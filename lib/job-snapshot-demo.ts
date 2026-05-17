@@ -229,8 +229,12 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
 
 const DEMO_SNAPSHOTS: Record<string, JobSnapshot> = {
   '00000000-0000-0000-0000-000000000010': JOB_1_FITZROY,
+  // Toorak — both IDs resolve (chat uses 020, snapshot panel uses 011)
   '00000000-0000-0000-0000-000000000011': JOB_2_TOORAK,
+  '00000000-0000-0000-0000-000000000020': JOB_2_TOORAK,
   '00000000-0000-0000-0000-000000000012': JOB_3_BRUNSWICK,
+  // Brunswick — alias used in chat route
+  '00000000-0000-0000-0000-000000000030': JOB_3_BRUNSWICK,
 }
 
 // ─── Export ───────────────────────────────────────────────────────────────────

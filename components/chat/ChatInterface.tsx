@@ -8,6 +8,7 @@ import UploadPanel from './UploadPanel'
 import AssumptionReview from './AssumptionReview'
 import QuoteView from '@/components/quote/QuoteView'
 import VariationNotificationModal from './VariationNotificationModal'
+import EmailDraftModal, { type EmailIntentHint } from './EmailDraftModal'
 import type { VariationCardVariation } from './VariationCard'
 import type { Worker, Job } from '@/lib/types/database.types'
 import type { DemoVariation } from '@/lib/variations-demo'
@@ -43,6 +44,19 @@ interface ShowVariationEvent {
   job_id: string
 }
 
+interface OpenEmailDraftEvent {
+  type: 'open_email_draft'
+  job_id: string | null
+  recipient_name: string | null
+  intent_hint: string
+}
+
+interface SuggestEmailDraftEvent {
+  type: 'suggest_email_draft'
+  job_id: string
+  intent_hint: string
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -54,7 +68,7 @@ interface ChatApiResponse {
   existing_job?: Job
   variation?: DemoVariation
   all_variations?: DemoVariation[]
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | { type: string; [key: string]: unknown }
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | { type: string; [key: string]: unknown }
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -95,6 +109,12 @@ interface ActiveJobRef {
   client_name?: string
 }
 
+export interface PendingEmailDraft {
+  jobId: string
+  intentHint: EmailIntentHint
+  recipientName?: string
+}
+
 interface ChatInterfaceProps {
   onJobMention?: (job: ActiveJobRef) => void
   onGeneralQuery?: () => void
@@ -102,6 +122,10 @@ interface ChatInterfaceProps {
   initialQuoteId?: string | null
   /** Called after initialQuoteId has been consumed (QuoteView opened) */
   onInitialQuoteConsumed?: () => void
+  /** When set, open EmailDraftModal immediately */
+  pendingEmailDraft?: PendingEmailDraft | null
+  /** Called after pendingEmailDraft has been consumed */
+  onPendingEmailDraftConsumed?: () => void
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -111,6 +135,8 @@ export default function ChatInterface({
   onGeneralQuery,
   initialQuoteId,
   onInitialQuoteConsumed,
+  pendingEmailDraft,
+  onPendingEmailDraftConsumed,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -128,6 +154,12 @@ export default function ChatInterface({
   const [reviewingAssumptions, setReviewingAssumptions] = useState<AssumptionReviewStateOrNull>(null)
   const [viewingQuote, setViewingQuote] = useState<QuoteViewStateOrNull>(null)
   const [activeVariationModal, setActiveVariationModal] = useState<{ variationId: string } | null>(null)
+  const [emailDraftModal, setEmailDraftModal] = useState<{
+    isOpen: boolean
+    jobId?: string | null
+    recipientName?: string
+    intentHint?: EmailIntentHint
+  } | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -143,6 +175,22 @@ export default function ChatInterface({
   // We only want to react when initialQuoteId changes (not on every render)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialQuoteId])
+
+  // When a pending email draft is passed from the snapshot panel's "Compose email" button,
+  // open EmailDraftModal immediately and notify the parent that we consumed it.
+  useEffect(() => {
+    if (pendingEmailDraft) {
+      setEmailDraftModal({
+        isOpen: true,
+        jobId: pendingEmailDraft.jobId,
+        recipientName: pendingEmailDraft.recipientName,
+        intentHint: pendingEmailDraft.intentHint,
+      })
+      onPendingEmailDraftConsumed?.()
+    }
+  // We only want to react when pendingEmailDraft changes (not on every render)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingEmailDraft])
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))
@@ -182,7 +230,7 @@ export default function ChatInterface({
 
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
-    (action: string, entityId?: string, _entityType?: string) => {
+    (action: string, entityId?: string, entityType?: string) => {
       if (action === 'Review assumptions') {
         const quoteId = entityId ?? 'demo-quote-id'
         // Try to find a job address from upload panel context, fall back to 'this job'
@@ -200,9 +248,36 @@ export default function ChatInterface({
         setPendingAction('show me the variations')
         return
       }
-      // 'Chase payment' → Session 10
-      // 'Follow up' → Session 12
-      // Other actions → no-op
+      // 'Chase payment' from morning brief (overdue invoice on Fitzroy job)
+      if (action === 'Chase payment') {
+        setEmailDraftModal({
+          isOpen: true,
+          jobId: '00000000-0000-0000-0000-000000000010',
+          recipientName: 'the Hendersons',
+          intentHint: 'invoice',
+        })
+        return
+      }
+      // 'Follow up' from morning brief (Toorak quote stale)
+      if (action === 'Follow up') {
+        setEmailDraftModal({
+          isOpen: true,
+          jobId: '00000000-0000-0000-0000-000000000020',
+          recipientName: 'Tom Caruso',
+          intentHint: 'quote_followup',
+        })
+        return
+      }
+      // 'Draft email' from suggest_email_draft chat message
+      if (action === 'Draft email') {
+        // entityId is the job_id passed through the alert
+        setEmailDraftModal({
+          isOpen: true,
+          jobId: entityId ?? null,
+          intentHint: (entityType as EmailIntentHint | undefined) ?? 'general',
+        })
+        return
+      }
     },
     [uploadPanel.job]
   )
@@ -419,6 +494,60 @@ export default function ChatInterface({
         })
       }
 
+      // Handle email draft event — open EmailDraftModal immediately
+      if (data.event?.type === 'open_email_draft') {
+        const evt = data.event as OpenEmailDraftEvent
+        setEmailDraftModal({
+          isOpen: true,
+          jobId: evt.job_id,
+          recipientName: evt.recipient_name ?? undefined,
+          intentHint: evt.intent_hint as EmailIntentHint,
+        })
+      }
+
+      // Handle suggest_email_draft — append a message with a "Draft email" action button
+      if (data.event?.type === 'suggest_email_draft') {
+        const evt = data.event as SuggestEmailDraftEvent
+        const suggestMessage: Message = {
+          id: generateId(),
+          role: 'assistant',
+          content: '',
+          alerts: [
+            {
+              priority: 'high',
+              message: data.message,
+              action: 'Draft email',
+              entity_id: evt.job_id,
+              entity_type: 'invoice',
+            },
+          ],
+          timestamp: new Date(),
+        }
+        // Replace the last assistant message with the suggest message (it already has message text)
+        // Actually the data.message is already set in assistantMessage above — add action button via separate alert message
+        setMessages((prev) => {
+          const updated = [...prev]
+          // Find the last assistant message (just added) and add the action alert
+          const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
+          if (lastIdx >= 0) {
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              alerts: [
+                {
+                  priority: 'high',
+                  message: 'Want me to draft a follow-up email?',
+                  action: 'Draft email',
+                  entity_id: evt.job_id,
+                  entity_type: 'invoice',
+                },
+              ],
+            }
+          }
+          return updated
+        })
+        void suggestMessage // suppress unused warning
+      }
+
       // Trigger general query callback for non-job intents
       if (
         data.intent === 'morning_brief' ||
@@ -485,6 +614,23 @@ export default function ChatInterface({
     }
     setMessages((prev) => [...prev, confirmMessage])
   }, [])
+
+  // Handler: email draft sent — close modal, append confirmation message
+  const handleEmailDraftSent = useCallback(
+    (commId: string, recipientEmail: string, jobAddress: string | null) => {
+      setEmailDraftModal(null)
+      const addressDisplay = jobAddress ? ` and logged to the ${jobAddress} communication history` : ' and logged to the job communication history'
+      const confirmMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: `Email sent to ${recipientEmail}${addressDisplay}.`,
+        timestamp: new Date(),
+      }
+      void commId // commId logged server-side; available here for future use
+      setMessages((prev) => [...prev, confirmMessage])
+    },
+    []
+  )
 
   // Handler: variation notification modal sent/skipped
   const handleVariationModalSent = useCallback(() => {
@@ -671,6 +817,19 @@ export default function ChatInterface({
           isOpen={!!activeVariationModal}
           onClose={() => setActiveVariationModal(null)}
           onSent={handleVariationModalSent}
+        />
+      )}
+
+      {/* ── Email Draft Modal ───────────────────────────────────────────────── */}
+      {emailDraftModal && (
+        <EmailDraftModal
+          isOpen={emailDraftModal.isOpen}
+          onClose={() => setEmailDraftModal(null)}
+          onSent={handleEmailDraftSent}
+          builderId="00000000-0000-0000-0000-000000000001"
+          jobId={emailDraftModal.jobId}
+          recipientName={emailDraftModal.recipientName}
+          intentHint={emailDraftModal.intentHint}
         />
       )}
 

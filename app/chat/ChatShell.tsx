@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import ChatInterface from '@/components/chat/ChatInterface'
+import ChatInterface, { type PendingEmailDraft } from '@/components/chat/ChatInterface'
 import JobSnapshotPanel from '@/components/job/JobSnapshotPanel'
 import MobileJobSheet from '@/components/job/MobileJobSheet'
 import type { ActiveJob } from '@/components/job/JobSnapshotPanel'
@@ -12,6 +12,7 @@ export default function ChatShell() {
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
   const [pendingQuoteView, setPendingQuoteView] = useState<string | null>(null)
+  const [pendingEmailDraft, setPendingEmailDraft] = useState<PendingEmailDraft | null>(null)
 
   const handleJobMention = useCallback((job: ActiveJob) => {
     setActiveJob(job)
@@ -38,6 +39,20 @@ export default function ChatShell() {
     setPendingQuoteView(null)
   }, [])
 
+  // Called by CommsTab's "Compose email" button inside the snapshot panel.
+  // We store the draft params and pass them down to ChatInterface so it opens EmailDraftModal.
+  const handleComposeEmail = useCallback((jobId: string) => {
+    setPendingEmailDraft({
+      jobId,
+      intentHint: 'general',
+    })
+  }, [])
+
+  // Called by ChatInterface after it has consumed the pending email draft.
+  const handleEmailDraftConsumed = useCallback(() => {
+    setPendingEmailDraft(null)
+  }, [])
+
   return (
     <div className="h-screen flex overflow-hidden bg-white">
       {/* ── Left: chat — full width on mobile, flex-1 on desktop ──────────── */}
@@ -47,6 +62,8 @@ export default function ChatShell() {
           onGeneralQuery={handleGeneralQuery}
           initialQuoteId={pendingQuoteView}
           onInitialQuoteConsumed={handleQuoteViewConsumed}
+          pendingEmailDraft={pendingEmailDraft}
+          onPendingEmailDraftConsumed={handleEmailDraftConsumed}
         />
       </div>
 
@@ -65,6 +82,7 @@ export default function ChatShell() {
           job={activeJob}
           onClose={handlePanelClose}
           onViewQuote={handleViewQuote}
+          onComposeEmail={handleComposeEmail}
         />
       </div>
 

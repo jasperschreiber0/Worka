@@ -186,7 +186,7 @@ All edge functions live in `supabase/functions/`. They use Deno + ESM imports.
 | **Output** | `{ intent: IntentType, entities: Record<string, string>, confidence: number, raw_message: string }` |
 | **Model** | `claude-sonnet-4-20250514` |
 
-Intent values: `morning_brief` | `add_worker` | `new_job` | `job_query` | `variation` | `invoice` | `unknown`
+Intent values: `morning_brief` | `add_worker` | `new_job` | `job_query` | `variation` | `invoice` | `email_draft` | `unknown`
 
 ### morning-brief
 
@@ -288,7 +288,7 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **9** | Split panel layout | Chat left, job snapshot right ✅ |
 | **10** | Job snapshot panel | All six sections from real data ✅ |
 | **11** | Variation surfacing | Pending variation in chat and panel ✅ |
-| **12** | Email draft flow | Draft from context, hold for approval, send logs |
+| **12** | Email draft flow | Draft from context, hold for approval, send logs ✅ |
 | **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching |
 | **14** | Quote to job conversion | One click, full job activation |
 | **15** | Homepage | Upload zone hero, sample plans, quotes pipeline |

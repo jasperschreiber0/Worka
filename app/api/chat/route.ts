@@ -12,6 +12,10 @@ import type {
 } from '@/lib/types/database.types'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 
+// ─── Extended intent type (includes email_draft not yet in DB types) ───────────
+
+type ExtendedIntentType = IntentType | 'email_draft'
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ChatRequestBody {
@@ -57,7 +61,20 @@ interface ShowVariationEvent {
   job_id: string
 }
 
-type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent
+interface OpenEmailDraftEvent {
+  type: 'open_email_draft'
+  job_id: string | null
+  recipient_name: string | null
+  intent_hint: string
+}
+
+interface SuggestEmailDraftEvent {
+  type: 'suggest_email_draft'
+  job_id: string
+  intent_hint: string
+}
+
+type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent
 
 interface ChatResponse {
   intent: string
@@ -74,7 +91,7 @@ interface ChatResponse {
 }
 
 interface ClassifyResult {
-  intent: IntentType
+  intent: ExtendedIntentType
   entities: Record<string, string>
   confidence: number
 }
@@ -125,6 +142,8 @@ Classify the builder's message into exactly one of these intents:
 - job_query: asking about a specific job, project status, or client
 - variation: variation requests, change orders, scope changes
 - invoice: invoices, payments, billing queries
+- email_draft: builder wants to draft/send an email to a client or subcontractor
+  Examples: "email the Hendersons", "draft an email to Tom about the quote", "send a message to the client", "follow up on the Toorak quote"
 - unknown: anything that doesn't fit the above
 
 Extract relevant entities:
@@ -132,6 +151,7 @@ Extract relevant entities:
 - For new_job: address, client_name (if mentioned)
 - For job_query: address or job name
 - For variation/invoice: job reference if mentioned
+- For email_draft: recipient_name (who to email), job_reference (which job), intent_hint (what it's about: invoice/quote_followup/variation/general)
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -714,9 +734,52 @@ function handleVariationIntent(entities: Record<string, string>, builderId: stri
 }
 
 function handleInvoice(): ChatResponse {
+  // The Fitzroy job has an overdue invoice of $28,000 — surface it and suggest a chase email
   return {
     intent: 'invoice',
-    message: 'Invoice management is coming in a future update. Type "whats on today" to see your morning brief.',
+    message: 'The Henderson invoice for $28,000 on the Fitzroy job (14 Merri St) is 3 days overdue. Want me to draft a follow-up email?',
+    event: {
+      type: 'suggest_email_draft',
+      job_id: '00000000-0000-0000-0000-000000000010',
+      intent_hint: 'invoice',
+    },
+  }
+}
+
+// ─── Email Draft Handler ──────────────────────────────────────────────────────
+
+// Map job references (from chat entities) to job IDs
+function resolveJobId(jobReference: string | undefined): string | null {
+  if (!jobReference) return null
+  const ref = jobReference.toLowerCase()
+  if (ref.includes('fitzroy') || ref.includes('merri') || ref.includes('henderson')) {
+    return '00000000-0000-0000-0000-000000000010'
+  }
+  if (ref.includes('toorak') || ref.includes('burnside') || ref.includes('caruso')) {
+    return '00000000-0000-0000-0000-000000000020'
+  }
+  if (ref.includes('brunswick') || ref.includes('bendigo')) {
+    return '00000000-0000-0000-0000-000000000030'
+  }
+  return null
+}
+
+function handleEmailDraft(entities: Record<string, string>): ChatResponse {
+  const { recipient_name, job_reference, intent_hint } = entities
+  const resolvedJobId = resolveJobId(job_reference)
+
+  const recipientDisplay = recipient_name ?? 'the client'
+  const jobDisplay = job_reference ? ` about the ${job_reference} job` : ''
+
+  return {
+    intent: 'email_draft',
+    message: `Drafting an email to ${recipientDisplay}${jobDisplay}…`,
+    event: {
+      type: 'open_email_draft',
+      job_id: resolvedJobId,
+      recipient_name: recipient_name ?? null,
+      intent_hint: intent_hint ?? 'general',
+    },
   }
 }
 
@@ -816,6 +879,52 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       ) {
         return NextResponse.json(handleVariationIntent({}, builderId))
       }
+      // Demo invoice: detect invoice/payment keywords
+      if (
+        lower.includes('invoice') ||
+        lower.includes('payment') ||
+        lower.includes('overdue') ||
+        lower.includes('chase payment') ||
+        lower.includes('chase the')
+      ) {
+        return NextResponse.json(handleInvoice())
+      }
+      // Demo email_draft: detect email/draft/follow-up keywords
+      if (
+        lower.includes('email') ||
+        lower.includes('draft') ||
+        lower.includes('follow up') ||
+        lower.includes('follow-up') ||
+        lower.includes('chase') ||
+        lower.includes('message the') ||
+        lower.includes('send a message')
+      ) {
+        // Try to detect recipient and job context from message
+        const fitzroyMatch = lower.includes('henderson') || lower.includes('fitzroy') || lower.includes('merri')
+        const toorakMatch = lower.includes('caruso') || lower.includes('tom') || lower.includes('toorak') || lower.includes('burnside')
+        const invoiceHint = lower.includes('invoice') || lower.includes('payment') || lower.includes('chase')
+        const quoteHint = lower.includes('quote') || lower.includes('follow up') || lower.includes('follow-up')
+
+        const jobId = fitzroyMatch
+          ? '00000000-0000-0000-0000-000000000010'
+          : toorakMatch
+            ? '00000000-0000-0000-0000-000000000020'
+            : null
+        const recipientName = fitzroyMatch ? 'the Hendersons' : toorakMatch ? 'Tom Caruso' : null
+        const hint = invoiceHint ? 'invoice' : quoteHint ? 'quote_followup' : 'general'
+        const recipientDisplay = recipientName ?? 'the client'
+
+        return NextResponse.json({
+          intent: 'email_draft',
+          message: `Drafting an email to ${recipientDisplay}…`,
+          event: {
+            type: 'open_email_draft',
+            job_id: jobId,
+            recipient_name: recipientName,
+            intent_hint: hint,
+          },
+        })
+      }
       // Demo job_query: detect known job keywords
       const demoJob = findDemoJob({ address: lower })
       if (demoJob) {
@@ -912,6 +1021,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
     if (classified.intent === 'invoice') {
       return NextResponse.json(handleInvoice())
+    }
+
+    if (classified.intent === 'email_draft') {
+      return NextResponse.json(handleEmailDraft(classified.entities))
     }
 
     return NextResponse.json(handleUnknown())

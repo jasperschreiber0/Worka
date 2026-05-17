@@ -30,6 +30,7 @@ export interface JobSnapshotPanelProps {
   onClose: () => void
   onViewQuote?: (quoteId: string) => void
   onVariationApprove?: (variationId: string) => void
+  onComposeEmail?: (jobId: string) => void
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -74,7 +75,7 @@ function SkeletonSection() {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariationApprove }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariationApprove, onComposeEmail }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -134,7 +135,12 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariatio
       case 'files':
         return <FilesTab files={snapshot.files} />
       case 'comms':
-        return <CommsTab comms={snapshot.comms} />
+        return (
+          <CommsTab
+            comms={snapshot.comms}
+            onComposeEmail={job && onComposeEmail ? () => onComposeEmail(job.id) : undefined}
+          />
+        )
       default:
         return <SkeletonSection />
     }
