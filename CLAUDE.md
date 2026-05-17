@@ -291,9 +291,45 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **12** | Email draft flow | Draft from context, hold for approval, send logs ✅ |
 | **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching ✅ |
 | **14** | Quote to job conversion | One click, full job activation ✅ |
-| **15** | Homepage | Upload zone hero, sample plans, quotes pipeline |
+| **15** | Homepage | Upload zone hero, sample plans, quotes pipeline ✅ |
 
+**ALL 15 SESSIONS COMPLETE.**
 
+---
+
+## Build Complete — Production Checklist
+
+All 15 sessions are done. Before going live, complete these steps:
+
+### 1. Connect Supabase
+- Create a Supabase project at https://supabase.com
+- Copy the project URL and anon/service-role keys into `.env.local`
+- Run the seed migrations in order: `supabase db push` (applies all files in `supabase/migrations/`)
+- Verify the 13 trade categories and 360+ cost rates are seeded (migration 001 + 002)
+
+### 2. Add OAuth Credentials (Gmail / Outlook)
+- **Gmail:** Create OAuth 2.0 credentials in Google Cloud Console → add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to env
+- **Outlook:** Register an app in Azure AD → add `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET` to env
+- Set `NEXT_PUBLIC_APP_URL` to your production domain (used for OAuth redirect URIs and invite links)
+
+### 3. Deploy to Vercel
+- Connect the GitHub repo to a new Vercel project
+- Add all env vars from `.env.local.example` to Vercel → Settings → Environment Variables
+- Set `NEXT_PUBLIC_APP_URL` to the Vercel deployment URL
+- Deploy — Vercel will auto-build on every push to main
+
+### 4. Run Seed Migrations
+- After deploying, run: `supabase db push --project-ref <your-project-ref>`
+- Confirm in Supabase dashboard: `trade_categories` has 13 rows, `cost_rates` has 360+ rows
+- Run the demo seed if you want pre-populated demo data (optional)
+
+### 5. Set Edge Function Secrets
+- In Supabase dashboard → Edge Functions → Manage secrets, add:
+  - `ANTHROPIC_API_KEY` — from https://console.anthropic.com
+  - `NEXT_PUBLIC_APP_URL` — your production URL
+  - `RESEND_API_KEY` — from https://resend.com (for email sending)
+  - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` — for SMS (optional)
+- Deploy edge functions: `supabase functions deploy --project-ref <your-project-ref>`
 
 ---
 
