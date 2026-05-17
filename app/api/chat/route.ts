@@ -16,6 +16,7 @@ import type {
 interface ChatRequestBody {
   message: string
   builder_id?: string
+  force_create?: boolean
 }
 
 interface Alert {
@@ -31,16 +32,28 @@ interface WorkerModalEvent {
   worker_id: string
 }
 
+interface UploadPanelEvent {
+  type: 'open_upload_panel'
+  job_id: string
+}
+
+interface DuplicateWarningEvent {
+  type: 'show_duplicate_warning'
+  job_id: string
+}
+
+type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent
+
 interface ChatResponse {
   intent: string
   message: string
   alerts?: Alert[]
   worker?: Worker
   invite_url?: string
-  event?: WorkerModalEvent | {
-    type: string
-    [key: string]: unknown
-  }
+  job?: Job
+  duplicate?: boolean
+  existing_job?: Job
+  event?: ChatEvent
 }
 
 interface ClassifyResult {
@@ -391,15 +404,168 @@ async function createWorker(params: CreateWorkerParams): Promise<CreateWorkerRes
   }
 }
 
-// ─── Intent Handlers ──────────────────────────────────────────────────────────
+// ─── Create Job ───────────────────────────────────────────────────────────────
 
-function handleNewJob(entities: Record<string, string>): ChatResponse {
-  const address = entities.address ? ` at ${entities.address}` : ''
+interface CreateJobParams {
+  builder_id: string
+  address: string
+  client_name?: string
+  force_create?: boolean
+}
+
+interface CreateJobResult {
+  job?: Job
+  duplicate?: boolean
+  existing_job?: Job
+  event: UploadPanelEvent | DuplicateWarningEvent
+}
+
+// Seed job data — mirrors the demo seed in the database
+const SEED_JOBS: Array<{ id: string; address: string; status: string; tokens: string[] }> = [
+  {
+    id: '00000000-0000-0000-0000-000000000010',
+    address: '14 Merri St, Fitzroy VIC 3065',
+    status: 'active',
+    tokens: ['14 merri st', '14 merri street'],
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000020',
+    address: '8 Burnside Ave, Toorak VIC 3142',
+    status: 'quoted',
+    tokens: ['8 burnside'],
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000030',
+    address: '52 Bendigo St, Brunswick VIC 3056',
+    status: 'quoting',
+    tokens: ['52 bendigo'],
+  },
+]
+
+function normAddress(addr: string): string {
+  return addr
+    .toLowerCase()
+    .replace(/[.,]/g, '')
+    .replace(/\bstreet\b/g, 'st')
+    .replace(/\bavenue\b/g, 'ave')
+    .replace(/\broad\b/g, 'rd')
+    .replace(/\bplace\b/g, 'pl')
+    .trim()
+}
+
+function findSeedDuplicate(address: string): (typeof SEED_JOBS)[number] | null {
+  const norm = normAddress(address)
+  for (const job of SEED_JOBS) {
+    for (const token of job.tokens) {
+      if (norm.includes(token)) return job
+    }
+  }
+  return null
+}
+
+async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
+  const { builder_id, address, client_name, force_create } = params
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  if (supabaseUrl && serviceRoleKey) {
+    // Live mode — query Supabase
+    const supabase = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+
+    if (!force_create) {
+      // Duplicate check: case-insensitive ILIKE on first 3 address tokens
+      const firstTokens = address.trim().split(/\s+/).slice(0, 3).join(' ')
+      const { data: existing } = await supabase
+        .from('jobs')
+        .select('id, builder_id, client_id, address, status, job_type, notes, created_at, updated_at')
+        .eq('builder_id', builder_id)
+        .neq('status', 'archived')
+        .ilike('address', `%${firstTokens}%`)
+        .limit(1)
+        .maybeSingle()
+
+      if (existing) {
+        const existingJob = existing as Job
+        return {
+          duplicate: true,
+          existing_job: existingJob,
+          event: { type: 'show_duplicate_warning', job_id: existingJob.id },
+        }
+      }
+    }
+
+    // Insert new job
+    const { data: jobRow, error } = await supabase
+      .from('jobs')
+      .insert({
+        builder_id,
+        address: address.trim(),
+        status: 'quoting' as const,
+        client_id: null,
+        job_type: null,
+        notes: client_name ? `Client: ${client_name}` : null,
+      })
+      .select()
+      .single()
+
+    if (error || !jobRow) {
+      throw new Error(error?.message ?? 'Failed to insert job')
+    }
+
+    const newJob = jobRow as Job
+    return {
+      job: newJob,
+      event: { type: 'open_upload_panel', job_id: newJob.id },
+    }
+  }
+
+  // Demo mode
+  if (!force_create) {
+    const duplicate = findSeedDuplicate(address)
+    if (duplicate) {
+      const existingJob: Job = {
+        id: duplicate.id,
+        builder_id,
+        client_id: null,
+        address: duplicate.address,
+        status: duplicate.status as Job['status'],
+        job_type: null,
+        notes: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+      return {
+        duplicate: true,
+        existing_job: existingJob,
+        event: { type: 'show_duplicate_warning', job_id: duplicate.id },
+      }
+    }
+  }
+
+  // New job (demo mode)
+  const fakeId = randomUUID()
+  const newJob: Job = {
+    id: fakeId,
+    builder_id,
+    client_id: null,
+    address: address.trim(),
+    status: 'quoting',
+    job_type: null,
+    notes: client_name ? `Client: ${client_name}` : null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
   return {
-    intent: 'new_job',
-    message: `Got it — creating a new job${address} is coming in the next update. Type "whats on today" to see your morning brief.`,
+    job: newJob,
+    event: { type: 'open_upload_panel', job_id: fakeId },
   }
 }
+
+// ─── Intent Handlers ──────────────────────────────────────────────────────────
 
 function handleJobQuery(entities: Record<string, string>): ChatResponse {
   const ref = entities.address ?? entities.job_name ?? ''
@@ -464,6 +630,32 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           intent: 'morning_brief',
           message: demo.message,
           alerts: demo.alerts,
+        })
+      }
+      // Demo new_job: detect "new job at <address>" or "job at <address>"
+      const newJobMatch = lower.match(/(?:new job|job)\s+at\s+(.+?)(?:\s+help|\s+quote|\s+start|$)/i)
+      if (newJobMatch ?? lower.includes('create job anyway')) {
+        const demoAddress = newJobMatch ? newJobMatch[1].trim() : 'unknown address'
+        const forceCreate = body.force_create === true || lower.includes('create job anyway')
+        const result = await createJob({
+          builder_id: builderId,
+          address: demoAddress,
+          force_create: forceCreate,
+        })
+        if (result.duplicate && result.existing_job) {
+          return NextResponse.json({
+            intent: 'new_job',
+            message: `Heads up — you've already got a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Want to open that job instead?`,
+            duplicate: true,
+            existing_job: result.existing_job,
+            event: result.event,
+          })
+        }
+        return NextResponse.json({
+          intent: 'new_job',
+          message: `New job at ${result.job!.address} created. Upload your plans to start the quote.`,
+          job: result.job,
+          event: result.event,
         })
       }
       // Demo add_worker: detect "add <name>" pattern
@@ -535,7 +727,35 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     if (classified.intent === 'new_job') {
-      return NextResponse.json(handleNewJob(classified.entities))
+      const address = classified.entities.address
+      if (!address) {
+        return NextResponse.json({
+          intent: 'new_job',
+          message: `Which address is this job at? For example: 'new job at 14 Smith St Fitzroy'`,
+        })
+      }
+      const forceCreate = body.force_create === true
+      const result = await createJob({
+        builder_id: builderId,
+        address,
+        client_name: classified.entities.client_name,
+        force_create: forceCreate,
+      })
+      if (result.duplicate && result.existing_job) {
+        return NextResponse.json({
+          intent: 'new_job',
+          message: `Heads up — you've already got a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Want to open that job instead?`,
+          duplicate: true,
+          existing_job: result.existing_job,
+          event: result.event,
+        })
+      }
+      return NextResponse.json({
+        intent: 'new_job',
+        message: `New job at ${result.job!.address} created. Upload your plans to start the quote.`,
+        job: result.job,
+        event: result.event,
+      })
     }
 
     if (classified.intent === 'job_query') {
