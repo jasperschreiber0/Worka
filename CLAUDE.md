@@ -280,8 +280,8 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **1** | Scaffold & Schema | Next.js 14, Supabase schema, 4 edge functions, CLAUDE.md ✅ |
 | **2** | Morning brief flow | Chat UI, classify-intent → morning-brief flow, ranked alerts ✅ |
 | **3** | Add worker flow | Worker modal, invite generated and sent ✅ |
-| **4** | New quote routing | Address detected, duplicate check, project created, upload panel ← current |
-| **5** | File upload + AI intake | PDF uploads, live progress states |
+| **4** | New quote routing | Address detected, duplicate check, project created, upload panel ✅ |
+| **5** | File upload + AI intake | PDF uploads, live progress states ← current |
 | **6** | Assumption control | Missing items surfaced, three resolution options |
 | **7** | Draft quote output | Quote with confidence scoring per line item |
 | **8** | Quote actions | Send to client, export PDF, revise |

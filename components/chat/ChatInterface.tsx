@@ -86,6 +86,31 @@ export default function ChatInterface() {
     setUploadPanel((prev) => ({ ...prev, isOpen: false }))
   }, [])
 
+  const handleIntakeComplete = useCallback(
+    (quoteId: string, assumptionCount: number) => {
+      setUploadPanel((prev) => ({ ...prev, isOpen: false }))
+
+      const jobAddress = uploadPanel.job?.address ?? 'this job'
+      const assistantMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.`,
+        alerts: [
+          {
+            priority: 'high',
+            message: `${assumptionCount} item${assumptionCount !== 1 ? 's' : ''} need your input before the quote is ready`,
+            action: 'Review assumptions',
+            entity_id: quoteId,
+            entity_type: 'quote',
+          },
+        ],
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, assistantMessage])
+    },
+    [uploadPanel.job]
+  )
+
   // Auto-scroll to bottom when messages change
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -315,6 +340,7 @@ export default function ChatInterface() {
             address: uploadPanel.job.address,
             status: uploadPanel.job.status,
           }}
+          onIntakeComplete={handleIntakeComplete}
         />
       )}
 

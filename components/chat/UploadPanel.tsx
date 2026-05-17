@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import IntakeProgress from './IntakeProgress'
+import type { File as DBFile } from '@/lib/types/database.types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +17,7 @@ export interface UploadPanelProps {
   isOpen: boolean
   onClose: () => void
   job: UploadPanelJob
+  onIntakeComplete?: (quoteId: string, assumptionCount: number) => void
 }
 
 interface SelectedFile {
@@ -45,6 +48,8 @@ const ACCEPTED_MIME_TYPES = [
   'image/heif',
 ]
 
+const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
+
 function isAcceptedFile(file: File): boolean {
   if (ACCEPTED_MIME_TYPES.includes(file.type)) return true
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
@@ -53,12 +58,19 @@ function isAcceptedFile(file: File): boolean {
 
 // ─── Inner component (rendered inside portal) ─────────────────────────────────
 
-function UploadPanelInner({ isOpen, onClose, job }: UploadPanelProps) {
+function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPanelProps) {
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [files, setFiles] = useState<SelectedFile[]>([])
   const [toast, setToast] = useState<string | null>(null)
+
+  // Upload + intake state
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [uploadedFile, setUploadedFile] = useState<DBFile | null>(null)
+  const [intakeStarted, setIntakeStarted] = useState(false)
+
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -75,6 +87,10 @@ function UploadPanelInner({ isOpen, onClose, job }: UploadPanelProps) {
         setMounted(false)
         setFiles([])
         setDragOver(false)
+        setUploading(false)
+        setUploadError(null)
+        setUploadedFile(null)
+        setIntakeStarted(false)
       }, 300)
       return () => clearTimeout(id)
     }
@@ -178,9 +194,61 @@ function UploadPanelInner({ isOpen, onClose, job }: UploadPanelProps) {
     [addFiles]
   )
 
-  const handleUpload = useCallback(() => {
-    showToast('File intake coming in Session 5')
-  }, [showToast])
+  // ── Real upload handler ────────────────────────────────────────────────────
+
+  const handleUpload = useCallback(async () => {
+    if (files.length === 0 || uploading) return
+
+    // Upload the first file (one at a time for intake progress)
+    const selectedFile = files[0]
+
+    setUploading(true)
+    setUploadError(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('file', selectedFile.file)
+      formData.append('job_id', job.id)
+      formData.append('builder_id', DEMO_BUILDER_ID)
+
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: 'Upload failed' }))
+        throw new Error((body as { error?: string }).error ?? 'Upload failed')
+      }
+
+      const data = await res.json() as { file: DBFile; intake_started: boolean }
+      setUploadedFile(data.file)
+      setIntakeStarted(true)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Upload failed — please try again.'
+      setUploadError(message)
+    } finally {
+      setUploading(false)
+    }
+  }, [files, uploading, job.id])
+
+  // ── Intake complete handler ────────────────────────────────────────────────
+
+  const handleIntakeComplete = useCallback(
+    (quoteId: string, assumptionCount: number) => {
+      if (onIntakeComplete) {
+        onIntakeComplete(quoteId, assumptionCount)
+      }
+      onClose()
+    },
+    [onIntakeComplete, onClose]
+  )
+
+  const handleIntakeError = useCallback(() => {
+    setUploadedFile(null)
+    setIntakeStarted(false)
+    setUploadError('Processing failed — please try uploading again.')
+  }, [])
 
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -257,188 +325,241 @@ function UploadPanelInner({ isOpen, onClose, job }: UploadPanelProps) {
 
         {/* ── Body ──────────────────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
-          {/* Drop zone */}
-          <div
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={handleBrowseClick}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                handleBrowseClick()
-              }
-            }}
-            aria-label="Drop zone — click or drag files here"
-            className={[
-              'rounded-xl border-2 border-dashed cursor-pointer',
-              'flex flex-col items-center justify-center gap-3',
-              'px-6 py-8 text-center',
-              'transition-colors duration-150',
-              dragOver
-                ? 'border-brand-500 bg-brand-50'
-                : 'border-slate-300 bg-slate-50 hover:border-brand-400 hover:bg-brand-50',
-            ].join(' ')}
-          >
-            {files.length === 0 ? (
-              <>
-                {/* File icon */}
-                <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 shadow-sm flex items-center justify-center">
-                  <svg
-                    width="24"
-                    height="24"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    aria-hidden="true"
-                    className="text-slate-400"
-                  >
-                    <path
-                      d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
-                      stroke="currentColor"
-                      strokeWidth="1.75"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M14 2v6h6M12 12v6M9 15l3-3 3 3"
-                      stroke="currentColor"
-                      strokeWidth="1.75"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
+
+          {/* ── Intake progress (replaces drop zone after upload) ─── */}
+          {intakeStarted && uploadedFile ? (
+            <IntakeProgress
+              fileId={uploadedFile.id}
+              jobId={job.id}
+              builderId={DEMO_BUILDER_ID}
+              filename={uploadedFile.filename}
+              onComplete={handleIntakeComplete}
+              onError={handleIntakeError}
+            />
+          ) : (
+            <>
+              {/* Upload error */}
+              {uploadError && (
+                <div
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+                  role="alert"
+                >
+                  {uploadError}
                 </div>
-                <div>
-                  <p className="text-sm font-semibold text-slate-700">
-                    Drop plans here
-                  </p>
-                  <p className="text-xs text-slate-500 mt-0.5">or tap to browse</p>
-                </div>
-                <p className="text-xs text-slate-400">PDF · DWG · Images accepted</p>
-              </>
-            ) : (
-              <div className="w-full space-y-2" onClick={(e) => e.stopPropagation()}>
-                {files.map((sf) => (
-                  <div
-                    key={sf.id}
-                    className="flex items-center gap-3 bg-white border border-slate-200 rounded-lg px-3 py-2.5 text-left"
-                  >
-                    {/* File type icon */}
-                    <div className="w-8 h-8 rounded-md bg-brand-50 border border-brand-100 flex items-center justify-center flex-shrink-0">
+              )}
+
+              {/* Drop zone */}
+              <div
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                onClick={handleBrowseClick}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    handleBrowseClick()
+                  }
+                }}
+                aria-label="Drop zone — click or drag files here"
+                className={[
+                  'rounded-xl border-2 border-dashed cursor-pointer',
+                  'flex flex-col items-center justify-center gap-3',
+                  'px-6 py-8 text-center',
+                  'transition-colors duration-150',
+                  dragOver
+                    ? 'border-brand-500 bg-brand-50'
+                    : 'border-slate-300 bg-slate-50 hover:border-brand-400 hover:bg-brand-50',
+                ].join(' ')}
+              >
+                {files.length === 0 ? (
+                  <>
+                    {/* File icon */}
+                    <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 shadow-sm flex items-center justify-center">
                       <svg
-                        width="14"
-                        height="14"
+                        width="24"
+                        height="24"
                         viewBox="0 0 24 24"
                         fill="none"
                         aria-hidden="true"
-                        className="text-brand-500"
+                        className="text-slate-400"
                       >
                         <path
                           d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
                           stroke="currentColor"
-                          strokeWidth="2"
+                          strokeWidth="1.75"
                           strokeLinecap="round"
                           strokeLinejoin="round"
                         />
                         <path
-                          d="M14 2v6h6"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-slate-800 truncate leading-tight">
-                        {sf.file.name}
-                      </p>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        {formatFileSize(sf.file.size)}
-                      </p>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        removeFile(sf.id)
-                      }}
-                      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
-                      aria-label={`Remove ${sf.file.name}`}
-                    >
-                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                        <path
-                          d="M1 1l8 8M9 1L1 9"
+                          d="M14 2v6h6M12 12v6M9 15l3-3 3 3"
                           stroke="currentColor"
                           strokeWidth="1.75"
                           strokeLinecap="round"
+                          strokeLinejoin="round"
                         />
                       </svg>
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-700">
+                        Drop plans here
+                      </p>
+                      <p className="text-xs text-slate-500 mt-0.5">or tap to browse</p>
+                    </div>
+                    <p className="text-xs text-slate-400">PDF · DWG · Images accepted</p>
+                  </>
+                ) : (
+                  <div className="w-full space-y-2" onClick={(e) => e.stopPropagation()}>
+                    {files.map((sf) => (
+                      <div
+                        key={sf.id}
+                        className="flex items-center gap-3 bg-white border border-slate-200 rounded-lg px-3 py-2.5 text-left"
+                      >
+                        {/* File type icon */}
+                        <div className="w-8 h-8 rounded-md bg-brand-50 border border-brand-100 flex items-center justify-center flex-shrink-0">
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            aria-hidden="true"
+                            className="text-brand-500"
+                          >
+                            <path
+                              d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                            <path
+                              d="M14 2v6h6"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-slate-800 truncate leading-tight">
+                            {sf.file.name}
+                          </p>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {formatFileSize(sf.file.size)}
+                          </p>
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            removeFile(sf.id)
+                          }}
+                          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                          aria-label={`Remove ${sf.file.name}`}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                            <path
+                              d="M1 1l8 8M9 1L1 9"
+                              stroke="currentColor"
+                              strokeWidth="1.75"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                    {/* "Add more" hint */}
+                    <button
+                      onClick={handleBrowseClick}
+                      className="w-full text-xs text-brand-600 hover:text-brand-700 font-medium py-1.5 text-center transition-colors"
+                    >
+                      + Add more files
                     </button>
                   </div>
-                ))}
-                {/* "Add more" hint */}
-                <button
-                  onClick={handleBrowseClick}
-                  className="w-full text-xs text-brand-600 hover:text-brand-700 font-medium py-1.5 text-center transition-colors"
-                >
-                  + Add more files
-                </button>
+                )}
               </div>
-            )}
-          </div>
 
-          {/* Hidden file input */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept={ACCEPTED_EXTENSIONS}
-            onChange={handleFileInputChange}
-            className="sr-only"
-            aria-hidden="true"
-            tabIndex={-1}
-          />
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPTED_EXTENSIONS}
+                onChange={handleFileInputChange}
+                className="sr-only"
+                aria-hidden="true"
+                tabIndex={-1}
+              />
 
-          {/* Accepted file types list */}
-          <div className="space-y-1.5">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
-              Accepted file types
-            </p>
-            <ul className="space-y-1 text-sm text-slate-600">
-              <li className="flex items-start gap-2">
-                <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
-                Architectural plans (PDF/DWG)
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
-                Site photos (JPG/PNG)
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
-                Engineer drawings
-              </li>
-            </ul>
-          </div>
+              {/* Accepted file types list */}
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                  Accepted file types
+                </p>
+                <ul className="space-y-1 text-sm text-slate-600">
+                  <li className="flex items-start gap-2">
+                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    Architectural plans (PDF/DWG)
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    Site photos (JPG/PNG)
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    Engineer drawings
+                  </li>
+                </ul>
+              </div>
 
-          {/* Info text */}
-          <p className="text-sm text-slate-500 leading-relaxed">
-            WorkA will extract quantities and draft your quote. You review everything before it
-            goes anywhere.
-          </p>
+              {/* Info text */}
+              <p className="text-sm text-slate-500 leading-relaxed">
+                WorkA will extract quantities and draft your quote. You review everything before it
+                goes anywhere.
+              </p>
+            </>
+          )}
         </div>
 
-        {/* ── Footer CTA ────────────────────────────────────────────── */}
-        <div className="flex-shrink-0 px-5 py-4 border-t border-slate-200 bg-white">
-          <button
-            onClick={handleUpload}
-            disabled={files.length === 0}
-            className="w-full btn-primary py-3 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
-          >
-            Upload plans
-          </button>
-        </div>
+        {/* ── Footer CTA (hidden during intake) ─────────────────── */}
+        {!intakeStarted && (
+          <div className="flex-shrink-0 px-5 py-4 border-t border-slate-200 bg-white">
+            <button
+              onClick={handleUpload}
+              disabled={files.length === 0 || uploading}
+              className="w-full btn-primary py-3 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+            >
+              {uploading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <svg
+                    className="animate-spin w-4 h-4 text-white"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8v8H4z"
+                    />
+                  </svg>
+                  Uploading...
+                </span>
+              ) : (
+                'Upload plans'
+              )}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Toast ────────────────────────────────────────────────────── */}

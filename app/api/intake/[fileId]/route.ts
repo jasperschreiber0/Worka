@@ -221,33 +221,35 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
 
         let anthropicResponse: string
         try {
-          const messageContent = isPdf
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const messageContent: any[] = isPdf
             ? [
                 {
-                  type: 'document' as const,
+                  type: 'document',
                   source: {
-                    type: 'base64' as const,
-                    media_type: mediaType as 'application/pdf',
+                    type: 'base64',
+                    media_type: 'application/pdf',
                     data: base64Data,
                   },
                 },
-                { type: 'text' as const, text: extractionPrompt },
+                { type: 'text', text: extractionPrompt },
               ]
             : [
                 {
-                  type: 'image' as const,
+                  type: 'image',
                   source: {
-                    type: 'base64' as const,
-                    media_type: mediaType as 'image/jpeg',
+                    type: 'base64',
+                    media_type: 'image/jpeg',
                     data: base64Data,
                   },
                 },
-                { type: 'text' as const, text: extractionPrompt },
+                { type: 'text', text: extractionPrompt },
               ]
 
           const response = await client.messages.create({
             model: 'claude-sonnet-4-20250514',
             max_tokens: 4096,
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
             messages: [{ role: 'user', content: messageContent }],
           })
 
