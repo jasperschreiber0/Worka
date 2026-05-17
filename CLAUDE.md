@@ -278,20 +278,20 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | Session | Focus | Key Deliverables |
 |---------|-------|-----------------|
 | **1** | Scaffold & Schema | Next.js 14, Supabase schema, 4 edge functions, CLAUDE.md ✅ |
-| **2** | Rate Seeding | 360+ cost_rates rows across all 13 categories and 8 states |
-| **3** | Auth & Onboarding | Supabase Auth, builder sign-up flow, plan selection |
-| **4** | File Intake Pipeline | PDF upload, storage bucket, AI extraction edge function |
-| **5** | Quote Generation | AI draft quote from extracted data, 3 validation gates |
-| **6** | Rate Resolution UI | Builder reviews line items, resolves assumptions |
-| **7** | Quote Review & Send | Builder approves quote, PDF generation, email send |
-| **8** | Job Management | Active jobs dashboard, status transitions |
-| **9** | Variations | Create, send, and track variation approvals |
-| **10** | Invoicing | Invoice creation, Stripe integration, payment tracking |
-| **11** | Morning Brief UI | Conversational interface, alert cards, quick actions |
-| **12** | Worker Management | Invite flow, worker app (mobile-first), daily logs |
-| **13** | Communication Log | Email/SMS threaded timeline per job |
-| **14** | Rate Learning | Auto-capture learned rates on quote acceptance |
-| **15** | Full UI Polish | Responsive design, empty states, loading states, production |
+| **2** | Morning brief flow | Chat UI, classify-intent → morning-brief flow, ranked alerts ← current |
+| **3** | Add worker flow | Worker modal, invite generated and sent |
+| **4** | New quote routing | Address detected, duplicate check, project created, upload panel |
+| **5** | File upload + AI intake | PDF uploads, live progress states |
+| **6** | Assumption control | Missing items surfaced, three resolution options |
+| **7** | Draft quote output | Quote with confidence scoring per line item |
+| **8** | Quote actions | Send to client, export PDF, revise |
+| **9** | Split panel layout | Chat left, job snapshot right |
+| **10** | Job snapshot panel | All six sections from real data |
+| **11** | Variation surfacing | Pending variation in chat and panel |
+| **12** | Email draft flow | Draft from context, hold for approval, send logs |
+| **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching |
+| **14** | Quote to job conversion | One click, full job activation |
+| **15** | Homepage | Upload zone hero, sample plans, quotes pipeline |
 
 ---
 
