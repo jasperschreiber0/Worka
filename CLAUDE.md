@@ -283,8 +283,8 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **4** | New quote routing | Address detected, duplicate check, project created, upload panel ✅ |
 | **5** | File upload + AI intake | PDF uploads, live progress states ✅ |
 | **6** | Assumption control | Missing items surfaced, three resolution options ✅ |
-| **7** | Draft quote output | Quote with confidence scoring per line item ← current |
-| **8** | Quote actions | Send to client, export PDF, revise |
+| **7** | Draft quote output | Quote with confidence scoring per line item ✅ |
+| **8** | Quote actions | Send to client, export PDF, revise ← current |
 | **9** | Split panel layout | Chat left, job snapshot right |
 | **10** | Job snapshot panel | All six sections from real data |
 | **11** | Variation surfacing | Pending variation in chat and panel |

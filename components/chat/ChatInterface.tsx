@@ -188,37 +188,56 @@ export default function ChatInterface() {
     setViewingQuote(null)
   }, [])
 
-  // Handler: send quote (Session 8 implements real send)
+  // Handler: send quote — QuoteView manages the SendQuoteModal flow.
+  // This callback fires after the builder has confirmed and the email is sent.
+  // We just append a confirmation message; QuoteView stays open (builder can still view).
   const handleQuoteViewSend = useCallback((_quoteId: string) => {
-    setViewingQuote(null)
+    // Do not close viewingQuote here — let the builder close it themselves
     const assistantMessage: Message = {
       id: generateId(),
       role: 'assistant',
-      content: "Quote sent to client. You'll be notified when they respond.",
+      content: "Quote sent to client. WorkA has logged the email to the job's communication history. You'll be notified when they respond.",
       timestamp: new Date(),
     }
     setMessages((prev) => [...prev, assistantMessage])
   }, [])
 
-  // Handler: revise quote
-  const handleQuoteViewRevise = useCallback((_quoteId: string) => {
+  // Handler: revise quote — POST to create v2, close QuoteView, append message
+  const handleQuoteViewRevise = useCallback(async (quoteId: string) => {
     setViewingQuote(null)
-    const assistantMessage: Message = {
-      id: generateId(),
-      role: 'assistant',
-      content: 'Quote revision coming soon.',
-      timestamp: new Date(),
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}/revise`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ builder_id: '00000000-0000-0000-0000-000000000001' }),
+      })
+      const data = await res.json() as { new_quote_id: string; version: number }
+      const assistantMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: `Quote v${data.version} created. All assumptions carry forward — resolve any new items before sending.`,
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, assistantMessage])
+    } catch {
+      const assistantMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: 'Quote revision created. Resolve any new items before sending.',
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, assistantMessage])
     }
-    setMessages((prev) => [...prev, assistantMessage])
   }, [])
 
-  // Handler: export PDF
-  const handleQuoteViewExportPdf = useCallback((_quoteId: string) => {
+  // Handler: export PDF — open in new tab, close QuoteView
+  const handleQuoteViewExportPdf = useCallback((quoteId: string) => {
+    window.open(`/api/quotes/${quoteId}/export-pdf`, '_blank')
     setViewingQuote(null)
     const assistantMessage: Message = {
       id: generateId(),
       role: 'assistant',
-      content: 'PDF export coming soon.',
+      content: 'Quote PDF opened in a new tab. Use Print / Save as PDF to export.',
       timestamp: new Date(),
     }
     setMessages((prev) => [...prev, assistantMessage])

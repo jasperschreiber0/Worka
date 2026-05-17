@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import SendQuoteModal from './SendQuoteModal'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -511,6 +512,7 @@ const FOCUSABLE_SELECTOR =
 
 function QuoteViewInner({
   quoteId,
+  builderId,
   onClose,
   onSend,
   onRevise,
@@ -521,6 +523,8 @@ function QuoteViewInner({
   const [error, setError] = useState<string | null>(null)
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
+  const [sendModalOpen, setSendModalOpen] = useState(false)
+  const [sentAt, setSentAt] = useState<string | null>(null)
 
   // Set of expanded category IDs — all start expanded
   const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
@@ -606,9 +610,43 @@ function QuoteViewInner({
   }, [quoteId])
 
   const handleClose = useCallback(() => {
+    setSendModalOpen(false)
     setVisible(false)
     setTimeout(() => onClose(), 220)
   }, [onClose])
+
+  // Open SendQuoteModal instead of calling onSend directly
+  const handleSendClick = useCallback((_qId: string) => {
+    setSendModalOpen(true)
+  }, [])
+
+  // Called by SendQuoteModal on successful send
+  const handleSent = useCallback((at: string) => {
+    setSendModalOpen(false)
+    setSentAt(at)
+    onSend(quoteId)
+  }, [quoteId, onSend])
+
+  // Export PDF — open in new tab
+  const handleExportPdfClick = useCallback((_qId: string) => {
+    window.open(`/api/quotes/${quoteId}/export-pdf`, '_blank')
+    onExportPdf(quoteId)
+  }, [quoteId, onExportPdf])
+
+  // Revise — POST then close and notify parent
+  const handleReviseClick = useCallback(async (_qId: string) => {
+    try {
+      await fetch(`/api/quotes/${quoteId}/revise`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ builder_id: builderId }),
+      })
+    } catch {
+      // Best-effort — parent will handle message regardless
+    }
+    onRevise(quoteId)
+    handleClose()
+  }, [quoteId, builderId, onRevise, handleClose])
 
   const toggleCategory = useCallback((categoryId: number) => {
     setExpandedCategories((prev) => {
@@ -663,13 +701,26 @@ function QuoteViewInner({
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-slate-900 truncate">
-                  Draft Quote v{data?.quote.version ?? 1}
+                  {sentAt ? 'Quote' : 'Draft Quote'} v{data?.quote.version ?? 1}
                 </h2>
-                {data && <OverallConfidenceBadge score={data.quote.confidence_score} />}
+                {data && !sentAt && <OverallConfidenceBadge score={data.quote.confidence_score} />}
+                {sentAt && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-semibold">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                    Sent
+                  </span>
+                )}
               </div>
               {data && (
                 <p className="text-xs text-slate-500 truncate mt-0.5">
                   {data.quote.job_address}
+                  {sentAt && (
+                    <span className="ml-1 text-green-600">
+                      &mdash; sent {new Date(sentAt).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}
+                    </span>
+                  )}
                 </p>
               )}
             </div>
@@ -754,11 +805,20 @@ function QuoteViewInner({
           <ActionBar
             quoteId={quoteId}
             summary={data.summary}
-            onSend={onSend}
-            onRevise={onRevise}
-            onExportPdf={onExportPdf}
+            onSend={handleSendClick}
+            onRevise={handleReviseClick}
+            onExportPdf={handleExportPdfClick}
           />
         )}
+
+        {/* ── Send Quote Modal ──────────────────────────────────────── */}
+        <SendQuoteModal
+          quoteId={quoteId}
+          builderId={builderId}
+          isOpen={sendModalOpen}
+          onClose={() => setSendModalOpen(false)}
+          onSent={handleSent}
+        />
       </div>
     </div>
   )
