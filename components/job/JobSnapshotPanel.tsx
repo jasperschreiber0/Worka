@@ -1,6 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import OverviewTab from '@/components/job/tabs/OverviewTab'
+import QuoteTab from '@/components/job/tabs/QuoteTab'
+import VariationsTab from '@/components/job/tabs/VariationsTab'
+import InvoicesTab from '@/components/job/tabs/InvoicesTab'
+import FilesTab from '@/components/job/tabs/FilesTab'
+import CommsTab from '@/components/job/tabs/CommsTab'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +28,7 @@ interface Tab {
 export interface JobSnapshotPanelProps {
   job: ActiveJob | null
   onClose: () => void
+  onViewQuote?: (quoteId: string) => void
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -59,15 +67,68 @@ function SkeletonSection() {
         <div className="h-4 w-3/4 bg-slate-200 rounded animate-pulse" />
         <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
       </div>
-      <p className="text-xs text-slate-400 italic mt-4">Real data in Session 10</p>
     </div>
   )
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function JobSnapshotPanel({ job, onClose }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, onViewQuote }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
+  const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Fetch snapshot when job changes
+  useEffect(() => {
+    if (!job) {
+      setSnapshot(null)
+      return
+    }
+    setLoading(true)
+    fetch(`/api/jobs/${job.id}/snapshot`)
+      .then((r) => r.json())
+      .then((data: { snapshot: JobSnapshot }) => {
+        setSnapshot(data.snapshot)
+        setLoading(false)
+      })
+      .catch(() => {
+        setLoading(false)
+      })
+  }, [job?.id])
+
+  // Reset to overview tab when job changes
+  useEffect(() => {
+    setActiveTab('overview')
+  }, [job?.id])
+
+  // Render the active tab content
+  function renderTabContent() {
+    if (loading || !snapshot) {
+      return <SkeletonSection />
+    }
+
+    switch (activeTab) {
+      case 'overview':
+        return <OverviewTab overview={snapshot.overview} job={snapshot.job} />
+      case 'quote':
+        return (
+          <QuoteTab
+            quote={snapshot.quote}
+            onViewQuote={onViewQuote ?? (() => {})}
+          />
+        )
+      case 'variations':
+        return <VariationsTab variations={snapshot.variations} />
+      case 'invoices':
+        return <InvoicesTab invoices={snapshot.invoices} />
+      case 'files':
+        return <FilesTab files={snapshot.files} />
+      case 'comms':
+        return <CommsTab comms={snapshot.comms} />
+      default:
+        return <SkeletonSection />
+    }
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -144,7 +205,7 @@ export default function JobSnapshotPanel({ job, onClose }: JobSnapshotPanelProps
       {/* ── Content ─────────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto bg-slate-50">
         {job ? (
-          <SkeletonSection />
+          renderTabContent()
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
             <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">

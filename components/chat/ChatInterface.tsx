@@ -87,11 +87,20 @@ interface ActiveJobRef {
 interface ChatInterfaceProps {
   onJobMention?: (job: ActiveJobRef) => void
   onGeneralQuery?: () => void
+  /** When set, open QuoteView for this quoteId immediately */
+  initialQuoteId?: string | null
+  /** Called after initialQuoteId has been consumed (QuoteView opened) */
+  onInitialQuoteConsumed?: () => void
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatInterface({ onJobMention, onGeneralQuery }: ChatInterfaceProps = {}) {
+export default function ChatInterface({
+  onJobMention,
+  onGeneralQuery,
+  initialQuoteId,
+  onInitialQuoteConsumed,
+}: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -111,6 +120,17 @@ export default function ChatInterface({ onJobMention, onGeneralQuery }: ChatInte
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // When a quoteId is passed from the snapshot panel's "View quote" button,
+  // open QuoteView immediately and notify the parent that we consumed it.
+  useEffect(() => {
+    if (initialQuoteId) {
+      setViewingQuote({ quoteId: initialQuoteId })
+      onInitialQuoteConsumed?.()
+    }
+  // We only want to react when initialQuoteId changes (not on every render)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuoteId])
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))

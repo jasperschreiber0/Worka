@@ -9,11 +9,12 @@ import JobSnapshotPanel, { type ActiveJob } from './JobSnapshotPanel'
 interface MobileJobSheetProps {
   job: ActiveJob
   onClose: () => void
+  onViewQuote?: (quoteId: string) => void
 }
 
 // ─── Inner sheet (rendered in portal) ────────────────────────────────────────
 
-function MobileJobSheetInner({ job, onClose }: MobileJobSheetProps) {
+function MobileJobSheetInner({ job, onClose, onViewQuote }: MobileJobSheetProps) {
   const [visible, setVisible] = useState(false)
   const sheetRef = useRef<HTMLDivElement>(null)
 
@@ -71,7 +72,7 @@ function MobileJobSheetInner({ job, onClose }: MobileJobSheetProps) {
 
         {/* Content — reuse JobSnapshotPanel */}
         <div className="flex-1 overflow-y-auto">
-          <JobSnapshotPanel job={job} onClose={handleClose} />
+          <JobSnapshotPanel job={job} onClose={handleClose} onViewQuote={onViewQuote} />
         </div>
       </div>
     </>
@@ -80,7 +81,7 @@ function MobileJobSheetInner({ job, onClose }: MobileJobSheetProps) {
 
 // ─── Portal wrapper ───────────────────────────────────────────────────────────
 
-export default function MobileJobSheet({ job, onClose }: MobileJobSheetProps) {
+export default function MobileJobSheet({ job, onClose, onViewQuote }: MobileJobSheetProps) {
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
@@ -91,7 +92,7 @@ export default function MobileJobSheet({ job, onClose }: MobileJobSheetProps) {
   if (!mounted) return null
 
   return createPortal(
-    <MobileJobSheetInner job={job} onClose={onClose} />,
+    <MobileJobSheetInner job={job} onClose={onClose} onViewQuote={onViewQuote} />,
     document.body
   )
 }

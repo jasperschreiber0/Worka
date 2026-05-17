@@ -11,6 +11,7 @@ import type { ActiveJob } from '@/components/job/JobSnapshotPanel'
 export default function ChatShell() {
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
+  const [pendingQuoteView, setPendingQuoteView] = useState<string | null>(null)
 
   const handleJobMention = useCallback((job: ActiveJob) => {
     setActiveJob(job)
@@ -26,6 +27,17 @@ export default function ChatShell() {
     setPanelVisible(false)
   }, [])
 
+  // Called by QuoteTab's "View quote" button inside the snapshot panel.
+  // We store the quoteId and pass it down to ChatInterface so it opens QuoteView.
+  const handleViewQuote = useCallback((quoteId: string) => {
+    setPendingQuoteView(quoteId)
+  }, [])
+
+  // Called by ChatInterface after it has consumed the pending quote ID.
+  const handleQuoteViewConsumed = useCallback(() => {
+    setPendingQuoteView(null)
+  }, [])
+
   return (
     <div className="h-screen flex overflow-hidden bg-white">
       {/* ── Left: chat — full width on mobile, flex-1 on desktop ──────────── */}
@@ -33,6 +45,8 @@ export default function ChatShell() {
         <ChatInterface
           onJobMention={handleJobMention}
           onGeneralQuery={handleGeneralQuery}
+          initialQuoteId={pendingQuoteView}
+          onInitialQuoteConsumed={handleQuoteViewConsumed}
         />
       </div>
 
@@ -47,12 +61,20 @@ export default function ChatShell() {
           ${panelVisible ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}
         `}
       >
-        <JobSnapshotPanel job={activeJob} onClose={handlePanelClose} />
+        <JobSnapshotPanel
+          job={activeJob}
+          onClose={handlePanelClose}
+          onViewQuote={handleViewQuote}
+        />
       </div>
 
       {/* ── Mobile bottom sheet ────────────────────────────────────────────── */}
       {panelVisible && activeJob && (
-        <MobileJobSheet job={activeJob} onClose={handlePanelClose} />
+        <MobileJobSheet
+          job={activeJob}
+          onClose={handlePanelClose}
+          onViewQuote={handleViewQuote}
+        />
       )}
     </div>
   )
