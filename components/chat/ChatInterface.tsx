@@ -151,6 +151,13 @@ interface ChatInterfaceProps {
   pendingEmailDraft?: PendingEmailDraft | null
   /** Called after pendingEmailDraft has been consumed */
   onPendingEmailDraftConsumed?: () => void
+  /**
+   * When set, auto-send this message instead of the default morning brief on mount.
+   * Used by ChatShell to trigger flows from the homepage ?action= / ?job= params.
+   */
+  autoMessage?: string | null
+  /** Called after autoMessage has been consumed (sent to chat) */
+  onAutoMessageConsumed?: () => void
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -162,6 +169,8 @@ export default function ChatInterface({
   onInitialQuoteConsumed,
   pendingEmailDraft,
   onPendingEmailDraftConsumed,
+  autoMessage,
+  onAutoMessageConsumed,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -758,12 +767,19 @@ export default function ChatInterface({
     }
   }, [pendingAction, sendMessage])
 
-  // On mount: auto-send "whats on today" to trigger morning brief
+  // On mount: auto-send either the injected autoMessage (from homepage ?action=/?job= params)
+  // or the default morning brief if no override is provided.
   useEffect(() => {
     if (!hasSentInitial) {
       setHasSentInitial(true)
-      sendMessage('whats on today')
+      if (autoMessage) {
+        onAutoMessageConsumed?.()
+        sendMessage(autoMessage)
+      } else {
+        sendMessage('whats on today')
+      }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasSentInitial, sendMessage])
 
   // Handle form submit

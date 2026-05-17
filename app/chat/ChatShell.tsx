@@ -1,18 +1,75 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
 import ChatInterface, { type PendingEmailDraft } from '@/components/chat/ChatInterface'
 import JobSnapshotPanel from '@/components/job/JobSnapshotPanel'
 import MobileJobSheet from '@/components/job/MobileJobSheet'
 import type { ActiveJob } from '@/components/job/JobSnapshotPanel'
 
+// ─── Action → message map ─────────────────────────────────────────────────────
+
+const ACTION_MESSAGES: Record<string, string> = {
+  new_quote: 'new job',
+  sample_quote: 'new job at 52 Bendigo St',
+}
+
+// ─── Job ID → chat trigger message ───────────────────────────────────────────
+
+const JOB_MESSAGES: Record<string, string> = {
+  '00000000-0000-0000-0000-000000000011': 'toorak job',
+  '00000000-0000-0000-0000-000000000020': 'toorak job',
+  '00000000-0000-0000-0000-000000000010': 'fitzroy job',
+  '00000000-0000-0000-0000-000000000012': 'brunswick job',
+  '00000000-0000-0000-0000-000000000030': 'brunswick job',
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ChatShell() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
   const [pendingQuoteView, setPendingQuoteView] = useState<string | null>(null)
   const [pendingEmailDraft, setPendingEmailDraft] = useState<PendingEmailDraft | null>(null)
+
+  // Auto-message from ?action= or ?job= query param
+  const [autoMessage, setAutoMessage] = useState<string | null>(null)
+  const consumedRef = useRef(false)
+
+  useEffect(() => {
+    if (consumedRef.current) return
+    const action = searchParams.get('action')
+    const jobId = searchParams.get('job')
+
+    if (action && ACTION_MESSAGES[action]) {
+      consumedRef.current = true
+      const message = ACTION_MESSAGES[action]
+      // Slight delay so the chat UI is fully mounted before the message fires
+      const t = setTimeout(() => {
+        setAutoMessage(message)
+        router.replace('/chat')
+      }, 500)
+      return () => clearTimeout(t)
+    }
+
+    if (jobId && JOB_MESSAGES[jobId]) {
+      consumedRef.current = true
+      const message = JOB_MESSAGES[jobId]
+      const t = setTimeout(() => {
+        setAutoMessage(message)
+        router.replace('/chat')
+      }, 500)
+      return () => clearTimeout(t)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleAutoMessageConsumed = useCallback(() => {
+    setAutoMessage(null)
+  }, [])
 
   const handleJobMention = useCallback((job: ActiveJob) => {
     setActiveJob(job)
@@ -64,6 +121,8 @@ export default function ChatShell() {
           onInitialQuoteConsumed={handleQuoteViewConsumed}
           pendingEmailDraft={pendingEmailDraft}
           onPendingEmailDraftConsumed={handleEmailDraftConsumed}
+          autoMessage={autoMessage}
+          onAutoMessageConsumed={handleAutoMessageConsumed}
         />
       </div>
 
