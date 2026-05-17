@@ -9,6 +9,7 @@ import AssumptionReview from './AssumptionReview'
 import QuoteView from '@/components/quote/QuoteView'
 import VariationNotificationModal from './VariationNotificationModal'
 import EmailDraftModal, { type EmailIntentHint } from './EmailDraftModal'
+import InboundEmailAlert, { type InboundEmailAlertProps } from './InboundEmailAlert'
 import type { VariationCardVariation } from './VariationCard'
 import type { Worker, Job } from '@/lib/types/database.types'
 import type { DemoVariation } from '@/lib/variations-demo'
@@ -57,6 +58,23 @@ interface SuggestEmailDraftEvent {
   intent_hint: string
 }
 
+interface InboundEmailAlertEvent {
+  type: 'inbound_email_alert'
+  email: {
+    from: string
+    subject: string
+    preview: string
+    received_display: string
+  }
+  job_address: string
+  intent: string
+  suggested_action: {
+    type: string
+    description: string
+    draft?: { subject: string; body: string }
+  } | null
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -68,7 +86,7 @@ interface ChatApiResponse {
   existing_job?: Job
   variation?: DemoVariation
   all_variations?: DemoVariation[]
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | { type: string; [key: string]: unknown }
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | { type: string; [key: string]: unknown }
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -160,6 +178,7 @@ export default function ChatInterface({
     recipientName?: string
     intentHint?: EmailIntentHint
   } | null>(null)
+  const [inboundEmailAlert, setInboundEmailAlert] = useState<Omit<InboundEmailAlertProps, 'onReply' | 'onDismiss'> | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -548,6 +567,17 @@ export default function ChatInterface({
         void suggestMessage // suppress unused warning
       }
 
+      // Handle inbound_email_alert event — surface matched email in chat
+      if (data.event?.type === 'inbound_email_alert') {
+        const evt = data.event as InboundEmailAlertEvent
+        setInboundEmailAlert({
+          email: evt.email,
+          job_address: evt.job_address,
+          intent: evt.intent,
+          suggested_action: evt.suggested_action,
+        })
+      }
+
       // Trigger general query callback for non-job intents
       if (
         data.intent === 'morning_brief' ||
@@ -688,7 +718,7 @@ export default function ChatInterface({
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-white flex-shrink-0">
         <div className="flex items-center gap-2.5">
@@ -831,6 +861,30 @@ export default function ChatInterface({
           recipientName={emailDraftModal.recipientName}
           intentHint={emailDraftModal.intentHint}
         />
+      )}
+
+      {/* ── Inbound Email Alert ─────────────────────────────────────────────── */}
+      {inboundEmailAlert && (
+        <div className="absolute bottom-24 left-4 right-4 z-20 max-w-lg">
+          <InboundEmailAlert
+            email={inboundEmailAlert.email}
+            job_address={inboundEmailAlert.job_address}
+            intent={inboundEmailAlert.intent}
+            suggested_action={inboundEmailAlert.suggested_action}
+            onReply={() => {
+              const draft = inboundEmailAlert.suggested_action?.draft
+              setEmailDraftModal({
+                isOpen: true,
+                jobId: null,
+                recipientName: inboundEmailAlert.email.from,
+                intentHint: 'general',
+                ...(draft ? {} : {}),
+              })
+              setInboundEmailAlert(null)
+            }}
+            onDismiss={() => setInboundEmailAlert(null)}
+          />
+        </div>
       )}
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}

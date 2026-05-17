@@ -12,9 +12,9 @@ import type {
 } from '@/lib/types/database.types'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 
-// ─── Extended intent type (includes email_draft not yet in DB types) ───────────
+// ─── Extended intent type (includes email_draft, email_sync_status, simulate_email) ──
 
-type ExtendedIntentType = IntentType | 'email_draft'
+type ExtendedIntentType = IntentType | 'email_draft' | 'email_sync_status' | 'simulate_email'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +74,24 @@ interface SuggestEmailDraftEvent {
   intent_hint: string
 }
 
-type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent
+interface InboundEmailAlertEvent {
+  type: 'inbound_email_alert'
+  email: {
+    from: string
+    subject: string
+    preview: string
+    received_display: string
+  }
+  job_address: string
+  intent: string
+  suggested_action: {
+    type: string
+    description: string
+    draft?: { subject: string; body: string }
+  } | null
+}
+
+type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent
 
 interface ChatResponse {
   intent: string
@@ -144,6 +161,10 @@ Classify the builder's message into exactly one of these intents:
 - invoice: invoices, payments, billing queries
 - email_draft: builder wants to draft/send an email to a client or subcontractor
   Examples: "email the Hendersons", "draft an email to Tom about the quote", "send a message to the client", "follow up on the Toorak quote"
+- email_sync_status: builder asking if email sync is connected, or for email sync status
+  Examples: "is my email connected?", "email sync status", "is Gmail connected", "check email sync"
+- simulate_email: builder wants to test email sync or simulate an inbound email
+  Examples: "simulate email", "test email sync", "simulate inbound email", "demo email"
 - unknown: anything that doesn't fit the above
 
 Extract relevant entities:
@@ -783,6 +804,108 @@ function handleEmailDraft(entities: Record<string, string>): ChatResponse {
   }
 }
 
+// ─── Email Sync Status Handler ────────────────────────────────────────────────
+
+async function handleEmailSyncStatus(builderId: string): Promise<ChatResponse> {
+  try {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+    const res = await fetch(`${appUrl}/api/email-sync/status?builder_id=${builderId}`)
+    const data = await res.json() as {
+      connected: boolean
+      provider: 'gmail' | 'outlook' | null
+      connected_at: string | null
+      last_synced_at: string | null
+      is_active: boolean
+      emails_processed_today: number
+      jobs_matched_today: number
+    }
+
+    if (!data.connected) {
+      return {
+        intent: 'email_sync_status',
+        message: "Email sync is not connected. Go to Settings → Email sync to connect your Gmail or Outlook inbox.",
+      }
+    }
+
+    const providerName = data.provider === 'gmail' ? 'Gmail' : 'Outlook'
+    const connectedPhrase = data.connected_at ? ` Connected ${data.connected_at}.` : ''
+    const syncPhrase = data.last_synced_at ? ` Last synced ${data.last_synced_at}.` : ''
+    const todayPhrase =
+      data.emails_processed_today > 0
+        ? ` Today: ${data.emails_processed_today} email${data.emails_processed_today !== 1 ? 's' : ''} processed, ${data.jobs_matched_today} matched to jobs.`
+        : ' No emails processed today yet.'
+
+    return {
+      intent: 'email_sync_status',
+      message: `${providerName} is connected and monitoring your inbox.${connectedPhrase}${syncPhrase}${todayPhrase}`,
+    }
+  } catch {
+    return {
+      intent: 'email_sync_status',
+      message: 'Email sync status is unavailable right now. Try again in a moment.',
+    }
+  }
+}
+
+// ─── Simulate Email Handler ───────────────────────────────────────────────────
+
+async function handleSimulateEmail(builderId: string): Promise<ChatResponse> {
+  try {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+    const res = await fetch(`${appUrl}/api/email-sync/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ builder_id: builderId, scenario: 'invoice_query' }),
+    })
+    const data = await res.json() as {
+      matched: boolean
+      job_id: string | null
+      job_address: string | null
+      intent: string
+      confidence: number
+      communication_id: string | null
+      suggested_action: {
+        type: string
+        description: string
+        draft?: { subject: string; body: string }
+      } | null
+      auto_logged: boolean
+    }
+
+    if (!data.matched) {
+      return {
+        intent: 'simulate_email',
+        message: 'Simulated email received but could not be matched to any active job.',
+      }
+    }
+
+    const address = data.job_address ?? 'an active job'
+    const preview = 'Hi Dave, just checking on the invoice — can we pay via bank transfer?'
+
+    return {
+      intent: 'simulate_email',
+      message: `Simulated inbound email matched to ${address}. Intent: ${data.intent}. Email has been logged to communication history.`,
+      event: {
+        type: 'inbound_email_alert',
+        email: {
+          from: 'henderson@email.com',
+          subject: 'Re: Invoice — 14 Merri St, Fitzroy',
+          preview,
+          received_display: 'just now',
+        },
+        job_address: address,
+        intent: data.intent,
+        suggested_action: data.suggested_action,
+      },
+    }
+  } catch {
+    return {
+      intent: 'simulate_email',
+      message: 'Could not simulate email — the email sync endpoint is unavailable.',
+    }
+  }
+}
+
 function handleUnknown(): ChatResponse {
   return {
     intent: 'unknown',
@@ -925,6 +1048,26 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           },
         })
       }
+      // Demo email_sync_status: detect "email connected", "email sync status" etc
+      if (
+        (lower.includes('email') && lower.includes('connected')) ||
+        (lower.includes('email') && lower.includes('sync')) ||
+        (lower.includes('gmail') && lower.includes('connected')) ||
+        lower === 'email sync status'
+      ) {
+        const result = await handleEmailSyncStatus(builderId)
+        return NextResponse.json(result)
+      }
+      // Demo simulate_email: detect "simulate email", "test email sync" etc
+      if (
+        (lower.includes('simulate') && lower.includes('email')) ||
+        (lower.includes('test') && lower.includes('email')) ||
+        lower.includes('simulate email') ||
+        lower.includes('test email sync')
+      ) {
+        const result = await handleSimulateEmail(builderId)
+        return NextResponse.json(result)
+      }
       // Demo job_query: detect known job keywords
       const demoJob = findDemoJob({ address: lower })
       if (demoJob) {
@@ -1025,6 +1168,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
     if (classified.intent === 'email_draft') {
       return NextResponse.json(handleEmailDraft(classified.entities))
+    }
+
+    if (classified.intent === 'email_sync_status') {
+      const result = await handleEmailSyncStatus(builderId)
+      return NextResponse.json(result)
+    }
+
+    if (classified.intent === 'simulate_email') {
+      const result = await handleSimulateEmail(builderId)
+      return NextResponse.json(result)
     }
 
     return NextResponse.json(handleUnknown())

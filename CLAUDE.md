@@ -289,7 +289,7 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **10** | Job snapshot panel | All six sections from real data ✅ |
 | **11** | Variation surfacing | Pending variation in chat and panel ✅ |
 | **12** | Email draft flow | Draft from context, hold for approval, send logs ✅ |
-| **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching |
+| **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching ✅ |
 | **14** | Quote to job conversion | One click, full job activation |
 | **15** | Homepage | Upload zone hero, sample plans, quotes pipeline |
 
@@ -306,6 +306,48 @@ Key variables used in edge functions (Deno):
 - `SUPABASE_SERVICE_ROLE_KEY` — injected automatically by Supabase
 - `ANTHROPIC_API_KEY` — set in Supabase dashboard → Edge Functions → Secrets
 - `NEXT_PUBLIC_APP_URL` — set in Supabase dashboard → Edge Functions → Secrets
+
+---
+
+## Email Sync Architecture (Session 13)
+
+### OAuth Flow
+1. Builder clicks "Connect Gmail/Outlook" at `/settings/email`
+2. Frontend calls `GET /api/email-sync/connect?provider=gmail&builder_id=...`
+3. Route returns `{ auth_url }` (or `{ demo_mode: true }` if no OAuth env vars)
+4. Browser redirects to Google/Microsoft OAuth consent screen
+5. Provider redirects back to `GET /api/email-sync/callback?code=...&state={builder_id}:{provider}`
+6. Callback exchanges code for tokens, upserts `email_sync_state`, redirects to `/settings/email?connected=true`
+7. **Demo mode**: if no OAuth credentials → callback redirects to `?connected=demo`
+
+### Parse Pipeline (`POST /api/email-sync/parse`)
+1. **Job matching** — fuzzy match against `DEMO_MATCHABLE_JOBS` (or live DB):
+   - Exact client email match (from address)
+   - Client name substring match in subject+body
+   - Street number + street name both present in subject+body
+2. **Intent classification** — Claude API if `ANTHROPIC_API_KEY` set, else keyword fallback
+3. **Action routing**:
+   - `unrelated` + no job match → `{ matched: false }`, nothing logged
+   - `general_reply` + job match → auto-logged (passive, no approval)
+   - Actionable intent + job match → logged + `suggested_action` returned
+   - `new_quote_request` → logged without job_id
+4. **`auto_logged: true`** only for passive general replies — everything else requires builder action
+
+### Intent Types
+`variation_approval` | `variation_rejection` | `quote_acceptance` | `quote_question` |
+`invoice_payment` | `invoice_dispute` | `delivery_eta` | `new_quote_request` |
+`general_reply` | `unrelated`
+
+### Chat Integration
+- `"is my email connected?"` → `email_sync_status` intent → calls `/api/email-sync/status`
+- `"simulate email"` / `"test email sync"` → `simulate_email` intent → calls `/api/email-sync/simulate` with `scenario: 'invoice_query'` → surfaces `InboundEmailAlert` in chat
+- `InboundEmailAlertEvent` (type: `inbound_email_alert`) surfaced as floating overlay in `ChatInterface`
+
+### Key Rules
+- WorkA NEVER sends automatically — every draft is held for builder approval
+- Passive logging (general_reply matched to job) is the only auto-logged case
+- Builder can disconnect at any time; all `communication_history` rows are retained
+- Initial sync ignores emails older than 90 days (enforced at provider API level via `sync_cursor`)
 
 ---
 
