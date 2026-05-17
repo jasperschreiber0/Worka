@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
+import { requirePermission } from '@/lib/auth/role-guard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,16 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ variationId: string }> }
 ): Promise<NextResponse<ResolveResponse | ErrorResponse>> {
+  const body = await request.json() as ResolveRequestBody
+  const { action } = body
+  if (action !== 'approved' && action !== 'rejected') {
+    return NextResponse.json({ error: 'action must be "approved" or "rejected"' }, { status: 400 })
+  }
+
+  const requiredAction = action === 'approved' ? 'approve_variation' : 'reject_variation'
+  const denied = requirePermission(request, requiredAction)
+  if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
   const { variationId } = await params
   const base = DEMO_VARIATIONS.find((v) => v.id === variationId)
 
@@ -74,18 +85,6 @@ export async function POST(
       { error: `Variation is already ${current.status} — status cannot be changed.` },
       { status: 422 }
     )
-  }
-
-  let body: ResolveRequestBody
-  try {
-    body = (await request.json()) as ResolveRequestBody
-  } catch {
-    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
-  }
-
-  const { action } = body
-  if (action !== 'approved' && action !== 'rejected') {
-    return NextResponse.json({ error: 'action must be "approved" or "rejected"' }, { status: 400 })
   }
 
   const now = new Date().toISOString()

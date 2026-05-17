@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import type { PermissionRole } from '@/lib/auth/role-guard'
 import OverviewTab from '@/components/job/tabs/OverviewTab'
 import QuoteTab from '@/components/job/tabs/QuoteTab'
 import VariationsTab from '@/components/job/tabs/VariationsTab'
@@ -29,6 +30,7 @@ interface Tab {
 export interface JobSnapshotPanelProps {
   job: ActiveJob | null
   onClose: () => void
+  userRole?: PermissionRole
   onViewQuote?: (quoteId: string) => void
   onVariationApprove?: (variationId: string) => void
   onComposeEmail?: (jobId: string) => void
@@ -84,7 +86,7 @@ interface ActivationModalState {
   quote: JobSnapshot['quote'] | null
 }
 
-export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariationApprove, onComposeEmail, onJobActivated }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', onViewQuote, onVariationApprove, onComposeEmail, onJobActivated }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -163,10 +165,9 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariatio
           <VariationsTab
             variations={snapshot.variations}
             jobAddress={snapshot.job.address}
+            userRole={userRole}
             onApprove={onVariationApprove}
-            onReject={() => {
-              // Reject from panel — no notification needed
-            }}
+            onReject={() => {}}
           />
         )
       case 'invoices':

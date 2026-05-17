@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { addCommEntry, demoCommHistory } from '@/lib/comms-demo'
 import { randomUUID } from 'crypto'
+import { requirePermission } from '@/lib/auth/role-guard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,9 @@ interface SendEmailResponse {
 export async function POST(
   request: NextRequest
 ): Promise<NextResponse<SendEmailResponse | { error: string }>> {
+  const denied = requirePermission(request, 'send_email')
+  if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
   try {
     const body = (await request.json()) as SendEmailRequestBody
     const { builder_id, job_id, to, subject, body: emailBody, linked_variation_id, linked_invoice_id } = body

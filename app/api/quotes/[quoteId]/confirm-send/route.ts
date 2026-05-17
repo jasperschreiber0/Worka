@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { requirePermission } from '@/lib/auth/role-guard'
 
 // ─── In-memory demo quote status map ─────────────────────────────────────────
 // Shared across requests within the same server process.
@@ -36,6 +37,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
+  const denied = requirePermission(request, 'send_quote')
+  if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
   const { quoteId } = params
 
   let body: ConfirmSendBody

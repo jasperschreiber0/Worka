@@ -752,6 +752,7 @@ function handleJobQuery(entities: Record<string, string>): ChatResponse {
       job_address: job.address,
       job_status: job.status,
       client_name: job.client_name,
+      job_ref: job.job_ref,
     },
   }
 }

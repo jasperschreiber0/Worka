@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { requirePermission } from '@/lib/auth/role-guard'
 import {
   demoActivationState,
   generateMilestones,
@@ -79,6 +80,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
+  const denied = requirePermission(request, 'activate_job')
+  if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
   try {
     const body = (await request.json()) as ActivateRequestBody
     const { builder_id, quote_id } = body

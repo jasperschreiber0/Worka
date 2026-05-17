@@ -2,12 +2,14 @@
 
 import { useState } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import { hasPermission, type PermissionRole } from '@/lib/auth/role-guard'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface VariationsTabProps {
   variations: JobSnapshot['variations']
   jobAddress?: string
+  userRole?: PermissionRole
   onApprove?: (variationId: string) => void
   onReject?: (variationId: string) => void
 }
@@ -85,7 +87,8 @@ function statusBadgeClass(status: string): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function VariationsTab({ variations, onApprove, onReject }: VariationsTabProps) {
+export default function VariationsTab({ variations, userRole = 'owner', onApprove, onReject }: VariationsTabProps) {
+  const canApprove = hasPermission(userRole, 'site_manager')
   // Local optimistic status per variation id
   const [localStatuses, setLocalStatuses] = useState<Record<string, VariationStatus>>({})
 
@@ -211,7 +214,7 @@ export default function VariationsTab({ variations, onApprove, onReject }: Varia
                 )}
 
                 {/* Actions for pending variations */}
-                {isPending && (
+                {isPending && canApprove && (
                   <div className="flex items-center gap-2 mt-2">
                     <button
                       type="button"
@@ -228,6 +231,9 @@ export default function VariationsTab({ variations, onApprove, onReject }: Varia
                       Reject
                     </button>
                   </div>
+                )}
+                {isPending && !canApprove && (
+                  <p className="text-xs text-slate-400 mt-2 italic">Approval requires site manager access or above.</p>
                 )}
 
                 {/* Status label for resolved variations */}
