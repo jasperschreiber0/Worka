@@ -15,6 +15,10 @@ export interface DemoVariation {
   created_display: string // "2 days ago"
   approved_at: string | null
   approved_by: string | null
+  variation_ref?: string
+  labour_cost?: number
+  materials_cost?: number
+  submitted_by?: string
 }
 
 export const DEMO_VARIATIONS: DemoVariation[] = [
@@ -32,6 +36,10 @@ export const DEMO_VARIATIONS: DemoVariation[] = [
     created_display: '2 days ago',
     approved_at: null,
     approved_by: null,
+    variation_ref: 'VAR-001',
+    labour_cost: 800,
+    materials_cost: 2400,
+    submitted_by: 'Tom Chen',
   },
   {
     id: 'var-002',
@@ -47,6 +55,10 @@ export const DEMO_VARIATIONS: DemoVariation[] = [
     created_display: '4 days ago',
     approved_at: null,
     approved_by: null,
+    variation_ref: 'VAR-002',
+    labour_cost: 680,
+    materials_cost: 0,
+    submitted_by: 'Tom Chen',
   },
 ]
 

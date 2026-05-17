@@ -30,6 +30,7 @@ export interface DemoQuote {
   confidence_score: number // weighted toward lowest line item
   version: number
   created_at: string
+  quote_ref?: string
 }
 
 // ─── Demo quote ───────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ export const DEMO_QUOTE: DemoQuote = {
   confidence_score: 45,
   version: 1,
   created_at: new Date().toISOString(),
+  quote_ref: 'QT-JOB-2025-003-v1',
 }
 
 // ─── Demo line items ──────────────────────────────────────────────────────────

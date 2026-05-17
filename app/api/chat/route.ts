@@ -53,6 +53,7 @@ interface OpenJobSnapshotEvent {
   job_address: string
   job_status: string
   client_name?: string
+  job_ref?: string
 }
 
 interface ShowVariationEvent {
@@ -485,24 +486,30 @@ interface CreateJobResult {
 }
 
 // Seed job data — mirrors the demo seed in the database
-const SEED_JOBS: Array<{ id: string; address: string; status: string; tokens: string[] }> = [
+const SEED_JOBS: Array<{ id: string; address: string; status: string; tokens: string[]; job_ref: string; client_name: string }> = [
   {
     id: '00000000-0000-0000-0000-000000000010',
     address: '14 Merri St, Fitzroy VIC 3065',
     status: 'active',
     tokens: ['14 merri st', '14 merri street'],
+    job_ref: 'JOB-2025-001',
+    client_name: 'Hendersons',
   },
   {
     id: '00000000-0000-0000-0000-000000000020',
     address: '8 Burnside Ave, Toorak VIC 3142',
     status: 'quoted',
     tokens: ['8 burnside'],
+    job_ref: 'JOB-2025-002',
+    client_name: 'Tom Caruso',
   },
   {
     id: '00000000-0000-0000-0000-000000000030',
     address: '52 Bendigo St, Brunswick VIC 3056',
     status: 'quoting',
     tokens: ['52 bendigo'],
+    job_ref: 'JOB-2025-003',
+    client_name: 'Brunswick client',
   },
 ]
 
@@ -639,6 +646,8 @@ interface DemoJob {
   status: string
   client_name: string
   keywords: string[]
+  client_keywords: string[]
+  job_ref: string
   summary: string
 }
 
@@ -649,14 +658,18 @@ const DEMO_JOBS: DemoJob[] = [
     status: 'active',
     client_name: 'Henderson',
     keywords: ['fitzroy', 'merri', 'henderson'],
+    client_keywords: ['henderson', 'hendersons'],
+    job_ref: 'JOB-2025-001',
     summary: "Here's the status on the Fitzroy job — active, no outstanding variations. $28k invoice overdue 3 days.",
   },
   {
     id: '00000000-0000-0000-0000-000000000020',
     address: '8 Burnside Rd, Toorak',
     status: 'quoted',
-    client_name: 'Caruso',
+    client_name: 'Tom Caruso',
     keywords: ['toorak', 'burnside', 'caruso'],
+    client_keywords: ['caruso', 'tom caruso'],
+    job_ref: 'JOB-2025-002',
     summary: "The Toorak job is in quoted status — $127,500 quote sent to Tom Caruso 5 days ago, no response yet.",
   },
   {
@@ -665,6 +678,8 @@ const DEMO_JOBS: DemoJob[] = [
     status: 'quoting',
     client_name: 'Brunswick client',
     keywords: ['brunswick', 'bendigo'],
+    client_keywords: [],
+    job_ref: 'JOB-2025-003',
     summary: "The Brunswick job at 52 Bendigo St is still in quoting — no quote sent yet.",
   },
 ]
@@ -672,11 +687,26 @@ const DEMO_JOBS: DemoJob[] = [
 function findDemoJob(entities: Record<string, string>): DemoJob | null {
   const ref = (entities.address ?? entities.job_name ?? '').toLowerCase()
   if (!ref) return null
+
+  // 1. Exact job_ref match (e.g. "JOB-2025-001")
+  for (const job of DEMO_JOBS) {
+    if (ref.includes(job.job_ref.toLowerCase())) return job
+  }
+
+  // 2. Address/suburb keyword match
   for (const job of DEMO_JOBS) {
     for (const kw of job.keywords) {
       if (ref.includes(kw)) return job
     }
   }
+
+  // 3. Client name token match
+  for (const job of DEMO_JOBS) {
+    for (const ck of job.client_keywords) {
+      if (ref.includes(ck)) return job
+    }
+  }
+
   return null
 }
 

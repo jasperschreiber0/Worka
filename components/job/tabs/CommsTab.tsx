@@ -31,7 +31,8 @@ function capitalise(str: string): string {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function CommsTab({ comms, onComposeEmail }: CommsTabProps) {
-  const count = comms.length
+  const messages = comms.messages
+  const count = messages.length
 
   if (count === 0) {
     return (
@@ -65,7 +66,7 @@ export default function CommsTab({ comms, onComposeEmail }: CommsTabProps) {
 
       {/* Message list */}
       <ul className="space-y-3">
-        {comms.map((comm) => (
+        {messages.map((comm) => (
           <li key={comm.id} className="flex items-start gap-3">
             {/* Direction indicator */}
             <div className="flex-shrink-0 flex flex-col items-center gap-1 pt-0.5">
