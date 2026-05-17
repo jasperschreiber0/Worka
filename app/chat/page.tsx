@@ -1,4 +1,4 @@
-import ChatInterface from '@/components/chat/ChatInterface'
+import ChatShell from './ChatShell'
 
 export const metadata = {
   title: 'WorkA — Morning Brief',
@@ -7,8 +7,8 @@ export const metadata = {
 
 export default function ChatPage() {
   return (
-    <main className="h-screen flex flex-col overflow-hidden bg-white">
-      <ChatInterface />
+    <main className="h-screen overflow-hidden">
+      <ChatShell />
     </main>
   )
 }

@@ -42,7 +42,15 @@ interface DuplicateWarningEvent {
   job_id: string
 }
 
-type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent
+interface OpenJobSnapshotEvent {
+  type: 'open_job_snapshot'
+  job_id: string
+  job_address: string
+  job_status: string
+  client_name?: string
+}
+
+type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent
 
 interface ChatResponse {
   intent: string
@@ -567,13 +575,80 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
 
 // ─── Intent Handlers ──────────────────────────────────────────────────────────
 
+// ─── Demo Job Data ────────────────────────────────────────────────────────────
+
+interface DemoJob {
+  id: string
+  address: string
+  status: string
+  client_name: string
+  keywords: string[]
+  summary: string
+}
+
+const DEMO_JOBS: DemoJob[] = [
+  {
+    id: '00000000-0000-0000-0000-000000000010',
+    address: '14 Merri St, Fitzroy',
+    status: 'active',
+    client_name: 'Henderson',
+    keywords: ['fitzroy', 'merri', 'henderson'],
+    summary: "Here's the status on the Fitzroy job — active, no outstanding variations. $28k invoice overdue 3 days.",
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000020',
+    address: '8 Burnside Rd, Toorak',
+    status: 'quoted',
+    client_name: 'Caruso',
+    keywords: ['toorak', 'burnside', 'caruso'],
+    summary: "The Toorak job is in quoted status — $127,500 quote sent to Tom Caruso 5 days ago, no response yet.",
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000030',
+    address: '52 Bendigo St, Brunswick',
+    status: 'quoting',
+    client_name: 'Brunswick client',
+    keywords: ['brunswick', 'bendigo'],
+    summary: "The Brunswick job at 52 Bendigo St is still in quoting — no quote sent yet.",
+  },
+]
+
+function findDemoJob(entities: Record<string, string>): DemoJob | null {
+  const ref = (entities.address ?? entities.job_name ?? '').toLowerCase()
+  if (!ref) return null
+  for (const job of DEMO_JOBS) {
+    for (const kw of job.keywords) {
+      if (ref.includes(kw)) return job
+    }
+  }
+  return null
+}
+
+// ─── Job Query Handler ────────────────────────────────────────────────────────
+
 function handleJobQuery(entities: Record<string, string>): ChatResponse {
-  const ref = entities.address ?? entities.job_name ?? ''
+  const job = findDemoJob(entities)
+
+  if (!job) {
+    const ref = entities.address ?? entities.job_name ?? ''
+    return {
+      intent: 'job_query',
+      message: ref
+        ? `I couldn't find a job matching "${ref}". You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).`
+        : "Which job are you asking about? You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).",
+    }
+  }
+
   return {
     intent: 'job_query',
-    message: ref
-      ? `Job details for ${ref} are coming in a future update. Type "whats on today" to see your morning brief.`
-      : 'Job details are coming in a future update. Type "whats on today" to see your morning brief.',
+    message: job.summary,
+    event: {
+      type: 'open_job_snapshot',
+      job_id: job.id,
+      job_address: job.address,
+      job_status: job.status,
+      client_name: job.client_name,
+    },
   }
 }
 
@@ -676,6 +751,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           invite_url: result.invite_url,
           event: result.modal_event,
         })
+      }
+      // Demo job_query: detect known job keywords
+      const demoJob = findDemoJob({ address: lower })
+      if (demoJob) {
+        return NextResponse.json(handleJobQuery({ address: lower }))
       }
       return NextResponse.json(handleUnknown())
     }

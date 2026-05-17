@@ -26,6 +26,14 @@ interface DuplicateWarningEvent {
   job_id: string
 }
 
+interface OpenJobSnapshotEvent {
+  type: 'open_job_snapshot'
+  job_id: string
+  job_address: string
+  job_status: string
+  client_name?: string
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -35,7 +43,7 @@ interface ChatApiResponse {
   job?: Job
   duplicate?: boolean
   existing_job?: Job
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | { type: string; [key: string]: unknown }
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | { type: string; [key: string]: unknown }
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -67,9 +75,23 @@ function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
+// ─── Props ────────────────────────────────────────────────────────────────────
+
+interface ActiveJobRef {
+  id: string
+  address: string
+  status: string
+  client_name?: string
+}
+
+interface ChatInterfaceProps {
+  onJobMention?: (job: ActiveJobRef) => void
+  onGeneralQuery?: () => void
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatInterface() {
+export default function ChatInterface({ onJobMention, onGeneralQuery }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -327,6 +349,26 @@ export default function ChatInterface() {
           isOpen: true,
           job: data.job,
         })
+      }
+
+      // Handle job snapshot event (Session 9)
+      if (data.event?.type === 'open_job_snapshot') {
+        const evt = data.event as OpenJobSnapshotEvent
+        onJobMention?.({
+          id: evt.job_id,
+          address: evt.job_address,
+          status: evt.job_status,
+          client_name: evt.client_name,
+        })
+      }
+
+      // Trigger general query callback for non-job intents
+      if (
+        data.intent === 'morning_brief' ||
+        data.intent === 'add_worker' ||
+        data.intent === 'unknown'
+      ) {
+        onGeneralQuery?.()
       }
     } catch {
       const errorMessage: Message = {
