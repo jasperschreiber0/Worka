@@ -1,10 +1,11 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import ChatMessage, { type Message } from './ChatMessage'
+import ChatMessage, { type Message, type DuplicateJob } from './ChatMessage'
 import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
-import type { Worker } from '@/lib/types/database.types'
+import UploadPanel from './UploadPanel'
+import type { Worker, Job } from '@/lib/types/database.types'
 
 // ─── API response type ────────────────────────────────────────────────────────
 
@@ -13,16 +14,26 @@ interface WorkerModalEvent {
   worker_id: string
 }
 
+interface UploadPanelEvent {
+  type: 'open_upload_panel'
+  job_id: string
+}
+
+interface DuplicateWarningEvent {
+  type: 'show_duplicate_warning'
+  job_id: string
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
   alerts?: Alert[]
   worker?: Worker
   invite_url?: string
-  event?: WorkerModalEvent | {
-    type: string
-    [key: string]: unknown
-  }
+  job?: Job
+  duplicate?: boolean
+  existing_job?: Job
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | { type: string; [key: string]: unknown }
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -31,6 +42,13 @@ interface WorkerModalState {
   isOpen: boolean
   worker: Worker | null
   inviteUrl: string
+}
+
+// ─── Upload panel state ───────────────────────────────────────────────────────
+
+interface UploadPanelState {
+  isOpen: boolean
+  job: Job | null
 }
 
 // ─── Unique ID helper ─────────────────────────────────────────────────────────
@@ -51,6 +69,10 @@ export default function ChatInterface() {
     worker: null,
     inviteUrl: '',
   })
+  const [uploadPanel, setUploadPanel] = useState<UploadPanelState>({
+    isOpen: false,
+    job: null,
+  })
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -58,6 +80,10 @@ export default function ChatInterface() {
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))
+  }, [])
+
+  const handleCloseUploadPanel = useCallback(() => {
+    setUploadPanel((prev) => ({ ...prev, isOpen: false }))
   }, [])
 
   // Auto-scroll to bottom when messages change
@@ -70,7 +96,7 @@ export default function ChatInterface() {
   }, [messages, loading, scrollToBottom])
 
   // Send a message to the API
-  const sendMessage = useCallback(async (text: string) => {
+  const sendMessage = useCallback(async (text: string, forceCreate?: boolean) => {
     const trimmed = text.trim()
     if (!trimmed || loading) return
 
@@ -93,16 +119,31 @@ export default function ChatInterface() {
         body: JSON.stringify({
           message: trimmed,
           builder_id: '00000000-0000-0000-0000-000000000001',
+          ...(forceCreate ? { force_create: true } : {}),
         }),
       })
 
       const data: ChatApiResponse = await res.json()
+
+      // Build assistant message — attach duplicateJob if relevant
+      let duplicateJob: DuplicateJob | undefined
+      if (
+        data.event?.type === 'show_duplicate_warning' &&
+        data.existing_job
+      ) {
+        duplicateJob = {
+          id: data.existing_job.id,
+          address: data.existing_job.address,
+          status: data.existing_job.status,
+        }
+      }
 
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
         content: data.message,
         alerts: data.alerts,
+        duplicateJob,
         timestamp: new Date(),
       }
 
@@ -120,6 +161,16 @@ export default function ChatInterface() {
           inviteUrl: data.invite_url,
         })
       }
+
+      if (
+        data.event?.type === 'open_upload_panel' &&
+        data.job
+      ) {
+        setUploadPanel({
+          isOpen: true,
+          job: data.job,
+        })
+      }
     } catch {
       const errorMessage: Message = {
         id: generateId(),
@@ -132,6 +183,16 @@ export default function ChatInterface() {
       setLoading(false)
     }
   }, [loading])
+
+  // Handler: open an existing job (wired fully in Session 9)
+  const handleOpenJob = useCallback((_jobId: string) => {
+    // No-op for now — wired in Session 9
+  }, [])
+
+  // Handler: create job anyway (skip duplicate check)
+  const handleCreateAnyway = useCallback(() => {
+    sendMessage('create job anyway', true)
+  }, [sendMessage])
 
   // On mount: auto-send "whats on today" to trigger morning brief
   useEffect(() => {
@@ -206,7 +267,12 @@ export default function ChatInterface() {
         aria-relevant="additions"
       >
         {messages.map((message) => (
-          <ChatMessage key={message.id} message={message} />
+          <ChatMessage
+            key={message.id}
+            message={message}
+            onOpenJob={handleOpenJob}
+            onCreateAnyway={handleCreateAnyway}
+          />
         ))}
 
         {/* Loading indicator */}
@@ -236,6 +302,19 @@ export default function ChatInterface() {
           onClose={handleCloseWorkerModal}
           worker={workerModal.worker}
           inviteUrl={workerModal.inviteUrl}
+        />
+      )}
+
+      {/* ── Upload Panel ───────────────────────────────────────────────────── */}
+      {uploadPanel.job && (
+        <UploadPanel
+          isOpen={uploadPanel.isOpen}
+          onClose={handleCloseUploadPanel}
+          job={{
+            id: uploadPanel.job.id,
+            address: uploadPanel.job.address,
+            status: uploadPanel.job.status,
+          }}
         />
       )}
 
