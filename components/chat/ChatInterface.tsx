@@ -3,17 +3,34 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import ChatMessage, { type Message } from './ChatMessage'
 import type { Alert } from './MorningBriefCard'
+import WorkerModal from './WorkerModal'
+import type { Worker } from '@/lib/types/database.types'
 
 // ─── API response type ────────────────────────────────────────────────────────
+
+interface WorkerModalEvent {
+  type: 'open_worker_modal'
+  worker_id: string
+}
 
 interface ChatApiResponse {
   intent: string
   message: string
   alerts?: Alert[]
-  event?: {
+  worker?: Worker
+  invite_url?: string
+  event?: WorkerModalEvent | {
     type: string
     [key: string]: unknown
   }
+}
+
+// ─── Worker modal state ───────────────────────────────────────────────────────
+
+interface WorkerModalState {
+  isOpen: boolean
+  worker: Worker | null
+  inviteUrl: string
 }
 
 // ─── Unique ID helper ─────────────────────────────────────────────────────────
@@ -29,10 +46,19 @@ export default function ChatInterface() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
+  const [workerModal, setWorkerModal] = useState<WorkerModalState>({
+    isOpen: false,
+    worker: null,
+    inviteUrl: '',
+  })
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  const handleCloseWorkerModal = useCallback(() => {
+    setWorkerModal((prev) => ({ ...prev, isOpen: false }))
+  }, [])
 
   // Auto-scroll to bottom when messages change
   const scrollToBottom = useCallback(() => {

@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
+import { randomUUID } from 'crypto'
 import type {
   IntentType,
   Invoice,
   Variation,
   Quote,
   Job,
+  Worker,
 } from '@/lib/types/database.types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -24,11 +26,18 @@ interface Alert {
   entity_type?: 'job' | 'invoice' | 'variation' | 'quote'
 }
 
+interface WorkerModalEvent {
+  type: 'open_worker_modal'
+  worker_id: string
+}
+
 interface ChatResponse {
   intent: string
   message: string
   alerts?: Alert[]
-  event?: {
+  worker?: Worker
+  invite_url?: string
+  event?: WorkerModalEvent | {
     type: string
     [key: string]: unknown
   }
@@ -305,16 +314,84 @@ async function getLiveMorningBrief(
   return { message, alerts }
 }
 
-// ─── Intent Handlers ──────────────────────────────────────────────────────────
+// ─── Create Worker ────────────────────────────────────────────────────────────
 
-function handleAddWorker(entities: Record<string, string>): ChatResponse {
-  const name = entities.name ? ` for ${entities.name}` : ''
-  const role = entities.role ? ` (${entities.role})` : ''
+interface CreateWorkerParams {
+  builder_id: string
+  name: string
+  role: string
+  email?: string
+  phone?: string
+}
+
+interface CreateWorkerResult {
+  worker: Worker
+  invite_url: string
+  modal_event: WorkerModalEvent
+}
+
+async function createWorker(params: CreateWorkerParams): Promise<CreateWorkerResult> {
+  const { builder_id, name, role, email, phone } = params
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  if (supabaseUrl && serviceRoleKey) {
+    // Live mode: insert into Supabase
+    const supabase = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+
+    const { data: workerRow, error } = await supabase
+      .from('workers')
+      .insert({
+        builder_id,
+        name: name.trim(),
+        role: role.trim().toLowerCase(),
+        email: email?.trim() ?? null,
+        phone: phone?.trim() ?? null,
+        status: 'invited' as const,
+      })
+      .select()
+      .single()
+
+    if (error || !workerRow) {
+      throw new Error(error?.message ?? 'Failed to insert worker')
+    }
+
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+    const invite_url = `${appUrl}/join/${workerRow.invite_token ?? 'unknown'}`
+
+    return {
+      worker: workerRow as Worker,
+      invite_url,
+      modal_event: { type: 'open_worker_modal', worker_id: workerRow.id },
+    }
+  }
+
+  // Demo mode: return a mock worker with a fake UUID and invite URL
+  const fakeId = randomUUID()
+  const fakeToken = 'demo-invite-token'
+  const worker: Worker = {
+    id: fakeId,
+    builder_id,
+    name: name.trim(),
+    role: role.trim().toLowerCase(),
+    email: email?.trim() ?? null,
+    phone: phone?.trim() ?? null,
+    status: 'invited',
+    invite_token: fakeToken,
+    created_at: new Date().toISOString(),
+  }
+
   return {
-    intent: 'add_worker',
-    message: `Got it — adding a worker${name}${role} is coming in the next update. Type "whats on today" to see your morning brief.`,
+    worker,
+    invite_url: `http://localhost:3000/join/${fakeToken}`,
+    modal_event: { type: 'open_worker_modal', worker_id: fakeId },
   }
 }
+
+// ─── Intent Handlers ──────────────────────────────────────────────────────────
 
 function handleNewJob(entities: Record<string, string>): ChatResponse {
   const address = entities.address ? ` at ${entities.address}` : ''
@@ -372,7 +449,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
     const apiKey = process.env.ANTHROPIC_API_KEY
     if (!apiKey) {
-      // No API key — still return demo brief for morning_brief keywords, else fallback
+      // No API key — keyword-based fallbacks for demo mode
       const lower = message.toLowerCase()
       if (
         lower.includes('today') ||
@@ -387,6 +464,25 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           intent: 'morning_brief',
           message: demo.message,
           alerts: demo.alerts,
+        })
+      }
+      // Demo add_worker: detect "add <name>" pattern
+      const addMatch = lower.match(/add\s+(\w+)/)
+      const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|a)\s+(\w+)/i)
+      if (addMatch) {
+        const demoName = addMatch[1].charAt(0).toUpperCase() + addMatch[1].slice(1)
+        const demoRole = roleMatch ? roleMatch[1].toLowerCase() : 'worker'
+        const result = await createWorker({
+          builder_id: builderId,
+          name: demoName,
+          role: demoRole,
+        })
+        return NextResponse.json({
+          intent: 'add_worker',
+          message: `Added ${demoName} as a ${result.worker.role.charAt(0).toUpperCase() + result.worker.role.slice(1)}. Invite link is ready — send it in two taps.`,
+          worker: result.worker,
+          invite_url: result.invite_url,
+          event: result.modal_event,
         })
       }
       return NextResponse.json(handleUnknown())
@@ -415,7 +511,27 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     if (classified.intent === 'add_worker') {
-      return NextResponse.json(handleAddWorker(classified.entities))
+      const { name, role, email, phone } = classified.entities
+      if (!name || !role) {
+        return NextResponse.json({
+          intent: 'add_worker',
+          message: `Got it — who are you adding and what's their trade? For example: "add Sarah she's a plumber"`,
+        })
+      }
+      const result = await createWorker({
+        builder_id: builderId,
+        name,
+        role,
+        email,
+        phone,
+      })
+      return NextResponse.json({
+        intent: 'add_worker',
+        message: `Added ${name} as a ${result.worker.role.charAt(0).toUpperCase() + result.worker.role.slice(1)}. Invite link is ready — send it in two taps.`,
+        worker: result.worker,
+        invite_url: result.invite_url,
+        event: result.modal_event,
+      })
     }
 
     if (classified.intent === 'new_job') {
