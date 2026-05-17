@@ -285,8 +285,8 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **6** | Assumption control | Missing items surfaced, three resolution options ✅ |
 | **7** | Draft quote output | Quote with confidence scoring per line item ✅ |
 | **8** | Quote actions | Send to client, export PDF, revise ✅ |
-| **9** | Split panel layout | Chat left, job snapshot right ← current |
-| **10** | Job snapshot panel | All six sections from real data |
+| **9** | Split panel layout | Chat left, job snapshot right ✅ |
+| **10** | Job snapshot panel | All six sections from real data ← current |
 | **11** | Variation surfacing | Pending variation in chat and panel |
 | **12** | Email draft flow | Draft from context, hold for approval, send logs |
 | **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching |

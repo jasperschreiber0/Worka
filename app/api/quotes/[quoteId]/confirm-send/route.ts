@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 // ─── In-memory demo quote status map ─────────────────────────────────────────
 // Shared across requests within the same server process.
 
-export const demoQuoteStatusMap: Map<string, { status: string; sent_at: string | null }> = new Map([
+const demoQuoteStatusMap: Map<string, { status: string; sent_at: string | null }> = new Map([
   ['demo-quote-id', { status: 'pending_review', sent_at: null }],
 ])
 
