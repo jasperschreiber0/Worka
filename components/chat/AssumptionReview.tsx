@@ -12,6 +12,7 @@ export interface AssumptionReviewProps {
   jobAddress: string
   onComplete: (allResolved: boolean) => void
   onDismiss: () => void
+  onViewQuote?: (quoteId: string) => void
 }
 
 // ─── Unit options ─────────────────────────────────────────────────────────────
@@ -456,7 +457,11 @@ function AssumptionCard({
 
 // ─── Completion screen ────────────────────────────────────────────────────────
 
-function CompletionScreen() {
+interface CompletionScreenProps {
+  onViewQuote: () => void
+}
+
+function CompletionScreen({ onViewQuote }: CompletionScreenProps) {
   return (
     <div className="flex flex-col items-center justify-center py-8 text-center space-y-4">
       <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center">
@@ -478,9 +483,7 @@ function CompletionScreen() {
       <button
         type="button"
         className="btn-primary px-6 py-2.5 text-sm"
-        onClick={() => {
-          // No-op for now — wired in Session 7
-        }}
+        onClick={onViewQuote}
       >
         View draft quote
       </button>
@@ -496,6 +499,7 @@ function AssumptionReviewInner({
   jobAddress,
   onComplete,
   onDismiss,
+  onViewQuote,
 }: AssumptionReviewProps) {
   const [assumptions, setAssumptions] = useState<AssumptionItem[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -717,7 +721,17 @@ function AssumptionReviewInner({
             </div>
           )}
 
-          {!isLoading && isComplete && <CompletionScreen />}
+          {!isLoading && isComplete && (
+            <CompletionScreen
+              onViewQuote={() => {
+                setVisible(false)
+                setTimeout(() => {
+                  onComplete(true)
+                  onViewQuote?.(quoteId)
+                }, 220)
+              }}
+            />
+          )}
 
           {!isLoading && !isComplete && total === 0 && (
             <div className="py-8 text-center">

@@ -6,6 +6,7 @@ import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
 import UploadPanel from './UploadPanel'
 import AssumptionReview from './AssumptionReview'
+import QuoteView from '@/components/quote/QuoteView'
 import type { Worker, Job } from '@/lib/types/database.types'
 
 // ─── API response type ────────────────────────────────────────────────────────
@@ -56,6 +57,10 @@ interface UploadPanelState {
 
 type AssumptionReviewStateOrNull = { quoteId: string; jobAddress: string } | null
 
+// ─── Quote view state ─────────────────────────────────────────────────────────
+
+type QuoteViewStateOrNull = { quoteId: string } | null
+
 // ─── Unique ID helper ─────────────────────────────────────────────────────────
 
 function generateId(): string {
@@ -79,6 +84,7 @@ export default function ChatInterface() {
     job: null,
   })
   const [reviewingAssumptions, setReviewingAssumptions] = useState<AssumptionReviewStateOrNull>(null)
+  const [viewingQuote, setViewingQuote] = useState<QuoteViewStateOrNull>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -125,6 +131,12 @@ export default function ChatInterface() {
         // Try to find a job address from upload panel context, fall back to 'this job'
         const jobAddress = uploadPanel.job?.address ?? 'this job'
         setReviewingAssumptions({ quoteId, jobAddress })
+        return
+      }
+      if (action === 'View draft quote') {
+        const quoteId = entityId ?? 'demo-quote-id'
+        setViewingQuote({ quoteId })
+        return
       }
       // 'Chase payment' → Session 10
       // 'Follow up' → Session 12
@@ -136,6 +148,7 @@ export default function ChatInterface() {
   // Handler: assumption review complete
   const handleAssumptionComplete = useCallback(
     (_allResolved: boolean) => {
+      const quoteId = reviewingAssumptions?.quoteId ?? 'demo-quote-id'
       setReviewingAssumptions(null)
       const assistantMessage: Message = {
         id: generateId(),
@@ -146,13 +159,15 @@ export default function ChatInterface() {
             priority: 'low',
             message: 'Quote is ready to review',
             action: 'View draft quote',
+            entity_id: quoteId,
+            entity_type: 'quote',
           },
         ],
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])
     },
-    []
+    [reviewingAssumptions]
   )
 
   // Handler: assumption review dismissed mid-flow
@@ -163,6 +178,47 @@ export default function ChatInterface() {
       id: generateId(),
       role: 'assistant',
       content: 'Assumptions review paused. Some items still need your input before the quote can be sent.',
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, assistantMessage])
+  }, [])
+
+  // Handler: close QuoteView
+  const handleQuoteViewClose = useCallback(() => {
+    setViewingQuote(null)
+  }, [])
+
+  // Handler: send quote (Session 8 implements real send)
+  const handleQuoteViewSend = useCallback((_quoteId: string) => {
+    setViewingQuote(null)
+    const assistantMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: "Quote sent to client. You'll be notified when they respond.",
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, assistantMessage])
+  }, [])
+
+  // Handler: revise quote
+  const handleQuoteViewRevise = useCallback((_quoteId: string) => {
+    setViewingQuote(null)
+    const assistantMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: 'Quote revision coming soon.',
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, assistantMessage])
+  }, [])
+
+  // Handler: export PDF
+  const handleQuoteViewExportPdf = useCallback((_quoteId: string) => {
+    setViewingQuote(null)
+    const assistantMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: 'PDF export coming soon.',
       timestamp: new Date(),
     }
     setMessages((prev) => [...prev, assistantMessage])
@@ -410,6 +466,19 @@ export default function ChatInterface() {
           jobAddress={reviewingAssumptions.jobAddress}
           onComplete={handleAssumptionComplete}
           onDismiss={handleAssumptionDismiss}
+          onViewQuote={(quoteId) => setViewingQuote({ quoteId })}
+        />
+      )}
+
+      {/* ── Quote View ─────────────────────────────────────────────────────── */}
+      {viewingQuote && (
+        <QuoteView
+          quoteId={viewingQuote.quoteId}
+          builderId="00000000-0000-0000-0000-000000000001"
+          onClose={handleQuoteViewClose}
+          onSend={handleQuoteViewSend}
+          onRevise={handleQuoteViewRevise}
+          onExportPdf={handleQuoteViewExportPdf}
         />
       )}
 
