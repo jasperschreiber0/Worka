@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import OverviewTab from '@/components/job/tabs/OverviewTab'
 import QuoteTab from '@/components/job/tabs/QuoteTab'
@@ -8,6 +8,7 @@ import VariationsTab from '@/components/job/tabs/VariationsTab'
 import InvoicesTab from '@/components/job/tabs/InvoicesTab'
 import FilesTab from '@/components/job/tabs/FilesTab'
 import CommsTab from '@/components/job/tabs/CommsTab'
+import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,7 @@ export interface JobSnapshotPanelProps {
   onViewQuote?: (quoteId: string) => void
   onVariationApprove?: (variationId: string) => void
   onComposeEmail?: (jobId: string) => void
+  onJobActivated?: (jobId: string) => void
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -75,10 +77,19 @@ function SkeletonSection() {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariationApprove, onComposeEmail }: JobSnapshotPanelProps) {
+// ─── Activation modal state ───────────────────────────────────────────────────
+
+interface ActivationModalState {
+  isOpen: boolean
+  quote: JobSnapshot['quote'] | null
+}
+
+export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariationApprove, onComposeEmail, onJobActivated }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
+  const [activationModal, setActivationModal] = useState<ActivationModalState>({ isOpen: false, quote: null })
+  const [activatedJobStatus, setActivatedJobStatus] = useState<string | null>(null)
 
   // Fetch snapshot when job changes
   useEffect(() => {
@@ -101,7 +112,34 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariatio
   // Reset to overview tab when job changes
   useEffect(() => {
     setActiveTab('overview')
+    setActivatedJobStatus(null)
   }, [job?.id])
+
+  // Handler: open activation modal from QuoteTab
+  const handleActivateJob = useCallback((quoteId: string) => {
+    if (!snapshot) return
+    const quote = snapshot.quote
+    if (!quote || quote.id !== quoteId) return
+    setActivationModal({ isOpen: true, quote })
+  }, [snapshot])
+
+  // Handler: job was activated successfully
+  const handleActivated = useCallback((result: ActivationResult) => {
+    setActivationModal({ isOpen: false, quote: null })
+    setActivatedJobStatus('active')
+    // Update the snapshot's job status locally so the header badge updates
+    setSnapshot((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        job: { ...prev.job, status: 'active' },
+        quote: prev.quote
+          ? { ...prev.quote, status: 'approved' }
+          : prev.quote,
+      }
+    })
+    onJobActivated?.(result.job.id)
+  }, [onJobActivated])
 
   // Render the active tab content
   function renderTabContent() {
@@ -117,6 +155,7 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariatio
           <QuoteTab
             quote={snapshot.quote}
             onViewQuote={onViewQuote ?? (() => {})}
+            onActivateJob={handleActivateJob}
           />
         )
       case 'variations':
@@ -158,19 +197,24 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariatio
             <p className="text-sm text-slate-500 mt-0.5">
               {job ? (
                 <>
-                  <span
-                    className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium mr-1.5 ${
-                      job.status === 'active'
-                        ? 'bg-green-100 text-green-700'
-                        : job.status === 'quoted'
-                          ? 'bg-blue-100 text-blue-700'
-                          : job.status === 'quoting'
-                            ? 'bg-amber-100 text-amber-700'
-                            : 'bg-slate-100 text-slate-600'
-                    }`}
-                  >
-                    {capitalise(job.status)}
-                  </span>
+                  {(() => {
+                    const displayStatus = activatedJobStatus ?? job.status
+                    return (
+                      <span
+                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium mr-1.5 ${
+                          displayStatus === 'active'
+                            ? 'bg-green-100 text-green-700'
+                            : displayStatus === 'quoted'
+                              ? 'bg-blue-100 text-blue-700'
+                              : displayStatus === 'quoting'
+                                ? 'bg-amber-100 text-amber-700'
+                                : 'bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        {capitalise(displayStatus)}
+                      </span>
+                    )
+                  })()}
                   {job.client_name && <span>{job.client_name} job</span>}
                 </>
               ) : (
@@ -244,6 +288,22 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariatio
           </div>
         )}
       </div>
+
+      {/* ── Activation Modal ─────────────────────────────────────────────────── */}
+      {activationModal.isOpen && activationModal.quote && job && (
+        <ActivationModal
+          isOpen={activationModal.isOpen}
+          onClose={() => setActivationModal({ isOpen: false, quote: null })}
+          onActivated={handleActivated}
+          job={{ id: job.id, address: job.address }}
+          quote={{
+            id: activationModal.quote.id!,
+            total_cost: activationModal.quote.total_cost ?? 0,
+            version: activationModal.quote.version,
+          }}
+          builderId="00000000-0000-0000-0000-000000000001"
+        />
+      )}
     </div>
   )
 }

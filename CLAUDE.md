@@ -290,7 +290,7 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **11** | Variation surfacing | Pending variation in chat and panel ✅ |
 | **12** | Email draft flow | Draft from context, hold for approval, send logs ✅ |
 | **13** | Email sync | Gmail/Outlook OAuth, inbound parsing, job matching ✅ |
-| **14** | Quote to job conversion | One click, full job activation |
+| **14** | Quote to job conversion | One click, full job activation ✅ |
 | **15** | Homepage | Upload zone hero, sample plans, quotes pipeline |
 
 
@@ -306,6 +306,28 @@ Key variables used in edge functions (Deno):
 - `SUPABASE_SERVICE_ROLE_KEY` — injected automatically by Supabase
 - `ANTHROPIC_API_KEY` — set in Supabase dashboard → Edge Functions → Secrets
 - `NEXT_PUBLIC_APP_URL` — set in Supabase dashboard → Edge Functions → Secrets
+
+---
+
+## Activation Flow (Session 14)
+
+The activation flow converts a `quoted` job to `active` in one click and creates three things atomically:
+
+1. **8 project milestones** — standard residential renovation set from contract signing (Week 0) through final inspection (Week 17)
+2. **5-stage invoice schedule** — standard percentages: Deposit 10%, Frame 20%, Lock-up 25%, Fix-out 25%, Completion 20% of total contract value
+3. **Proof feed** — audit trail starting with `job_activated` event; all subsequent variations, approvals, and communications are logged
+
+Key rules:
+- Activation is irreversible — job moves to `active`, cannot go back to `quoted` (forward-only state machine)
+- Builder can activate even if client hasn't formally replied — verbal approval is sufficient (quote status `sent` OR `approved`)
+- The `ActivationModal` shows exactly what will be created (8 milestones, 5 invoices with amounts) before the builder confirms
+- Demo mode uses `demoActivationState` in-memory map; Supabase mode writes to `job_milestones`, `invoice_schedule`, `proof_events`
+- The Toorak job (Job 2, `00000000-0000-0000-0000-000000000011`) is the primary activation demo candidate
+- Both `job_id` aliases (`000...011` and `000...020`) are synced to the same activation state
+
+### Activation entry points
+1. **QuoteTab** — "Activate job →" button appears when `quote.status === 'sent'` or `'approved'`; opens `ActivationModal` via `JobSnapshotPanel`
+2. **Chat** — Asking about the Toorak job returns a `suggest_job_activation` event; adds `[Activate job →]` action button inline in chat message
 
 ---
 

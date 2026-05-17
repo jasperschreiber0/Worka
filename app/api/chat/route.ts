@@ -91,7 +91,13 @@ interface InboundEmailAlertEvent {
   } | null
 }
 
-type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent
+interface SuggestJobActivationEvent {
+  type: 'suggest_job_activation'
+  job_id: string
+  quote_id: string
+}
+
+type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent
 
 interface ChatResponse {
   intent: string
@@ -676,6 +682,10 @@ function findDemoJob(entities: Record<string, string>): DemoJob | null {
 
 // ─── Job Query Handler ────────────────────────────────────────────────────────
 
+// Toorak job IDs (canonical and alias)
+const TOORAK_JOB_ID = '00000000-0000-0000-0000-000000000020'
+const TOORAK_QUOTE_ID = 'demo-quote-id-toorak'
+
 function handleJobQuery(entities: Record<string, string>): ChatResponse {
   const job = findDemoJob(entities)
 
@@ -686,6 +696,20 @@ function handleJobQuery(entities: Record<string, string>): ChatResponse {
       message: ref
         ? `I couldn't find a job matching "${ref}". You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).`
         : "Which job are you asking about? You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).",
+    }
+  }
+
+  // Toorak job with sent quote — include activation suggestion
+  if (job.id === TOORAK_JOB_ID && job.status === 'quoted') {
+    return {
+      intent: 'job_query',
+      message:
+        'The Toorak quote for $127,500 was sent to Tom Caruso 5 days ago. If Tom has verbally approved, you can activate the job now — this creates the milestone timeline and invoice schedule in one click.',
+      event: {
+        type: 'suggest_job_activation',
+        job_id: TOORAK_JOB_ID,
+        quote_id: TOORAK_QUOTE_ID,
+      },
     }
   }
 
@@ -1072,6 +1096,22 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       const demoJob = findDemoJob({ address: lower })
       if (demoJob) {
         return NextResponse.json(handleJobQuery({ address: lower }))
+      }
+      // Demo activate job: detect activation keywords
+      if (
+        lower.includes('activate') ||
+        (lower.includes('toorak') && (lower.includes('go') || lower.includes('start') || lower.includes('kick off')))
+      ) {
+        return NextResponse.json({
+          intent: 'job_query',
+          message:
+            'The Toorak quote for $127,500 was sent to Tom Caruso 5 days ago. If Tom has verbally approved, you can activate the job now — this creates the milestone timeline and invoice schedule in one click.',
+          event: {
+            type: 'suggest_job_activation',
+            job_id: TOORAK_JOB_ID,
+            quote_id: TOORAK_QUOTE_ID,
+          },
+        })
       }
       return NextResponse.json(handleUnknown())
     }

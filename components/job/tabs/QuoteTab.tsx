@@ -7,6 +7,7 @@ import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 interface QuoteTabProps {
   quote: JobSnapshot['quote']
   onViewQuote: (quoteId: string) => void
+  onActivateJob?: (quoteId: string) => void
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ function confidenceColour(score: number): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function QuoteTab({ quote, onViewQuote }: QuoteTabProps) {
+export default function QuoteTab({ quote, onViewQuote, onActivateJob }: QuoteTabProps) {
   // ── No quote ───────────────────────────────────────────────────────────────
   if (!quote) {
     return (
@@ -146,6 +147,32 @@ export default function QuoteTab({ quote, onViewQuote }: QuoteTabProps) {
             <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
           </svg>
         </button>
+      )}
+
+      {/* Activation trigger — show when quote is sent or approved */}
+      {quote.id && onActivateJob && (quote.status === 'sent' || quote.status === 'approved') && (
+        <div className="pt-1">
+          <div className="border-t border-slate-200 pt-4 mt-1">
+            <p className="text-xs text-slate-500 mb-2.5">Client approved?</p>
+            <button
+              type="button"
+              onClick={() => onActivateJob(quote.id!)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-500 text-white text-sm font-semibold hover:bg-brand-600 transition-colors shadow-sm"
+            >
+              Activate job
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden="true"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+              </svg>
+            </button>
+          </div>
+        </div>
       )}
     </div>
   )

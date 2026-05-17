@@ -13,6 +13,7 @@ import InboundEmailAlert, { type InboundEmailAlertProps } from './InboundEmailAl
 import type { VariationCardVariation } from './VariationCard'
 import type { Worker, Job } from '@/lib/types/database.types'
 import type { DemoVariation } from '@/lib/variations-demo'
+import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
 
 // ─── API response type ────────────────────────────────────────────────────────
 
@@ -75,6 +76,12 @@ interface InboundEmailAlertEvent {
   } | null
 }
 
+interface SuggestJobActivationEvent {
+  type: 'suggest_job_activation'
+  job_id: string
+  quote_id: string
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -86,7 +93,7 @@ interface ChatApiResponse {
   existing_job?: Job
   variation?: DemoVariation
   all_variations?: DemoVariation[]
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | { type: string; [key: string]: unknown }
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -179,6 +186,13 @@ export default function ChatInterface({
     intentHint?: EmailIntentHint
   } | null>(null)
   const [inboundEmailAlert, setInboundEmailAlert] = useState<Omit<InboundEmailAlertProps, 'onReply' | 'onDismiss'> | null>(null)
+  const [chatActivationModal, setChatActivationModal] = useState<{
+    isOpen: boolean
+    jobId: string
+    quoteId: string
+    jobAddress: string
+    quoteTotalCost: number
+  } | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -284,6 +298,17 @@ export default function ChatInterface({
           jobId: '00000000-0000-0000-0000-000000000020',
           recipientName: 'Tom Caruso',
           intentHint: 'quote_followup',
+        })
+        return
+      }
+      // 'Activate job' from chat suggest_job_activation message
+      if (action === 'Activate job') {
+        setChatActivationModal({
+          isOpen: true,
+          jobId: '00000000-0000-0000-0000-000000000020',
+          quoteId: 'demo-quote-id-toorak',
+          jobAddress: '8 Burnside Rd, Toorak',
+          quoteTotalCost: 127500,
         })
         return
       }
@@ -567,6 +592,30 @@ export default function ChatInterface({
         void suggestMessage // suppress unused warning
       }
 
+      // Handle suggest_job_activation event — add "Activate job" action button in chat
+      if (data.event?.type === 'suggest_job_activation') {
+        const evt = data.event as SuggestJobActivationEvent
+        setMessages((prev) => {
+          const updated = [...prev]
+          const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
+          if (lastIdx >= 0) {
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              alerts: [
+                {
+                  priority: 'high',
+                  message: 'If Tom has verbally approved, activate the job now to create the milestone timeline and invoice schedule.',
+                  action: 'Activate job',
+                  entity_id: evt.job_id,
+                  entity_type: 'job',
+                },
+              ],
+            }
+          }
+          return updated
+        })
+      }
+
       // Handle inbound_email_alert event — surface matched email in chat
       if (data.event?.type === 'inbound_email_alert') {
         const evt = data.event as InboundEmailAlertEvent
@@ -673,6 +722,28 @@ export default function ChatInterface({
     }
     setMessages((prev) => [...prev, confirmMessage])
   }, [])
+
+  // Handler: job activated from chat modal
+  const handleChatActivated = useCallback((result: ActivationResult) => {
+    setChatActivationModal(null)
+    const depositItem = result.invoice_schedule.find((item) => item.label === 'Deposit')
+    const depositAmount = depositItem
+      ? new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(depositItem.amount)
+      : 'deposit'
+    const confirmMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: `Job activated — ${result.job.address} is now live. Your milestone timeline and invoice schedule are ready. First invoice (${depositAmount} deposit) is scheduled for today.`,
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, confirmMessage])
+    // Refresh the right panel with the now-active job
+    onJobMention?.({
+      id: result.job.id,
+      address: result.job.address,
+      status: 'active',
+    })
+  }, [onJobMention])
 
   // Handler: create job anyway (skip duplicate check)
   const handleCreateAnyway = useCallback(() => {
@@ -860,6 +931,18 @@ export default function ChatInterface({
           jobId={emailDraftModal.jobId}
           recipientName={emailDraftModal.recipientName}
           intentHint={emailDraftModal.intentHint}
+        />
+      )}
+
+      {/* ── Chat Activation Modal ──────────────────────────────────────────── */}
+      {chatActivationModal && (
+        <ActivationModal
+          isOpen={chatActivationModal.isOpen}
+          onClose={() => setChatActivationModal(null)}
+          onActivated={handleChatActivated}
+          job={{ id: chatActivationModal.jobId, address: chatActivationModal.jobAddress }}
+          quote={{ id: chatActivationModal.quoteId, total_cost: chatActivationModal.quoteTotalCost, version: 1 }}
+          builderId="00000000-0000-0000-0000-000000000001"
         />
       )}
 

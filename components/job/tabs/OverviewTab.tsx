@@ -1,6 +1,8 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import { proofEventColour, type DemoProofEvent, type ProofEventColour } from '@/lib/activation-demo'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +34,74 @@ function Section({ label, children }: { label: string; children: React.ReactNode
     <div className="space-y-1.5">
       <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">{label}</p>
       <div>{children}</div>
+    </div>
+  )
+}
+
+// ─── Proof event dot colour ────────────────────────────────────────────────────
+
+function dotColourClass(colour: ProofEventColour): string {
+  switch (colour) {
+    case 'green':
+      return 'bg-green-500'
+    case 'amber':
+      return 'bg-amber-500'
+    default:
+      return 'bg-slate-400'
+  }
+}
+
+// ─── Proof Feed ───────────────────────────────────────────────────────────────
+
+function ProofFeed({ jobId }: { jobId: string }) {
+  const [events, setEvents] = useState<DemoProofEvent[]>([])
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    setLoaded(false)
+    fetch(`/api/jobs/${jobId}/proof`)
+      .then((r) => r.json())
+      .then((data: { events: DemoProofEvent[] }) => {
+        setEvents(data.events.slice(0, 5))
+        setLoaded(true)
+      })
+      .catch(() => {
+        setLoaded(true)
+      })
+  }, [jobId])
+
+  if (!loaded) {
+    return (
+      <div className="space-y-3">
+        <div className="h-4 w-3/4 bg-slate-200 rounded animate-pulse" />
+        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
+      </div>
+    )
+  }
+
+  if (events.length === 0) {
+    return <p className="text-sm text-slate-400">No events yet — proof feed starts on activation.</p>
+  }
+
+  return (
+    <div className="space-y-3">
+      {events.map((event) => {
+        const colour = proofEventColour(event.event_type)
+        return (
+          <div key={event.id} className="flex items-start gap-2.5">
+            <span
+              className={`mt-1.5 flex-shrink-0 w-2 h-2 rounded-full ${dotColourClass(colour)}`}
+              aria-hidden="true"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="text-sm text-slate-800 truncate">{event.description}</p>
+                <span className="flex-shrink-0 text-xs text-slate-400">{event.display_time}</span>
+              </div>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -103,6 +173,11 @@ export default function OverviewTab({ overview, job }: OverviewTabProps) {
         ) : (
           <p className="text-sm text-slate-400">No notes yet</p>
         )}
+      </Section>
+
+      {/* Proof feed */}
+      <Section label="Proof feed">
+        <ProofFeed jobId={job.id} />
       </Section>
     </div>
   )
