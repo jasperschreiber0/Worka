@@ -293,6 +293,8 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **14** | Quote to job conversion | One click, full job activation |
 | **15** | Homepage | Upload zone hero, sample plans, quotes pipeline |
 
+
+
 ---
 
 ## Environment Variables

@@ -182,7 +182,7 @@ async function getLiveMorningBrief(
         .eq('id', inv.job_id)
         .single()
 
-      const address = job?.address ?? 'unknown job'
+      const address = (job as { address: string } | null)?.address ?? 'unknown job'
       const dueRelative = inv.due_date ? relativeDate(inv.due_date) : 'recently'
       alerts.push({
         priority: 'high',
@@ -202,25 +202,26 @@ async function getLiveMorningBrief(
     .eq('status', 'pending')
 
   if (variations && variations.length > 0) {
+    const typedVariations = variations as Variation[]
     // Group by job
-    const byJob = new Map<string, typeof variations>()
-    for (const v of variations as Variation[]) {
+    const byJob = new Map<string, Variation[]>()
+    for (const v of typedVariations) {
       const existing = byJob.get(v.job_id) ?? []
       existing.push(v)
       byJob.set(v.job_id, existing)
     }
 
-    for (const [jobId, vars] of byJob) {
+    for (const [jobId, vars] of Array.from(byJob.entries())) {
       const { data: job } = await supabase
         .from('jobs')
         .select('address')
         .eq('id', jobId)
         .single()
 
-      const address = job?.address ?? 'unknown job'
+      const address = (job as { address: string } | null)?.address ?? 'unknown job'
       const count = vars.length
-      const totalAmount = vars.reduce((sum, v) => sum + (v.amount ?? 0), 0)
-      const priority = count >= 2 ? 'high' : 'medium'
+      const totalAmount = vars.reduce((sum: number, v: Variation) => sum + (v.amount ?? 0), 0)
+      const priority: 'high' | 'medium' = count >= 2 ? 'high' : 'medium'
 
       alerts.push({
         priority,
@@ -252,7 +253,7 @@ async function getLiveMorningBrief(
         .eq('id', quote.job_id)
         .single()
 
-      const address = job?.address ?? 'unknown job'
+      const address = (job as { address: string } | null)?.address ?? 'unknown job'
       const sentRelative = quote.sent_at ? relativeDate(quote.sent_at) : 'recently'
 
       alerts.push({
@@ -273,9 +274,10 @@ async function getLiveMorningBrief(
     .in('status', ['active', 'quoting', 'quoted'])
 
   if (activeJobs && activeJobs.length > 0) {
-    const activeCount = activeJobs.filter((j) => j.status === 'active').length
-    const quotingCount = activeJobs.filter((j) => j.status === 'quoting').length
-    const quotedCount = activeJobs.filter((j) => j.status === 'quoted').length
+    const typedJobs = activeJobs as Job[]
+    const activeCount = typedJobs.filter((j: Job) => j.status === 'active').length
+    const quotingCount = typedJobs.filter((j: Job) => j.status === 'quoting').length
+    const quotedCount = typedJobs.filter((j: Job) => j.status === 'quoted').length
 
     const parts: string[] = []
     if (activeCount > 0) parts.push(`${activeCount} active job${activeCount !== 1 ? 's' : ''}`)

@@ -51,16 +51,15 @@ export default function HomePage() {
         ))}
       </div>
 
-      {/* CTA placeholder — full auth UI comes in Session 3 */}
+      {/* CTA — open the morning brief chat */}
       <div className="mt-12 flex flex-col sm:flex-row gap-4 items-center">
-        <button
-          disabled
-          className="btn-primary opacity-60 cursor-not-allowed px-8 py-3 text-base"
-          title="Coming in Session 3"
+        <a
+          href="/chat"
+          className="btn-primary px-8 py-3 text-base no-underline"
         >
-          Get started free
-        </button>
-        <p className="text-sm text-slate-400">Auth &amp; onboarding — Session 3</p>
+          Open WorkA
+        </a>
+        <p className="text-sm text-slate-400">Morning brief — Session 2</p>
       </div>
 
       {/* Build status */}
@@ -70,16 +69,26 @@ export default function HomePage() {
           <li className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-green-500" />
             Session 1 — Scaffold &amp; schema &nbsp;
-            <span className="text-green-600 font-medium">complete</span>
+            <span className="text-green-600 font-medium">✅ complete</span>
+          </li>
+          <li className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-blue-500" />
+            Session 2 — Morning brief flow &nbsp;
+            <span className="text-blue-600 font-medium">🔵 in progress</span>
           </li>
           <li className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-slate-300" />
-            Session 2 — Rate seeding (360+ items) &nbsp;
+            Session 3 — Add worker flow &nbsp;
             <span className="text-slate-400">pending</span>
           </li>
           <li className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-slate-300" />
-            Session 3 — Auth &amp; onboarding &nbsp;
+            Session 4 — New quote routing &nbsp;
+            <span className="text-slate-400">pending</span>
+          </li>
+          <li className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-slate-300" />
+            Session 5–15 — File upload, quotes, panels &hellip; &nbsp;
             <span className="text-slate-400">pending</span>
           </li>
         </ul>
