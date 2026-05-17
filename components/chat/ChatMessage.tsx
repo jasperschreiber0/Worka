@@ -24,6 +24,7 @@ interface ChatMessageProps {
   message: Message
   onOpenJob?: (jobId: string) => void
   onCreateAnyway?: () => void
+  onAction?: (action: string, entityId?: string, entityType?: string) => void
 }
 
 // ─── Relative time helper ─────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ function relativeTime(date: Date): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatMessage({ message, onOpenJob, onCreateAnyway }: ChatMessageProps) {
+export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onAction }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const hasAlerts = message.alerts && message.alerts.length > 0
   const hasDuplicate = !!message.duplicateJob
@@ -77,7 +78,7 @@ export default function ChatMessage({ message, onOpenJob, onCreateAnyway }: Chat
     return (
       <div className="flex justify-start mb-4" role="listitem">
         <div className="max-w-sm sm:max-w-lg lg:max-w-xl w-full">
-          <MorningBriefCard message={message.content} alerts={message.alerts} />
+          <MorningBriefCard message={message.content} alerts={message.alerts} onAction={onAction} />
           <p className="text-xs text-slate-400 mt-1 px-1">
             {relativeTime(message.timestamp)}
           </p>

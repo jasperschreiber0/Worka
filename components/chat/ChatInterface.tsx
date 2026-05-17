@@ -5,6 +5,7 @@ import ChatMessage, { type Message, type DuplicateJob } from './ChatMessage'
 import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
 import UploadPanel from './UploadPanel'
+import AssumptionReview from './AssumptionReview'
 import type { Worker, Job } from '@/lib/types/database.types'
 
 // ─── API response type ────────────────────────────────────────────────────────
@@ -51,6 +52,10 @@ interface UploadPanelState {
   job: Job | null
 }
 
+// ─── Assumption review state ──────────────────────────────────────────────────
+
+type AssumptionReviewStateOrNull = { quoteId: string; jobAddress: string } | null
+
 // ─── Unique ID helper ─────────────────────────────────────────────────────────
 
 function generateId(): string {
@@ -73,6 +78,7 @@ export default function ChatInterface() {
     isOpen: false,
     job: null,
   })
+  const [reviewingAssumptions, setReviewingAssumptions] = useState<AssumptionReviewStateOrNull>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -110,6 +116,57 @@ export default function ChatInterface() {
     },
     [uploadPanel.job]
   )
+
+  // Handler: action button clicked in MorningBriefCard or ChatMessage
+  const handleAction = useCallback(
+    (action: string, entityId?: string, _entityType?: string) => {
+      if (action === 'Review assumptions') {
+        const quoteId = entityId ?? 'demo-quote-id'
+        // Try to find a job address from upload panel context, fall back to 'this job'
+        const jobAddress = uploadPanel.job?.address ?? 'this job'
+        setReviewingAssumptions({ quoteId, jobAddress })
+      }
+      // 'Chase payment' → Session 10
+      // 'Follow up' → Session 12
+      // Other actions → no-op
+    },
+    [uploadPanel.job]
+  )
+
+  // Handler: assumption review complete
+  const handleAssumptionComplete = useCallback(
+    (_allResolved: boolean) => {
+      setReviewingAssumptions(null)
+      const assistantMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: 'All assumptions resolved — draft quote is ready. You can now review and send it.',
+        alerts: [
+          {
+            priority: 'low',
+            message: 'Quote is ready to review',
+            action: 'View draft quote',
+          },
+        ],
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, assistantMessage])
+    },
+    []
+  )
+
+  // Handler: assumption review dismissed mid-flow
+  const handleAssumptionDismiss = useCallback(() => {
+    setReviewingAssumptions(null)
+    // Count remaining unresolved — for demo we always say items need input
+    const assistantMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: 'Assumptions review paused. Some items still need your input before the quote can be sent.',
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, assistantMessage])
+  }, [])
 
   // Auto-scroll to bottom when messages change
   const scrollToBottom = useCallback(() => {
@@ -297,6 +354,7 @@ export default function ChatInterface() {
             message={message}
             onOpenJob={handleOpenJob}
             onCreateAnyway={handleCreateAnyway}
+            onAction={handleAction}
           />
         ))}
 
@@ -341,6 +399,17 @@ export default function ChatInterface() {
             status: uploadPanel.job.status,
           }}
           onIntakeComplete={handleIntakeComplete}
+        />
+      )}
+
+      {/* ── Assumption Review ──────────────────────────────────────────────── */}
+      {reviewingAssumptions && (
+        <AssumptionReview
+          quoteId={reviewingAssumptions.quoteId}
+          builderId="00000000-0000-0000-0000-000000000001"
+          jobAddress={reviewingAssumptions.jobAddress}
+          onComplete={handleAssumptionComplete}
+          onDismiss={handleAssumptionDismiss}
         />
       )}
 

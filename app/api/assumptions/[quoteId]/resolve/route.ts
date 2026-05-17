@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { DEMO_ASSUMPTIONS, demoResolutionState } from '../route'
+import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

@@ -13,6 +13,7 @@ export interface Alert {
 interface MorningBriefCardProps {
   message: string
   alerts: Alert[]
+  onAction?: (action: string, entityId?: string, entityType?: string) => void
 }
 
 // ─── Priority config ──────────────────────────────────────────────────────────
@@ -40,7 +41,7 @@ const priorityConfig = {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function MorningBriefCard({ message, alerts }: MorningBriefCardProps) {
+export default function MorningBriefCard({ message, alerts, onAction }: MorningBriefCardProps) {
   // Sort alerts by priority: high → medium → low
   const sorted = [...alerts].sort(
     (a, b) => priorityConfig[a.priority].order - priorityConfig[b.priority].order
@@ -79,7 +80,9 @@ export default function MorningBriefCard({ message, alerts }: MorningBriefCardPr
                       className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-brand-600 hover:text-brand-700 hover:underline transition-colors focus:outline-none focus:ring-1 focus:ring-brand-400 rounded"
                       aria-label={`${alert.action} for this item`}
                       onClick={() => {
-                        // Action buttons wired up in Sessions 9–11
+                        if (onAction && alert.action) {
+                          onAction(alert.action, alert.entity_id, alert.entity_type)
+                        }
                       }}
                     >
                       {alert.action}

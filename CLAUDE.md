@@ -281,8 +281,8 @@ These rules are non-negotiable. Never violate them, even if the builder seems to
 | **2** | Morning brief flow | Chat UI, classify-intent → morning-brief flow, ranked alerts ✅ |
 | **3** | Add worker flow | Worker modal, invite generated and sent ✅ |
 | **4** | New quote routing | Address detected, duplicate check, project created, upload panel ✅ |
-| **5** | File upload + AI intake | PDF uploads, live progress states ← current |
-| **6** | Assumption control | Missing items surfaced, three resolution options |
+| **5** | File upload + AI intake | PDF uploads, live progress states ✅ |
+| **6** | Assumption control | Missing items surfaced, three resolution options ← current |
 | **7** | Draft quote output | Quote with confidence scoring per line item |
 | **8** | Quote actions | Send to client, export PDF, revise |
 | **9** | Split panel layout | Chat left, job snapshot right |

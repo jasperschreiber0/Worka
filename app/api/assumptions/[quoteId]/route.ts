@@ -1,18 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
+import type { AssumptionItem } from '@/lib/assumptions-demo'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// Re-export type so components can import it from here if needed
+export type { AssumptionItem }
 
-export interface AssumptionItem {
-  id: string
-  line_item_id: string | null
-  description: string
-  gate: 1 | 2 | 3
-  current_quantity: number | null
-  current_unit: string | null
-  current_rate: number | null
-  trade_category: string
-  resolution_type: 'unresolved' | 'accepted' | 'adjusted' | 'excluded'
-}
+// ─── Response shape ────────────────────────────────────────────────────────────
 
 interface AssumptionsResponse {
   quote_id: string
@@ -20,56 +13,6 @@ interface AssumptionsResponse {
   total_count: number
   unresolved_count: number
 }
-
-// ─── Demo data ────────────────────────────────────────────────────────────────
-
-export const DEMO_ASSUMPTIONS: AssumptionItem[] = [
-  {
-    id: 'demo-assumption-1',
-    line_item_id: 'demo-line-1',
-    description: 'GPO points — living areas',
-    gate: 1,
-    current_quantity: 14,
-    current_unit: null, // Gate 1: no unit
-    current_rate: 85,
-    trade_category: 'Electrical',
-    resolution_type: 'unresolved',
-  },
-  {
-    id: 'demo-assumption-2',
-    line_item_id: 'demo-line-2',
-    description: 'Plasterboard — feature wall',
-    gate: 2,
-    current_quantity: 22.5,
-    current_unit: 'sqm',
-    current_rate: 45,
-    trade_category: 'Internal Linings',
-    resolution_type: 'unresolved', // Gate 2: quantity but no dimensions string
-  },
-  {
-    id: 'demo-assumption-3',
-    line_item_id: 'demo-line-3',
-    description: 'Scaffolding — perimeter',
-    gate: 3,
-    current_quantity: 0,
-    current_unit: 'weeks',
-    current_rate: 1200,
-    trade_category: 'Preliminaries',
-    resolution_type: 'unresolved', // Gate 3: zero quantity → auto-excluded but shown for review
-  },
-]
-
-// ─── In-memory demo state (shared with resolve route via module) ──────────────
-
-// This Map is keyed by assumption_id → resolution_type
-export const demoResolutionState = new Map<
-  string,
-  {
-    resolution_type: 'unresolved' | 'accepted' | 'adjusted' | 'excluded'
-    adjusted_quantity?: number
-    adjusted_unit?: string
-  }
->()
 
 // ─── GET /api/assumptions/[quoteId] ──────────────────────────────────────────
 
@@ -169,8 +112,7 @@ export async function GET(
         trade_categories: any
       } | null
 
-      const tradeName: string =
-        li?.trade_categories?.name ?? 'Unknown'
+      const tradeName: string = li?.trade_categories?.name ?? 'Unknown'
 
       // Infer gate from line item state
       let gate: 1 | 2 | 3 = 2
