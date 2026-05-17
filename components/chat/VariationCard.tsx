@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { hasPermission } from '@/lib/auth/role-guard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -13,6 +14,11 @@ export interface VariationCardVariation {
   job_address: string
   created_display: string
   job_id?: string
+  variation_ref?: string
+  labour_cost?: number
+  materials_cost?: number
+  submitted_by?: string
+  days_pending?: number
 }
 
 interface VariationCardProps {
@@ -20,6 +26,7 @@ interface VariationCardProps {
   onApprove: (variationId: string) => void
   onReject: (variationId: string) => void
   onViewJob?: (jobId: string) => void
+  userRole?: import('@/lib/auth/role-guard').PermissionRole
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -69,7 +76,7 @@ function statusLabel(status: string): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function VariationCard({ variation, onApprove, onReject, onViewJob }: VariationCardProps) {
+export default function VariationCard({ variation, onApprove, onReject, onViewJob, userRole = 'owner' }: VariationCardProps) {
   const [localStatus, setLocalStatus] = useState(variation.status)
   const isPending = localStatus === 'pending'
 
@@ -91,9 +98,16 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
     >
       {/* Header row */}
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-          Variation
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+            Variation
+          </span>
+          {variation.variation_ref && (
+            <span className="text-xs font-mono font-semibold text-brand-600 bg-brand-50 px-1.5 py-0.5 rounded">
+              {variation.variation_ref}
+            </span>
+          )}
+        </div>
         <span
           className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${statusBadgeClass(localStatus)}`}
         >
@@ -106,30 +120,49 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
         {variation.job_address} &middot; {variation.created_display}
       </p>
 
+      {/* Submitted by */}
+      {variation.submitted_by && (
+        <p className="text-xs text-slate-400 mb-1.5">Submitted by {variation.submitted_by}</p>
+      )}
+
       {/* Title */}
       <p className="text-sm font-semibold text-slate-900 leading-snug mb-1">
         {variation.title}
       </p>
 
-      {/* Amount */}
-      <p className="text-lg font-bold text-slate-900 mb-3">
-        {formatAUD(variation.amount)}
-      </p>
+      {/* Amount + breakdown */}
+      <div className="mb-3">
+        <p className="text-lg font-bold text-slate-900">{formatAUD(variation.amount)}</p>
+        {(variation.labour_cost !== undefined || variation.materials_cost !== undefined) && (
+          <div className="flex gap-3 mt-1">
+            {variation.labour_cost !== undefined && (
+              <span className="text-xs text-slate-500">
+                Labour: <span className="font-medium text-slate-700">{formatAUD(variation.labour_cost)}</span>
+              </span>
+            )}
+            {variation.materials_cost !== undefined && (
+              <span className="text-xs text-slate-500">
+                Materials: <span className="font-medium text-slate-700">{formatAUD(variation.materials_cost)}</span>
+              </span>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Actions */}
-      {isPending ? (
+      {isPending && hasPermission(userRole ?? 'owner', 'site_manager') ? (
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={handleApprove}
-            className="flex-1 px-3 py-1.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
+            className="flex-1 px-3 py-2.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
           >
             Approve {formatAUD(variation.amount)}
           </button>
           <button
             type="button"
             onClick={handleReject}
-            className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
+            className="px-3 py-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
           >
             Reject
           </button>
@@ -137,7 +170,7 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
             <button
               type="button"
               onClick={() => onViewJob(variation.job_id!)}
-              className="px-3 py-1.5 text-xs font-medium text-brand-600 hover:text-brand-700 flex items-center gap-1 whitespace-nowrap"
+              className="px-3 py-2.5 text-xs font-medium text-brand-600 hover:text-brand-700 flex items-center gap-1 whitespace-nowrap"
             >
               Details
               <svg
@@ -153,6 +186,8 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
             </button>
           )}
         </div>
+      ) : isPending ? (
+        <p className="text-xs text-slate-400 italic">Approval requires Site Manager access</p>
       ) : (
         <div className="flex items-center gap-2">
           {localStatus === 'approved' ? (

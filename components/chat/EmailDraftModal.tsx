@@ -386,14 +386,17 @@ export default function EmailDraftModal({
                 </div>
               </div>
 
-              {/* Explanation */}
-              <div className="space-y-3 text-sm text-slate-600 leading-relaxed">
-                <p>
-                  This will send the email to the client. WorkA will log it to the job&apos;s communication history.
-                </p>
-                <p className="text-xs text-slate-400">
-                  This action cannot be undone. Emails sent through WorkA are always logged.
-                </p>
+              {/* Irreversibility warning */}
+              <div className="flex items-start gap-2.5 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                <svg className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                </svg>
+                <div>
+                  <p className="text-xs font-semibold text-amber-800 mb-0.5">This will send immediately</p>
+                  <p className="text-xs text-amber-700 leading-relaxed">
+                    The email will be sent to <span className="font-semibold">{draftTo}</span> and logged to communication history. This cannot be undone.
+                  </p>
+                </div>
               </div>
 
               {/* Subject preview */}
@@ -455,10 +458,7 @@ export default function EmailDraftModal({
                 </>
               ) : (
                 <>
-                  Send email
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-                  </svg>
+                  Confirm &amp; send →
                 </>
               )}
             </button>

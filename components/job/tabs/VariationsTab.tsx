@@ -23,6 +23,10 @@ interface VariationWithLocalStatus {
   status: string
   created_at: string
   localStatus: VariationStatus
+  variation_ref?: string
+  labour_cost?: number
+  materials_cost?: number
+  submitted_by?: string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -171,10 +175,40 @@ export default function VariationsTab({ variations, onApprove, onReject }: Varia
                   </span>
                 </div>
 
+                {/* Ref + submitter */}
+                {(v.variation_ref || v.submitted_by) && (
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    {v.variation_ref && (
+                      <span className="text-xs font-mono font-semibold text-brand-600 bg-brand-50 px-1.5 py-0.5 rounded border border-brand-100">
+                        {v.variation_ref}
+                      </span>
+                    )}
+                    {v.submitted_by && (
+                      <span className="text-xs text-slate-400">by {v.submitted_by}</span>
+                    )}
+                  </div>
+                )}
+
                 {/* Amount + date */}
                 <p className="text-xs text-slate-500 mb-2">
                   {formatCurrency(v.amount)} &middot; {v.created_at}
                 </p>
+
+                {/* Labour/materials breakdown */}
+                {(v.labour_cost !== undefined || v.materials_cost !== undefined) && (
+                  <div className="flex gap-3 mb-1.5">
+                    {v.labour_cost !== undefined && (
+                      <span className="text-xs text-slate-500">
+                        Labour: <span className="font-medium">{formatCurrency(v.labour_cost)}</span>
+                      </span>
+                    )}
+                    {v.materials_cost !== undefined && (
+                      <span className="text-xs text-slate-500">
+                        Materials: <span className="font-medium">{formatCurrency(v.materials_cost)}</span>
+                      </span>
+                    )}
+                  </div>
+                )}
 
                 {/* Actions for pending variations */}
                 {isPending && (
@@ -182,14 +216,14 @@ export default function VariationsTab({ variations, onApprove, onReject }: Varia
                     <button
                       type="button"
                       onClick={() => void handleApprove(v.id)}
-                      className="flex-1 px-3 py-1.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
+                      className="flex-1 px-3 py-2.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
                     >
                       Approve {formatCurrency(v.amount)}
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleReject(v.id)}
-                      className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
+                      className="px-3 py-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
                     >
                       Reject
                     </button>

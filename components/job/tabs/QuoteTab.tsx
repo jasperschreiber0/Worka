@@ -1,6 +1,7 @@
 'use client'
 
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import { hasPermission } from '@/lib/auth/role-guard'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -8,6 +9,7 @@ interface QuoteTabProps {
   quote: JobSnapshot['quote']
   onViewQuote: (quoteId: string) => void
   onActivateJob?: (quoteId: string) => void
+  userRole?: import('@/lib/auth/role-guard').PermissionRole
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -46,7 +48,7 @@ function confidenceColour(score: number): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function QuoteTab({ quote, onViewQuote, onActivateJob }: QuoteTabProps) {
+export default function QuoteTab({ quote, onViewQuote, onActivateJob, userRole = 'owner' }: QuoteTabProps) {
   // ── No quote ───────────────────────────────────────────────────────────────
   if (!quote) {
     return (
@@ -83,6 +85,9 @@ export default function QuoteTab({ quote, onViewQuote, onActivateJob }: QuoteTab
       {/* Header */}
       <div>
         <p className="text-sm font-semibold text-slate-800">Quote v{quote.version}</p>
+        {quote.quote_ref && (
+          <p className="text-xs font-mono text-brand-600 mt-0.5">{quote.quote_ref}</p>
+        )}
         {quote.sent_at ? (
           <p className="text-xs text-slate-500 mt-0.5">
             Sent {quote.sent_at} &middot; Awaiting response
@@ -149,8 +154,8 @@ export default function QuoteTab({ quote, onViewQuote, onActivateJob }: QuoteTab
         </button>
       )}
 
-      {/* Activation trigger — show when quote is sent or approved */}
-      {quote.id && onActivateJob && (quote.status === 'sent' || quote.status === 'approved') && (
+      {/* Activation trigger — show when quote is sent or approved, owner role only */}
+      {quote.id && onActivateJob && (quote.status === 'sent' || quote.status === 'approved') && hasPermission(userRole ?? 'owner', 'owner') && (
         <div className="pt-1">
           <div className="border-t border-slate-200 pt-4 mt-1">
             <p className="text-xs text-slate-500 mb-2.5">Client approved?</p>

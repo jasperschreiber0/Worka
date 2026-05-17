@@ -1007,7 +1007,7 @@ export default function ChatInterface({
           <button
             type="submit"
             disabled={loading || !input.trim()}
-            className="flex-shrink-0 btn-primary px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-shrink-0 btn-primary px-4 min-h-[44px] text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             aria-label="Send message"
           >
             Send

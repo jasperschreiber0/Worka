@@ -210,7 +210,7 @@ function LineItemRow({ item }: LineItemRowProps) {
       </div>
 
       {/* Qty + unit */}
-      <div className="flex-shrink-0 text-right w-16 sm:w-20">
+      <div className="flex-shrink-0 text-right w-14 sm:w-20">
         <span className={`text-sm tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
           {formatQuantity(item.quantity)}
           {item.unit ? (
@@ -229,14 +229,14 @@ function LineItemRow({ item }: LineItemRowProps) {
       </div>
 
       {/* Total */}
-      <div className="flex-shrink-0 text-right w-20 sm:w-24">
+      <div className="flex-shrink-0 text-right w-16 sm:w-24">
         <span className={`text-sm font-medium tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
           {isExcluded ? 'Excluded' : formatTotal(item.total)}
         </span>
       </div>
 
       {/* Confidence indicator */}
-      <div className="flex-shrink-0 w-20 sm:w-24 flex justify-end">
+      <div className="hidden sm:flex flex-shrink-0 w-24 justify-end">
         <ConfidenceIndicator
           confidence={item.confidence}
           isAssumption={item.is_assumption}
