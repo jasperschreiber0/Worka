@@ -29,6 +29,7 @@ export interface JobSnapshotPanelProps {
   job: ActiveJob | null
   onClose: () => void
   onViewQuote?: (quoteId: string) => void
+  onVariationApprove?: (variationId: string) => void
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -73,7 +74,7 @@ function SkeletonSection() {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function JobSnapshotPanel({ job, onClose, onViewQuote }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, onViewQuote, onVariationApprove }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -118,7 +119,16 @@ export default function JobSnapshotPanel({ job, onClose, onViewQuote }: JobSnaps
           />
         )
       case 'variations':
-        return <VariationsTab variations={snapshot.variations} />
+        return (
+          <VariationsTab
+            variations={snapshot.variations}
+            jobAddress={snapshot.job.address}
+            onApprove={onVariationApprove}
+            onReject={() => {
+              // Reject from panel — no notification needed
+            }}
+          />
+        )
       case 'invoices':
         return <InvoicesTab invoices={snapshot.invoices} />
       case 'files':

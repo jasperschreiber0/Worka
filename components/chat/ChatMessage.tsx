@@ -2,6 +2,7 @@
 
 import MorningBriefCard, { type Alert } from './MorningBriefCard'
 import DuplicateWarning from './DuplicateWarning'
+import VariationCard, { type VariationCardVariation } from './VariationCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ export interface Message {
   content: string
   alerts?: Alert[]
   duplicateJob?: DuplicateJob
+  variation?: VariationCardVariation
   timestamp: Date
 }
 
@@ -25,6 +27,8 @@ interface ChatMessageProps {
   onOpenJob?: (jobId: string) => void
   onCreateAnyway?: () => void
   onAction?: (action: string, entityId?: string, entityType?: string) => void
+  onVariationApprove?: (variationId: string) => void
+  onVariationReject?: (variationId: string) => void
 }
 
 // ─── Relative time helper ─────────────────────────────────────────────────────
@@ -51,10 +55,11 @@ function relativeTime(date: Date): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onAction }: ChatMessageProps) {
+export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onAction, onVariationApprove, onVariationReject }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const hasAlerts = message.alerts && message.alerts.length > 0
   const hasDuplicate = !!message.duplicateJob
+  const hasVariation = !!message.variation
 
   if (isUser) {
     return (
@@ -105,6 +110,31 @@ export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onActi
               onCreateAnyway={onCreateAnyway}
             />
           )}
+          <p className="text-xs text-slate-400 mt-1 px-1">
+            {relativeTime(message.timestamp)}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // Assistant message with variation card
+  if (hasVariation && message.variation) {
+    const v = message.variation
+    return (
+      <div className="flex justify-start mb-4" role="listitem">
+        <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
+          <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
+            <p className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap break-words">
+              {message.content}
+            </p>
+          </div>
+          <VariationCard
+            variation={v}
+            onApprove={onVariationApprove ?? (() => {})}
+            onReject={onVariationReject ?? (() => {})}
+            onViewJob={onOpenJob}
+          />
           <p className="text-xs text-slate-400 mt-1 px-1">
             {relativeTime(message.timestamp)}
           </p>

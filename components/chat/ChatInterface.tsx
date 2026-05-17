@@ -7,7 +7,10 @@ import WorkerModal from './WorkerModal'
 import UploadPanel from './UploadPanel'
 import AssumptionReview from './AssumptionReview'
 import QuoteView from '@/components/quote/QuoteView'
+import VariationNotificationModal from './VariationNotificationModal'
+import type { VariationCardVariation } from './VariationCard'
 import type { Worker, Job } from '@/lib/types/database.types'
+import type { DemoVariation } from '@/lib/variations-demo'
 
 // ─── API response type ────────────────────────────────────────────────────────
 
@@ -34,6 +37,12 @@ interface OpenJobSnapshotEvent {
   client_name?: string
 }
 
+interface ShowVariationEvent {
+  type: 'show_variation'
+  variation_id: string
+  job_id: string
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -43,7 +52,9 @@ interface ChatApiResponse {
   job?: Job
   duplicate?: boolean
   existing_job?: Job
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | { type: string; [key: string]: unknown }
+  variation?: DemoVariation
+  all_variations?: DemoVariation[]
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | { type: string; [key: string]: unknown }
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -116,6 +127,7 @@ export default function ChatInterface({
   })
   const [reviewingAssumptions, setReviewingAssumptions] = useState<AssumptionReviewStateOrNull>(null)
   const [viewingQuote, setViewingQuote] = useState<QuoteViewStateOrNull>(null)
+  const [activeVariationModal, setActiveVariationModal] = useState<{ variationId: string } | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -165,6 +177,9 @@ export default function ChatInterface({
     [uploadPanel.job]
   )
 
+  // Pending action that requires sendMessage (defined later)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
+
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
     (action: string, entityId?: string, _entityType?: string) => {
@@ -178,6 +193,11 @@ export default function ChatInterface({
       if (action === 'View draft quote') {
         const quoteId = entityId ?? 'demo-quote-id'
         setViewingQuote({ quoteId })
+        return
+      }
+      if (action === 'Review variations') {
+        // Defer until sendMessage is available via pendingAction
+        setPendingAction('show me the variations')
         return
       }
       // 'Chase payment' → Session 10
@@ -337,12 +357,29 @@ export default function ChatInterface({
         }
       }
 
+      // Attach variation card if present
+      let variationCard: VariationCardVariation | undefined
+      if (data.event?.type === 'show_variation' && data.variation) {
+        const v = data.variation
+        variationCard = {
+          id: v.id,
+          title: v.title,
+          description: v.description,
+          amount: v.amount,
+          status: v.status,
+          job_address: v.job_address,
+          created_display: v.created_display,
+          job_id: v.job_id,
+        }
+      }
+
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
         content: data.message,
         alerts: data.alerts,
         duplicateJob,
+        variation: variationCard,
         timestamp: new Date(),
       }
 
@@ -408,10 +445,71 @@ export default function ChatInterface({
     // No-op for now — wired in Session 9
   }, [])
 
+  // Handler: approve variation from chat card — POST resolve then open notification modal
+  const handleVariationApprove = useCallback(async (variationId: string) => {
+    // POST to resolve endpoint
+    try {
+      await fetch(`/api/variations/${variationId}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          builder_id: '00000000-0000-0000-0000-000000000001',
+          action: 'approved',
+        }),
+      })
+    } catch {
+      // Proceed to modal even if resolve call fails (card already updated optimistically)
+    }
+    setActiveVariationModal({ variationId })
+  }, [])
+
+  // Handler: reject variation from chat card — POST resolve, append confirmation
+  const handleVariationReject = useCallback(async (variationId: string) => {
+    try {
+      await fetch(`/api/variations/${variationId}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          builder_id: '00000000-0000-0000-0000-000000000001',
+          action: 'rejected',
+        }),
+      })
+    } catch {
+      // Optimistic UI — card already updated
+    }
+    const confirmMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: 'Variation rejected. No notification has been sent to the client.',
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, confirmMessage])
+  }, [])
+
+  // Handler: variation notification modal sent/skipped
+  const handleVariationModalSent = useCallback(() => {
+    setActiveVariationModal(null)
+    const confirmMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: 'Variation approved. The client notification has been logged to the job communication history.',
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, confirmMessage])
+  }, [])
+
   // Handler: create job anyway (skip duplicate check)
   const handleCreateAnyway = useCallback(() => {
     sendMessage('create job anyway', true)
   }, [sendMessage])
+
+  // Fire any pending action that needed sendMessage (e.g. "Review variations" from MorningBriefCard)
+  useEffect(() => {
+    if (pendingAction) {
+      setPendingAction(null)
+      sendMessage(pendingAction)
+    }
+  }, [pendingAction, sendMessage])
 
   // On mount: auto-send "whats on today" to trigger morning brief
   useEffect(() => {
@@ -492,6 +590,8 @@ export default function ChatInterface({
             onOpenJob={handleOpenJob}
             onCreateAnyway={handleCreateAnyway}
             onAction={handleAction}
+            onVariationApprove={handleVariationApprove}
+            onVariationReject={handleVariationReject}
           />
         ))}
 
@@ -560,6 +660,17 @@ export default function ChatInterface({
           onSend={handleQuoteViewSend}
           onRevise={handleQuoteViewRevise}
           onExportPdf={handleQuoteViewExportPdf}
+        />
+      )}
+
+      {/* ── Variation Notification Modal ────────────────────────────────────── */}
+      {activeVariationModal && (
+        <VariationNotificationModal
+          variationId={activeVariationModal.variationId}
+          builderId="00000000-0000-0000-0000-000000000001"
+          isOpen={!!activeVariationModal}
+          onClose={() => setActiveVariationModal(null)}
+          onSent={handleVariationModalSent}
         />
       )}
 

@@ -10,6 +10,7 @@ import type {
   Job,
   Worker,
 } from '@/lib/types/database.types'
+import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,7 +51,13 @@ interface OpenJobSnapshotEvent {
   client_name?: string
 }
 
-type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent
+interface ShowVariationEvent {
+  type: 'show_variation'
+  variation_id: string
+  job_id: string
+}
+
+type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent
 
 interface ChatResponse {
   intent: string
@@ -61,6 +68,8 @@ interface ChatResponse {
   job?: Job
   duplicate?: boolean
   existing_job?: Job
+  variation?: DemoVariation
+  all_variations?: DemoVariation[]
   event?: ChatEvent
 }
 
@@ -652,10 +661,55 @@ function handleJobQuery(entities: Record<string, string>): ChatResponse {
   }
 }
 
-function handleVariation(): ChatResponse {
+function applyVariationState(variation: DemoVariation): DemoVariation {
+  const override = demoVariationState.get(variation.id)
+  if (!override) return variation
+  return {
+    ...variation,
+    status: override.status as DemoVariation['status'],
+    approved_at: override.approved_at ?? null,
+    approved_by: override.approved_by ?? null,
+  }
+}
+
+function handleVariationIntent(entities: Record<string, string>, builderId: string): ChatResponse {
+  // Filter variations for this builder
+  const builderVariations = DEMO_VARIATIONS
+    .map(applyVariationState)
+    .filter((v) => v.builder_id === builderId)
+
+  // Filter for pending ones
+  const pendingVariations = builderVariations.filter((v) => v.status === 'pending')
+
+  if (pendingVariations.length === 0) {
+    return {
+      intent: 'variation',
+      message: 'No pending variations right now — all scope changes are up to date.',
+    }
+  }
+
+  // Surface the first pending variation with a follow-up question
+  const first = pendingVariations[0]
+  const count = pendingVariations.length
+  const countPhrase = count === 1
+    ? '1 pending variation'
+    : `${count} pending variations`
+
+  const message = `You have ${countPhrase} on the Fitzroy job that need a decision.\n\n${first.title} — $${first.amount.toLocaleString('en-AU')}. Approve or reject?`
+
+  // Suppress unused variable warning from entities
+  void entities
+
   return {
     intent: 'variation',
-    message: 'Variation management is coming in a future update. Type "whats on today" to see your morning brief.',
+    message,
+    variation: first,
+    all_variations: pendingVariations,
+    event: {
+      type: 'show_variation',
+      variation_id: first.id,
+      job_id: first.job_id,
+    },
   }
 }
 
@@ -752,6 +806,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           event: result.modal_event,
         })
       }
+      // Demo variation: detect variation-related keywords
+      if (
+        lower.includes('variation') ||
+        lower.includes('variations') ||
+        lower.includes('change order') ||
+        lower.includes('scope change') ||
+        lower.includes('show me the variations')
+      ) {
+        return NextResponse.json(handleVariationIntent({}, builderId))
+      }
       // Demo job_query: detect known job keywords
       const demoJob = findDemoJob({ address: lower })
       if (demoJob) {
@@ -843,7 +907,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     if (classified.intent === 'variation') {
-      return NextResponse.json(handleVariation())
+      return NextResponse.json(handleVariationIntent(classified.entities, builderId))
     }
 
     if (classified.intent === 'invoice') {
