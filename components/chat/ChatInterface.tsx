@@ -107,6 +107,19 @@ export default function ChatInterface() {
       }
 
       setMessages((prev) => [...prev, assistantMessage])
+
+      // Handle Layer 3 events
+      if (
+        data.event?.type === 'open_worker_modal' &&
+        data.worker &&
+        data.invite_url
+      ) {
+        setWorkerModal({
+          isOpen: true,
+          worker: data.worker,
+          inviteUrl: data.invite_url,
+        })
+      }
     } catch {
       const errorMessage: Message = {
         id: generateId(),
@@ -215,6 +228,16 @@ export default function ChatInterface() {
         {/* Scroll anchor */}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* ── Worker Modal ───────────────────────────────────────────────────── */}
+      {workerModal.worker && (
+        <WorkerModal
+          isOpen={workerModal.isOpen}
+          onClose={handleCloseWorkerModal}
+          worker={workerModal.worker}
+          inviteUrl={workerModal.inviteUrl}
+        />
+      )}
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
       <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3 pb-safe">
