@@ -14,7 +14,7 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 
 // ─── Extended intent type (includes email_draft, email_sync_status, simulate_email) ──
 
-type ExtendedIntentType = IntentType | 'email_draft' | 'email_sync_status' | 'simulate_email'
+type ExtendedIntentType = IntentType | 'email_draft' | 'email_sync_status' | 'simulate_email' | 'margin_query'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -100,6 +100,20 @@ interface SuggestJobActivationEvent {
 
 type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent
 
+export interface MarginJob {
+  id: string
+  job_ref: string
+  address: string
+  status: string
+  quoted_amount: number
+  projected_cost: number
+  margin_amount: number
+  margin_percent: number
+  quoted_margin_percent: number
+  cost_to_date: number
+  variation_impact: number
+}
+
 interface ChatResponse {
   intent: string
   message: string
@@ -111,6 +125,7 @@ interface ChatResponse {
   existing_job?: Job
   variation?: DemoVariation
   all_variations?: DemoVariation[]
+  margin_jobs?: MarginJob[]
   event?: ChatEvent
 }
 
@@ -172,6 +187,8 @@ Classify the builder's message into exactly one of these intents:
   Examples: "is my email connected?", "email sync status", "is Gmail connected", "check email sync"
 - simulate_email: builder wants to test email sync or simulate an inbound email
   Examples: "simulate email", "test email sync", "simulate inbound email", "demo email"
+- margin_query: asking about job margin, profit, costs, which job is losing money, cost overruns
+  Examples: "which job is bleeding margin", "how's my margin", "what's the profit on Fitzroy", "any jobs losing money", "cost overrun"
 - unknown: anything that doesn't fit the above
 
 Extract relevant entities:
@@ -649,6 +666,12 @@ interface DemoJob {
   client_keywords: string[]
   job_ref: string
   summary: string
+  // Margin data (active/quoted jobs only)
+  quoted_amount?: number
+  projected_cost?: number
+  cost_to_date?: number
+  quoted_margin_percent?: number
+  variation_impact?: number
 }
 
 const DEMO_JOBS: DemoJob[] = [
@@ -661,6 +684,11 @@ const DEMO_JOBS: DemoJob[] = [
     client_keywords: ['henderson', 'hendersons'],
     job_ref: 'JOB-2025-001',
     summary: "Here's the status on the Fitzroy job — active, no outstanding variations. $28k invoice overdue 3 days.",
+    quoted_amount: 142000,
+    projected_cost: 158200,
+    cost_to_date: 95500,
+    quoted_margin_percent: 18,
+    variation_impact: 4880,
   },
   {
     id: '00000000-0000-0000-0000-000000000020',
@@ -671,6 +699,11 @@ const DEMO_JOBS: DemoJob[] = [
     client_keywords: ['caruso', 'tom caruso'],
     job_ref: 'JOB-2025-002',
     summary: "The Toorak job is in quoted status — $127,500 quote sent to Tom Caruso 5 days ago, no response yet.",
+    quoted_amount: 127500,
+    projected_cost: 99450,
+    cost_to_date: 0,
+    quoted_margin_percent: 22,
+    variation_impact: 0,
   },
   {
     id: '00000000-0000-0000-0000-000000000030',
@@ -961,6 +994,60 @@ async function handleSimulateEmail(builderId: string): Promise<ChatResponse> {
   }
 }
 
+function handleMarginQuery(): ChatResponse {
+  const activeJobs = DEMO_JOBS.filter(
+    (j) => (j.status === 'active' || j.status === 'quoted') && j.quoted_amount !== undefined
+  )
+
+  if (activeJobs.length === 0) {
+    return {
+      intent: 'margin_query',
+      message: 'No active jobs with margin data right now.',
+    }
+  }
+
+  const marginJobs: MarginJob[] = activeJobs.map((job) => {
+    const quoted = job.quoted_amount!
+    const cost = job.projected_cost!
+    const marginAmt = quoted - cost
+    const marginPct = (marginAmt / quoted) * 100
+    return {
+      id: job.id,
+      job_ref: job.job_ref,
+      address: job.address,
+      status: job.status,
+      quoted_amount: quoted,
+      projected_cost: cost,
+      margin_amount: marginAmt,
+      margin_percent: parseFloat(marginPct.toFixed(1)),
+      quoted_margin_percent: job.quoted_margin_percent!,
+      cost_to_date: job.cost_to_date ?? 0,
+      variation_impact: job.variation_impact ?? 0,
+    }
+  }).sort((a, b) => a.margin_percent - b.margin_percent)
+
+  const bleeding = marginJobs.filter((j) => j.margin_percent < 10)
+  const healthy = marginJobs.filter((j) => j.margin_percent >= 15)
+
+  let message: string
+  if (bleeding.length > 0) {
+    const worst = bleeding[0]
+    const isNeg = worst.margin_percent < 0
+    message = `The ${worst.address.split(',')[0]} job is ${isNeg ? 'underwater' : 'at risk'} — margin is tracking at ${isNeg ? '–' : ''}${Math.abs(worst.margin_percent).toFixed(1)}% against the quoted ${worst.quoted_margin_percent}%. Variations and cost overruns have added $${worst.variation_impact.toLocaleString('en-AU')} to projected spend.`
+    if (healthy.length > 0) {
+      message += ` The Toorak quote is holding at ${healthy[0].margin_percent.toFixed(1)}%.`
+    }
+  } else {
+    message = `Margins are looking ${healthy.length === marginJobs.length ? 'healthy' : 'acceptable'} across your ${marginJobs.length} job${marginJobs.length !== 1 ? 's' : ''}. Keep an eye on variations.`
+  }
+
+  return {
+    intent: 'margin_query',
+    message,
+    margin_jobs: marginJobs,
+  }
+}
+
 function handleUnknown(): ChatResponse {
   return {
     intent: 'unknown',
@@ -1123,6 +1210,18 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         const result = await handleSimulateEmail(builderId)
         return NextResponse.json(result)
       }
+      // Demo margin_query: detect margin/profit/cost overrun keywords
+      if (
+        lower.includes('margin') ||
+        lower.includes('profit') ||
+        lower.includes('bleeding') ||
+        lower.includes('losing money') ||
+        lower.includes('cost overrun') ||
+        lower.includes('which job is') ||
+        (lower.includes('how') && lower.includes('margin'))
+      ) {
+        return NextResponse.json(handleMarginQuery())
+      }
       // Demo job_query: detect known job keywords
       const demoJob = findDemoJob({ address: lower })
       if (demoJob) {
@@ -1249,6 +1348,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     if (classified.intent === 'simulate_email') {
       const result = await handleSimulateEmail(builderId)
       return NextResponse.json(result)
+    }
+
+    if (classified.intent === 'margin_query') {
+      return NextResponse.json(handleMarginQuery())
     }
 
     return NextResponse.json(handleUnknown())

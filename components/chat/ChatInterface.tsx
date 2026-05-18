@@ -14,6 +14,7 @@ import type { VariationCardVariation } from './VariationCard'
 import type { Worker, Job } from '@/lib/types/database.types'
 import type { DemoVariation } from '@/lib/variations-demo'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
+import type { MarginJob } from './MarginCard'
 
 // ─── API response type ────────────────────────────────────────────────────────
 
@@ -93,6 +94,7 @@ interface ChatApiResponse {
   existing_job?: Job
   variation?: DemoVariation
   all_variations?: DemoVariation[]
+  margin_jobs?: MarginJob[]
   event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
 }
 
@@ -508,6 +510,7 @@ export default function ChatInterface({
         alerts: data.alerts,
         duplicateJob,
         variation: variationCard,
+        marginJobs: data.margin_jobs,
         timestamp: new Date(),
       }
 
@@ -754,6 +757,18 @@ export default function ChatInterface({
     })
   }, [onJobMention])
 
+  // Handler: open job from margin card — routes to job snapshot panel
+  const handleOpenMarginJob = useCallback((jobId: string) => {
+    const job = [
+      { id: '00000000-0000-0000-0000-000000000010', address: '14 Merri St, Fitzroy', status: 'active', client_name: 'Henderson' },
+      { id: '00000000-0000-0000-0000-000000000020', address: '8 Burnside Rd, Toorak', status: 'quoted', client_name: 'Tom Caruso' },
+      { id: '00000000-0000-0000-0000-000000000030', address: '52 Bendigo St, Brunswick', status: 'quoting', client_name: 'Brunswick client' },
+    ].find((j) => j.id === jobId)
+    if (job) {
+      onJobMention?.({ id: job.id, address: job.address, status: job.status, client_name: job.client_name })
+    }
+  }, [onJobMention])
+
   // Handler: create job anyway (skip duplicate check)
   const handleCreateAnyway = useCallback(() => {
     sendMessage('create job anyway', true)
@@ -855,6 +870,7 @@ export default function ChatInterface({
             onAction={handleAction}
             onVariationApprove={handleVariationApprove}
             onVariationReject={handleVariationReject}
+            onOpenMarginJob={handleOpenMarginJob}
           />
         ))}
 

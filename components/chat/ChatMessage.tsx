@@ -3,6 +3,7 @@
 import MorningBriefCard, { type Alert } from './MorningBriefCard'
 import DuplicateWarning from './DuplicateWarning'
 import VariationCard, { type VariationCardVariation } from './VariationCard'
+import MarginCard, { type MarginJob } from './MarginCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,7 @@ export interface Message {
   alerts?: Alert[]
   duplicateJob?: DuplicateJob
   variation?: VariationCardVariation
+  marginJobs?: MarginJob[]
   timestamp: Date
 }
 
@@ -29,6 +31,7 @@ interface ChatMessageProps {
   onAction?: (action: string, entityId?: string, entityType?: string) => void
   onVariationApprove?: (variationId: string) => void
   onVariationReject?: (variationId: string) => void
+  onOpenMarginJob?: (jobId: string) => void
 }
 
 // ─── Relative time helper ─────────────────────────────────────────────────────
@@ -55,11 +58,12 @@ function relativeTime(date: Date): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onAction, onVariationApprove, onVariationReject }: ChatMessageProps) {
+export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const hasAlerts = message.alerts && message.alerts.length > 0
   const hasDuplicate = !!message.duplicateJob
   const hasVariation = !!message.variation
+  const hasMarginJobs = !!message.marginJobs && message.marginJobs.length > 0
 
   if (isUser) {
     return (
@@ -134,6 +138,28 @@ export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onActi
             onApprove={onVariationApprove ?? (() => {})}
             onReject={onVariationReject ?? (() => {})}
             onViewJob={onOpenJob}
+          />
+          <p className="text-xs text-slate-400 mt-1 px-1">
+            {relativeTime(message.timestamp)}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // Assistant message with margin jobs
+  if (hasMarginJobs && message.marginJobs) {
+    return (
+      <div className="flex justify-start mb-4" role="listitem">
+        <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
+          <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
+            <p className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap break-words">
+              {message.content}
+            </p>
+          </div>
+          <MarginCard
+            jobs={message.marginJobs}
+            onOpenJob={onOpenMarginJob ?? onOpenJob}
           />
           <p className="text-xs text-slate-400 mt-1 px-1">
             {relativeTime(message.timestamp)}
