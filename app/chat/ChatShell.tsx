@@ -24,9 +24,18 @@ const JOB_MESSAGES: Record<string, string> = {
   '00000000-0000-0000-0000-000000000030': 'brunswick job',
 }
 
+// ─── Props ────────────────────────────────────────────────────────────────────
+
+interface ChatShellProps {
+  builderId: string
+  userName: string
+  userInitials: string
+  isDemo: boolean
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatShell() {
+export default function ChatShell({ builderId, userName, userInitials, isDemo }: ChatShellProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -35,7 +44,6 @@ export default function ChatShell() {
   const [pendingQuoteView, setPendingQuoteView] = useState<string | null>(null)
   const [pendingEmailDraft, setPendingEmailDraft] = useState<PendingEmailDraft | null>(null)
 
-  // Auto-message from ?action= or ?job= query param
   const [autoMessage, setAutoMessage] = useState<string | null>(null)
   const consumedRef = useRef(false)
 
@@ -47,7 +55,6 @@ export default function ChatShell() {
     if (action && ACTION_MESSAGES[action]) {
       consumedRef.current = true
       const message = ACTION_MESSAGES[action]
-      // Slight delay so the chat UI is fully mounted before the message fires
       const t = setTimeout(() => {
         setAutoMessage(message)
         router.replace('/chat')
@@ -78,43 +85,37 @@ export default function ChatShell() {
 
   const handleGeneralQuery = useCallback(() => {
     setPanelVisible(false)
-    // Keep activeJob so the panel can animate out gracefully
   }, [])
 
   const handlePanelClose = useCallback(() => {
     setPanelVisible(false)
   }, [])
 
-  // Called by QuoteTab's "View quote" button inside the snapshot panel.
-  // We store the quoteId and pass it down to ChatInterface so it opens QuoteView.
   const handleViewQuote = useCallback((quoteId: string) => {
     setPendingQuoteView(quoteId)
   }, [])
 
-  // Called by ChatInterface after it has consumed the pending quote ID.
   const handleQuoteViewConsumed = useCallback(() => {
     setPendingQuoteView(null)
   }, [])
 
-  // Called by CommsTab's "Compose email" button inside the snapshot panel.
-  // We store the draft params and pass them down to ChatInterface so it opens EmailDraftModal.
   const handleComposeEmail = useCallback((jobId: string) => {
-    setPendingEmailDraft({
-      jobId,
-      intentHint: 'general',
-    })
+    setPendingEmailDraft({ jobId, intentHint: 'general' })
   }, [])
 
-  // Called by ChatInterface after it has consumed the pending email draft.
   const handleEmailDraftConsumed = useCallback(() => {
     setPendingEmailDraft(null)
   }, [])
 
   return (
     <div className="h-screen flex overflow-hidden bg-white">
-      {/* ── Left: chat — full width on mobile, flex-1 on desktop ──────────── */}
+      {/* ── Left: chat ────────────────────────────────────────────────────── */}
       <div className="flex-1 min-w-0 flex flex-col h-full">
         <ChatInterface
+          builderId={builderId}
+          userName={userName}
+          userInitials={userInitials}
+          isDemo={isDemo}
           onJobMention={handleJobMention}
           onGeneralQuery={handleGeneralQuery}
           initialQuoteId={pendingQuoteView}
@@ -127,8 +128,6 @@ export default function ChatShell() {
       </div>
 
       {/* ── Right: job snapshot panel — desktop only ──────────────────────── */}
-      {/* Hidden on mobile (shown as bottom sheet instead) */}
-      {/* Slides in from right using CSS transform, never display:none */}
       <div
         className={`
           hidden md:flex md:flex-col

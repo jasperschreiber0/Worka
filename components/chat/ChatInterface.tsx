@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
 import ChatMessage, { type Message, type DuplicateJob } from './ChatMessage'
 import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
@@ -143,28 +144,64 @@ export interface PendingEmailDraft {
 }
 
 interface ChatInterfaceProps {
+  builderId?: string
+  userName?: string
+  userInitials?: string
+  isDemo?: boolean
   onJobMention?: (job: ActiveJobRef) => void
   onGeneralQuery?: () => void
-  /** When set, open QuoteView for this quoteId immediately */
   initialQuoteId?: string | null
-  /** Called after initialQuoteId has been consumed (QuoteView opened) */
   onInitialQuoteConsumed?: () => void
-  /** When set, open EmailDraftModal immediately */
   pendingEmailDraft?: PendingEmailDraft | null
-  /** Called after pendingEmailDraft has been consumed */
   onPendingEmailDraftConsumed?: () => void
-  /**
-   * When set, auto-send this message instead of the default morning brief on mount.
-   * Used by ChatShell to trigger flows from the homepage ?action= / ?job= params.
-   */
   autoMessage?: string | null
-  /** Called after autoMessage has been consumed (sent to chat) */
   onAutoMessageConsumed?: () => void
+}
+
+// ─── Sign-out button ──────────────────────────────────────────────────────────
+
+function SignOutButton({ isDemo }: { isDemo: boolean }) {
+  const router = useRouter()
+
+  async function handleSignOut() {
+    if (isDemo) {
+      router.push('/login')
+      return
+    }
+    try {
+      const { createClientComponentClient } = await import('@supabase/auth-helpers-nextjs')
+      const supabase = createClientComponentClient()
+      await supabase.auth.signOut()
+      router.push('/login')
+      router.refresh()
+    } catch {
+      router.push('/login')
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleSignOut}
+      className="w-full px-3 py-2 text-sm text-left text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors flex items-center gap-2"
+    >
+      <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15M12 9l-3 3m0 0 3 3m-3-3h12.75" />
+      </svg>
+      Sign out
+    </button>
+  )
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
+const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
+
 export default function ChatInterface({
+  builderId = DEMO_BUILDER_ID,
+  userName = 'Dave Nguyen',
+  userInitials = 'DN',
+  isDemo = true,
   onJobMention,
   onGeneralQuery,
   initialQuoteId,
@@ -401,7 +438,7 @@ export default function ChatInterface({
       const res = await fetch(`/api/quotes/${quoteId}/revise`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ builder_id: '00000000-0000-0000-0000-000000000001' }),
+        body: JSON.stringify({ builder_id: builderId }),
       })
       const data = await res.json() as { new_quote_id: string; version: number }
       const assistantMessage: Message = {
@@ -467,7 +504,7 @@ export default function ChatInterface({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: trimmed,
-          builder_id: '00000000-0000-0000-0000-000000000001',
+          builder_id: builderId,
           ...(forceCreate ? { force_create: true } : {}),
         }),
       })
@@ -673,7 +710,7 @@ export default function ChatInterface({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          builder_id: '00000000-0000-0000-0000-000000000001',
+          builder_id: builderId,
           action: 'approved',
         }),
       })
@@ -690,7 +727,7 @@ export default function ChatInterface({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          builder_id: '00000000-0000-0000-0000-000000000001',
+          builder_id: builderId,
           action: 'rejected',
         }),
       })
@@ -844,10 +881,28 @@ export default function ChatInterface({
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-sm text-slate-600 font-medium hidden sm:block">Dave Nguyen</span>
-          {/* Avatar */}
-          <div className="w-8 h-8 rounded-full bg-brand-100 border border-brand-200 flex items-center justify-center flex-shrink-0">
-            <span className="text-xs font-semibold text-brand-700">DN</span>
+          {isDemo && (
+            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+              Demo
+            </span>
+          )}
+          <span className="text-sm text-slate-600 font-medium hidden sm:block">{userName}</span>
+          <div className="relative group">
+            <button
+              type="button"
+              className="w-8 h-8 rounded-full bg-brand-100 border border-brand-200 flex items-center justify-center flex-shrink-0 hover:bg-brand-200 transition-colors"
+              aria-label="Account menu"
+            >
+              <span className="text-xs font-semibold text-brand-700">{userInitials}</span>
+            </button>
+            {/* Dropdown */}
+            <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-xl shadow-lg py-1 hidden group-focus-within:block z-50">
+              <div className="px-3 py-2 border-b border-slate-100">
+                <p className="text-xs font-semibold text-slate-900 truncate">{userName}</p>
+                {isDemo && <p className="text-xs text-amber-600">Demo mode</p>}
+              </div>
+              <SignOutButton isDemo={isDemo} />
+            </div>
           </div>
         </div>
       </header>
@@ -922,7 +977,7 @@ export default function ChatInterface({
       {reviewingAssumptions && (
         <AssumptionReview
           quoteId={reviewingAssumptions.quoteId}
-          builderId="00000000-0000-0000-0000-000000000001"
+          builderId={builderId}
           jobAddress={reviewingAssumptions.jobAddress}
           onComplete={handleAssumptionComplete}
           onDismiss={handleAssumptionDismiss}
@@ -934,7 +989,7 @@ export default function ChatInterface({
       {viewingQuote && (
         <QuoteView
           quoteId={viewingQuote.quoteId}
-          builderId="00000000-0000-0000-0000-000000000001"
+          builderId={builderId}
           onClose={handleQuoteViewClose}
           onSend={handleQuoteViewSend}
           onRevise={handleQuoteViewRevise}
@@ -946,7 +1001,7 @@ export default function ChatInterface({
       {activeVariationModal && (
         <VariationNotificationModal
           variationId={activeVariationModal.variationId}
-          builderId="00000000-0000-0000-0000-000000000001"
+          builderId={builderId}
           isOpen={!!activeVariationModal}
           onClose={() => setActiveVariationModal(null)}
           onSent={handleVariationModalSent}
@@ -959,7 +1014,7 @@ export default function ChatInterface({
           isOpen={emailDraftModal.isOpen}
           onClose={() => setEmailDraftModal(null)}
           onSent={handleEmailDraftSent}
-          builderId="00000000-0000-0000-0000-000000000001"
+          builderId={builderId}
           jobId={emailDraftModal.jobId}
           recipientName={emailDraftModal.recipientName}
           intentHint={emailDraftModal.intentHint}
@@ -974,7 +1029,7 @@ export default function ChatInterface({
           onActivated={handleChatActivated}
           job={{ id: chatActivationModal.jobId, address: chatActivationModal.jobAddress }}
           quote={{ id: chatActivationModal.quoteId, total_cost: chatActivationModal.quoteTotalCost, version: 1 }}
-          builderId="00000000-0000-0000-0000-000000000001"
+          builderId={builderId}
         />
       )}
 
