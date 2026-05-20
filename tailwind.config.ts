@@ -37,7 +37,17 @@ const config: Config = {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    // Safe-area utility classes for iPhone notch / home indicator
+    function ({ addUtilities }: { addUtilities: (u: Record<string, Record<string, string>>) => void }) {
+      addUtilities({
+        '.pt-safe': { paddingTop: 'env(safe-area-inset-top)' },
+        '.pb-safe': { paddingBottom: 'env(safe-area-inset-bottom)' },
+        '.pl-safe': { paddingLeft: 'env(safe-area-inset-left)' },
+        '.pr-safe': { paddingRight: 'env(safe-area-inset-right)' },
+      })
+    },
+  ],
 }
 
 export default config
