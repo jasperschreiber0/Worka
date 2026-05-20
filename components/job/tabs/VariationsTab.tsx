@@ -10,6 +10,7 @@ interface VariationsTabProps {
   variations: JobSnapshot['variations']
   jobAddress?: string
   userRole?: PermissionRole
+  builderId?: string
   onApprove?: (variationId: string) => void
   onReject?: (variationId: string) => void
 }
@@ -87,7 +88,9 @@ function statusBadgeClass(status: string): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function VariationsTab({ variations, userRole = 'owner', onApprove, onReject }: VariationsTabProps) {
+const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
+
+export default function VariationsTab({ variations, userRole = 'owner', builderId = DEMO_BUILDER_ID, onApprove, onReject }: VariationsTabProps) {
   const canApprove = hasPermission(userRole, 'site_manager')
   // Local optimistic status per variation id
   const [localStatuses, setLocalStatuses] = useState<Record<string, VariationStatus>>({})
@@ -104,7 +107,7 @@ export default function VariationsTab({ variations, userRole = 'owner', onApprov
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          builder_id: '00000000-0000-0000-0000-000000000001',
+          builder_id: builderId,
           action: 'approved',
         }),
       })
@@ -122,7 +125,7 @@ export default function VariationsTab({ variations, userRole = 'owner', onApprov
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          builder_id: '00000000-0000-0000-0000-000000000001',
+          builder_id: builderId,
           action: 'rejected',
         }),
       })

@@ -154,6 +154,8 @@ interface ChatInterfaceProps {
   onInitialQuoteConsumed?: () => void
   pendingEmailDraft?: PendingEmailDraft | null
   onPendingEmailDraftConsumed?: () => void
+  pendingUpload?: ActiveJobRef | null
+  onPendingUploadConsumed?: () => void
   autoMessage?: string | null
   onAutoMessageConsumed?: () => void
 }
@@ -208,6 +210,8 @@ export default function ChatInterface({
   onInitialQuoteConsumed,
   pendingEmailDraft,
   onPendingEmailDraftConsumed,
+  pendingUpload,
+  onPendingUploadConsumed,
   autoMessage,
   onAutoMessageConsumed,
 }: ChatInterfaceProps = {}) {
@@ -272,6 +276,28 @@ export default function ChatInterface({
   // We only want to react when pendingEmailDraft changes (not on every render)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingEmailDraft])
+
+  // Open UploadPanel when a job's Files tab triggers "Upload plans"
+  useEffect(() => {
+    if (pendingUpload) {
+      setUploadPanel({
+        isOpen: true,
+        job: {
+          id: pendingUpload.id,
+          builder_id: builderId,
+          address: pendingUpload.address,
+          client_id: null,
+          status: pendingUpload.status as import('@/lib/types/database.types').JobStatus,
+          job_type: null,
+          notes: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      })
+      onPendingUploadConsumed?.()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingUpload])
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))

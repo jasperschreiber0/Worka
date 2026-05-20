@@ -6,6 +6,7 @@ import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 
 interface InvoicesTabProps {
   invoices: JobSnapshot['invoices']
+  onAddInvoice?: () => void
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ function statusLabel(status: string): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function InvoicesTab({ invoices }: InvoicesTabProps) {
+export default function InvoicesTab({ invoices, onAddInvoice }: InvoicesTabProps) {
   const count = invoices.length
 
   return (
@@ -98,9 +99,7 @@ export default function InvoicesTab({ invoices }: InvoicesTabProps) {
       <button
         type="button"
         className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors mt-1"
-        onClick={() => {
-          // Future session: wire to invoice creation flow
-        }}
+        onClick={onAddInvoice}
       >
         Add invoice
         <svg

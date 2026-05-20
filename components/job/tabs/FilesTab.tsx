@@ -6,6 +6,7 @@ import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 
 interface FilesTabProps {
   files: JobSnapshot['files']
+  onUploadPlans?: () => void
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,7 +41,7 @@ function intakeStatusClass(status: string): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function FilesTab({ files }: FilesTabProps) {
+export default function FilesTab({ files, onUploadPlans }: FilesTabProps) {
   const count = files.length
 
   if (count === 0) {
@@ -50,9 +51,7 @@ export default function FilesTab({ files }: FilesTabProps) {
         <button
           type="button"
           className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors"
-          onClick={() => {
-            // Future session: trigger UploadPanel
-          }}
+          onClick={onUploadPlans}
         >
           Upload plans
           <svg

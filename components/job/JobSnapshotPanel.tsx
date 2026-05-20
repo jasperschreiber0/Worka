@@ -31,9 +31,12 @@ export interface JobSnapshotPanelProps {
   job: ActiveJob | null
   onClose: () => void
   userRole?: PermissionRole
+  builderId?: string
   onViewQuote?: (quoteId: string) => void
   onVariationApprove?: (variationId: string) => void
   onComposeEmail?: (jobId: string) => void
+  onUploadPlans?: (job: ActiveJob) => void
+  onAddInvoice?: (jobId: string) => void
   onJobActivated?: (jobId: string) => void
 }
 
@@ -86,7 +89,7 @@ interface ActivationModalState {
   quote: JobSnapshot['quote'] | null
 }
 
-export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', onViewQuote, onVariationApprove, onComposeEmail, onJobActivated }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -166,14 +169,25 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', onV
             variations={snapshot.variations}
             jobAddress={snapshot.job.address}
             userRole={userRole}
+            builderId={builderId}
             onApprove={onVariationApprove}
             onReject={() => {}}
           />
         )
       case 'invoices':
-        return <InvoicesTab invoices={snapshot.invoices} />
+        return (
+          <InvoicesTab
+            invoices={snapshot.invoices}
+            onAddInvoice={job && onAddInvoice ? () => onAddInvoice(job.id) : undefined}
+          />
+        )
       case 'files':
-        return <FilesTab files={snapshot.files} />
+        return (
+          <FilesTab
+            files={snapshot.files}
+            onUploadPlans={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
+          />
+        )
       case 'comms':
         return (
           <CommsTab

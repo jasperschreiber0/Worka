@@ -43,6 +43,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
   const [panelVisible, setPanelVisible] = useState(false)
   const [pendingQuoteView, setPendingQuoteView] = useState<string | null>(null)
   const [pendingEmailDraft, setPendingEmailDraft] = useState<PendingEmailDraft | null>(null)
+  const [pendingUpload, setPendingUpload] = useState<ActiveJob | null>(null)
 
   const [autoMessage, setAutoMessage] = useState<string | null>(null)
   const consumedRef = useRef(false)
@@ -107,6 +108,18 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
     setPendingEmailDraft(null)
   }, [])
 
+  const handleUploadPlans = useCallback((job: ActiveJob) => {
+    setPendingUpload(job)
+  }, [])
+
+  const handleUploadConsumed = useCallback(() => {
+    setPendingUpload(null)
+  }, [])
+
+  const handleAddInvoice = useCallback((jobId: string) => {
+    setPendingEmailDraft({ jobId, intentHint: 'invoice' })
+  }, [])
+
   return (
     <div className="h-screen flex overflow-hidden bg-white">
       {/* ── Left: chat ────────────────────────────────────────────────────── */}
@@ -122,6 +135,8 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onInitialQuoteConsumed={handleQuoteViewConsumed}
           pendingEmailDraft={pendingEmailDraft}
           onPendingEmailDraftConsumed={handleEmailDraftConsumed}
+          pendingUpload={pendingUpload}
+          onPendingUploadConsumed={handleUploadConsumed}
           autoMessage={autoMessage}
           onAutoMessageConsumed={handleAutoMessageConsumed}
         />
@@ -141,6 +156,9 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onClose={handlePanelClose}
           onViewQuote={handleViewQuote}
           onComposeEmail={handleComposeEmail}
+          onUploadPlans={handleUploadPlans}
+          onAddInvoice={handleAddInvoice}
+          builderId={builderId}
         />
       </div>
 

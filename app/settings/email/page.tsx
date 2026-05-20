@@ -3,6 +3,9 @@
 import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
+
+const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 
 // ─── Inner component that uses useSearchParams ────────────────────────────────
 
@@ -12,8 +15,15 @@ function EmailSettingsContent() {
   const connected = searchParams.get('connected')
   const [connecting, setConnecting] = useState<'gmail' | 'outlook' | null>(null)
   const [bannerDismissed, setBannerDismissed] = useState(false)
+  const [builderId, setBuilderId] = useState(DEMO_BUILDER_ID)
 
-  const BUILDER_ID = '00000000-0000-0000-0000-000000000001'
+  useEffect(() => {
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return
+    const supabase = createClientComponentClient()
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session?.user.id) setBuilderId(data.session.user.id)
+    })
+  }, [])
 
   useEffect(() => {
     // Clear query param from URL after reading it (keeps address bar clean)
@@ -30,7 +40,7 @@ function EmailSettingsContent() {
     setConnecting(provider)
     try {
       const res = await fetch(
-        `/api/email-sync/connect?provider=${provider}&builder_id=${BUILDER_ID}`
+        `/api/email-sync/connect?provider=${provider}&builder_id=${builderId}`
       )
       const data = (await res.json()) as
         | { auth_url: string }
