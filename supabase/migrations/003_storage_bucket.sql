@@ -10,6 +10,10 @@ VALUES (
 ON CONFLICT (id) DO NOTHING;
 
 -- RLS: builders can only upload to their own folder (builder_id/job_id/filename)
+DROP POLICY IF EXISTS "builders_upload_own" ON storage.objects;
+DROP POLICY IF EXISTS "builders_read_own"   ON storage.objects;
+DROP POLICY IF EXISTS "builders_delete_own" ON storage.objects;
+
 CREATE POLICY "builders_upload_own" ON storage.objects
   FOR INSERT TO authenticated
   WITH CHECK (bucket_id = 'plans' AND (storage.foldername(name))[1] = auth.uid()::text);

@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_job_workers_worker_id ON job_workers (worker_id);
 
 ALTER TABLE job_workers ENABLE ROW LEVEL SECURITY;
 
--- Builders can manage all assignments under their builder
+DROP POLICY IF EXISTS "job_workers_builder_full_access" ON job_workers;
 CREATE POLICY "job_workers_builder_full_access"
   ON job_workers
   USING (
@@ -58,6 +58,7 @@ ON CONFLICT DO NOTHING;
 
 DROP POLICY IF EXISTS "jobs_own_builder" ON jobs;
 
+DROP POLICY IF EXISTS "jobs_builder_or_assigned_worker" ON jobs;
 CREATE POLICY "jobs_builder_or_assigned_worker"
   ON jobs FOR SELECT
   USING (

@@ -41,10 +41,14 @@ ALTER TABLE job_milestones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE invoice_schedule ENABLE ROW LEVEL SECURITY;
 ALTER TABLE proof_events ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "milestones_own"       ON job_milestones;
+DROP POLICY IF EXISTS "invoice_schedule_own" ON invoice_schedule;
+DROP POLICY IF EXISTS "proof_events_own"     ON proof_events;
+
 CREATE POLICY "milestones_own" ON job_milestones FOR ALL USING (builder_id = auth.uid());
 CREATE POLICY "invoice_schedule_own" ON invoice_schedule FOR ALL USING (builder_id = auth.uid());
 CREATE POLICY "proof_events_own" ON proof_events FOR ALL USING (builder_id = auth.uid());
 
-CREATE INDEX ON job_milestones(job_id, sort_order);
-CREATE INDEX ON invoice_schedule(job_id);
-CREATE INDEX ON proof_events(job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_milestones_job_order ON job_milestones(job_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_invoice_schedule_job     ON invoice_schedule(job_id);
+CREATE INDEX IF NOT EXISTS idx_proof_events_job_ts      ON proof_events(job_id, created_at DESC);

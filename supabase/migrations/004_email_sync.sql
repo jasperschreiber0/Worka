@@ -16,4 +16,5 @@ CREATE TABLE IF NOT EXISTS email_sync_state (
 );
 
 ALTER TABLE email_sync_state ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "email_sync_own" ON email_sync_state;
 CREATE POLICY "email_sync_own" ON email_sync_state FOR ALL USING (builder_id = auth.uid());

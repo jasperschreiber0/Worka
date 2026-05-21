@@ -43,6 +43,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_job_ref ON jobs;
 CREATE TRIGGER trg_job_ref
   BEFORE INSERT ON jobs
   FOR EACH ROW
