@@ -333,7 +333,7 @@ export default function ChatInterface({
   )
 
   // Pending action that requires sendMessage (defined later)
-  const [pendingAction, setPendingAction] = useState<string | null>(null)
+ const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
 
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
@@ -511,6 +511,11 @@ export default function ChatInterface({
   const sendMessage = useCallback(async (text: string, forceCreate?: boolean) => {
     const trimmed = text.trim()
     if (!trimmed || loading) return
+    const apiMessage =
+      awaitingAddressForNewJob && !trimmed.toLowerCase().startsWith('new job')
+        ? `new job at ${trimmed}`
+        : trimmed
+    setAwaitingAddressForNewJob(false)
 
     // Add user message to state
     const userMessage: Message = {
@@ -529,7 +534,7 @@ export default function ChatInterface({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: trimmed,
+         message: apiMessage,
           builder_id: builderId,
           ...(forceCreate ? { force_create: true } : {}),
         }),
@@ -578,6 +583,9 @@ export default function ChatInterface({
       }
 
       setMessages((prev) => [...prev, assistantMessage])
+      if (data.intent === 'new_job' && !data.job && !data.duplicate) {
+        setAwaitingAddressForNewJob(true)
+      }
 
       // Handle Layer 3 events
       if (
@@ -721,7 +729,7 @@ export default function ChatInterface({
     } finally {
       setLoading(false)
     }
-  }, [loading])
+  }, [loading, awaitingAddressForNewJob])
 
   // Handler: open an existing job (wired fully in Session 9)
   const handleOpenJob = useCallback((_jobId: string) => {
