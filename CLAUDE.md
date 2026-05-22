@@ -62,6 +62,12 @@ Layer 4 — Presentation (UI)
 **Extended intents** (handled entirely in the Next.js route, not by edge functions):
 `email_draft` | `email_sync_status` | `simulate_email` | `margin_query`
 
+### New job flow — address follow-up (fixed)
+
+When the initial "new job" message contains no address, the chat route asks "Which address is this job at?" and returns the `new_job` intent with no job created. `ChatInterface.tsx` sets `awaitingAddressForNewJob` state on that response. On the next `sendMessage` call, if that flag is set, the payload sent to `/api/chat` is silently prefixed with `"new job at "` so the classifier routes it correctly. The message **displayed in chat is never modified** — only the API payload.
+
+**This is the canonical pattern for two-step chat flows.** Any future flow that requires a follow-up answer should track pending intent in a `useState` flag inside `ChatInterface.tsx` and rewrite only the outgoing API payload, leaving the displayed message unchanged.
+
 ---
 
 ## Demo Mode
