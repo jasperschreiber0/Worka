@@ -219,6 +219,7 @@ export default function ChatInterface({
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
+  const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
   const [workerModal, setWorkerModal] = useState<WorkerModalState>({
     isOpen: false,
     worker: null,
@@ -512,7 +513,11 @@ export default function ChatInterface({
     const trimmed = text.trim()
     if (!trimmed || loading) return
 
-    // Add user message to state
+    // If we're awaiting an address for a new job, silently prefix the API payload
+    const apiPayload = awaitingAddressForNewJob ? `new job at ${trimmed}` : trimmed
+    setAwaitingAddressForNewJob(false)
+
+    // Add user message to state — always show what the user typed, never the prefixed version
     const userMessage: Message = {
       id: generateId(),
       role: 'user',
@@ -529,7 +534,7 @@ export default function ChatInterface({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: trimmed,
+          message: apiPayload,
           builder_id: builderId,
           ...(forceCreate ? { force_create: true } : {}),
         }),
@@ -710,6 +715,11 @@ export default function ChatInterface({
       ) {
         onGeneralQuery?.()
       }
+
+      // Set address follow-up flag when new_job came back with no job created
+      if (data.intent === 'new_job' && !data.job) {
+        setAwaitingAddressForNewJob(true)
+      }
     } catch {
       const errorMessage: Message = {
         id: generateId(),
@@ -720,8 +730,9 @@ export default function ChatInterface({
       setMessages((prev) => [...prev, errorMessage])
     } finally {
       setLoading(false)
+      inputRef.current?.focus()
     }
-  }, [loading])
+  }, [loading, awaitingAddressForNewJob])
 
   // Handler: open an existing job (wired fully in Session 9)
   const handleOpenJob = useCallback((_jobId: string) => {
