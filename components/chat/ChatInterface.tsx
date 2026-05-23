@@ -514,7 +514,8 @@ export default function ChatInterface({
     if (!trimmed || loading) return
 
     // If we're awaiting an address for a new job, silently prefix the API payload
-    const apiPayload = awaitingAddressForNewJob ? `new job at ${trimmed}` : trimmed
+    // but NOT when forceCreate is true (that's a button action with a known address already)
+    const apiPayload = (awaitingAddressForNewJob && !forceCreate) ? `new job at ${trimmed}` : trimmed
     setAwaitingAddressForNewJob(false)
 
     // Add user message to state — always show what the user typed, never the prefixed version

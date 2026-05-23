@@ -79,14 +79,15 @@ Your only job is to parse a builder's natural-language message and return a JSON
    Examples: "add Jack hes a carpenter", "invite Sarah as site manager", "new worker Tom plumber 0412345678"
 
 3. new_job
-   Trigger: creating a new job, project, quoting a new address
+   Trigger: creating a new job, project, quoting a NEW address not yet in the system
    Entities: { address: string, client_name?: string }
    Examples: "new job at 52 Bendigo St help me quote it", "start a job for the Hendersons at 10 Oak Ave"
+   NOT this: "I need to quote", "quote the Fitzroy job", "I need to do a quote" — those are job_query
 
 4. job_query
-   Trigger: asking about an existing job, its status, timeline, workers on site
+   Trigger: asking about an existing job, its status, timeline, workers on site — also vague quoting requests that reference existing work
    Entities: { address?: string, job_id?: string, query_type?: string }
-   Examples: "what's happening on the Miller job", "status of 14 Smith St"
+   Examples: "what's happening on the Miller job", "status of 14 Smith St", "I need to quote", "I need to do a quote", "quote for the Fitzroy job"
 
 5. variation
    Trigger: creating, logging or asking about a variation, change order, scope change
