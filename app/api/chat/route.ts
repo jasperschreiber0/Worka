@@ -177,8 +177,8 @@ async function classifyIntent(
 Classify the builder's message into exactly one of these intents:
 - morning_brief: asking what's on today, what needs attention, daily summary, status check
 - add_worker: adding, inviting, or registering a new crew member or worker
-- new_job: starting a new job, new quote, new project at an address
-- job_query: asking about a specific job, project status, or client
+- new_job: starting a new job, new quote, new project at a NEW address not yet in the system. NOT vague quoting requests like "I need to quote" or "do a quote"
+- job_query: asking about an existing job, listing jobs, project status, or client. Also vague quoting requests like "I need to quote", "list my jobs", "show all jobs", "what jobs do I have"
 - variation: variation requests, change orders, scope changes
 - invoice: invoices, payments, billing queries
 - email_draft: builder wants to draft/send an email to a client or subcontractor
@@ -1051,7 +1051,7 @@ function handleMarginQuery(): ChatResponse {
 function handleUnknown(): ChatResponse {
   return {
     intent: 'unknown',
-    message: 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.',
+    message: 'I can help with jobs, quotes, workers, variations, and invoices. Try:\n• "whats on today" — daily brief\n• "new job at 12 Smith St Richmond" — start a job\n• "list my jobs" — see all active jobs\n• "add a worker called Tom, carpenter" — invite crew\n• "log a variation on [address]" — record a change',
   }
 }
 
@@ -1325,6 +1325,33 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     if (classified.intent === 'job_query') {
+      // Live path: if no specific address, list all jobs from DB
+      const address = classified.entities.address ?? classified.entities.job_name ?? ''
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (!address && supabaseUrl && serviceRoleKey) {
+        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+        const { data: jobs } = await supabase
+          .from('jobs')
+          .select('id, address, status, job_ref')
+          .eq('builder_id', builderId)
+          .not('status', 'eq', 'archived')
+          .order('created_at', { ascending: false })
+          .limit(10)
+        if (jobs && jobs.length > 0) {
+          const lines = (jobs as Array<{ id: string; address: string; status: string; job_ref: string | null }>)
+            .map(j => `• ${j.address} — ${j.status}${j.job_ref ? ` (${j.job_ref})` : ''}`)
+            .join('\n')
+          return NextResponse.json({
+            intent: 'job_query',
+            message: `You have ${jobs.length} active job${jobs.length === 1 ? '' : 's'}:\n${lines}\n\nAsk me about any of them by address.`,
+          })
+        }
+        return NextResponse.json({
+          intent: 'job_query',
+          message: 'You don\'t have any active jobs yet. Try "new job at [address]" to get started.',
+        })
+      }
       return NextResponse.json(handleJobQuery(classified.entities))
     }
 
