@@ -41,7 +41,7 @@ export async function POST(
       )
     }
 
-    const fromAddress = 'dave@nguyenconstructions.com.au'
+    const fromAddress = 'hello@getworka.com'
     let communicationId: string
     let sentAt: string
 
