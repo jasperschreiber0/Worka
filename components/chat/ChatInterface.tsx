@@ -663,7 +663,7 @@ export default function ChatInterface({
                   message: 'Want me to draft a follow-up email?',
                   action: 'Draft email',
                   entity_id: evt.job_id,
-                  entity_type: 'invoice',
+                  entity_type: evt.intent_hint === 'variation' ? 'variation' : evt.intent_hint === 'invoice' ? 'invoice' : evt.intent_hint === 'quote_followup' ? 'quote' : 'job',
                 },
               ],
             }

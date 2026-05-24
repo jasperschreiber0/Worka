@@ -514,7 +514,7 @@ const SEED_JOBS: Array<{ id: string; address: string; status: string; tokens: st
   },
   {
     id: '00000000-0000-0000-0000-000000000020',
-    address: '8 Burnside Ave, Toorak VIC 3142',
+    address: '8 Burnside Rd, Toorak VIC 3142',
     status: 'quoted',
     tokens: ['8 burnside'],
     job_ref: 'JOB-2025-002',
@@ -1243,7 +1243,79 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           },
         })
       }
+      // Demo list_workers: detect staff/crew/team/worker listing
+      if (
+        lower.includes('staff') ||
+        lower.includes('my workers') ||
+        lower.includes('my crew') ||
+        lower.includes('my team') ||
+        lower.includes('list workers') ||
+        lower.includes('show workers') ||
+        (lower.includes('list') && lower.includes('worker')) ||
+        (lower.includes('who') && (lower.includes('crew') || lower.includes('worker') || lower.includes('team')))
+      ) {
+        return NextResponse.json({
+          intent: 'job_query',
+          message: 'You have 2 workers on your crew:\n• Jack Thompson — Carpenter (on Fitzroy job)\n• Mick Reynolds — Plumber (on Fitzroy job)\n\nType "add [name], they\'re a [trade]" to invite someone new.',
+        })
+      }
+      // Demo job listing: detect "quote", "list jobs", "all jobs", "my jobs"
+      if (
+        (lower.includes('quote') && !lower.includes('email') && !lower.includes('draft') && !lower.includes('follow')) ||
+        lower.includes('my jobs') ||
+        lower.includes('list jobs') ||
+        lower.includes('all jobs') ||
+        lower.includes('show jobs') ||
+        lower.includes('what jobs')
+      ) {
+        return NextResponse.json({
+          intent: 'job_query',
+          message: 'You have 3 active jobs:\n• 14 Merri St, Fitzroy — active (JOB-2025-001)\n• 8 Burnside Rd, Toorak — quoted (JOB-2025-002)\n• 52 Bendigo St, Brunswick — quoting (JOB-2025-003)\n\nAsk me about any of them by address.',
+        })
+      }
       return NextResponse.json(handleUnknown())
+    }
+
+    // Pre-classify: worker/staff/crew listing — classify-intent has no intent for this
+    const lowerMsg = message.toLowerCase()
+    if (
+      lowerMsg.includes('staff') ||
+      lowerMsg.includes('my workers') ||
+      lowerMsg.includes('my crew') ||
+      lowerMsg.includes('my team') ||
+      lowerMsg.includes('list workers') ||
+      lowerMsg.includes('show workers') ||
+      (lowerMsg.includes('list') && lowerMsg.includes('worker')) ||
+      (lowerMsg.includes('who') && (lowerMsg.includes('crew') || lowerMsg.includes('worker') || lowerMsg.includes('team')))
+    ) {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (supabaseUrl && serviceRoleKey) {
+        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+        const { data: workers } = await supabase
+          .from('workers')
+          .select('name, role, status')
+          .eq('builder_id', builderId)
+          .order('created_at', { ascending: false })
+          .limit(20)
+        if (workers && workers.length > 0) {
+          const lines = (workers as Array<{ name: string; role: string; status: string }>)
+            .map(w => `• ${w.name} — ${w.role} (${w.status})`)
+            .join('\n')
+          return NextResponse.json({
+            intent: 'job_query',
+            message: `You have ${workers.length} worker${workers.length === 1 ? '' : 's'} on your crew:\n${lines}\n\nType "add [name], they're a [trade]" to invite someone new.`,
+          })
+        }
+        return NextResponse.json({
+          intent: 'job_query',
+          message: 'No workers on your crew yet. Type "add [name], they\'re a [trade]" to invite your first one.',
+        })
+      }
+      return NextResponse.json({
+        intent: 'job_query',
+        message: 'You have 2 workers on your crew:\n• Jack Thompson — Carpenter (on Fitzroy job)\n• Mick Reynolds — Plumber (on Fitzroy job)\n\nType "add [name], they\'re a [trade]" to invite someone new.',
+      })
     }
 
     const anthropic = new Anthropic({ apiKey })
