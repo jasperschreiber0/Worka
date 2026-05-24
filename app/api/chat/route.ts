@@ -1055,6 +1055,69 @@ function handleUnknown(): ChatResponse {
   }
 }
 
+async function smartFallback(
+  message: string,
+  builderId: string,
+  anthropic: Anthropic
+): Promise<ChatResponse> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  let jobLines = '- 14 Merri St, Fitzroy VIC 3065 (active, JOB-2025-001)\n- 8 Burnside Rd, Toorak VIC 3142 (quoted, JOB-2025-002)\n- 52 Bendigo St, Brunswick VIC 3056 (quoting, JOB-2025-003)'
+  let workerLines = '- Jack Thompson (Carpenter)\n- Mick Reynolds (Plumber)'
+
+  if (supabaseUrl && serviceRoleKey) {
+    const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+    const [{ data: jobs }, { data: workers }] = await Promise.all([
+      supabase.from('jobs').select('address, status, job_ref').eq('builder_id', builderId).not('status', 'eq', 'archived').limit(10),
+      supabase.from('workers').select('name, role').eq('builder_id', builderId).limit(20),
+    ])
+    jobLines = jobs?.length
+      ? (jobs as Array<{ address: string; status: string; job_ref: string | null }>)
+          .map(j => `- ${j.address} (${j.status}${j.job_ref ? ', ' + j.job_ref : ''})`).join('\n')
+      : 'No active jobs yet.'
+    workerLines = workers?.length
+      ? (workers as Array<{ name: string; role: string }>).map(w => `- ${w.name} (${w.role})`).join('\n')
+      : 'No workers yet.'
+  }
+
+  const systemPrompt = `You are WorkA — an AI operations manager for Australian residential builders. Answer in plain English. Be direct and brief (builders are busy on site).
+
+Active jobs:
+${jobLines}
+
+Crew:
+${workerLines}
+
+Actions available — tell the builder to type these if they want to act:
+- "whats on today" — daily brief and alerts
+- "new job at [address]" — create a job
+- "add [name], they're a [trade]" — invite a crew member
+- "show my jobs" / "show my team" — lists
+- "log a variation on [address]" — record a scope change
+- "invoice for [stage] on [address]" — create an invoice
+- "email [client] about [topic]" — draft a client email
+- "how's my margin" — margin overview
+
+Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD.`
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: message }],
+    })
+    const text = resp.content[0].type === 'text' ? resp.content[0].text : null
+    return {
+      intent: 'unknown',
+      message: text ?? handleUnknown().message,
+    }
+  } catch {
+    return handleUnknown()
+  }
+}
+
 // ─── POST Handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest): Promise<NextResponse<ChatResponse>> {
@@ -1453,7 +1516,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       return NextResponse.json(handleMarginQuery())
     }
 
-    return NextResponse.json(handleUnknown())
+    return NextResponse.json(await smartFallback(message, builderId, anthropic))
   } catch (err) {
     console.error('[/api/chat] Error:', err)
     return NextResponse.json(
