@@ -28,7 +28,7 @@ export default function LoginForm() {
 
     try {
       if (!supabaseUrl || (email === DEMO_EMAIL && password === DEMO_PASSWORD)) {
-        router.push(next as string)
+        router.push(next as never)
         return
       }
 
@@ -40,7 +40,7 @@ export default function LoginForm() {
         return
       }
 
-      router.push(next as string)
+      router.push(next as never)
       router.refresh()
     } finally {
       setLoading(false)
