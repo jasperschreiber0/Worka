@@ -1,48 +1,55 @@
 /**
  * classify-intent — Layer 1 Intent (AI)
  *
- * Classifies builder natural-language messages into structured intents
- * using Claude. This is the brain of the four-layer architecture.
+ * NOW IMPLEMENTS: multi-action extraction.
+ * Returns an ordered list of all actions extracted from a builder message,
+ * replacing the previous single-intent contract.
  *
  * Input:  POST { message: string, builder_id: string }
- * Output: { intent, entities, confidence, raw_message }
+ * Output: { actions: ExtractedAction[], raw_context: Record<string, string> }
  *
- * Supported intents:
- *   morning_brief | add_worker | new_job | job_query |
- *   variation     | invoice    | unknown
+ * Confidence < 50 on any action → caller should skip that action.
  *
  * Test messages (must always resolve correctly):
- *   "whats on today"                        → morning_brief
- *   "add Jack hes a carpenter"              → add_worker { name: "Jack", role: "carpenter" }
- *   "new job at 52 Bendigo St help me quote it" → new_job { address: "52 Bendigo St" }
+ *   "whats on today"                        → [{ type: morning_brief, confidence: 90+ }]
+ *   "add Jack hes a carpenter"              → [{ type: add_worker, entities: { name, role } }]
+ *   "new job at 52 Bendigo St help me quote it" → [{ type: create_job, entities: { address } }]
+ *   "New rear extension at 52 Bendigo. Client Sarah Jones. Budget $380k. Tell me assumptions." →
+ *     [create_job(address, client, budget, scope), review_assumptions]
  */
 
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 
-// ─── Types ────────────────────────────────────────────────────
-
-type Intent =
+type ActionType =
   | 'morning_brief'
   | 'add_worker'
-  | 'new_job'
+  | 'create_job'
   | 'job_query'
   | 'variation'
   | 'invoice'
+  | 'email_draft'
+  | 'email_sync_status'
+  | 'simulate_email'
+  | 'margin_query'
+  | 'open_upload_panel'
+  | 'review_assumptions'
   | 'unknown'
 
-interface ClassifyIntentRequest {
+interface ExtractedAction {
+  type: ActionType
+  entities: Record<string, string>
+  confidence: number
+}
+
+interface ExtractActionsRequest {
   message: string
   builder_id: string
 }
 
-interface ClassifyIntentResponse {
-  intent: Intent
-  entities: Record<string, string>
-  confidence: number
-  raw_message: string
+interface ExtractActionsResponse {
+  actions: ExtractedAction[]
+  raw_context: Record<string, string>
 }
-
-// ─── CORS headers ─────────────────────────────────────────────
 
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -57,69 +64,50 @@ function corsResponse(body: string, status = 200): Response {
   })
 }
 
-// ─── System prompt ────────────────────────────────────────────
+const SYSTEM_PROMPT = `You are an action extractor for WorkA — an AI operations manager for Australian residential builders.
 
-const SYSTEM_PROMPT = `You are an intent classifier for WorkA — an AI operations manager for Australian residential builders.
-
-Your only job is to parse a builder's natural-language message and return a JSON object with:
-- intent: one of the 7 values below
-- entities: a flat key/value object with relevant extracted data
-- confidence: a number 0-100 representing your classification certainty
-
-### Intent definitions and entity schemas
-
-1. morning_brief
-   Trigger: asking about the day, today's schedule, what's on, daily summary, briefing
-   Entities: {} (none required)
-   Examples: "whats on today", "give me a rundown", "morning brief", "what do i have today"
-
-2. add_worker
-   Trigger: adding, inviting, creating a new crew member, worker, tradesperson or employee
-   Entities: { name: string, role: string, email?: string, phone?: string }
-   Examples: "add Jack hes a carpenter", "invite Sarah as site manager", "new worker Tom plumber 0412345678"
-
-3. new_job
-   Trigger: creating a new job, project, quoting a new address
-   Entities: { address: string, client_name?: string }
-   Examples: "new job at 52 Bendigo St help me quote it", "start a job for the Hendersons at 10 Oak Ave"
-
-4. job_query
-   Trigger: asking about an existing job, its status, timeline, workers on site
-   Entities: { address?: string, job_id?: string, query_type?: string }
-   Examples: "what's happening on the Miller job", "status of 14 Smith St"
-
-5. variation
-   Trigger: creating, logging or asking about a variation, change order, scope change
-   Entities: { job_address?: string, title?: string, amount?: string, description?: string }
-   Examples: "log a variation on the Oak Ave job — extra retaining wall $2400"
-
-6. invoice
-   Trigger: creating, sending, asking about invoices or payments
-   Entities: { job_address?: string, amount?: string, stage?: string }
-   Examples: "send invoice for slab stage on Bendigo St", "invoice the Smiths $15000 for frame stage"
-
-7. unknown
-   Trigger: anything that doesn't match the above
-   Entities: {}
-
-### Rules
-- ONLY return valid JSON — no prose, no markdown, no explanation
-- If confidence is below 40, set intent to "unknown"
-- For add_worker: normalise role to lowercase (e.g. "Carpenter" → "carpenter")
-- For new_job: extract the cleanest possible address without surrounding words
-- For addresses: strip leading articles ("at", "for", "on") and trailing instructions ("help me quote it")
+Your job is to parse a builder's natural-language message and return ALL actions they are requesting, in priority order, as a JSON object.
 
 ### Output format (strict JSON, no other text)
 {
-  "intent": "<intent_value>",
-  "entities": { "<key>": "<value>" },
-  "confidence": <0-100>
-}`
+  "actions": [
+    {
+      "type": "<action_type>",
+      "entities": { "<key>": "<value>" },
+      "confidence": <0-100>
+    }
+  ],
+  "raw_context": { "<key>": "<value>" }
+}
 
-// ─── Handler ──────────────────────────────────────────────────
+### Action types and entity schemas
+
+1. morning_brief — asking about the day, today's schedule. Entities: {}
+2. add_worker — adding a new crew member. Entities: { name, role, email?, phone? }
+3. create_job — new job/quote at an address. Entities: { address, client_name?, budget_hint?, scope_notes? }
+4. job_query — asking about an existing job. Entities: { address?, job_name?, query_type? }
+5. variation — variation/change order. Entities: { job_address?, title?, amount?, description? }
+6. invoice — invoice/payment query. Entities: { job_address?, amount?, stage? }
+7. email_draft — draft an email. Entities: { recipient_name?, job_reference?, intent_hint? }
+8. email_sync_status — check if email sync is connected. Entities: {}
+9. simulate_email — test email sync. Entities: {}
+10. margin_query — job margin/profit query. Entities: { job_address? }
+11. open_upload_panel — explicit upload request (only if no create_job action). Entities: {}
+12. review_assumptions — asking about unresolved assumptions before quote. Entities: {}
+13. unknown — anything else. Entities: {}
+
+### raw_context
+Capture any context not mapped to an action: budget without create_job, timeline constraints, etc.
+
+### Rules
+- Return ALL actions the builder is requesting — never discard intent
+- Order by logical dependency: create_job before open_upload_panel, create_job before review_assumptions
+- Confidence < 50: include but mark accurately — caller will skip low-confidence actions
+- For create_job: strip leading articles from address; extract budget_hint as numeric string (e.g. "$380,000" → "380000")
+- For add_worker: normalise role to lowercase
+- ONLY return valid JSON — no prose, no markdown, no explanation`
 
 Deno.serve(async (req: Request): Promise<Response> => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS_HEADERS })
   }
@@ -128,9 +116,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return corsResponse(JSON.stringify({ error: 'Method not allowed' }), 405)
   }
 
-  let body: ClassifyIntentRequest
+  let body: ExtractActionsRequest
   try {
-    body = await req.json() as ClassifyIntentRequest
+    body = await req.json() as ExtractActionsRequest
   } catch {
     return corsResponse(JSON.stringify({ error: 'Invalid JSON body' }), 400)
   }
@@ -140,7 +128,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
     return corsResponse(JSON.stringify({ error: 'message is required' }), 400)
   }
-
   if (!builder_id || typeof builder_id !== 'string') {
     return corsResponse(JSON.stringify({ error: 'builder_id is required' }), 400)
   }
@@ -157,52 +144,43 @@ Deno.serve(async (req: Request): Promise<Response> => {
       model: 'claude-sonnet-4-20250514',
       max_tokens: 512,
       system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: message.trim(),
-        },
-      ],
+      messages: [{ role: 'user', content: message.trim() }],
     })
 
     const rawText = response.content[0].type === 'text' ? response.content[0].text : ''
 
-    // Parse the JSON from Claude's response
-    let parsed: { intent: Intent; entities: Record<string, string>; confidence: number }
+    let parsed: ExtractActionsResponse
     try {
-      // Strip any accidental markdown code fences
       const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
-      parsed = JSON.parse(cleaned)
+      parsed = JSON.parse(cleaned) as ExtractActionsResponse
     } catch {
-      // Fallback if Claude returned malformed JSON
       console.error('Failed to parse Claude response:', rawText)
-      parsed = { intent: 'unknown', entities: {}, confidence: 0 }
+      parsed = { actions: [{ type: 'unknown', entities: {}, confidence: 0 }], raw_context: {} }
     }
 
-    // Validate and sanitise
-    const validIntents: Intent[] = [
-      'morning_brief', 'add_worker', 'new_job', 'job_query',
-      'variation', 'invoice', 'unknown',
+    const validTypes: ActionType[] = [
+      'morning_brief', 'add_worker', 'create_job', 'job_query', 'variation',
+      'invoice', 'email_draft', 'email_sync_status', 'simulate_email',
+      'margin_query', 'open_upload_panel', 'review_assumptions', 'unknown',
     ]
-    const intent: Intent = validIntents.includes(parsed.intent) ? parsed.intent : 'unknown'
-    const entities: Record<string, string> = parsed.entities && typeof parsed.entities === 'object'
-      ? parsed.entities as Record<string, string>
-      : {}
-    const confidence = typeof parsed.confidence === 'number'
-      ? Math.min(100, Math.max(0, parsed.confidence))
-      : 0
 
-    const result: ClassifyIntentResponse = {
-      intent,
-      entities,
-      confidence,
-      raw_message: message.trim(),
+    const actions: ExtractedAction[] = Array.isArray(parsed.actions)
+      ? parsed.actions.map((a) => ({
+          type: validTypes.includes(a.type) ? a.type : 'unknown' as ActionType,
+          entities: a.entities && typeof a.entities === 'object' ? a.entities : {},
+          confidence: typeof a.confidence === 'number' ? Math.min(100, Math.max(0, a.confidence)) : 0,
+        }))
+      : [{ type: 'unknown', entities: {}, confidence: 0 }]
+
+    const result: ExtractActionsResponse = {
+      actions,
+      raw_context: parsed.raw_context ?? {},
     }
 
     return corsResponse(JSON.stringify(result))
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error'
-    console.error('classify-intent error:', message)
-    return corsResponse(JSON.stringify({ error: 'Classification failed', detail: message }), 500)
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    console.error('classify-intent error:', msg)
+    return corsResponse(JSON.stringify({ error: 'Extraction failed', detail: msg }), 500)
   }
 })
