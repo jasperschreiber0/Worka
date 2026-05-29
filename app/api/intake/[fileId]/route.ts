@@ -281,8 +281,13 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
           const parsed = JSON.parse(anthropicResponse)
           lineItems = parsed.line_items ?? []
         } catch {
-          // Malformed JSON from AI — treat all as assumptions
-          lineItems = []
+          console.error('[intake] Malformed AI response:', anthropicResponse?.slice(0, 200))
+          emit('error', {
+            message: 'Could not extract line items from the plans — the PDF may be unclear or image-based. Try uploading a higher quality version.',
+          })
+          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+          controller.close()
+          return
         }
 
         // Apply the 3 quantity validation gates

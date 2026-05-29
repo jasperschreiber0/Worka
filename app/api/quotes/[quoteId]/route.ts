@@ -171,8 +171,7 @@ export async function GET(
       return NextResponse.json({ error: lineErr.message }, { status: 500 })
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const jobRow = (quoteRow as any).jobs as { address: string } | null
+    const jobRow = (quoteRow as typeof quoteRow & { jobs: { address: string } | null }).jobs
 
     const quote: DemoQuote = {
       id: quoteRow.id,
@@ -188,8 +187,7 @@ export async function GET(
     }
 
     const items: DemoQuoteLineItem[] = (lineRows ?? []).map((row) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tc = (row as any).trade_categories as { id: number; name: string } | null
+      const tc = (row as typeof row & { trade_categories: { id: number; name: string } | null }).trade_categories
       return {
         id: row.id,
         quote_id: row.quote_id,

@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
+import { addCommEntry } from '@/lib/comms-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
+import { randomUUID } from 'crypto'
 
 // ─── In-memory demo quote status map ─────────────────────────────────────────
-// Shared across requests within the same server process.
 
 const demoQuoteStatusMap: Map<string, { status: string; sent_at: string | null }> = new Map([
   ['demo-quote-id', { status: 'pending_review', sent_at: null }],
+  ['demo-quote-id-toorak', { status: 'pending_review', sent_at: null }],
 ])
 
-// ─── Request body ─────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ConfirmSendBody {
   builder_id: string
@@ -17,18 +20,10 @@ interface ConfirmSendBody {
   body: string
 }
 
-// ─── Response shape ───────────────────────────────────────────────────────────
-
 interface ConfirmSendResponse {
   sent: true
   sent_at: string
   communication_id: string
-}
-
-// ─── Generate a mock communication id ─────────────────────────────────────────
-
-function generateCommunicationId(): string {
-  return `comm-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
 // ─── Route handler ─────────────────────────────────────────────────────────────
@@ -57,11 +52,68 @@ export async function POST(
   }
 
   const sentAt = new Date().toISOString()
-  const communicationId = generateCommunicationId()
-
-  // ── Send via Resend if API key is set ─────────────────────────────────────
-
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const resendApiKey = process.env.RESEND_API_KEY
+
+  // ── Demo path ─────────────────────────────────────────────────────────────
+
+  const isDemoQuote = !supabaseUrl || !serviceRoleKey || quoteId.startsWith('demo-')
+  if (isDemoQuote) {
+    const current = demoQuoteStatusMap.get(quoteId)
+    if (!current) {
+      return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
+    if (current.status !== 'pending_review') {
+      return NextResponse.json(
+        { error: `Quote is already ${current.status} — cannot send again` },
+        { status: 422 }
+      )
+    }
+    demoQuoteStatusMap.set(quoteId, { status: 'sent', sent_at: sentAt })
+    const commId = randomUUID()
+    addCommEntry({
+      builder_id: body.builder_id,
+      job_id: null,
+      direction: 'outbound',
+      channel: 'email',
+      subject: body.subject,
+      body: body.body,
+      from_address: 'quotes@getworka.com',
+      to_address: body.to,
+      linked_variation_id: null,
+      linked_invoice_id: null,
+    })
+    return NextResponse.json<ConfirmSendResponse>({ sent: true, sent_at: sentAt, communication_id: commId })
+  }
+
+  // ── Live path: Supabase ───────────────────────────────────────────────────
+
+  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+
+  // 1. Verify quote exists and belongs to this builder
+  const { data: quoteRow, error: fetchErr } = await supabase
+    .from('quotes')
+    .select('id, status, job_id')
+    .eq('id', quoteId)
+    .eq('builder_id', body.builder_id)
+    .single()
+
+  if (fetchErr || !quoteRow) {
+    return NextResponse.json({ error: 'Quote not found or unauthorized' }, { status: 404 })
+  }
+
+  // 2. Forward-only state guard — only pending_review can be sent
+  if (quoteRow.status !== 'pending_review') {
+    return NextResponse.json(
+      { error: `Quote is already ${quoteRow.status} — cannot send again` },
+      { status: 422 }
+    )
+  }
+
+  // 3. Send via Resend
   if (resendApiKey) {
     try {
       const { Resend } = await import('resend')
@@ -73,44 +125,49 @@ export async function POST(
         text: body.body,
       })
     } catch (err) {
-      console.error('Resend error:', err)
+      console.error('[confirm-send] Resend error:', err)
       return NextResponse.json({ error: 'Failed to send email' }, { status: 502 })
     }
   }
 
-  // ── Update quote status (demo in-memory or Supabase) ──────────────────────
+  // 4. Atomic status update — eq('status', 'pending_review') prevents double-sends
+  const { data: updated } = await supabase
+    .from('quotes')
+    .update({ status: 'sent', sent_at: sentAt })
+    .eq('id', quoteId)
+    .eq('status', 'pending_review')
+    .select('id')
+    .single()
 
-  if (quoteId === 'demo-quote-id') {
-    demoQuoteStatusMap.set(quoteId, { status: 'sent', sent_at: sentAt })
-  } else {
-    // Real Supabase path:
-    // await supabase.from('quotes').update({ status: 'sent', sent_at: sentAt }).eq('id', quoteId)
-    // For now, return 404 for non-demo quotes
-    return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+  if (!updated) {
+    return NextResponse.json(
+      { error: 'Quote status changed concurrently — refresh and try again' },
+      { status: 409 }
+    )
   }
 
-  // ── Log to communication_history (demo in-memory) ─────────────────────────
-  // In a real implementation this would insert into the communication_history table:
-  //
-  // await supabase.from('communication_history').insert({
-  //   job_id: quote.job_id,
-  //   builder_id: body.builder_id,
-  //   direction: 'outbound',
-  //   channel: 'email',
-  //   subject: body.subject,
-  //   body: body.body,
-  //   to_address: body.to,
-  //   from_address: 'quotes@worka.com.au',
-  //   timestamp: sentAt,
-  // })
-  //
-  // For demo mode we skip DB and return the generated id.
+  // 5. Log to communication_history
+  const { data: commRow } = await supabase
+    .from('communication_history')
+    .insert({
+      builder_id: body.builder_id,
+      job_id: quoteRow.job_id ?? null,
+      direction: 'outbound',
+      channel: 'email',
+      subject: body.subject,
+      body: body.body,
+      from_address: 'quotes@getworka.com',
+      to_address: body.to,
+      timestamp: sentAt,
+    })
+    .select('id')
+    .single()
 
-  const response: ConfirmSendResponse = {
+  const communicationId = (commRow as { id: string } | null)?.id ?? randomUUID()
+
+  return NextResponse.json<ConfirmSendResponse>({
     sent: true,
     sent_at: sentAt,
     communication_id: communicationId,
-  }
-
-  return NextResponse.json(response, { status: 200 })
+  })
 }

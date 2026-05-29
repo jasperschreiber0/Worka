@@ -49,6 +49,22 @@ export async function POST(
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
     const resendApiKey = process.env.RESEND_API_KEY
 
+    // If a job_id is provided in live mode, verify it belongs to this builder
+    if (job_id && supabaseUrl && serviceRoleKey) {
+      const supabase = createClient(supabaseUrl, serviceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      })
+      const { data: jobRow } = await supabase
+        .from('jobs')
+        .select('id')
+        .eq('id', job_id)
+        .eq('builder_id', builder_id)
+        .single()
+      if (!jobRow) {
+        return NextResponse.json({ error: 'Job not found or unauthorized' }, { status: 403 })
+      }
+    }
+
     // Step 1: Send via Resend if configured
     if (resendApiKey) {
       const resendRes = await fetch('https://api.resend.com/emails', {
