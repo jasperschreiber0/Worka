@@ -209,10 +209,12 @@ Your job is to parse a builder's natural-language message and return ALL actions
 
 2. add_worker
    Trigger: adding, inviting, or creating a new crew member
+   BULK: if multiple crew members are named in one message, return ONE add_worker action per person
    Entities: { name, role, email?, phone? }
 
 3. create_job
    Trigger: creating a new job, new quote, new project at an address
+   BULK: if the builder lists multiple addresses in one message, return ONE create_job action per address
    Entities: {
      address,           ← required: cleanest possible street address
      client_name?,      ← client's name if mentioned
@@ -1174,6 +1176,8 @@ async function orchestrateActions(
   const messageParts: string[] = []
   const stateChanges: StateChange[] = []
   let accumulated: Partial<ChatResponse> = {}
+  const bulkJobsCreated: { address: string; client?: string }[] = []
+  const bulkMode = actions.filter(a => a.type === 'create_job').length > 1
 
   for (const action of actions) {
     switch (action.type) {
@@ -1269,7 +1273,11 @@ async function orchestrateActions(
             }
           }
 
-          messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Opening that job now.`)
+          if (!bulkMode) {
+            messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Opening that job now.`)
+          } else {
+            bulkJobsCreated.push({ address: result.existing_job.address, client: client_name })
+          }
 
         } else {
           accumulated.job = result.job
@@ -1287,10 +1295,15 @@ async function orchestrateActions(
             await sb.from('jobs').update(dlUpdates).eq('id', result.job.id)
           }
 
-          const budgetStr = budget_hint ? ` Budget noted: ~$${parseInt(budget_hint).toLocaleString('en-AU')}.` : ''
-          const clientStr = client_name ? ` Client: ${client_name}.` : ''
-          messageParts.push(`New job at ${result.job.address} created.${clientStr}${budgetStr} Upload your plans to start the quote.`)
-          events.push({ type: 'open_upload_panel', job_id: result.job.id })
+          if (bulkMode) {
+            // Collect for summary message; don't open a panel for each
+            bulkJobsCreated.push({ address: result.job.address, client: client_name })
+          } else {
+            const budgetStr = budget_hint ? ` Budget noted: ~$${parseInt(budget_hint).toLocaleString('en-AU')}.` : ''
+            const clientStr = client_name ? ` Client: ${client_name}.` : ''
+            messageParts.push(`New job at ${result.job.address} created.${clientStr}${budgetStr} Upload your plans to start the quote.`)
+            events.push({ type: 'open_upload_panel', job_id: result.job.id })
+          }
         }
         break
       }
@@ -1751,6 +1764,16 @@ async function orchestrateActions(
     }
   }
 
+  // Emit bulk job creation summary (suppressed per-job messages above)
+  if (bulkJobsCreated.length > 0) {
+    const jobList = bulkJobsCreated.map(j => `• ${j.address}${j.client ? ` — ${j.client}` : ''}`).join('\n')
+    messageParts.push(
+      `${bulkJobsCreated.length} job${bulkJobsCreated.length === 1 ? '' : 's'} created:\n${jobList}\n\n` +
+      `Open each job from the panel on the right and upload plans via the Files tab to start quoting.`
+    )
+    stateChanges.push({ status: 'saved', label: `${bulkJobsCreated.length} jobs created` })
+  }
+
   // If nothing produced a message (shouldn't happen, but be safe)
   if (messageParts.length === 0) {
     messageParts.push('I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.')
@@ -1866,13 +1889,52 @@ async function routeDemoMessage(
     actions.push({ type: 'morning_brief', entities: {}, confidence: 90 })
   }
 
-  // New job — extract address, client, budget, scope
+  // Bulk job creation — "I've got 3 jobs: 14 Smith St (Henderson), 8 Brown Rd (Caruso), 22 Jones Ave"
+  const bulkJobListMatch = lower.match(/(?:have|got|running|working on|managing|juggling)\s+(?:\d+\s+)?(?:jobs?|projects?|sites?)[:\s,]+(.+)/i)
+  if (bulkJobListMatch && !actions.some(a => a.type === 'create_job')) {
+    const rawList = bulkJobListMatch[1]
+    // Split on commas that are followed by a digit or uppercase (likely address boundary)
+    const entries = rawList.split(/,\s*(?=\d|\b[A-Z])/).map(s => s.trim()).filter(Boolean)
+    if (entries.length > 1) {
+      for (const entry of entries) {
+        const clientMatch = entry.match(/\(([^)]+)\)/)
+        const address = entry.replace(/\([^)]+\)/g, '').replace(/\bfor\b.*/i, '').trim()
+        if (address.length > 3) {
+          actions.push({
+            type: 'create_job',
+            entities: {
+              address,
+              ...(clientMatch ? { client_name: clientMatch[1].trim() } : {}),
+            },
+            confidence: 88,
+          })
+        }
+      }
+    }
+  }
+
+  // Crew bulk add — "My crew: Jack (carpenter), Mick (plumber), Sarah (tiler)"
+  const crewBulkMatch = lower.match(/(?:my crew|my team|my workers|my staff)[:\s]+(.+)/i)
+  if (crewBulkMatch && !actions.some(a => a.type === 'add_worker')) {
+    const crewList = crewBulkMatch[1]
+    const crewEntries = crewList.split(/,\s*/).map(s => s.trim()).filter(Boolean)
+    for (const entry of crewEntries) {
+      const roleMatch = entry.match(/\(([^)]+)\)/)
+      const rawName = entry.replace(/\([^)]+\)/g, '').trim()
+      if (rawName && roleMatch) {
+        const name = rawName.charAt(0).toUpperCase() + rawName.slice(1)
+        actions.push({ type: 'add_worker', entities: { name, role: roleMatch[1].toLowerCase() }, confidence: 88 })
+      }
+    }
+  }
+
+  // New job — extract address, client, budget, scope (single job)
   const newJobMatch = lower.match(/(?:new\s+(?:job|rear|kitchen|bathroom|renovation|extension|project|build)\s+at|job\s+at)\s+(.+?)(?:\s+for|\s+client|\s+budget|\s+help|\s+quote|\s+start|,|$)/i)
   const forceMatch = lower.includes('create job anyway')
-  if (newJobMatch || forceMatch) {
+  if ((newJobMatch || forceMatch) && !actions.some(a => a.type === 'create_job')) {
     const rawAddress = newJobMatch ? newJobMatch[1].trim() : 'unknown address'
     // Extract client name
-    const clientMatch = message.match(/client\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)
+    const clientMatch = message.match(/(?:for|client)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)
     // Extract budget hint (strip non-numeric)
     const budgetMatch = message.match(/(?:budget|around|approx\.?|~)\s*\$?([\d,]+)/i)
     // Extract scope
@@ -1909,10 +1971,10 @@ async function routeDemoMessage(
     actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
   }
 
-  // Add worker — require "add [Name]" followed by a role indicator to avoid false matches
+  // Add worker — single add; skip if crew bulk already matched
   const addMatch = lower.match(/(?:^|\s)add\s+([a-z]+)(?:\s|,)/)
   const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|they(?:'re|re|'re)\s+a|a)\s+(\w+)/i)
-  const isAddWorkerIntent = addMatch && roleMatch && !lower.includes('task') && !lower.includes('rate') && !lower.includes('price') && !lower.includes('database')
+  const isAddWorkerIntent = addMatch && roleMatch && !lower.includes('task') && !lower.includes('rate') && !lower.includes('price') && !lower.includes('database') && !actions.some(a => a.type === 'add_worker')
   if (isAddWorkerIntent) {
     const demoName = addMatch[1].charAt(0).toUpperCase() + addMatch[1].slice(1)
     const demoRole = roleMatch ? roleMatch[1].toLowerCase() : 'worker'
