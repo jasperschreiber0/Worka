@@ -253,6 +253,11 @@ export default function ChatInterface({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
+  // Focus input on mount so user can start typing immediately
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
   // When a quoteId is passed from the snapshot panel's "View quote" button,
   // open QuoteView immediately and notify the parent that we consumed it.
   useEffect(() => {
@@ -998,6 +1003,7 @@ export default function ChatInterface({
             address: uploadPanel.job.address,
             status: uploadPanel.job.status,
           }}
+          builderId={builderId}
           onIntakeComplete={handleIntakeComplete}
         />
       )}

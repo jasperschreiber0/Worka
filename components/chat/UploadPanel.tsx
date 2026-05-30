@@ -17,6 +17,7 @@ export interface UploadPanelProps {
   isOpen: boolean
   onClose: () => void
   job: UploadPanelJob
+  builderId: string
   onIntakeComplete?: (quoteId: string, assumptionCount: number) => void
 }
 
@@ -48,8 +49,6 @@ const ACCEPTED_MIME_TYPES = [
   'image/heif',
 ]
 
-const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
-
 function isAcceptedFile(file: File): boolean {
   if (ACCEPTED_MIME_TYPES.includes(file.type)) return true
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
@@ -58,7 +57,7 @@ function isAcceptedFile(file: File): boolean {
 
 // ─── Inner component (rendered inside portal) ─────────────────────────────────
 
-function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPanelProps) {
+function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete }: UploadPanelProps) {
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -209,7 +208,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
       const formData = new FormData()
       formData.append('file', selectedFile.file)
       formData.append('job_id', job.id)
-      formData.append('builder_id', DEMO_BUILDER_ID)
+      formData.append('builder_id', builderId)
 
       const res = await fetch('/api/upload', {
         method: 'POST',
@@ -331,7 +330,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
             <IntakeProgress
               fileId={uploadedFile.id}
               jobId={job.id}
-              builderId={DEMO_BUILDER_ID}
+              builderId={builderId}
               filename={uploadedFile.filename}
               onComplete={handleIntakeComplete}
               onError={handleIntakeError}
