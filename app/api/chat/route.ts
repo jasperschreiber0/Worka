@@ -1248,9 +1248,31 @@ async function orchestrateActions(
       }
 
       case 'job_query': {
-        const result = handleJobQuery(action.entities)
-        if (result.message) messageParts.push(result.message)
-        if (result.event) events.push(result.event)
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (sbUrl && sbKey) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const addressHint = action.entities.address ?? action.entities.job_name ?? ''
+          let dbQuery = sb.from('jobs').select('id, address, status, job_type, notes').eq('builder_id', ctx.builder_id)
+          if (addressHint) dbQuery = dbQuery.ilike('address', `%${addressHint}%`)
+          const { data: matchedJobs } = await dbQuery.order('created_at', { ascending: false }).limit(10)
+
+          if (!matchedJobs || matchedJobs.length === 0) {
+            messageParts.push(addressHint ? `No jobs found matching "${addressHint}".` : "You don't have any jobs yet. Type \"new job at [address]\" to get started.")
+          } else if (matchedJobs.length === 1) {
+            const j = matchedJobs[0] as { id: string; address: string; status: string }
+            events.push({ type: 'open_job_snapshot', job_id: j.id, job_address: j.address, job_status: j.status })
+            messageParts.push(`Here's the ${j.address} job (${j.status}).`)
+          } else {
+            const list = (matchedJobs as Array<{ id: string; address: string; status: string }>).map(j => `• ${j.address} — ${j.status}`).join('\n')
+            messageParts.push(`Found ${matchedJobs.length} jobs${addressHint ? ` matching "${addressHint}"` : ''}:\n${list}`)
+          }
+        } else {
+          const result = handleJobQuery(action.entities)
+          if (result.message) messageParts.push(result.message)
+          if (result.event) events.push(result.event)
+        }
         break
       }
 
@@ -1622,8 +1644,42 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       return NextResponse.json(result)
     }
 
-    // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
     const lowerMsg = message.toLowerCase()
+
+    // Pre-extract fast path: job listing bypasses LLM extraction
+    const isJobListQuery =
+      (lowerMsg.includes('my jobs') || lowerMsg.includes('list jobs') || lowerMsg.includes('show jobs') ||
+       lowerMsg.includes('all jobs') || lowerMsg.includes('what jobs') || lowerMsg.includes('jobs do i') ||
+       (lowerMsg.includes('list') && lowerMsg.includes('job')) || (lowerMsg.includes('show') && lowerMsg.includes('job') && !lowerMsg.includes('new job')))
+
+    if (isJobListQuery) {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (supabaseUrl && serviceRoleKey) {
+        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+        const { data: jobs } = await supabase
+          .from('jobs')
+          .select('id, address, status, created_at')
+          .eq('builder_id', builderId)
+          .order('created_at', { ascending: false })
+          .limit(20)
+        if (jobs && jobs.length > 0) {
+          const lines = (jobs as Array<{ id: string; address: string; status: string }>)
+            .map(j => `• ${j.address} — ${j.status}`)
+            .join('\n')
+          return NextResponse.json({
+            intent: 'job_query',
+            message: `You have ${jobs.length} job${jobs.length === 1 ? '' : 's'}:\n${lines}\n\nAsk me about any of them by name or address.`,
+          })
+        }
+        return NextResponse.json({
+          intent: 'job_query',
+          message: "You don't have any jobs yet. Type \"new job at [address]\" to get started.",
+        })
+      }
+    }
+
+    // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
     if (
       lowerMsg.includes('staff') ||
       lowerMsg.includes('my workers') ||

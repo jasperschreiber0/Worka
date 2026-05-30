@@ -27,7 +27,7 @@ export interface Message {
 interface ChatMessageProps {
   message: Message
   onOpenJob?: (jobId: string) => void
-  onCreateAnyway?: () => void
+  onCreateAnyway?: (address: string) => void
   onAction?: (action: string, entityId?: string, entityType?: string) => void
   onVariationApprove?: (variationId: string) => void
   onVariationReject?: (variationId: string) => void

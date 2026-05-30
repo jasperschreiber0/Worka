@@ -831,9 +831,9 @@ export default function ChatInterface({
     }
   }, [onJobMention])
 
-  // Handler: create job anyway (skip duplicate check)
-  const handleCreateAnyway = useCallback(() => {
-    sendMessage('create job anyway', true)
+  // Handler: create job anyway (skip duplicate check) — pass address so the API knows what to create
+  const handleCreateAnyway = useCallback((address: string) => {
+    sendMessage(`new job at ${address}`, true)
   }, [sendMessage])
 
   // Fire any pending action that needed sendMessage (e.g. "Review variations" from MorningBriefCard)
