@@ -148,8 +148,14 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
 
   // Render the active tab content
   function renderTabContent() {
-    if (loading || !snapshot) {
-      return <SkeletonSection />
+    if (loading) return <SkeletonSection />
+    if (!snapshot) {
+      return (
+        <div className="p-6 text-center text-slate-400 text-sm">
+          <p>Job details not available yet.</p>
+          <p className="mt-1">Plans are still being processed.</p>
+        </div>
+      )
     }
 
     switch (activeTab) {
