@@ -96,6 +96,7 @@ interface ChatApiResponse {
   variation?: DemoVariation
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
+  state_changes?: import('@/app/api/chat/route').StateChange[]
   event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
   events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }>
 }
@@ -252,6 +253,11 @@ export default function ChatInterface({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
+  // Focus input on mount so user can start typing immediately
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
   // When a quoteId is passed from the snapshot panel's "View quote" button,
   // open QuoteView immediately and notify the parent that we consumed it.
   useEffect(() => {
@@ -294,6 +300,8 @@ export default function ChatInterface({
           notes: null,
           budget_estimate: null,
           scope_notes: null,
+          quote_deadline: null,
+          client_deadline: null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         },
@@ -589,6 +597,7 @@ export default function ChatInterface({
         duplicateJob,
         variation: variationCard,
         marginJobs: data.margin_jobs,
+        stateChanges: data.state_changes,
         timestamp: new Date(),
       }
 

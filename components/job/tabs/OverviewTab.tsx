@@ -6,9 +6,11 @@ import { proofEventColour, type DemoProofEvent, type ProofEventColour } from '@/
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
+import type { JobRisk } from '@/lib/job-snapshot-demo'
+
 interface OverviewTabProps {
   overview: JobSnapshot['overview']
-  job: JobSnapshot['job']
+  job: JobSnapshot['job'] & { risks?: JobRisk[] }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -108,6 +110,23 @@ function ProofFeed({ jobId }: { jobId: string }) {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
+function riskColour(level: 'high' | 'medium' | 'low'): string {
+  if (level === 'high') return 'bg-red-50 border-red-200 text-red-700'
+  if (level === 'medium') return 'bg-amber-50 border-amber-200 text-amber-700'
+  return 'bg-slate-50 border-slate-200 text-slate-600'
+}
+
+function formatDeadline(isoDate: string): string {
+  const d = new Date(isoDate)
+  const now = new Date()
+  const diffDays = Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
+  const label = d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })
+  if (diffDays < 0) return `${label} (overdue)`
+  if (diffDays === 0) return `${label} (today)`
+  if (diffDays === 1) return `${label} (tomorrow)`
+  return `${label} (${diffDays} days)`
+}
+
 export default function OverviewTab({ overview, job }: OverviewTabProps) {
   const statusColour =
     job.status === 'active'
@@ -118,28 +137,84 @@ export default function OverviewTab({ overview, job }: OverviewTabProps) {
           ? 'bg-amber-100 text-amber-700'
           : 'bg-slate-100 text-slate-600'
 
+  const hasDeadlines = job.quote_deadline || job.client_deadline
+  const hasFinancials = overview.spend_to_date !== null || overview.margin_to_date !== null || job.budget_estimate !== null
+
   return (
     <div className="p-4 space-y-5">
       {/* Status */}
       <Section label="Status">
         <div className="flex items-center gap-2">
-          <span
-            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${statusColour}`}
-          >
+          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${statusColour}`}>
             {capitalise(job.status)}
           </span>
           <span className="text-sm text-slate-600">{overview.started}</span>
         </div>
       </Section>
 
+      {/* Risks */}
+      {job.risks && job.risks.length > 0 && (
+        <Section label="Risks">
+          <div className="space-y-1.5">
+            {job.risks.map((risk, i) => (
+              <div key={i} className={`flex items-start gap-2 rounded-lg border px-3 py-2 ${riskColour(risk.level)}`}>
+                <span className="text-xs font-semibold uppercase tracking-wide flex-shrink-0 mt-0.5 w-10">
+                  {risk.level}
+                </span>
+                <p className="text-xs leading-snug">{risk.message}</p>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Deadlines */}
+      {hasDeadlines && (
+        <Section label="Deadlines">
+          <div className="space-y-1.5">
+            {job.quote_deadline && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm text-slate-500">Quote due</span>
+                <span className={`text-sm font-medium ${new Date(job.quote_deadline) < new Date() ? 'text-red-600' : 'text-slate-800'}`}>
+                  {formatDeadline(job.quote_deadline)}
+                </span>
+              </div>
+            )}
+            {job.client_deadline && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm text-slate-500">Client deadline</span>
+                <span className="text-sm font-medium text-slate-800">
+                  {formatDeadline(job.client_deadline)}
+                </span>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      {/* Budget & scope */}
+      {(job.budget_estimate || job.scope_notes) && (
+        <Section label="Budget & scope">
+          <div className="space-y-1.5">
+            {job.budget_estimate !== null && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm text-slate-500">Budget target</span>
+                <span className="text-sm font-medium text-slate-800">{formatCurrency(job.budget_estimate)}</span>
+              </div>
+            )}
+            {job.scope_notes && (
+              <p className="text-sm text-slate-700 whitespace-pre-line">{job.scope_notes}</p>
+            )}
+          </div>
+        </Section>
+      )}
+
       {/* Crew */}
       <Section label="Crew on this job">
         {overview.workers_on_job.length > 0 ? (
           <ul className="space-y-1">
             {overview.workers_on_job.map((worker) => (
-              <li key={worker} className="text-sm text-slate-700">
-                {worker}
-              </li>
+              <li key={worker} className="text-sm text-slate-700">{worker}</li>
             ))}
           </ul>
         ) : (
@@ -153,25 +228,31 @@ export default function OverviewTab({ overview, job }: OverviewTabProps) {
       </Section>
 
       {/* Financials */}
-      <Section label="Financials">
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-          <span className="text-sm text-slate-500">Spend to date</span>
-          <span className="text-sm text-slate-700 font-medium">
-            {overview.spend_to_date !== null ? formatCurrency(overview.spend_to_date) : '—'}
-          </span>
-          <span className="text-sm text-slate-500">Margin</span>
-          <span className="text-sm text-slate-700 font-medium">
-            {overview.margin_to_date !== null ? `${overview.margin_to_date}%` : '—'}
-          </span>
-        </div>
-      </Section>
+      {hasFinancials && (
+        <Section label="Financials">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+            {overview.spend_to_date !== null && (
+              <>
+                <span className="text-sm text-slate-500">Spend to date</span>
+                <span className="text-sm text-slate-700 font-medium">{formatCurrency(overview.spend_to_date)}</span>
+              </>
+            )}
+            {overview.margin_to_date !== null && (
+              <>
+                <span className="text-sm text-slate-500">Margin</span>
+                <span className="text-sm text-slate-700 font-medium">{overview.margin_to_date}%</span>
+              </>
+            )}
+          </div>
+        </Section>
+      )}
 
       {/* Notes */}
       <Section label="Notes">
         {overview.notes ? (
           <p className="text-sm text-slate-700 whitespace-pre-line">{overview.notes}</p>
         ) : (
-          <p className="text-sm text-slate-400">No notes yet</p>
+          <p className="text-sm text-slate-400">No notes</p>
         )}
       </Section>
 

@@ -160,13 +160,14 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
 
     switch (activeTab) {
       case 'overview':
-        return <OverviewTab overview={snapshot.overview} job={snapshot.job} />
+        return <OverviewTab overview={snapshot.overview} job={{ ...snapshot.job, risks: snapshot.risks }} />
       case 'quote':
         return (
           <QuoteTab
             quote={snapshot.quote}
             onViewQuote={onViewQuote ?? (() => {})}
             onActivateJob={handleActivateJob}
+            onStartQuote={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
           />
         )
       case 'variations':

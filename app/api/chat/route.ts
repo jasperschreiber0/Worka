@@ -119,6 +119,11 @@ export interface MarginJob {
   variation_impact: number
 }
 
+export interface StateChange {
+  status: 'saved' | 'found' | 'warning' | 'blocked' | 'info'
+  label: string
+}
+
 interface ChatResponse {
   intent: string
   message: string
@@ -131,6 +136,7 @@ interface ChatResponse {
   variation?: DemoVariation
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
+  state_changes?: StateChange[]
   // Single event preserved for backwards compat; primary path uses events[]
   event?: ChatEvent
   events?: ChatEvent[]
@@ -206,10 +212,12 @@ Your job is to parse a builder's natural-language message and return ALL actions
 3. create_job
    Trigger: creating a new job, new quote, new project at an address
    Entities: {
-     address,          ← required: cleanest possible street address
-     client_name?,     ← client's name if mentioned
-     budget_hint?,     ← stated budget e.g. "around $380,000" → "380000"
-     scope_notes?      ← any scope description e.g. "rear extension", "kitchen reno"
+     address,           ← required: cleanest possible street address
+     client_name?,      ← client's name if mentioned
+     budget_hint?,      ← stated budget e.g. "around $380,000" → "380000"
+     scope_notes?,      ← any scope description e.g. "rear extension", "kitchen reno"
+     quote_deadline?,   ← ISO date YYYY-MM-DD if builder states when quote is needed (e.g. "by Friday", "before Easter"). Today: REPLACE_TODAY
+     client_deadline?,  ← ISO date YYYY-MM-DD if client has a hard deadline (e.g. "council approval next week"). Today: REPLACE_TODAY
    }
 
 4. job_query
@@ -285,10 +293,12 @@ async function extractActions(
   message: string,
   anthropic: Anthropic
 ): Promise<ExtractedAction[]> {
+  const todayIso = new Date().toISOString().split('T')[0]
+  const systemPrompt = EXTRACT_ACTIONS_PROMPT.replace(/REPLACE_TODAY/g, todayIso)
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 512,
-    system: EXTRACT_ACTIONS_PROMPT,
+    system: systemPrompt,
     messages: [{ role: 'user', content: message }],
   })
 
@@ -420,6 +430,31 @@ async function getLiveMorningBrief(
             : `${count} variations on ${address} are waiting for approval, totalling ${formatAUD(totalAmount)}.`,
         action: 'Review variations',
         entity_id: jobId,
+        entity_type: 'job',
+      })
+    }
+  }
+
+  // Upcoming quote deadlines
+  const twoDaysFromNow = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+  const { data: upcomingDeadlines } = await supabase
+    .from('jobs')
+    .select('id, address, quote_deadline, status')
+    .eq('builder_id', builderId)
+    .not('quote_deadline', 'is', null)
+    .lte('quote_deadline', twoDaysFromNow)
+    .in('status', ['quoting', 'quoted'])
+
+  if (upcomingDeadlines && upcomingDeadlines.length > 0) {
+    for (const job of upcomingDeadlines as Array<{ id: string; address: string; quote_deadline: string; status: string }>) {
+      const deadline = new Date(job.quote_deadline)
+      const hoursLeft = (deadline.getTime() - Date.now()) / (1000 * 60 * 60)
+      const urgency = hoursLeft < 0 ? 'OVERDUE' : hoursLeft < 24 ? `${Math.round(hoursLeft)}h left` : `${Math.round(hoursLeft / 24)} day(s)`
+      alerts.push({
+        priority: hoursLeft < 24 ? 'high' : 'medium',
+        message: `Quote deadline for ${job.address} — ${urgency}.`,
+        action: hoursLeft < 0 ? 'Check quote status' : 'Review quote',
+        entity_id: job.id,
         entity_type: 'job',
       })
     }
@@ -729,6 +764,8 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
         notes: null,
         budget_estimate: null,
         scope_notes: null,
+        quote_deadline: null,
+        client_deadline: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }
@@ -747,6 +784,8 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
     notes: client_name ? `Client: ${client_name}` : null,
     budget_estimate: budgetValue,
     scope_notes: scope_notes ?? null,
+    quote_deadline: null,
+    client_deadline: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }
@@ -1095,6 +1134,7 @@ async function orchestrateActions(
 ): Promise<ChatResponse> {
   const events: ChatEvent[] = []
   const messageParts: string[] = []
+  const stateChanges: StateChange[] = []
   let accumulated: Partial<ChatResponse> = {}
 
   for (const action of actions) {
@@ -1127,7 +1167,7 @@ async function orchestrateActions(
       }
 
       case 'create_job': {
-        const { address, client_name, budget_hint, scope_notes } = action.entities
+        const { address, client_name, budget_hint, scope_notes, quote_deadline, client_deadline } = action.entities
         if (!address) {
           messageParts.push('Which address is this job at? For example: \'new job at 14 Smith St Fitzroy\'')
           break
@@ -1146,31 +1186,44 @@ async function orchestrateActions(
         ctx.resolved_job = result.job
         ctx.is_duplicate = result.is_duplicate
 
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
         if (result.is_duplicate && result.existing_job) {
           accumulated.duplicate = true
           accumulated.existing_job = result.existing_job
           accumulated.job = result.existing_job
-          // Surface the duplicate warning — but do NOT stop. Continue remaining actions.
+          stateChanges.push({ status: 'found', label: `Existing job found at ${result.existing_job.address} (${result.existing_job.status})` })
           events.push({ type: 'show_duplicate_warning', job_id: result.existing_job.id })
 
           // Write extracted context back to the existing job — only update null fields
-          // to avoid overwriting data the builder previously set deliberately.
-          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-          if ((client_name || budget_hint || scope_notes) && sbUrl && sbKey) {
+          if ((client_name || budget_hint || scope_notes || quote_deadline || client_deadline) && sbUrl && sbKey) {
             const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
             const { data: existingRow } = await sb
-              .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', result.existing_job.id).single()
+              .from('jobs').select('budget_estimate, scope_notes, notes, quote_deadline, client_deadline').eq('id', result.existing_job.id).single()
             if (existingRow) {
               const updates: Record<string, unknown> = {}
               if (budget_hint && !existingRow.budget_estimate) {
                 updates.budget_estimate = parseFloat(budget_hint.replace(/,/g, ''))
+                stateChanges.push({ status: 'saved', label: `Budget saved ($${parseInt(budget_hint).toLocaleString('en-AU')})` })
+              } else if (budget_hint) {
+                stateChanges.push({ status: 'info', label: `Budget already set — not overwritten` })
               }
               if (scope_notes && !existingRow.scope_notes) {
                 updates.scope_notes = scope_notes
+                stateChanges.push({ status: 'saved', label: 'Scope notes updated' })
               }
               if (client_name && !existingRow.notes) {
                 updates.notes = `Client: ${client_name}`
+                stateChanges.push({ status: 'saved', label: `Client linked (${client_name})` })
+              }
+              if (quote_deadline && !existingRow.quote_deadline) {
+                updates.quote_deadline = quote_deadline
+                stateChanges.push({ status: 'saved', label: `Quote deadline set (${quote_deadline})` })
+              }
+              if (client_deadline && !existingRow.client_deadline) {
+                updates.client_deadline = client_deadline
+                stateChanges.push({ status: 'saved', label: `Client deadline noted (${client_deadline})` })
               }
               if (Object.keys(updates).length > 0) {
                 await sb.from('jobs').update(updates).eq('id', result.existing_job.id)
@@ -1178,14 +1231,24 @@ async function orchestrateActions(
             }
           }
 
-          const contextHints: string[] = []
-          if (client_name) contextHints.push(`client ${client_name} noted`)
-          if (budget_hint) contextHints.push(`budget ~$${budget_hint} noted`)
-          if (scope_notes) contextHints.push(`scope noted`)
-          const hintStr = contextHints.length > 0 ? ` (${contextHints.join(', ')})` : ''
-          messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status})${hintStr}. Opening that job now.`)
+          messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Opening that job now.`)
+
         } else {
           accumulated.job = result.job
+          stateChanges.push({ status: 'saved', label: `New job created at ${result.job.address}` })
+          if (client_name) stateChanges.push({ status: 'saved', label: `Client linked (${client_name})` })
+          if (budget_hint) stateChanges.push({ status: 'saved', label: `Budget saved ($${parseInt(budget_hint).toLocaleString('en-AU')})` })
+          if (scope_notes) stateChanges.push({ status: 'saved', label: 'Scope notes saved' })
+
+          // Persist deadline on the new job
+          if ((quote_deadline || client_deadline) && sbUrl && sbKey) {
+            const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+            const dlUpdates: Record<string, unknown> = {}
+            if (quote_deadline) { dlUpdates.quote_deadline = quote_deadline; stateChanges.push({ status: 'saved', label: `Quote deadline set (${quote_deadline})` }) }
+            if (client_deadline) { dlUpdates.client_deadline = client_deadline; stateChanges.push({ status: 'saved', label: `Client deadline noted (${client_deadline})` }) }
+            await sb.from('jobs').update(dlUpdates).eq('id', result.job.id)
+          }
+
           const budgetStr = budget_hint ? ` Budget noted: ~$${parseInt(budget_hint).toLocaleString('en-AU')}.` : ''
           const clientStr = client_name ? ` Client: ${client_name}.` : ''
           messageParts.push(`New job at ${result.job.address} created.${clientStr}${budgetStr} Upload your plans to start the quote.`)
@@ -1212,6 +1275,45 @@ async function orchestrateActions(
         if (jobId && sbUrl && sbKey) {
           const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
 
+          // Step 1: Verify files actually exist (don't trust the builder's statement)
+          const { data: uploadedFiles } = await sb
+            .from('files')
+            .select('id, filename, intake_status')
+            .eq('job_id', jobId)
+            .order('created_at', { ascending: false })
+
+          if (!uploadedFiles || uploadedFiles.length === 0) {
+            stateChanges.push({ status: 'warning', label: 'No plans found in database' })
+            messageParts.push("I can't find any uploaded plans for this job. Use the upload button to add them, then I'll extract quantities and flag every assumption.")
+            break
+          }
+
+          const processing = uploadedFiles.filter((f: { intake_status: string }) => f.intake_status === 'processing')
+          const uploaded = uploadedFiles.filter((f: { intake_status: string }) => f.intake_status === 'uploaded')
+          const extracted = uploadedFiles.filter((f: { intake_status: string }) => f.intake_status === 'extracted')
+          const failed = uploadedFiles.filter((f: { intake_status: string }) => f.intake_status === 'failed')
+
+          stateChanges.push({ status: 'found', label: `${uploadedFiles.length} plan${uploadedFiles.length > 1 ? 's' : ''} found` })
+
+          if (processing.length > 0) {
+            stateChanges.push({ status: 'info', label: `${processing.length} plan${processing.length > 1 ? 's' : ''} currently processing` })
+            messageParts.push(`Plans found and processing now — I'll flag assumptions as soon as extraction completes.`)
+            break
+          }
+
+          if (uploaded.length > 0 && extracted.length === 0) {
+            stateChanges.push({ status: 'warning', label: 'Plans uploaded but intake has not started' })
+            messageParts.push(`Plans uploaded but not yet processed. The intake pipeline hasn't run — this usually starts automatically after upload. Try re-uploading if it's been more than a few minutes.`)
+            break
+          }
+
+          if (failed.length > 0 && extracted.length === 0) {
+            stateChanges.push({ status: 'blocked', label: `${failed.length} plan${failed.length > 1 ? 's' : ''} failed to process` })
+            messageParts.push(`Plan processing failed. Try re-uploading the file — if the problem persists, check that the PDF is not encrypted or corrupted.`)
+            break
+          }
+
+          // Step 2: Check for a draft quote
           const { data: quoteRow } = await sb
             .from('quotes')
             .select('id, status')
@@ -1222,6 +1324,7 @@ async function orchestrateActions(
             .maybeSingle()
 
           if (quoteRow) {
+            stateChanges.push({ status: 'found', label: 'Draft quote exists' })
             const { data: items } = await sb
               .from('quote_line_items')
               .select('description, confidence')
@@ -1230,16 +1333,18 @@ async function orchestrateActions(
               .eq('assumption_status', 'unresolved')
 
             if (items && items.length > 0) {
-              const list = items.map(i => `• ${i.description}`).join('\n')
+              stateChanges.push({ status: 'blocked', label: `${items.length} assumption${items.length === 1 ? '' : 's'} blocking quote` })
+              const list = items.map((i: { description: string }) => `• ${i.description}`).join('\n')
               messageParts.push(`${items.length} assumption${items.length === 1 ? '' : 's'} need your input before the quote can be sent:\n${list}`)
             } else {
+              stateChanges.push({ status: 'info', label: 'No unresolved assumptions — quote ready' })
               messageParts.push('No unresolved assumptions — quote is clear to send once you\'re happy with the numbers.')
             }
           } else {
-            messageParts.push("No draft quote yet for this job. Once the plans are processed, I'll flag every assumption that needs your input.")
+            stateChanges.push({ status: 'warning', label: 'No draft quote yet — plans may still be processing' })
+            messageParts.push("Plans found but no draft quote yet. Once extraction completes, I'll flag every assumption that needs your input.")
           }
         } else if (jobId) {
-          // Demo mode — no DB available
           messageParts.push('I\'ll surface any unresolved assumptions once your plans are processed.')
         } else {
           messageParts.push('Upload the plans first and I\'ll flag every assumption that needs your input before the quote can be issued.')
@@ -1373,8 +1478,8 @@ async function orchestrateActions(
     intent: actions.map((a) => a.type).join('+'),
     message: messageParts.join('\n\n'),
     events: events.length > 0 ? events : undefined,
-    // Backwards compat: expose first event as event field for existing UI code
     event: events.length > 0 ? events[0] : undefined,
+    state_changes: stateChanges.length > 0 ? stateChanges : undefined,
     ...accumulated,
   }
 }

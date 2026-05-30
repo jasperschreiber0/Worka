@@ -120,6 +120,46 @@ export async function GET(
   timestamps.sort((a: string, b: string) => new Date(b).getTime() - new Date(a).getTime())
   const lastActivity = timestamps[0] ? daysAgo(timestamps[0]) : 'No activity yet'
 
+  // ── Risk engine (deterministic, no AI) ───────────────────────────────────
+  const risks: JobSnapshot['risks'] = []
+  const now = Date.now()
+
+  if (job.quote_deadline) {
+    const deadline = new Date(job.quote_deadline).getTime()
+    const hoursLeft = (deadline - now) / (1000 * 60 * 60)
+    if (hoursLeft < 0) {
+      risks.push({ level: 'high', message: `Quote deadline passed ${Math.abs(Math.round(hoursLeft / 24))} day(s) ago.` })
+    } else if (hoursLeft <= 48 && !quote) {
+      risks.push({ level: 'high', message: `Quote needed in ${Math.round(hoursLeft)}h — no draft exists yet.` })
+    } else if (hoursLeft <= 48 && quote && unresolvedCount > 0) {
+      risks.push({ level: 'high', message: `Quote due in ${Math.round(hoursLeft)}h — ${unresolvedCount} assumption${unresolvedCount > 1 ? 's' : ''} still unresolved.` })
+    } else if (hoursLeft <= 96) {
+      risks.push({ level: 'medium', message: `Quote deadline in ${Math.round(hoursLeft / 24)} day(s).` })
+    }
+  }
+
+  if (quote && unresolvedCount > 0) {
+    risks.push({ level: 'high', message: `${unresolvedCount} assumption${unresolvedCount > 1 ? 's' : ''} unresolved — quote cannot advance to pending review.` })
+  }
+
+  const typedFiles = (files ?? []) as Array<{ intake_status: string }>
+  const unprocessed = typedFiles.filter(f => f.intake_status === 'uploaded' || f.intake_status === 'failed')
+  if (unprocessed.length > 0) {
+    risks.push({ level: 'medium', message: `${unprocessed.length} plan${unprocessed.length > 1 ? 's' : ''} uploaded but not yet processed.` })
+  }
+
+  if (job.budget_estimate && typedFiles.length === 0) {
+    risks.push({ level: 'medium', message: 'Budget noted but no plans uploaded — quote cannot be generated.' })
+  }
+
+  if (!quote && !job.budget_estimate && typedFiles.length === 0) {
+    risks.push({ level: 'medium', message: 'No plans, no budget, no quote — upload plans to start.' })
+  }
+
+  if (!job.clients?.email) {
+    risks.push({ level: 'low', message: 'Client email missing — required to send quote.' })
+  }
+
   const snapshot: JobSnapshot = {
     job: {
       id: job.id,
@@ -131,6 +171,10 @@ export async function GET(
       client_phone: job.clients?.phone ?? null,
       created_at: daysAgo(job.created_at),
       days_active: Math.floor((Date.now() - new Date(job.created_at).getTime()) / (1000 * 60 * 60 * 24)),
+      budget_estimate: job.budget_estimate ?? null,
+      scope_notes: job.scope_notes ?? null,
+      quote_deadline: job.quote_deadline ?? null,
+      client_deadline: job.client_deadline ?? null,
     },
     overview: {
       started: daysAgo(job.created_at),
@@ -186,6 +230,7 @@ export async function GET(
         timestamp: daysAgo(c.timestamp),
       })),
     },
+    risks,
   }
 
   return NextResponse.json({ snapshot })

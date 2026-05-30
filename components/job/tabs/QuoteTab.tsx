@@ -9,6 +9,7 @@ interface QuoteTabProps {
   quote: JobSnapshot['quote']
   onViewQuote: (quoteId: string) => void
   onActivateJob?: (quoteId: string) => void
+  onStartQuote?: () => void
   userRole?: import('@/lib/auth/role-guard').PermissionRole
 }
 
@@ -48,20 +49,18 @@ function confidenceColour(score: number): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function QuoteTab({ quote, onViewQuote, onActivateJob, userRole = 'owner' }: QuoteTabProps) {
+export default function QuoteTab({ quote, onViewQuote, onActivateJob, onStartQuote, userRole = 'owner' }: QuoteTabProps) {
   // ── No quote ───────────────────────────────────────────────────────────────
   if (!quote) {
     return (
       <div className="p-4 space-y-4">
-        <p className="text-sm text-slate-500">No quote yet</p>
+        <p className="text-sm text-slate-500">No quote yet — upload your plans to get started.</p>
         <button
           type="button"
           className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors"
-          onClick={() => {
-            // Session 11: wire to quote creation flow
-          }}
+          onClick={onStartQuote}
         >
-          Start a quote
+          Upload plans & start quote
           <svg
             className="w-3.5 h-3.5"
             fill="none"

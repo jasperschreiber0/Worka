@@ -3,16 +3,7 @@ import type { File as DBFile, FileType, FileIntakeStatus } from '@/lib/types/dat
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MAX_FILE_SIZE = 52428800 // 50MB
-
-const ACCEPTED_MIME_TYPES = new Set([
-  'application/pdf',
-  'image/jpeg',
-  'image/png',
-  'image/heic',
-  'image/heif',
-  'application/octet-stream',
-])
+const MAX_FILE_SIZE = 52428800 // 50 MB
 
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -26,61 +17,43 @@ function detectFileType(filename: string): FileType {
   return 'other'
 }
 
-function isAcceptedMimeType(mimeType: string): boolean {
-  if (ACCEPTED_MIME_TYPES.has(mimeType)) return true
-  // Allow image/* broadly
-  if (mimeType.startsWith('image/')) return true
-  return false
-}
-
 // ─── POST /api/upload ─────────────────────────────────────────────────────────
+//
+// Accepts JSON { job_id, builder_id, filename, content_type, size? }.
+// In real mode: creates a Supabase Storage presigned upload URL and inserts the
+// file DB record, then returns { file, upload_url } so the client can PUT the
+// file bytes directly to Supabase Storage — bypassing Vercel's 4.5 MB body limit.
+// In demo mode: returns a mock file record with upload_url = 'demo://upload'.
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  let formData: FormData
+  let body: { job_id?: string; builder_id?: string; filename?: string; content_type?: string; size?: number }
   try {
-    formData = await req.formData()
+    body = await req.json()
   } catch {
-    return NextResponse.json({ error: 'Invalid form data' }, { status: 400 })
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  // Extract fields
-  const fileEntry = formData.get('file')
-  const job_id = formData.get('job_id')?.toString() ?? ''
-  const builder_id = formData.get('builder_id')?.toString() ?? DEMO_BUILDER_ID
-
-  if (!fileEntry || typeof fileEntry === 'string') {
-    return NextResponse.json({ error: 'No file provided' }, { status: 400 })
-  }
+  const { job_id, builder_id: rawBuilderId, filename, content_type, size } = body
+  const builder_id = rawBuilderId ?? DEMO_BUILDER_ID
 
   if (!job_id) {
     return NextResponse.json({ error: 'job_id is required' }, { status: 400 })
   }
-
-  const uploadedFile = fileEntry as globalThis.File
-  const filename = uploadedFile.name
-  const mimeType = uploadedFile.type || 'application/octet-stream'
-
-  // Validate file type
-  if (!isAcceptedMimeType(mimeType)) {
-    return NextResponse.json(
-      { error: `File type not accepted: ${mimeType}` },
-      { status: 422 }
-    )
+  if (!filename) {
+    return NextResponse.json({ error: 'filename is required' }, { status: 400 })
   }
 
-  // Validate file size
-  if (uploadedFile.size > MAX_FILE_SIZE) {
-    return NextResponse.json(
-      { error: 'File exceeds maximum size of 50MB' },
-      { status: 422 }
-    )
+  const mimeType = content_type || 'application/octet-stream'
+
+  if (size && size > MAX_FILE_SIZE) {
+    return NextResponse.json({ error: 'File exceeds maximum size of 50 MB' }, { status: 422 })
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const isSupabaseConfigured = Boolean(supabaseUrl && supabaseKey)
 
-  // ── Real mode: upload to Supabase Storage + insert DB row ─────────────────
+  // ── Real mode: presigned URL + DB record ──────────────────────────────────
   if (isSupabaseConfigured) {
     try {
       const { createClient } = await import('@supabase/supabase-js')
@@ -88,24 +61,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       const storagePath = `${builder_id}/${job_id}/${filename}`
 
-      // Upload file bytes to Storage
-      const fileBytes = await uploadedFile.arrayBuffer()
-      const { error: storageError } = await supabase.storage
+      // Create a presigned upload URL — client will PUT file bytes directly to
+      // Supabase Storage, bypassing Vercel's request body size limit.
+      const { data: signData, error: signError } = await supabase.storage
         .from('plans')
-        .upload(storagePath, fileBytes, {
-          contentType: mimeType,
-          upsert: true,
-        })
+        .createSignedUploadUrl(storagePath)
 
-      if (storageError) {
-        console.error('Storage upload error:', storageError)
-        return NextResponse.json(
-          { error: 'Failed to upload file to storage' },
-          { status: 500 }
-        )
+      if (signError || !signData) {
+        console.error('Signed URL error:', signError)
+        return NextResponse.json({ error: 'Failed to create upload URL' }, { status: 500 })
       }
 
-      // Insert file record
+      // Insert file record (status 'uploaded' — intake triggered after client PUT)
       const { data: fileRow, error: dbError } = await supabase
         .from('files')
         .insert({
@@ -122,26 +89,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       if (dbError || !fileRow) {
         console.error('DB insert error:', dbError)
-        return NextResponse.json(
-          { error: 'Failed to create file record' },
-          { status: 500 }
-        )
+        return NextResponse.json({ error: 'Failed to create file record' }, { status: 500 })
       }
 
       return NextResponse.json(
-        { file: fileRow as DBFile, intake_started: true },
+        { file: fileRow as DBFile, upload_url: signData.signedUrl },
         { status: 201 }
       )
     } catch (err) {
       console.error('Upload error:', err)
-      return NextResponse.json(
-        { error: 'Upload failed' },
-        { status: 500 }
-      )
+      return NextResponse.json({ error: 'Upload failed' }, { status: 500 })
     }
   }
 
-  // ── Demo mode: return mock File record ────────────────────────────────────
+  // ── Demo mode: return mock file record, skip real upload ──────────────────
   const demoFile: DBFile = {
     id: crypto.randomUUID(),
     job_id,
@@ -155,7 +116,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   return NextResponse.json(
-    { file: demoFile, intake_started: true },
+    { file: demoFile, upload_url: 'demo://skip' },
     { status: 201 }
   )
 }

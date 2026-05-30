@@ -14,6 +14,11 @@ export interface ProofEvent {
   timestamp: string
 }
 
+export interface JobRisk {
+  level: 'high' | 'medium' | 'low'
+  message: string
+}
+
 export interface JobSnapshot {
   job: {
     id: string
@@ -26,6 +31,10 @@ export interface JobSnapshot {
     created_at: string
     days_active: number
     job_ref?: string
+    budget_estimate: number | null
+    scope_notes: string | null
+    quote_deadline: string | null  // ISO date or null
+    client_deadline: string | null // ISO date or null
   }
   overview: {
     started: string
@@ -81,6 +90,7 @@ export interface JobSnapshot {
     }>
     proof_events?: ProofEvent[]
   }
+  risks: JobRisk[]
 }
 
 // ─── Job 1: Fitzroy (active) ──────────────────────────────────────────────────
@@ -97,6 +107,10 @@ const JOB_1_FITZROY: JobSnapshot = {
     created_at: '45 days ago',
     days_active: 45,
     job_ref: 'JOB-2025-001',
+    budget_estimate: null,
+    scope_notes: 'Full kitchen and bathroom renovation',
+    quote_deadline: null,
+    client_deadline: null,
   },
   overview: {
     started: '45 days ago',
@@ -170,6 +184,10 @@ const JOB_1_FITZROY: JobSnapshot = {
     ],
     proof_events: [],
   },
+  risks: [
+    { level: 'high', message: '2 variations pending approval.' },
+    { level: 'high', message: 'Invoice for $28,000 overdue 3 days.' },
+  ],
 }
 
 // ─── Job 2: Toorak (quoted) ───────────────────────────────────────────────────
@@ -186,6 +204,10 @@ const JOB_2_TOORAK: JobSnapshot = {
     created_at: '12 days ago',
     days_active: 12,
     job_ref: 'JOB-2025-002',
+    budget_estimate: 127500,
+    scope_notes: null,
+    quote_deadline: null,
+    client_deadline: null,
   },
   overview: {
     started: '12 days ago',
@@ -253,6 +275,10 @@ const JOB_2_TOORAK: JobSnapshot = {
       },
     ],
   },
+  risks: [
+    { level: 'medium', message: 'Quote sent 5 days ago with no response from Tom Caruso.' },
+    { level: 'low', message: 'Client email on file — ready to follow up.' },
+  ],
 }
 
 // ─── Job 3: Brunswick (quoting) ───────────────────────────────────────────────
@@ -269,6 +295,10 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     created_at: '3 days ago',
     days_active: 3,
     job_ref: 'JOB-2025-003',
+    budget_estimate: 380000,
+    scope_notes: 'Rear extension',
+    quote_deadline: null,
+    client_deadline: null,
   },
   overview: {
     started: '3 days ago',
@@ -295,6 +325,11 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     messages: [],
     proof_events: [],
   },
+  risks: [
+    { level: 'medium', message: 'Budget noted ($380,000) but no plans uploaded yet.' },
+    { level: 'medium', message: '2 assumptions need resolving before quote can be sent.' },
+    { level: 'low', message: 'Client email missing — required to send quote.' },
+  ],
 }
 
 // ─── Lookup map ───────────────────────────────────────────────────────────────

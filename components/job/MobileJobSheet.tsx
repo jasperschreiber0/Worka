@@ -46,22 +46,22 @@ function MobileJobSheetInner({ job, onClose, onViewQuote }: MobileJobSheetProps)
 
   return (
     <>
-      {/* Backdrop */}
+      {/* Backdrop — hidden on md+ (side panel is used there instead) */}
       <div
-        className={`fixed inset-0 bg-black/30 z-30 transition-opacity duration-300 ${
+        className={`md:hidden fixed inset-0 bg-black/30 z-30 transition-opacity duration-300 ${
           visible ? 'opacity-100' : 'opacity-0'
         }`}
         onClick={handleClose}
         aria-hidden="true"
       />
 
-      {/* Sheet */}
+      {/* Sheet — hidden on md+ (side panel is used there instead) */}
       <div
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
         aria-label={`Job snapshot: ${job.address}`}
-        className={`fixed inset-x-0 bottom-0 z-40 bg-white rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col transition-transform duration-300 ease-in-out ${
+        className={`md:hidden fixed inset-x-0 bottom-0 z-40 bg-white rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col transition-transform duration-300 ease-in-out ${
           visible ? 'translate-y-0' : 'translate-y-full'
         }`}
       >
