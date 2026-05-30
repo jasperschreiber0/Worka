@@ -930,40 +930,79 @@ function findDemoJob(entities: Record<string, string>): DemoJob | null {
 const TOORAK_JOB_ID = '00000000-0000-0000-0000-000000000020'
 const TOORAK_QUOTE_ID = 'demo-quote-id-toorak'
 
-function handleJobQuery(entities: Record<string, string>): Partial<ChatResponse> {
-  const job = findDemoJob(entities)
+async function handleJobQuery(entities: Record<string, string>, builderId: string): Promise<Partial<ChatResponse>> {
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-  if (!job) {
-    const ref = entities.address ?? entities.job_name ?? ''
+  if (sbUrl && sbKey) {
+    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+    const ref = (entities.address ?? entities.job_name ?? entities.job_ref ?? '').trim()
+
+    if (ref) {
+      // Search by address
+      const { data: jobs } = await sb
+        .from('jobs')
+        .select('id, address, status, job_ref')
+        .eq('builder_id', builderId)
+        .ilike('address', `%${ref}%`)
+        .not('status', 'eq', 'archived')
+        .limit(3)
+
+      if (jobs && jobs.length === 1) {
+        const j = jobs[0] as { id: string; address: string; status: string; job_ref: string | null }
+        return {
+          message: `Opening ${j.address}…`,
+          event: { type: 'open_job_snapshot', job_id: j.id, job_address: j.address, job_status: j.status },
+        }
+      }
+      if (jobs && jobs.length > 1) {
+        const list = (jobs as Array<{ address: string; status: string }>).map(j => `• ${j.address} — ${j.status}`).join('\n')
+        return { message: `Found ${jobs.length} jobs matching "${ref}":\n${list}\n\nBe more specific — which one?` }
+      }
+    }
+
+    // No match — list real jobs
+    const { data: allJobs } = await sb
+      .from('jobs')
+      .select('id, address, status, job_ref')
+      .eq('builder_id', builderId)
+      .not('status', 'eq', 'archived')
+      .order('created_at', { ascending: false })
+      .limit(10)
+
+    if (!allJobs || allJobs.length === 0) {
+      return { message: 'No active jobs yet. Type "new job at [address]" to create one.' }
+    }
+
+    const list = (allJobs as Array<{ address: string; status: string }>).map(j => `• ${j.address} — ${j.status}`).join('\n')
     return {
       message: ref
-        ? `I couldn't find a job matching "${ref}". You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).`
-        : 'Which job are you asking about? You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).',
+        ? `No job found matching "${ref}". Your active jobs:\n${list}`
+        : `Which job are you asking about? Your active jobs:\n${list}`,
+      job_list: (allJobs as Array<{ id: string; address: string; status: string; job_ref: string | null }>)
+        .map(j => ({ id: j.id, address: j.address, status: j.status, job_ref: j.job_ref })),
     }
   }
 
+  // Demo fallback
+  const job = findDemoJob(entities)
+  if (!job) {
+    return {
+      message: entities.address
+        ? `No job found matching "${entities.address}". Your active jobs:\n• 14 Merri St, Fitzroy\n• 8 Burnside Rd, Toorak\n• 52 Bendigo St, Brunswick`
+        : 'Which job are you asking about?',
+      job_list: DEMO_JOB_LIST,
+    }
+  }
   if (job.id === TOORAK_JOB_ID && job.status === 'quoted') {
     return {
-      message:
-        'The Toorak quote for $127,500 was sent to Tom Caruso 5 days ago. If Tom has verbally approved, you can activate the job now — this creates the milestone timeline and invoice schedule in one click.',
-      event: {
-        type: 'suggest_job_activation',
-        job_id: TOORAK_JOB_ID,
-        quote_id: TOORAK_QUOTE_ID,
-      },
+      message: 'The Toorak quote for $127,500 was sent to Tom Caruso 5 days ago. If Tom has verbally approved, you can activate the job now.',
+      event: { type: 'suggest_job_activation', job_id: TOORAK_JOB_ID, quote_id: TOORAK_QUOTE_ID },
     }
   }
-
   return {
     message: job.summary,
-    event: {
-      type: 'open_job_snapshot',
-      job_id: job.id,
-      job_address: job.address,
-      job_status: job.status,
-      client_name: job.client_name,
-      job_ref: job.job_ref,
-    },
+    event: { type: 'open_job_snapshot', job_id: job.id, job_address: job.address, job_status: job.status, client_name: job.client_name, job_ref: job.job_ref },
   }
 }
 
@@ -978,12 +1017,46 @@ function applyVariationState(variation: DemoVariation): DemoVariation {
   }
 }
 
-function handleVariationIntent(entities: Record<string, string>, builderId: string): Partial<ChatResponse> {
-  void entities
-  const builderVariations = DEMO_VARIATIONS
-    .map(applyVariationState)
-    .filter((v) => v.builder_id === builderId)
+async function handleVariationIntent(entities: Record<string, string>, builderId: string): Promise<Partial<ChatResponse>> {
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
+  if (sbUrl && sbKey) {
+    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+    const { data: vars } = await sb
+      .from('variations')
+      .select('id, job_id, title, description, amount, status, created_at')
+      .eq('builder_id', builderId)
+      .in('status', ['pending', 'draft'])
+      .order('created_at', { ascending: true })
+      .limit(10)
+
+    if (!vars || vars.length === 0) {
+      return { message: 'No pending variations right now — all scope changes are approved or up to date.' }
+    }
+
+    const pending = (vars as Array<{ id: string; job_id: string; title: string; description: string; amount: number | null; status: string; created_at: string }>)
+      .filter(v => v.status === 'pending')
+
+    if (pending.length === 0) {
+      return { message: `${vars.length} variation${vars.length !== 1 ? 's' : ''} in draft — not yet sent for approval.` }
+    }
+
+    const first = pending[0]
+    const { data: job } = await sb.from('jobs').select('address').eq('id', first.job_id).single()
+    const addr = (job as { address: string } | null)?.address ?? 'a job'
+    const countPhrase = pending.length === 1 ? '1 pending variation' : `${pending.length} pending variations`
+    const amtDisplay = first.amount ? `$${first.amount.toLocaleString('en-AU')}` : 'amount TBD'
+
+    return {
+      message: `You have ${countPhrase} on ${addr} that need a decision.\n\n${first.title} — ${amtDisplay}. Approve or reject?`,
+      event: { type: 'show_variation', variation_id: first.id, job_id: first.job_id },
+    }
+  }
+
+  // Demo fallback
+  void entities
+  const builderVariations = DEMO_VARIATIONS.map(applyVariationState).filter((v) => v.builder_id === builderId)
   const pendingVariations = builderVariations.filter((v) => v.status === 'pending')
 
   if (pendingVariations.length === 0) {
@@ -993,27 +1066,62 @@ function handleVariationIntent(entities: Record<string, string>, builderId: stri
   const first = pendingVariations[0]
   const count = pendingVariations.length
   const countPhrase = count === 1 ? '1 pending variation' : `${count} pending variations`
-
   return {
     message: `You have ${countPhrase} on the Fitzroy job that need a decision.\n\n${first.title} — $${first.amount.toLocaleString('en-AU')}. Approve or reject?`,
     variation: first,
     all_variations: pendingVariations,
-    event: {
-      type: 'show_variation',
-      variation_id: first.id,
-      job_id: first.job_id,
-    },
+    event: { type: 'show_variation', variation_id: first.id, job_id: first.job_id },
   }
 }
 
-function handleInvoice(): Partial<ChatResponse> {
+async function handleInvoice(builderId: string): Promise<Partial<ChatResponse>> {
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  if (sbUrl && sbKey) {
+    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+    const { data: invoices } = await sb
+      .from('invoices')
+      .select('id, job_id, amount, status, due_date, sent_at')
+      .eq('builder_id', builderId)
+      .in('status', ['overdue', 'sent', 'draft'])
+      .order('due_date', { ascending: true })
+      .limit(5)
+
+    if (!invoices || invoices.length === 0) {
+      return { message: 'No outstanding invoices right now. Type "invoice for [stage] on [address]" to create one.' }
+    }
+
+    const overdues = (invoices as Array<{ id: string; job_id: string; amount: number; status: string; due_date: string | null; sent_at: string | null }>)
+      .filter(i => i.status === 'overdue')
+
+    if (overdues.length > 0) {
+      const inv = overdues[0]
+      const { data: job } = await sb.from('jobs').select('address').eq('id', inv.job_id).single()
+      const addr = (job as { address: string } | null)?.address ?? 'a job'
+      const daysOverdue = inv.due_date
+        ? Math.max(0, Math.floor((Date.now() - new Date(inv.due_date).getTime()) / 86400000))
+        : null
+      const overdueLabel = daysOverdue ? ` ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} overdue` : ' overdue'
+      return {
+        message: `$${inv.amount.toLocaleString('en-AU')} invoice on ${addr} is${overdueLabel}. Want me to draft a follow-up email?`,
+        event: { type: 'suggest_email_draft', job_id: inv.job_id, intent_hint: 'invoice' },
+      }
+    }
+
+    const sent = (invoices as Array<{ id: string; job_id: string; amount: number; status: string }>).filter(i => i.status === 'sent')
+    if (sent.length > 0) {
+      const total = sent.reduce((s, i) => s + i.amount, 0)
+      return { message: `${sent.length} invoice${sent.length !== 1 ? 's' : ''} outstanding totalling $${total.toLocaleString('en-AU')} — awaiting payment.` }
+    }
+
+    return { message: `${invoices.length} invoice${invoices.length !== 1 ? 's' : ''} in draft. Send them when you're ready.` }
+  }
+
+  // Demo fallback
   return {
     message: 'The Henderson invoice for $28,000 on the Fitzroy job (14 Merri St) is 3 days overdue. Want me to draft a follow-up email?',
-    event: {
-      type: 'suggest_email_draft',
-      job_id: '00000000-0000-0000-0000-000000000010',
-      intent_hint: 'invoice',
-    },
+    event: { type: 'suggest_email_draft', job_id: '00000000-0000-0000-0000-000000000010', intent_hint: 'invoice' },
   }
 }
 
@@ -1123,14 +1231,95 @@ async function handleSimulateEmail(builderId: string): Promise<Partial<ChatRespo
   }
 }
 
-function handleMarginQuery(): Partial<ChatResponse> {
+async function handleMarginQuery(builderId: string): Promise<Partial<ChatResponse>> {
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  if (sbUrl && sbKey) {
+    // Live path — fetch real quotes + variations from DB
+    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+
+    // Get active/quoted jobs with their latest quotes
+    const { data: quotes } = await sb
+      .from('quotes')
+      .select('id, job_id, total_cost, margin_pct, status, version')
+      .eq('builder_id', builderId)
+      .in('status', ['draft', 'pending_review', 'sent', 'approved'])
+      .order('version', { ascending: false })
+
+    if (!quotes || quotes.length === 0) {
+      return { message: 'No quotes with margin data yet. Upload plans on a job to generate a quote.' }
+    }
+
+    // Keep only the latest quote per job
+    const latestByJob = new Map<string, typeof quotes[0]>()
+    for (const q of quotes as Array<{ id: string; job_id: string; total_cost: number | null; margin_pct: number | null; status: string; version: number }>) {
+      if (!latestByJob.has(q.job_id)) latestByJob.set(q.job_id, q)
+    }
+
+    // Fetch job details and approved variation totals for each
+    const marginJobs: MarginJob[] = []
+    for (const [jobId, quote] of Array.from(latestByJob.entries())) {
+      if (!quote.total_cost) continue
+
+      const [{ data: job }, { data: vars }] = await Promise.all([
+        sb.from('jobs').select('id, address, status, job_ref').eq('id', jobId).single(),
+        sb.from('variations').select('amount').eq('job_id', jobId).eq('status', 'approved'),
+      ])
+
+      if (!job) continue
+      const j = job as { id: string; address: string; status: string; job_ref: string | null }
+      const quotedMarginPct = quote.margin_pct ?? 18
+      const quotedAmt = quote.total_cost
+      const baseCost = quotedAmt * (1 - quotedMarginPct / 100)
+      const variationImpact = ((vars ?? []) as Array<{ amount: number | null }>).reduce((s, v) => s + (v.amount ?? 0), 0)
+      const projectedCost = baseCost + variationImpact
+      const marginAmt = quotedAmt - projectedCost
+      const marginPct = parseFloat(((marginAmt / quotedAmt) * 100).toFixed(1))
+
+      marginJobs.push({
+        id: j.id,
+        job_ref: j.job_ref ?? '',
+        address: j.address,
+        status: j.status,
+        quoted_amount: quotedAmt,
+        projected_cost: projectedCost,
+        margin_amount: marginAmt,
+        margin_percent: marginPct,
+        quoted_margin_percent: quotedMarginPct,
+        cost_to_date: 0,
+        variation_impact: variationImpact,
+      })
+    }
+
+    if (marginJobs.length === 0) {
+      return { message: 'No quoted jobs with margin data yet.' }
+    }
+
+    marginJobs.sort((a, b) => a.margin_percent - b.margin_percent)
+    const bleeding = marginJobs.filter((j) => j.margin_percent < 10)
+    const healthy = marginJobs.filter((j) => j.margin_percent >= 15)
+
+    let message: string
+    if (bleeding.length > 0) {
+      const worst = bleeding[0]
+      const isNeg = worst.margin_percent < 0
+      const shortAddr = worst.address.split(',')[0]
+      message = `The ${shortAddr} job is ${isNeg ? 'underwater' : 'at risk'} — margin tracking at ${isNeg ? '–' : ''}${Math.abs(worst.margin_percent).toFixed(1)}% against the quoted ${worst.quoted_margin_percent}%.`
+      if (worst.variation_impact > 0) message += ` Approved variations have added $${worst.variation_impact.toLocaleString('en-AU')} to projected spend.`
+      if (healthy.length > 0) message += ` ${healthy[0].address.split(',')[0]} is holding at ${healthy[0].margin_percent.toFixed(1)}%.`
+    } else {
+      message = `Margins looking ${healthy.length === marginJobs.length ? 'healthy' : 'acceptable'} across your ${marginJobs.length} job${marginJobs.length !== 1 ? 's' : ''}. Keep an eye on variations.`
+    }
+
+    return { message, margin_jobs: marginJobs }
+  }
+
+  // Demo fallback
   const activeJobs = DEMO_JOBS.filter(
     (j) => (j.status === 'active' || j.status === 'quoted') && j.quoted_amount !== undefined
   )
-
-  if (activeJobs.length === 0) {
-    return { message: 'No active jobs with margin data right now.' }
-  }
+  if (activeJobs.length === 0) return { message: 'No active jobs with margin data right now.' }
 
   const marginJobs: MarginJob[] = activeJobs.map((job) => {
     const quoted = job.quoted_amount!
@@ -1160,9 +1349,7 @@ function handleMarginQuery(): Partial<ChatResponse> {
     const worst = bleeding[0]
     const isNeg = worst.margin_percent < 0
     message = `The ${worst.address.split(',')[0]} job is ${isNeg ? 'underwater' : 'at risk'} — margin is tracking at ${isNeg ? '–' : ''}${Math.abs(worst.margin_percent).toFixed(1)}% against the quoted ${worst.quoted_margin_percent}%. Variations and cost overruns have added $${worst.variation_impact.toLocaleString('en-AU')} to projected spend.`
-    if (healthy.length > 0) {
-      message += ` The Toorak quote is holding at ${healthy[0].margin_percent.toFixed(1)}%.`
-    }
+    if (healthy.length > 0) message += ` The ${healthy[0].address.split(',')[0]} quote is holding at ${healthy[0].margin_percent.toFixed(1)}%.`
   } else {
     message = `Margins are looking ${healthy.length === marginJobs.length ? 'healthy' : 'acceptable'} across your ${marginJobs.length} job${marginJobs.length !== 1 ? 's' : ''}. Keep an eye on variations.`
   }
@@ -1424,14 +1611,15 @@ async function orchestrateActions(
       }
 
       case 'job_query': {
-        const result = handleJobQuery(action.entities)
+        const result = await handleJobQuery(action.entities, ctx.builder_id)
         if (result.message) messageParts.push(result.message)
         if (result.event) events.push(result.event)
+        if (result.job_list) accumulated.job_list = result.job_list
         break
       }
 
       case 'variation': {
-        const result = handleVariationIntent(action.entities, ctx.builder_id)
+        const result = await handleVariationIntent(action.entities, ctx.builder_id)
         if (result.message) messageParts.push(result.message)
         if (result.event) events.push(result.event)
         if (result.variation) accumulated.variation = result.variation
@@ -1440,7 +1628,7 @@ async function orchestrateActions(
       }
 
       case 'invoice': {
-        const result = handleInvoice()
+        const result = await handleInvoice(ctx.builder_id)
         if (result.message) messageParts.push(result.message)
         if (result.event) events.push(result.event)
         break
@@ -1467,7 +1655,7 @@ async function orchestrateActions(
       }
 
       case 'margin_query': {
-        const result = handleMarginQuery()
+        const result = await handleMarginQuery(ctx.builder_id)
         if (result.message) messageParts.push(result.message)
         if (result.margin_jobs) accumulated.margin_jobs = result.margin_jobs
         break
