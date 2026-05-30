@@ -699,8 +699,10 @@ export default function ChatInterface({
         onGeneralQuery?.()
       }
 
-      // Set address follow-up flag when new_job came back with no job created
-      if (data.intent === 'new_job' && !data.job) {
+      // Set address follow-up flag when a create_job came back with no job (address was missing)
+      const isNoAddressResponse = !data.job && !data.duplicate &&
+        (data.intent === 'new_job' || data.intent === 'create_job' || data.intent?.startsWith('create_job+'))
+      if (isNoAddressResponse && data.message?.toLowerCase().includes('address')) {
         setAwaitingAddressForNewJob(true)
       }
     } catch {

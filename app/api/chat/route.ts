@@ -1158,8 +1158,7 @@ async function orchestrateActions(
           const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
           const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
           if ((client_name || budget_hint || scope_notes) && sbUrl && sbKey) {
-            const { createClient: mkClient } = await import('@supabase/supabase-js')
-            const sb = mkClient(sbUrl, sbKey, { auth: { persistSession: false } })
+            const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
             const { data: existingRow } = await sb
               .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', result.existing_job.id).single()
             if (existingRow) {
@@ -1211,8 +1210,7 @@ async function orchestrateActions(
         const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
         if (jobId && sbUrl && sbKey) {
-          const { createClient: mkClient } = await import('@supabase/supabase-js')
-          const sb = mkClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
 
           const { data: quoteRow } = await sb
             .from('quotes')
@@ -1308,8 +1306,7 @@ async function orchestrateActions(
         const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
         if (jobId && sbUrl && sbKey && (newScope || newBudget || newClient)) {
-          const { createClient: mkClient } = await import('@supabase/supabase-js')
-          const sb = mkClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
           const { data: existingRow } = await sb
             .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', jobId).single()
           if (existingRow) {
