@@ -729,7 +729,7 @@ export default function ChatInterface({
       inputRef.current?.focus()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [awaitingAddressForNewJob])
+  }, [awaitingAddressForNewJob, builderId, onJobMention, onGeneralQuery])
 
   const handleOpenJob = useCallback((jobId: string) => {
     const job = messages.find(m => m.duplicateJob?.id === jobId)?.duplicateJob

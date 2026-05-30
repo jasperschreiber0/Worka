@@ -1,5 +1,7 @@
 'use client'
 
+import { MarkdownContent } from './ChatMessage'
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface Alert {
@@ -50,7 +52,9 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
   return (
     <div className="rounded-lg border border-brand-200 bg-brand-50 p-4 max-w-full">
       {/* Summary text */}
-      <p className="text-sm font-medium text-slate-800 mb-4 leading-relaxed">{message}</p>
+      <div className="mb-4 text-sm font-medium text-slate-800 leading-relaxed">
+        <MarkdownContent text={message} />
+      </div>
 
       {/* Alerts list */}
       {sorted.length > 0 && (

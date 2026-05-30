@@ -1102,7 +1102,7 @@ async function handleInvoice(builderId: string): Promise<Partial<ChatResponse>> 
       const daysOverdue = inv.due_date
         ? Math.max(0, Math.floor((Date.now() - new Date(inv.due_date).getTime()) / 86400000))
         : null
-      const overdueLabel = daysOverdue ? ` ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} overdue` : ' overdue'
+      const overdueLabel = daysOverdue !== null ? ` ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} overdue` : ' overdue'
       return {
         message: `$${inv.amount.toLocaleString('en-AU')} invoice on ${addr} is${overdueLabel}. Want me to draft a follow-up email?`,
         event: { type: 'suggest_email_draft', job_id: inv.job_id, intent_hint: 'invoice' },
@@ -1257,22 +1257,32 @@ async function handleMarginQuery(builderId: string): Promise<Partial<ChatRespons
       if (!latestByJob.has(q.job_id)) latestByJob.set(q.job_id, q)
     }
 
-    // Fetch job details and approved variation totals for each
+    // Batch-fetch job details and approved variation totals in two parallel queries
+    const jobIds = Array.from(latestByJob.keys())
+    const [{ data: jobsData }, { data: allVars }] = await Promise.all([
+      sb.from('jobs').select('id, address, status, job_ref').in('id', jobIds),
+      sb.from('variations').select('job_id, amount').in('job_id', jobIds).eq('status', 'approved'),
+    ])
+
+    const jobMap = new Map(
+      ((jobsData ?? []) as Array<{ id: string; address: string; status: string; job_ref: string | null }>)
+        .map(j => [j.id, j])
+    )
+    const varsByJob = new Map<string, number>()
+    for (const v of (allVars ?? []) as Array<{ job_id: string; amount: number | null }>) {
+      varsByJob.set(v.job_id, (varsByJob.get(v.job_id) ?? 0) + (v.amount ?? 0))
+    }
+
     const marginJobs: MarginJob[] = []
     for (const [jobId, quote] of Array.from(latestByJob.entries())) {
       if (!quote.total_cost) continue
+      const j = jobMap.get(jobId)
+      if (!j) continue
 
-      const [{ data: job }, { data: vars }] = await Promise.all([
-        sb.from('jobs').select('id, address, status, job_ref').eq('id', jobId).single(),
-        sb.from('variations').select('amount').eq('job_id', jobId).eq('status', 'approved'),
-      ])
-
-      if (!job) continue
-      const j = job as { id: string; address: string; status: string; job_ref: string | null }
       const quotedMarginPct = quote.margin_pct ?? 18
       const quotedAmt = quote.total_cost
       const baseCost = quotedAmt * (1 - quotedMarginPct / 100)
-      const variationImpact = ((vars ?? []) as Array<{ amount: number | null }>).reduce((s, v) => s + (v.amount ?? 0), 0)
+      const variationImpact = varsByJob.get(jobId) ?? 0
       const projectedCost = baseCost + variationImpact
       const marginAmt = quotedAmt - projectedCost
       const marginPct = parseFloat(((marginAmt / quotedAmt) * 100).toFixed(1))
@@ -1895,31 +1905,50 @@ async function orchestrateActions(
         if (sbUrl && sbKey) {
           const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
           const riskLines: string[] = []
-          // Overdue / outstanding invoices
-          const { data: invs } = await sb.from('invoices').select('job_id, amount, status, due_date').eq('builder_id', ctx.builder_id).in('status', ['sent', 'overdue'])
-          for (const inv of (invs ?? []) as Array<{ job_id: string; amount: number; status: string; due_date: string | null }>) {
-            const { data: j } = await sb.from('jobs').select('address').eq('id', inv.job_id).single()
-            const addr = (j as { address: string } | null)?.address ?? 'unknown job'
+
+          // Fetch all three categories in parallel
+          const [{ data: invs }, { data: sentQuotes }, { data: draftQs }] = await Promise.all([
+            sb.from('invoices').select('job_id, amount, status').eq('builder_id', ctx.builder_id).in('status', ['sent', 'overdue']),
+            sb.from('quotes').select('job_id, total_cost, sent_at').eq('builder_id', ctx.builder_id).eq('status', 'sent'),
+            sb.from('quotes').select('id, job_id').eq('builder_id', ctx.builder_id).in('status', ['draft', 'pending_review']),
+          ])
+
+          const invList = (invs ?? []) as Array<{ job_id: string; amount: number; status: string }>
+          const sentList = (sentQuotes ?? []) as Array<{ job_id: string; total_cost: number | null; sent_at: string | null }>
+          const draftList = (draftQs ?? []) as Array<{ id: string; job_id: string }>
+
+          // Batch-fetch all job addresses and assumption counts in parallel
+          const allJobIds = Array.from(new Set([...invList.map(i => i.job_id), ...sentList.map(q => q.job_id), ...draftList.map(q => q.job_id)]))
+          const draftQIds = draftList.map(q => q.id)
+
+          const [{ data: allJobs }, { data: assumptionRows }] = await Promise.all([
+            allJobIds.length > 0 ? sb.from('jobs').select('id, address').in('id', allJobIds) : Promise.resolve({ data: [] as Array<{ id: string; address: string }> }),
+            draftQIds.length > 0 ? sb.from('quote_line_items').select('quote_id').in('quote_id', draftQIds).eq('is_assumption', true).eq('assumption_status', 'unresolved') : Promise.resolve({ data: [] as Array<{ quote_id: string }> }),
+          ])
+
+          const jobAddrMap = new Map(((allJobs ?? []) as Array<{ id: string; address: string }>).map(j => [j.id, j.address]))
+          const assumptionsByQuote = new Map<string, number>()
+          for (const row of (assumptionRows ?? []) as Array<{ quote_id: string }>) {
+            assumptionsByQuote.set(row.quote_id, (assumptionsByQuote.get(row.quote_id) ?? 0) + 1)
+          }
+
+          for (const inv of invList) {
+            const addr = jobAddrMap.get(inv.job_id) ?? 'unknown job'
             riskLines.push(`• ${inv.status === 'overdue' ? '🔴' : '🟡'} ${addr}: $${inv.amount.toLocaleString('en-AU')} invoice ${inv.status === 'overdue' ? 'overdue' : 'outstanding — not yet paid'}`)
           }
-          // Unapproved quotes
-          const { data: sentQuotes } = await sb.from('quotes').select('job_id, total_cost, sent_at').eq('builder_id', ctx.builder_id).eq('status', 'sent')
-          for (const q of (sentQuotes ?? []) as Array<{ job_id: string; total_cost: number | null; sent_at: string | null }>) {
-            const { data: j } = await sb.from('jobs').select('address').eq('id', q.job_id).single()
-            const addr = (j as { address: string } | null)?.address ?? 'unknown job'
+          for (const q of sentList) {
+            const addr = jobAddrMap.get(q.job_id) ?? 'unknown job'
             const days = q.sent_at ? Math.floor((Date.now() - new Date(q.sent_at).getTime()) / 86400000) : null
             riskLines.push(`• 🟡 ${addr}: $${(q.total_cost ?? 0).toLocaleString('en-AU')} quote waiting${days ? ` ${days} days` : ''} — no client approval yet, can't invoice`)
           }
-          // Quotes blocked by assumptions
-          const { data: draftQs } = await sb.from('quotes').select('id, job_id').eq('builder_id', ctx.builder_id).in('status', ['draft', 'pending_review'])
-          for (const q of (draftQs ?? []) as Array<{ id: string; job_id: string }>) {
-            const { count } = await sb.from('quote_line_items').select('id', { count: 'exact', head: true }).eq('quote_id', q.id).eq('is_assumption', true).eq('assumption_status', 'unresolved')
-            if (count && count > 0) {
-              const { data: j } = await sb.from('jobs').select('address').eq('id', q.job_id).single()
-              const addr = (j as { address: string } | null)?.address ?? 'unknown job'
+          for (const q of draftList) {
+            const count = assumptionsByQuote.get(q.id) ?? 0
+            if (count > 0) {
+              const addr = jobAddrMap.get(q.job_id) ?? 'unknown job'
               riskLines.push(`• 🔴 ${addr}: ${count} unresolved assumption${count === 1 ? '' : 's'} blocking quote — can't issue until cleared`)
             }
           }
+
           if (riskLines.length === 0) {
             messageParts.push('No significant payment risks right now. Invoices are current, quotes are progressing cleanly.')
           } else {
@@ -2153,11 +2182,14 @@ Rules: never invent data you don't have. Keep responses under 4 sentences unless
 // Builds an action list from keyword detection then calls orchestrateActions
 // with a null anthropic reference (no AI calls needed in demo mode).
 
-const DEMO_JOB_LIST: JobListItem[] = [
-  { id: '00000000-0000-0000-0000-000000000010', address: '14 Merri St, Fitzroy', status: 'active', client_name: 'The Hendersons', job_ref: 'JOB-2025-001' },
-  { id: '00000000-0000-0000-0000-000000000020', address: '8 Burnside Rd, Toorak', status: 'quoted', client_name: 'Tom Caruso', job_ref: 'JOB-2025-002' },
-  { id: '00000000-0000-0000-0000-000000000030', address: '52 Bendigo St, Brunswick', status: 'quoting', job_ref: 'JOB-2025-003' },
-]
+// Derived from DEMO_JOBS — single source of truth for demo job data
+const DEMO_JOB_LIST: JobListItem[] = DEMO_JOBS.map(j => ({
+  id: j.id,
+  address: j.address,
+  status: j.status,
+  client_name: j.client_name !== 'Brunswick client' ? j.client_name : undefined,
+  job_ref: j.job_ref,
+}))
 
 async function routeDemoMessage(
   message: string,
@@ -2577,6 +2609,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           message: 'No active jobs yet. Type "new job at [address]" to create your first one.',
         })
       }
+      // Supabase URL present but no service role key — return demo list rather than falling through silently
+      return NextResponse.json({
+        intent: 'job_query',
+        message: `You have ${DEMO_JOB_LIST.length} active jobs. Tap one to open it.`,
+        job_list: DEMO_JOB_LIST,
+      })
     }
 
     const anthropic = new Anthropic({ apiKey })

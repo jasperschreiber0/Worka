@@ -25,7 +25,7 @@ function renderInline(text: string): React.ReactNode[] {
   return parts
 }
 
-function MarkdownContent({ text }: { text: string }) {
+export function MarkdownContent({ text }: { text: string }) {
   const lines = text.split('\n')
   const nodes: React.ReactNode[] = []
   let i = 0
@@ -111,7 +111,7 @@ function MarkdownContent({ text }: { text: string }) {
 
     // Regular paragraph line
     nodes.push(
-      <p key={`p-${i}`} className="text-sm text-slate-800 leading-relaxed">{renderInline(trimmed)}</p>
+      <p key={`p-${i}`} className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap">{renderInline(trimmed)}</p>
     )
     i++
   }
