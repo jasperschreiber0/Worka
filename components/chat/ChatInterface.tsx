@@ -994,6 +994,7 @@ export default function ChatInterface({
             address: uploadPanel.job.address,
             status: uploadPanel.job.status,
           }}
+          builderId={builderId}
           onIntakeComplete={handleIntakeComplete}
         />
       )}

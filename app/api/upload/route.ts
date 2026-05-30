@@ -94,7 +94,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .from('plans')
         .upload(storagePath, fileBytes, {
           contentType: mimeType,
-          upsert: false,
+          upsert: true,
         })
 
       if (storageError) {
