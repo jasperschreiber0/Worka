@@ -83,8 +83,15 @@ export interface Job {
   notes: string | null
   budget_estimate: number | null
   scope_notes: string | null
+  quote_deadline: string | null   // ISO date: "YYYY-MM-DD"
+  client_deadline: string | null  // ISO date: "YYYY-MM-DD"
   created_at: string
   updated_at: string
+}
+
+export interface StateChange {
+  status: 'saved' | 'found' | 'warning' | 'blocked' | 'info'
+  label: string
 }
 
 export interface Quote {

@@ -4,6 +4,8 @@ import MorningBriefCard, { type Alert } from './MorningBriefCard'
 import DuplicateWarning from './DuplicateWarning'
 import VariationCard, { type VariationCardVariation } from './VariationCard'
 import MarginCard, { type MarginJob } from './MarginCard'
+import StateUpdateCard from './StateUpdateCard'
+import type { StateChange } from '@/app/api/chat/route'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +23,7 @@ export interface Message {
   duplicateJob?: DuplicateJob
   variation?: VariationCardVariation
   marginJobs?: MarginJob[]
+  stateChanges?: StateChange[]
   timestamp: Date
 }
 
@@ -107,6 +110,9 @@ export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onActi
               {message.content}
             </p>
           </div>
+          {message.stateChanges && message.stateChanges.length > 0 && (
+            <StateUpdateCard changes={message.stateChanges} />
+          )}
           {onOpenJob && onCreateAnyway && (
             <DuplicateWarning
               existingJob={dup}
@@ -172,12 +178,15 @@ export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onActi
   // Assistant message without alerts → plain bubble
   return (
     <div className="flex justify-start mb-4" role="listitem">
-      <div className="max-w-xs sm:max-w-md lg:max-w-lg">
+      <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
         <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
           <p className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap break-words">
             {message.content}
           </p>
         </div>
+        {message.stateChanges && message.stateChanges.length > 0 && (
+          <StateUpdateCard changes={message.stateChanges} />
+        )}
         <p className="text-xs text-slate-400 mt-1 px-1">
           {relativeTime(message.timestamp)}
         </p>
