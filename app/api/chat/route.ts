@@ -1569,6 +1569,15 @@ Actions available — tell the builder to type these if they want to act:
 - "email [client] about [topic]" — draft a client email
 - "how's my margin" — margin overview
 
+Worker management notes:
+- Adding workers: "add [name], they're a [trade]" — creates invite link
+- Removing/deactivating a worker: not yet available via chat. The builder should go to Settings → Team to deactivate a crew member. Worker status can be set to inactive in the database (invited → active → inactive).
+- Assigning workers to jobs: coming soon — for now, note it in the job's scope notes.
+
+Upload & memory notes:
+- Uploading plans: use the upload button inside any job panel — WorkA extracts quantities and flags assumptions
+- Uploading past quotes or pricing: currently the builder can upload PDFs through a job's Files tab; CSV rate sheet import is coming. WorkA learns rates automatically from approved quotes.
+
 Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD.`
 
   const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
@@ -1656,10 +1665,11 @@ async function routeDemoMessage(
     actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
   }
 
-  // Add worker
-  const addMatch = lower.match(/add\s+(\w+)/)
-  const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|a)\s+(\w+)/i)
-  if (addMatch) {
+  // Add worker — require "add [Name]" followed by a role indicator to avoid false matches
+  const addMatch = lower.match(/(?:^|\s)add\s+([a-z]+)(?:\s|,)/)
+  const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|they(?:'re|re|'re)\s+a|a)\s+(\w+)/i)
+  const isAddWorkerIntent = addMatch && roleMatch && !lower.includes('task') && !lower.includes('rate') && !lower.includes('price') && !lower.includes('database')
+  if (isAddWorkerIntent) {
     const demoName = addMatch[1].charAt(0).toUpperCase() + addMatch[1].slice(1)
     const demoRole = roleMatch ? roleMatch[1].toLowerCase() : 'worker'
     actions.push({ type: 'add_worker', entities: { name: demoName, role: demoRole }, confidence: 90 })
@@ -1844,15 +1854,30 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
+    // Excluded: how-to questions, removal/deletion requests — those go through the AI
+    const isActionableWorkerQuestion =
+      lowerMsg.includes('remove') ||
+      lowerMsg.includes('delete') ||
+      lowerMsg.includes('fire') ||
+      lowerMsg.includes('how do i') ||
+      lowerMsg.includes('how to') ||
+      lowerMsg.includes('can i') ||
+      lowerMsg.includes('am i able')
     if (
-      lowerMsg.includes('staff') ||
-      lowerMsg.includes('my workers') ||
-      lowerMsg.includes('my crew') ||
-      lowerMsg.includes('my team') ||
-      lowerMsg.includes('list workers') ||
-      lowerMsg.includes('show workers') ||
-      (lowerMsg.includes('list') && lowerMsg.includes('worker')) ||
-      (lowerMsg.includes('who') && (lowerMsg.includes('crew') || lowerMsg.includes('worker') || lowerMsg.includes('team')))
+      !isActionableWorkerQuestion &&
+      (
+        lowerMsg.includes('list workers') ||
+        lowerMsg.includes('show workers') ||
+        lowerMsg.includes('show my workers') ||
+        lowerMsg.includes('show my crew') ||
+        lowerMsg.includes('show my team') ||
+        lowerMsg.includes('my workers') ||
+        lowerMsg.includes('my crew') ||
+        lowerMsg.includes('my team') ||
+        (lowerMsg.includes('list') && lowerMsg.includes('worker')) ||
+        (lowerMsg.includes('who') && (lowerMsg.includes('crew') || lowerMsg.includes('worker') || lowerMsg.includes('team'))) ||
+        lowerMsg === 'staff'
+      )
     ) {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
       const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
