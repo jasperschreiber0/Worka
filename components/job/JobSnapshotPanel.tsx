@@ -160,7 +160,7 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
 
     switch (activeTab) {
       case 'overview':
-        return <OverviewTab overview={snapshot.overview} job={{ ...snapshot.job, risks: snapshot.risks }} />
+        return <OverviewTab overview={snapshot.overview} job={{ ...snapshot.job, risks: snapshot.risks }} quote={snapshot.quote} />
       case 'quote':
         return (
           <QuoteTab
