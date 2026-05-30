@@ -162,14 +162,16 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
         />
       </div>
 
-      {/* ── Mobile bottom sheet ────────────────────────────────────────────── */}
-      {panelVisible && activeJob && (
-        <MobileJobSheet
-          job={activeJob}
-          onClose={handlePanelClose}
-          onViewQuote={handleViewQuote}
-        />
-      )}
+      {/* ── Mobile bottom sheet (hidden on md+ where side panel shows) ─────── */}
+      <div className="md:hidden">
+        {panelVisible && activeJob && (
+          <MobileJobSheet
+            job={activeJob}
+            onClose={handlePanelClose}
+            onViewQuote={handleViewQuote}
+          />
+        )}
+      </div>
     </div>
   )
 }

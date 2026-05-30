@@ -715,12 +715,15 @@ export default function ChatInterface({
       setLoading(false)
       inputRef.current?.focus()
     }
-  }, [loading, awaitingAddressForNewJob])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingAddressForNewJob])
 
-  // Handler: open an existing job (wired fully in Session 9)
-  const handleOpenJob = useCallback((_jobId: string) => {
-    // No-op for now — wired in Session 9
-  }, [])
+  const handleOpenJob = useCallback((jobId: string) => {
+    const job = messages.find(m => m.duplicateJob?.id === jobId)?.duplicateJob
+    if (job) {
+      onJobMention?.({ id: job.id, address: job.address, status: job.status })
+    }
+  }, [messages, onJobMention])
 
   // Handler: approve variation from chat card — POST resolve then open notification modal
   const handleVariationApprove = useCallback(async (variationId: string) => {
