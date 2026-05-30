@@ -158,6 +158,23 @@ export async function POST(
         .from('quote_line_items')
         .update(lineItemUpdate)
         .eq('id', assumptionRow.line_item_id)
+
+      // Recalculate quote totals from all non-excluded line items
+      const { data: activeItems } = await supabase
+        .from('quote_line_items')
+        .select('total, confidence')
+        .eq('quote_id', quoteId)
+        .neq('assumption_status', 'excluded')
+
+      if (activeItems) {
+        const newTotal = activeItems.reduce((sum, item) => sum + (item.total ?? 0), 0)
+        const confidences = activeItems.map(i => i.confidence ?? 100).filter(c => c > 0)
+        const newConfidence = confidences.length > 0 ? Math.min(...confidences) : 0
+        await supabase
+          .from('quotes')
+          .update({ total_cost: newTotal, confidence_score: newConfidence })
+          .eq('id', quoteId)
+      }
     }
 
     // 3. Check if all assumptions for this quote are resolved

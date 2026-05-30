@@ -3,18 +3,14 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 import { randomUUID } from 'crypto'
 import type {
-  IntentType,
   Invoice,
   Variation,
   Quote,
   Job,
   Worker,
+  ExtractedAction,
 } from '@/lib/types/database.types'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
-
-// ─── Extended intent type (includes email_draft, email_sync_status, simulate_email) ──
-
-type ExtendedIntentType = IntentType | 'email_draft' | 'email_sync_status' | 'simulate_email' | 'margin_query'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -98,7 +94,16 @@ interface SuggestJobActivationEvent {
   quote_id: string
 }
 
-type ChatEvent = WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent
+type ChatEvent =
+  | WorkerModalEvent
+  | UploadPanelEvent
+  | DuplicateWarningEvent
+  | OpenJobSnapshotEvent
+  | ShowVariationEvent
+  | OpenEmailDraftEvent
+  | SuggestEmailDraftEvent
+  | InboundEmailAlertEvent
+  | SuggestJobActivationEvent
 
 export interface MarginJob {
   id: string
@@ -126,21 +131,24 @@ interface ChatResponse {
   variation?: DemoVariation
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
+  // Single event preserved for backwards compat; primary path uses events[]
   event?: ChatEvent
+  events?: ChatEvent[]
 }
 
-interface ClassifyResult {
-  intent: ExtendedIntentType
-  entities: Record<string, string>
-  confidence: number
+// ─── Action orchestration context ─────────────────────────────────────────────
+
+interface OrchestrationContext {
+  builder_id: string
+  force_create: boolean
+  // Resolved job context — set when a job is created or a duplicate is found
+  resolved_job_id: string | null
+  resolved_job: Job | null
+  is_duplicate: boolean
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Returns a plain-English relative date string.
- * Never returns ISO strings or raw timestamps.
- */
 function relativeDate(dateInput: string | Date): string {
   const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput
   const now = new Date()
@@ -163,62 +171,130 @@ function formatAUD(amount: number): string {
   return `$${amount.toLocaleString('en-AU')}`
 }
 
-// ─── Intent Classification ────────────────────────────────────────────────────
+// ─── Multi-action extraction ──────────────────────────────────────────────────
+//
+// Replaces single-intent classification. Returns an ordered list of actions
+// the builder wants executed, plus any context not tied to a specific action.
+// Confidence < 50 on any action → action is skipped (not executed blindly).
 
-async function classifyIntent(
+const EXTRACT_ACTIONS_PROMPT = `You are an action extractor for WorkA — an AI operations manager for Australian residential builders.
+
+Your job is to parse a builder's natural-language message and return ALL actions they are requesting, in priority order, as a JSON object.
+
+### Output format (strict JSON, no other text)
+{
+  "actions": [
+    {
+      "type": "<action_type>",
+      "entities": { "<key>": "<value>" },
+      "confidence": <0-100>
+    }
+  ],
+  "raw_context": { "<key>": "<value>" }
+}
+
+### Action types and entity schemas
+
+1. morning_brief
+   Trigger: asking about the day, today's schedule, what's on, daily summary
+   Entities: {}
+
+2. add_worker
+   Trigger: adding, inviting, or creating a new crew member
+   Entities: { name, role, email?, phone? }
+
+3. create_job
+   Trigger: creating a new job, new quote, new project at an address
+   Entities: {
+     address,          ← required: cleanest possible street address
+     client_name?,     ← client's name if mentioned
+     budget_hint?,     ← stated budget e.g. "around $380,000" → "380000"
+     scope_notes?      ← any scope description e.g. "rear extension", "kitchen reno"
+   }
+
+4. job_query
+   Trigger: asking about an existing job's status, timeline, workers
+   Entities: { address?, job_name?, query_type? }
+
+5. variation
+   Trigger: creating, logging, or asking about a variation or change order
+   Entities: { job_address?, title?, amount?, description? }
+
+6. invoice
+   Trigger: creating, sending, or asking about invoices or payments
+   Entities: { job_address?, amount?, stage? }
+
+7. email_draft
+   Trigger: drafting or sending an email to a client or subcontractor
+   Entities: { recipient_name?, job_reference?, intent_hint? }
+
+8. email_sync_status
+   Trigger: asking if email sync is connected
+   Entities: {}
+
+9. simulate_email
+   Trigger: testing or simulating an inbound email
+   Entities: {}
+
+10. margin_query
+    Trigger: asking about job margin, profit, cost overruns
+    Entities: { job_address? }
+
+11. open_upload_panel
+    Trigger: explicit mention of uploading plans, files, drawings
+    Entities: {}
+    Note: only emit this as a SEPARATE action if the builder explicitly asks to upload
+    and there is NO create_job action (create_job already implies upload panel opens)
+
+12. review_assumptions
+    Trigger: asking to see assumptions, unresolved items, what needs clarifying before quote
+    Entities: {}
+
+13. unknown
+    Trigger: anything that doesn't fit the above
+    Entities: {}
+
+### raw_context
+Capture any additional context not mapped to a specific action:
+- budget mentions without a create_job action
+- timeline constraints ("needs to be done by Christmas")
+- notes about scope or client preferences
+Keep values as short strings.
+
+### Rules
+- Return ALL actions the builder is requesting — never discard intent
+- Order actions by logical dependency: create_job before open_upload_panel, create_job before review_assumptions
+- If confidence is below 50 for an action, still include it but set confidence accurately
+- For create_job: strip leading articles ("at", "for", "on") from address; strip trailing instructions
+- For add_worker: normalise role to lowercase
+- ONLY return valid JSON — no prose, no markdown, no explanation`
+
+async function extractActions(
   message: string,
   anthropic: Anthropic
-): Promise<ClassifyResult> {
+): Promise<ExtractedAction[]> {
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 256,
-    system: `You are an intent classifier for WorkA, an AI operations manager for Australian residential builders.
-
-Classify the builder's message into exactly one of these intents:
-- morning_brief: asking what's on today, what needs attention, daily summary, status check
-- add_worker: adding, inviting, or registering a new crew member or worker
-- new_job: starting a new job, new quote, new project at a NEW address not yet in the system. NOT vague quoting requests like "I need to quote" or "do a quote"
-- job_query: asking about an existing job, listing jobs, project status, or client. Also vague quoting requests like "I need to quote", "list my jobs", "show all jobs", "what jobs do I have"
-- variation: variation requests, change orders, scope changes
-- invoice: invoices, payments, billing queries
-- email_draft: builder wants to draft/send an email to a client or subcontractor
-  Examples: "email the Hendersons", "draft an email to Tom about the quote", "send a message to the client", "follow up on the Toorak quote"
-- email_sync_status: builder asking if email sync is connected, or for email sync status
-  Examples: "is my email connected?", "email sync status", "is Gmail connected", "check email sync"
-- simulate_email: builder wants to test email sync or simulate an inbound email
-  Examples: "simulate email", "test email sync", "simulate inbound email", "demo email"
-- margin_query: asking about job margin, profit, costs, which job is losing money, cost overruns
-  Examples: "which job is bleeding margin", "how's my margin", "what's the profit on Fitzroy", "any jobs losing money", "cost overrun"
-- unknown: anything that doesn't fit the above
-
-Extract relevant entities:
-- For add_worker: name, role
-- For new_job: address, client_name (if mentioned)
-- For job_query: address or job name
-- For variation/invoice: job reference if mentioned
-- For email_draft: recipient_name (who to email), job_reference (which job), intent_hint (what it's about: invoice/quote_followup/variation/general)
-
-Respond with ONLY valid JSON in this exact format:
-{
-  "intent": "<intent_value>",
-  "entities": { "<key>": "<value>" },
-  "confidence": <number 0-100>
-}`,
+    max_tokens: 512,
+    system: EXTRACT_ACTIONS_PROMPT,
     messages: [{ role: 'user', content: message }],
   })
 
   const content = response.content[0]
   if (content.type !== 'text') {
-    return { intent: 'unknown', entities: {}, confidence: 0 }
+    return [{ type: 'unknown', entities: {}, confidence: 0 }]
   }
 
   try {
-    // Strip markdown code fences if present
     const cleaned = content.text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
-    const parsed = JSON.parse(cleaned) as ClassifyResult
-    return parsed
+    const parsed = JSON.parse(cleaned) as { actions: ExtractedAction[]; raw_context: Record<string, string> }
+    if (!Array.isArray(parsed.actions) || parsed.actions.length === 0) {
+      return [{ type: 'unknown', entities: {}, confidence: 0 }]
+    }
+    // Filter out low-confidence actions silently — they are not executed
+    return parsed.actions.filter((a) => (a.confidence ?? 0) >= 50)
   } catch {
-    return { intent: 'unknown', entities: {}, confidence: 0 }
+    return [{ type: 'unknown', entities: {}, confidence: 0 }]
   }
 }
 
@@ -270,7 +346,6 @@ async function getLiveMorningBrief(
   const supabase = createClient(supabaseUrl, serviceRoleKey)
   const alerts: Alert[] = []
 
-  // Overdue invoices: sent invoices with due_date in the past
   const { data: invoices } = await supabase
     .from('invoices')
     .select('id, job_id, amount, due_date, status')
@@ -298,7 +373,6 @@ async function getLiveMorningBrief(
     }
   }
 
-  // Pending variations grouped by job
   const { data: variations } = await supabase
     .from('variations')
     .select('id, job_id, title, amount, status, created_at')
@@ -307,7 +381,6 @@ async function getLiveMorningBrief(
 
   if (variations && variations.length > 0) {
     const typedVariations = variations as Variation[]
-    // Group by job
     const byJob = new Map<string, Variation[]>()
     for (const v of typedVariations) {
       const existing = byJob.get(v.job_id) ?? []
@@ -340,7 +413,6 @@ async function getLiveMorningBrief(
     }
   }
 
-  // Stale sent quotes (sent more than 3 days ago with no response)
   const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()
   const { data: staleQuotes } = await supabase
     .from('quotes')
@@ -370,7 +442,6 @@ async function getLiveMorningBrief(
     }
   }
 
-  // Active jobs summary
   const { data: activeJobs } = await supabase
     .from('jobs')
     .select('id, address, status')
@@ -395,7 +466,6 @@ async function getLiveMorningBrief(
     })
   }
 
-  // Build summary message
   const highCount = alerts.filter((a) => a.priority === 'high').length
   const medCount = alerts.filter((a) => a.priority === 'medium').length
 
@@ -432,7 +502,6 @@ async function createWorker(params: CreateWorkerParams): Promise<CreateWorkerRes
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
   if (supabaseUrl && serviceRoleKey) {
-    // Live mode: insert into Supabase
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     })
@@ -464,7 +533,6 @@ async function createWorker(params: CreateWorkerParams): Promise<CreateWorkerRes
     }
   }
 
-  // Demo mode: return a mock worker with a fake UUID and invite URL
   const fakeId = randomUUID()
   const fakeToken = 'demo-invite-token'
   const worker: Worker = {
@@ -487,23 +555,34 @@ async function createWorker(params: CreateWorkerParams): Promise<CreateWorkerRes
 }
 
 // ─── Create Job ───────────────────────────────────────────────────────────────
+//
+// Key change from v1: no longer returns early on duplicate.
+// Returns { job, is_duplicate, existing_job? } so the orchestrator can
+// switch context to the existing job and continue remaining actions.
 
 interface CreateJobParams {
   builder_id: string
   address: string
   client_name?: string
+  budget_hint?: string
+  scope_notes?: string
   force_create?: boolean
 }
 
 interface CreateJobResult {
-  job?: Job
-  duplicate?: boolean
+  job: Job
+  is_duplicate: boolean
   existing_job?: Job
-  event: UploadPanelEvent | DuplicateWarningEvent
 }
 
-// Seed job data — mirrors the demo seed in the database
-const SEED_JOBS: Array<{ id: string; address: string; status: string; tokens: string[]; job_ref: string; client_name: string }> = [
+const SEED_JOBS: Array<{
+  id: string
+  address: string
+  status: string
+  tokens: string[]
+  job_ref: string
+  client_name: string
+}> = [
   {
     id: '00000000-0000-0000-0000-000000000010',
     address: '14 Merri St, Fitzroy VIC 3065',
@@ -551,24 +630,30 @@ function findSeedDuplicate(address: string): (typeof SEED_JOBS)[number] | null {
   return null
 }
 
+function parseBudget(hint: string | undefined): number | null {
+  if (!hint) return null
+  const cleaned = hint.replace(/[,$\s]/g, '')
+  const n = parseFloat(cleaned)
+  return isNaN(n) ? null : n
+}
+
 async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
-  const { builder_id, address, client_name, force_create } = params
+  const { builder_id, address, client_name, budget_hint, scope_notes, force_create } = params
+  const budgetValue = parseBudget(budget_hint)
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
   if (supabaseUrl && serviceRoleKey) {
-    // Live mode — query Supabase
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     })
 
     if (!force_create) {
-      // Duplicate check: case-insensitive ILIKE on first 3 address tokens
       const firstTokens = address.trim().split(/\s+/).slice(0, 3).join(' ')
       const { data: existing } = await supabase
         .from('jobs')
-        .select('id, builder_id, client_id, address, status, job_type, notes, created_at, updated_at')
+        .select('*')
         .eq('builder_id', builder_id)
         .neq('status', 'archived')
         .ilike('address', `%${firstTokens}%`)
@@ -576,25 +661,37 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
         .maybeSingle()
 
       if (existing) {
-        const existingJob = existing as Job
+        // Context-switch: return the existing job so orchestrator can continue
+        // processing remaining actions against it — do NOT stop here
         return {
-          duplicate: true,
-          existing_job: existingJob,
-          event: { type: 'show_duplicate_warning', job_id: existingJob.id },
+          job: existing as Job,
+          is_duplicate: true,
+          existing_job: existing as Job,
         }
       }
     }
 
-    // Insert new job
+    let clientId: string | null = null
+    if (client_name && client_name.trim().length > 0) {
+      const { data: newClient } = await supabase
+        .from('clients')
+        .insert({ builder_id, name: client_name.trim() })
+        .select('id')
+        .single()
+      if (newClient) clientId = newClient.id as string
+    }
+
     const { data: jobRow, error } = await supabase
       .from('jobs')
       .insert({
         builder_id,
         address: address.trim(),
         status: 'quoting' as const,
-        client_id: null,
+        client_id: clientId,
         job_type: null,
         notes: client_name ? `Client: ${client_name}` : null,
+        budget_estimate: budgetValue,
+        scope_notes: scope_notes ?? null,
       })
       .select()
       .single()
@@ -603,11 +700,7 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
       throw new Error(error?.message ?? 'Failed to insert job')
     }
 
-    const newJob = jobRow as Job
-    return {
-      job: newJob,
-      event: { type: 'open_upload_panel', job_id: newJob.id },
-    }
+    return { job: jobRow as Job, is_duplicate: false }
   }
 
   // Demo mode
@@ -622,18 +715,15 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
         status: duplicate.status as Job['status'],
         job_type: null,
         notes: null,
+        budget_estimate: null,
+        scope_notes: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }
-      return {
-        duplicate: true,
-        existing_job: existingJob,
-        event: { type: 'show_duplicate_warning', job_id: duplicate.id },
-      }
+      return { job: existingJob, is_duplicate: true, existing_job: existingJob }
     }
   }
 
-  // New job (demo mode)
   const fakeId = randomUUID()
   const newJob: Job = {
     id: fakeId,
@@ -643,17 +733,14 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
     status: 'quoting',
     job_type: null,
     notes: client_name ? `Client: ${client_name}` : null,
+    budget_estimate: budgetValue,
+    scope_notes: scope_notes ?? null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }
 
-  return {
-    job: newJob,
-    event: { type: 'open_upload_panel', job_id: fakeId },
-  }
+  return { job: newJob, is_duplicate: false }
 }
-
-// ─── Intent Handlers ──────────────────────────────────────────────────────────
 
 // ─── Demo Job Data ────────────────────────────────────────────────────────────
 
@@ -666,7 +753,6 @@ interface DemoJob {
   client_keywords: string[]
   job_ref: string
   summary: string
-  // Margin data (active/quoted jobs only)
   quoted_amount?: number
   projected_cost?: number
   cost_to_date?: number
@@ -721,19 +807,14 @@ function findDemoJob(entities: Record<string, string>): DemoJob | null {
   const ref = (entities.address ?? entities.job_name ?? '').toLowerCase()
   if (!ref) return null
 
-  // 1. Exact job_ref match (e.g. "JOB-2025-001")
   for (const job of DEMO_JOBS) {
     if (ref.includes(job.job_ref.toLowerCase())) return job
   }
-
-  // 2. Address/suburb keyword match
   for (const job of DEMO_JOBS) {
     for (const kw of job.keywords) {
       if (ref.includes(kw)) return job
     }
   }
-
-  // 3. Client name token match
   for (const job of DEMO_JOBS) {
     for (const ck of job.client_keywords) {
       if (ref.includes(ck)) return job
@@ -743,29 +824,25 @@ function findDemoJob(entities: Record<string, string>): DemoJob | null {
   return null
 }
 
-// ─── Job Query Handler ────────────────────────────────────────────────────────
+// ─── Individual action handlers ───────────────────────────────────────────────
 
-// Toorak job IDs (canonical and alias)
 const TOORAK_JOB_ID = '00000000-0000-0000-0000-000000000020'
 const TOORAK_QUOTE_ID = 'demo-quote-id-toorak'
 
-function handleJobQuery(entities: Record<string, string>): ChatResponse {
+function handleJobQuery(entities: Record<string, string>): Partial<ChatResponse> {
   const job = findDemoJob(entities)
 
   if (!job) {
     const ref = entities.address ?? entities.job_name ?? ''
     return {
-      intent: 'job_query',
       message: ref
         ? `I couldn't find a job matching "${ref}". You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).`
-        : "Which job are you asking about? You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).",
+        : 'Which job are you asking about? You have jobs at Fitzroy (14 Merri St), Toorak (8 Burnside Rd), and Brunswick (52 Bendigo St).',
     }
   }
 
-  // Toorak job with sent quote — include activation suggestion
   if (job.id === TOORAK_JOB_ID && job.status === 'quoted') {
     return {
-      intent: 'job_query',
       message:
         'The Toorak quote for $127,500 was sent to Tom Caruso 5 days ago. If Tom has verbally approved, you can activate the job now — this creates the milestone timeline and invoice schedule in one click.',
       event: {
@@ -777,7 +854,6 @@ function handleJobQuery(entities: Record<string, string>): ChatResponse {
   }
 
   return {
-    intent: 'job_query',
     message: job.summary,
     event: {
       type: 'open_job_snapshot',
@@ -801,37 +877,24 @@ function applyVariationState(variation: DemoVariation): DemoVariation {
   }
 }
 
-function handleVariationIntent(entities: Record<string, string>, builderId: string): ChatResponse {
-  // Filter variations for this builder
+function handleVariationIntent(entities: Record<string, string>, builderId: string): Partial<ChatResponse> {
+  void entities
   const builderVariations = DEMO_VARIATIONS
     .map(applyVariationState)
     .filter((v) => v.builder_id === builderId)
 
-  // Filter for pending ones
   const pendingVariations = builderVariations.filter((v) => v.status === 'pending')
 
   if (pendingVariations.length === 0) {
-    return {
-      intent: 'variation',
-      message: 'No pending variations right now — all scope changes are up to date.',
-    }
+    return { message: 'No pending variations right now — all scope changes are up to date.' }
   }
 
-  // Surface the first pending variation with a follow-up question
   const first = pendingVariations[0]
   const count = pendingVariations.length
-  const countPhrase = count === 1
-    ? '1 pending variation'
-    : `${count} pending variations`
-
-  const message = `You have ${countPhrase} on the Fitzroy job that need a decision.\n\n${first.title} — $${first.amount.toLocaleString('en-AU')}. Approve or reject?`
-
-  // Suppress unused variable warning from entities
-  void entities
+  const countPhrase = count === 1 ? '1 pending variation' : `${count} pending variations`
 
   return {
-    intent: 'variation',
-    message,
+    message: `You have ${countPhrase} on the Fitzroy job that need a decision.\n\n${first.title} — $${first.amount.toLocaleString('en-AU')}. Approve or reject?`,
     variation: first,
     all_variations: pendingVariations,
     event: {
@@ -842,10 +905,8 @@ function handleVariationIntent(entities: Record<string, string>, builderId: stri
   }
 }
 
-function handleInvoice(): ChatResponse {
-  // The Fitzroy job has an overdue invoice of $28,000 — surface it and suggest a chase email
+function handleInvoice(): Partial<ChatResponse> {
   return {
-    intent: 'invoice',
     message: 'The Henderson invoice for $28,000 on the Fitzroy job (14 Merri St) is 3 days overdue. Want me to draft a follow-up email?',
     event: {
       type: 'suggest_email_draft',
@@ -855,9 +916,6 @@ function handleInvoice(): ChatResponse {
   }
 }
 
-// ─── Email Draft Handler ──────────────────────────────────────────────────────
-
-// Map job references (from chat entities) to job IDs
 function resolveJobId(jobReference: string | undefined): string | null {
   if (!jobReference) return null
   const ref = jobReference.toLowerCase()
@@ -873,15 +931,13 @@ function resolveJobId(jobReference: string | undefined): string | null {
   return null
 }
 
-function handleEmailDraft(entities: Record<string, string>): ChatResponse {
+function handleEmailDraft(entities: Record<string, string>): Partial<ChatResponse> {
   const { recipient_name, job_reference, intent_hint } = entities
   const resolvedJobId = resolveJobId(job_reference)
-
   const recipientDisplay = recipient_name ?? 'the client'
   const jobDisplay = job_reference ? ` about the ${job_reference} job` : ''
 
   return {
-    intent: 'email_draft',
     message: `Drafting an email to ${recipientDisplay}${jobDisplay}…`,
     event: {
       type: 'open_email_draft',
@@ -892,9 +948,7 @@ function handleEmailDraft(entities: Record<string, string>): ChatResponse {
   }
 }
 
-// ─── Email Sync Status Handler ────────────────────────────────────────────────
-
-async function handleEmailSyncStatus(builderId: string): Promise<ChatResponse> {
+async function handleEmailSyncStatus(builderId: string): Promise<Partial<ChatResponse>> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
     const res = await fetch(`${appUrl}/api/email-sync/status?builder_id=${builderId}`)
@@ -903,16 +957,12 @@ async function handleEmailSyncStatus(builderId: string): Promise<ChatResponse> {
       provider: 'gmail' | 'outlook' | null
       connected_at: string | null
       last_synced_at: string | null
-      is_active: boolean
       emails_processed_today: number
       jobs_matched_today: number
     }
 
     if (!data.connected) {
-      return {
-        intent: 'email_sync_status',
-        message: "Email sync is not connected. Go to Settings → Email sync to connect your Gmail or Outlook inbox.",
-      }
+      return { message: 'Email sync is not connected. Go to Settings → Email sync to connect your Gmail or Outlook inbox.' }
     }
 
     const providerName = data.provider === 'gmail' ? 'Gmail' : 'Outlook'
@@ -923,21 +973,13 @@ async function handleEmailSyncStatus(builderId: string): Promise<ChatResponse> {
         ? ` Today: ${data.emails_processed_today} email${data.emails_processed_today !== 1 ? 's' : ''} processed, ${data.jobs_matched_today} matched to jobs.`
         : ' No emails processed today yet.'
 
-    return {
-      intent: 'email_sync_status',
-      message: `${providerName} is connected and monitoring your inbox.${connectedPhrase}${syncPhrase}${todayPhrase}`,
-    }
+    return { message: `${providerName} is connected and monitoring your inbox.${connectedPhrase}${syncPhrase}${todayPhrase}` }
   } catch {
-    return {
-      intent: 'email_sync_status',
-      message: 'Email sync status is unavailable right now. Try again in a moment.',
-    }
+    return { message: 'Email sync status is unavailable right now. Try again in a moment.' }
   }
 }
 
-// ─── Simulate Email Handler ───────────────────────────────────────────────────
-
-async function handleSimulateEmail(builderId: string): Promise<ChatResponse> {
+async function handleSimulateEmail(builderId: string): Promise<Partial<ChatResponse>> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
     const res = await fetch(`${appUrl}/api/email-sync/simulate`, {
@@ -950,28 +992,17 @@ async function handleSimulateEmail(builderId: string): Promise<ChatResponse> {
       job_id: string | null
       job_address: string | null
       intent: string
-      confidence: number
-      communication_id: string | null
-      suggested_action: {
-        type: string
-        description: string
-        draft?: { subject: string; body: string }
-      } | null
-      auto_logged: boolean
+      suggested_action: { type: string; description: string; draft?: { subject: string; body: string } } | null
     }
 
     if (!data.matched) {
-      return {
-        intent: 'simulate_email',
-        message: 'Simulated email received but could not be matched to any active job.',
-      }
+      return { message: 'Simulated email received but could not be matched to any active job.' }
     }
 
     const address = data.job_address ?? 'an active job'
     const preview = 'Hi Dave, just checking on the invoice — can we pay via bank transfer?'
 
     return {
-      intent: 'simulate_email',
       message: `Simulated inbound email matched to ${address}. Intent: ${data.intent}. Email has been logged to communication history.`,
       event: {
         type: 'inbound_email_alert',
@@ -987,23 +1018,17 @@ async function handleSimulateEmail(builderId: string): Promise<ChatResponse> {
       },
     }
   } catch {
-    return {
-      intent: 'simulate_email',
-      message: 'Could not simulate email — the email sync endpoint is unavailable.',
-    }
+    return { message: 'Could not simulate email — the email sync endpoint is unavailable.' }
   }
 }
 
-function handleMarginQuery(): ChatResponse {
+function handleMarginQuery(): Partial<ChatResponse> {
   const activeJobs = DEMO_JOBS.filter(
     (j) => (j.status === 'active' || j.status === 'quoted') && j.quoted_amount !== undefined
   )
 
   if (activeJobs.length === 0) {
-    return {
-      intent: 'margin_query',
-      message: 'No active jobs with margin data right now.',
-    }
+    return { message: 'No active jobs with margin data right now.' }
   }
 
   const marginJobs: MarginJob[] = activeJobs.map((job) => {
@@ -1041,17 +1066,191 @@ function handleMarginQuery(): ChatResponse {
     message = `Margins are looking ${healthy.length === marginJobs.length ? 'healthy' : 'acceptable'} across your ${marginJobs.length} job${marginJobs.length !== 1 ? 's' : ''}. Keep an eye on variations.`
   }
 
-  return {
-    intent: 'margin_query',
-    message,
-    margin_jobs: marginJobs,
-  }
+  return { message, margin_jobs: marginJobs }
 }
 
-function handleUnknown(): ChatResponse {
+// ─── Action orchestrator ──────────────────────────────────────────────────────
+//
+// Executes an ordered list of actions with shared context.
+// Jobs resolved in one action (create_job) are available to subsequent actions
+// (open_upload_panel, review_assumptions) via the context object.
+// Events from all actions are accumulated and returned as events[].
+
+async function orchestrateActions(
+  actions: ExtractedAction[],
+  ctx: OrchestrationContext,
+  anthropic: Anthropic
+): Promise<ChatResponse> {
+  const events: ChatEvent[] = []
+  const messageParts: string[] = []
+  let accumulated: Partial<ChatResponse> = {}
+
+  for (const action of actions) {
+    switch (action.type) {
+
+      case 'morning_brief': {
+        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+        const brief =
+          supabaseUrl && serviceRoleKey
+            ? await getLiveMorningBrief(ctx.builder_id, supabaseUrl, serviceRoleKey)
+            : getDemoMorningBrief()
+        messageParts.push(brief.message)
+        accumulated.alerts = brief.alerts
+        break
+      }
+
+      case 'add_worker': {
+        const { name, role, email, phone } = action.entities
+        if (!name || !role) {
+          messageParts.push('Got it — who are you adding and what\'s their trade? For example: "add Sarah she\'s a plumber"')
+          break
+        }
+        const result = await createWorker({ builder_id: ctx.builder_id, name, role, email, phone })
+        accumulated.worker = result.worker
+        accumulated.invite_url = result.invite_url
+        messageParts.push(`Added ${name} as a ${result.worker.role.charAt(0).toUpperCase() + result.worker.role.slice(1)}. Invite link is ready — send it in two taps.`)
+        events.push(result.modal_event)
+        break
+      }
+
+      case 'create_job': {
+        const { address, client_name, budget_hint, scope_notes } = action.entities
+        if (!address) {
+          messageParts.push('Which address is this job at? For example: \'new job at 14 Smith St Fitzroy\'')
+          break
+        }
+        const result = await createJob({
+          builder_id: ctx.builder_id,
+          address,
+          client_name,
+          budget_hint,
+          scope_notes,
+          force_create: ctx.force_create,
+        })
+
+        // Update shared context so subsequent actions know which job to use
+        ctx.resolved_job_id = result.job.id
+        ctx.resolved_job = result.job
+        ctx.is_duplicate = result.is_duplicate
+
+        if (result.is_duplicate && result.existing_job) {
+          accumulated.duplicate = true
+          accumulated.existing_job = result.existing_job
+          accumulated.job = result.existing_job
+          // Surface the duplicate warning — but do NOT stop. Continue remaining actions.
+          events.push({ type: 'show_duplicate_warning', job_id: result.existing_job.id })
+          const contextHints: string[] = []
+          if (client_name) contextHints.push(`client ${client_name} noted`)
+          if (budget_hint) contextHints.push(`budget ~$${budget_hint} noted`)
+          const hintStr = contextHints.length > 0 ? ` (${contextHints.join(', ')})` : ''
+          messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status})${hintStr}. Opening that job now.`)
+        } else {
+          accumulated.job = result.job
+          const budgetStr = budget_hint ? ` Budget noted: ~$${parseInt(budget_hint).toLocaleString('en-AU')}.` : ''
+          const clientStr = client_name ? ` Client: ${client_name}.` : ''
+          messageParts.push(`New job at ${result.job.address} created.${clientStr}${budgetStr} Upload your plans to start the quote.`)
+          events.push({ type: 'open_upload_panel', job_id: result.job.id })
+        }
+        break
+      }
+
+      case 'open_upload_panel': {
+        // Only emit if we have a resolved job and haven't already emitted an upload panel event
+        // (create_job already emits one for new jobs)
+        const jobId = ctx.resolved_job_id
+        if (jobId && !events.some((e) => e.type === 'open_upload_panel')) {
+          events.push({ type: 'open_upload_panel', job_id: jobId })
+        }
+        break
+      }
+
+      case 'review_assumptions': {
+        // Surface assumption review for the resolved job
+        // In demo mode this is a message; in live mode it would open the assumption panel
+        if (ctx.resolved_job_id) {
+          messageParts.push('I\'ll surface any unresolved assumptions once your plans are processed.')
+        } else {
+          messageParts.push('Upload the plans first and I\'ll flag every assumption that needs your input before the quote can be issued.')
+        }
+        break
+      }
+
+      case 'job_query': {
+        const result = handleJobQuery(action.entities)
+        if (result.message) messageParts.push(result.message)
+        if (result.event) events.push(result.event)
+        break
+      }
+
+      case 'variation': {
+        const result = handleVariationIntent(action.entities, ctx.builder_id)
+        if (result.message) messageParts.push(result.message)
+        if (result.event) events.push(result.event)
+        if (result.variation) accumulated.variation = result.variation
+        if (result.all_variations) accumulated.all_variations = result.all_variations
+        break
+      }
+
+      case 'invoice': {
+        const result = handleInvoice()
+        if (result.message) messageParts.push(result.message)
+        if (result.event) events.push(result.event)
+        break
+      }
+
+      case 'email_draft': {
+        const result = handleEmailDraft(action.entities)
+        if (result.message) messageParts.push(result.message)
+        if (result.event) events.push(result.event)
+        break
+      }
+
+      case 'email_sync_status': {
+        const result = await handleEmailSyncStatus(ctx.builder_id)
+        if (result.message) messageParts.push(result.message)
+        break
+      }
+
+      case 'simulate_email': {
+        const result = await handleSimulateEmail(ctx.builder_id)
+        if (result.message) messageParts.push(result.message)
+        if (result.event) events.push(result.event)
+        break
+      }
+
+      case 'margin_query': {
+        const result = handleMarginQuery()
+        if (result.message) messageParts.push(result.message)
+        if (result.margin_jobs) accumulated.margin_jobs = result.margin_jobs
+        break
+      }
+
+      case 'unknown':
+      default: {
+        if (actions.length === 1) {
+          messageParts.push('I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.')
+        }
+        break
+      }
+    }
+  }
+
+  // If nothing produced a message (shouldn't happen, but be safe)
+  if (messageParts.length === 0) {
+    messageParts.push('I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.')
+  }
+
+  // Suppress unused var
+  void anthropic
+
   return {
-    intent: 'unknown',
-    message: 'I can help with jobs, quotes, workers, variations, and invoices. Try:\n• "whats on today" — daily brief\n• "new job at 12 Smith St Richmond" — start a job\n• "list my jobs" — see all active jobs\n• "add a worker called Tom, carpenter" — invite crew\n• "log a variation on [address]" — record a change',
+    intent: actions.map((a) => a.type).join('+'),
+    message: messageParts.join('\n\n'),
+    events: events.length > 0 ? events : undefined,
+    // Backwards compat: expose first event as event field for existing UI code
+    event: events.length > 0 ? events[0] : undefined,
+    ...accumulated,
   }
 }
 
@@ -1101,6 +1300,7 @@ Actions available — tell the builder to type these if they want to act:
 
 Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD.`
 
+  const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
   try {
     const resp = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
@@ -1111,11 +1311,188 @@ Rules: never invent data you don't have. Keep responses under 4 sentences unless
     const text = resp.content[0].type === 'text' ? resp.content[0].text : null
     return {
       intent: 'unknown',
-      message: text ?? handleUnknown().message,
+      message: text ?? fallbackMsg,
     }
   } catch {
-    return handleUnknown()
+    return { intent: 'unknown', message: fallbackMsg }
   }
+}
+
+// ─── Demo mode keyword router ─────────────────────────────────────────────────
+//
+// Mirrors the multi-action logic without an API key.
+// Builds an action list from keyword detection then calls orchestrateActions
+// with a null anthropic reference (no AI calls needed in demo mode).
+
+async function routeDemoMessage(
+  message: string,
+  builderId: string,
+  forceCreate: boolean
+): Promise<ChatResponse> {
+  const lower = message.toLowerCase()
+  const actions: ExtractedAction[] = []
+
+  // Morning brief
+  if (
+    lower.includes('today') ||
+    lower.includes('brief') ||
+    lower.includes('morning') ||
+    lower.match(/^what('?s| is) on/)
+  ) {
+    actions.push({ type: 'morning_brief', entities: {}, confidence: 90 })
+  }
+
+  // New job — extract address, client, budget, scope
+  const newJobMatch = lower.match(/(?:new job|job)\s+at\s+(.+?)(?:\s+help|\s+quote|\s+start|$)/i)
+  const forceMatch = lower.includes('create job anyway')
+  if (newJobMatch || forceMatch) {
+    const rawAddress = newJobMatch ? newJobMatch[1].trim() : 'unknown address'
+    // Extract client name
+    const clientMatch = message.match(/client\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)
+    // Extract budget hint (strip non-numeric)
+    const budgetMatch = message.match(/(?:budget|around|approx\.?|~)\s*\$?([\d,]+)/i)
+    // Extract scope
+    const scopeMatch = message.match(/(?:rear extension|kitchen|bathroom|renovation|extension|addition|reno)/i)
+    actions.push({
+      type: 'create_job',
+      entities: {
+        address: rawAddress,
+        ...(clientMatch ? { client_name: clientMatch[1] } : {}),
+        ...(budgetMatch ? { budget_hint: budgetMatch[1].replace(/,/g, '') } : {}),
+        ...(scopeMatch ? { scope_notes: scopeMatch[0] } : {}),
+      },
+      confidence: 95,
+    })
+  }
+
+  // Upload plans mentioned
+  if (lower.includes('upload') || lower.includes('plans') || lower.includes('drawings')) {
+    if (!actions.some((a) => a.type === 'create_job')) {
+      actions.push({ type: 'open_upload_panel', entities: {}, confidence: 85 })
+    }
+  }
+
+  // Assumptions review
+  if (
+    lower.includes('assumption') ||
+    lower.includes('assumptions') ||
+    lower.includes('unresolved') ||
+    lower.includes('what needs resolving') ||
+    lower.includes('before we can issue') ||
+    lower.includes('before we quote')
+  ) {
+    actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
+  }
+
+  // Add worker
+  const addMatch = lower.match(/add\s+(\w+)/)
+  const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|a)\s+(\w+)/i)
+  if (addMatch) {
+    const demoName = addMatch[1].charAt(0).toUpperCase() + addMatch[1].slice(1)
+    const demoRole = roleMatch ? roleMatch[1].toLowerCase() : 'worker'
+    actions.push({ type: 'add_worker', entities: { name: demoName, role: demoRole }, confidence: 90 })
+  }
+
+  // Variation
+  if (
+    lower.includes('variation') ||
+    lower.includes('change order') ||
+    lower.includes('scope change') ||
+    lower.includes('show me the variations')
+  ) {
+    actions.push({ type: 'variation', entities: {}, confidence: 85 })
+  }
+
+  // Invoice
+  if (lower.includes('invoice') || lower.includes('payment') || lower.includes('overdue') || lower.includes('chase')) {
+    actions.push({ type: 'invoice', entities: {}, confidence: 85 })
+  }
+
+  // Email draft
+  if (
+    lower.includes('email') ||
+    lower.includes('draft') ||
+    lower.includes('follow up') ||
+    lower.includes('follow-up') ||
+    lower.includes('message the') ||
+    lower.includes('send a message')
+  ) {
+    const fitzroy = lower.includes('henderson') || lower.includes('fitzroy') || lower.includes('merri')
+    const toorak = lower.includes('caruso') || lower.includes('tom') || lower.includes('toorak') || lower.includes('burnside')
+    const invoiceHint = lower.includes('invoice') || lower.includes('payment') || lower.includes('chase')
+    const quoteHint = lower.includes('quote') || lower.includes('follow up') || lower.includes('follow-up')
+    actions.push({
+      type: 'email_draft',
+      entities: {
+        recipient_name: fitzroy ? 'the Hendersons' : toorak ? 'Tom Caruso' : '',
+        job_reference: fitzroy ? 'Fitzroy' : toorak ? 'Toorak' : '',
+        intent_hint: invoiceHint ? 'invoice' : quoteHint ? 'quote_followup' : 'general',
+      },
+      confidence: 80,
+    })
+  }
+
+  // Email sync status
+  if (
+    (lower.includes('email') && lower.includes('connected')) ||
+    (lower.includes('email') && lower.includes('sync')) ||
+    lower === 'email sync status'
+  ) {
+    actions.push({ type: 'email_sync_status', entities: {}, confidence: 90 })
+  }
+
+  // Simulate email
+  if ((lower.includes('simulate') && lower.includes('email')) || (lower.includes('test') && lower.includes('email'))) {
+    actions.push({ type: 'simulate_email', entities: {}, confidence: 90 })
+  }
+
+  // Margin query
+  if (
+    lower.includes('margin') ||
+    lower.includes('profit') ||
+    lower.includes('bleeding') ||
+    lower.includes('losing money') ||
+    lower.includes('cost overrun') ||
+    lower.includes('which job is')
+  ) {
+    actions.push({ type: 'margin_query', entities: {}, confidence: 85 })
+  }
+
+  // Job query — known jobs by keyword
+  const demoJob = findDemoJob({ address: lower })
+  if (
+    demoJob &&
+    !actions.some((a) => a.type === 'create_job') &&
+    !actions.some((a) => a.type === 'morning_brief')
+  ) {
+    actions.push({ type: 'job_query', entities: { address: lower }, confidence: 80 })
+  }
+
+  // Activate
+  if (
+    lower.includes('activate') ||
+    (lower.includes('toorak') && (lower.includes('go') || lower.includes('start') || lower.includes('kick off')))
+  ) {
+    if (!actions.some((a) => a.type === 'job_query')) {
+      actions.push({ type: 'job_query', entities: { address: 'toorak' }, confidence: 80 })
+    }
+  }
+
+  // Fallback
+  if (actions.length === 0) {
+    actions.push({ type: 'unknown', entities: {}, confidence: 100 })
+  }
+
+  const ctx: OrchestrationContext = {
+    builder_id: builderId,
+    force_create: forceCreate,
+    resolved_job_id: null,
+    resolved_job: null,
+    is_duplicate: false,
+  }
+
+  // Pass null — orchestrator void-suppress it, no AI calls needed
+  return orchestrateActions(actions, ctx, null as unknown as Anthropic)
 }
 
 // ─── POST Handler ─────────────────────────────────────────────────────────────
@@ -1125,6 +1502,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     const body = (await request.json()) as ChatRequestBody
     const message = body.message?.trim()
     const builderId = body.builder_id ?? '00000000-0000-0000-0000-000000000001'
+    const forceCreate = body.force_create === true
 
     if (!message) {
       return NextResponse.json(
@@ -1134,209 +1512,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY
+
     if (!apiKey) {
-      // No API key — keyword-based fallbacks for demo mode
-      const lower = message.toLowerCase()
-      if (
-        lower.includes('today') ||
-        lower.includes('brief') ||
-        lower.includes('on today') ||
-        lower.includes('morning') ||
-        lower.includes('what') ||
-        lower.includes('status')
-      ) {
-        const demo = getDemoMorningBrief()
-        return NextResponse.json({
-          intent: 'morning_brief',
-          message: demo.message,
-          alerts: demo.alerts,
-        })
-      }
-      // Demo new_job: detect "new job at <address>" or "job at <address>"
-      const newJobMatch = lower.match(/(?:new job|job)\s+at\s+(.+?)(?:\s+help|\s+quote|\s+start|$)/i)
-      if (newJobMatch ?? lower.includes('create job anyway')) {
-        const demoAddress = newJobMatch ? newJobMatch[1].trim() : 'unknown address'
-        const forceCreate = body.force_create === true || lower.includes('create job anyway')
-        const result = await createJob({
-          builder_id: builderId,
-          address: demoAddress,
-          force_create: forceCreate,
-        })
-        if (result.duplicate && result.existing_job) {
-          return NextResponse.json({
-            intent: 'new_job',
-            message: `Heads up — you've already got a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Want to open that job instead?`,
-            duplicate: true,
-            existing_job: result.existing_job,
-            event: result.event,
-          })
-        }
-        return NextResponse.json({
-          intent: 'new_job',
-          message: `New job at ${result.job!.address} created. Upload your plans to start the quote.`,
-          job: result.job,
-          event: result.event,
-        })
-      }
-      // Demo add_worker: detect "add <name>" pattern
-      const addMatch = lower.match(/add\s+(\w+)/)
-      const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|a)\s+(\w+)/i)
-      if (addMatch) {
-        const demoName = addMatch[1].charAt(0).toUpperCase() + addMatch[1].slice(1)
-        const demoRole = roleMatch ? roleMatch[1].toLowerCase() : 'worker'
-        const result = await createWorker({
-          builder_id: builderId,
-          name: demoName,
-          role: demoRole,
-        })
-        return NextResponse.json({
-          intent: 'add_worker',
-          message: `Added ${demoName} as a ${result.worker.role.charAt(0).toUpperCase() + result.worker.role.slice(1)}. Invite link is ready — send it in two taps.`,
-          worker: result.worker,
-          invite_url: result.invite_url,
-          event: result.modal_event,
-        })
-      }
-      // Demo variation: detect variation-related keywords
-      if (
-        lower.includes('variation') ||
-        lower.includes('variations') ||
-        lower.includes('change order') ||
-        lower.includes('scope change') ||
-        lower.includes('show me the variations')
-      ) {
-        return NextResponse.json(handleVariationIntent({}, builderId))
-      }
-      // Demo invoice: detect invoice/payment keywords
-      if (
-        lower.includes('invoice') ||
-        lower.includes('payment') ||
-        lower.includes('overdue') ||
-        lower.includes('chase payment') ||
-        lower.includes('chase the')
-      ) {
-        return NextResponse.json(handleInvoice())
-      }
-      // Demo email_draft: detect email/draft/follow-up keywords
-      if (
-        lower.includes('email') ||
-        lower.includes('draft') ||
-        lower.includes('follow up') ||
-        lower.includes('follow-up') ||
-        lower.includes('chase') ||
-        lower.includes('message the') ||
-        lower.includes('send a message')
-      ) {
-        // Try to detect recipient and job context from message
-        const fitzroyMatch = lower.includes('henderson') || lower.includes('fitzroy') || lower.includes('merri')
-        const toorakMatch = lower.includes('caruso') || lower.includes('tom') || lower.includes('toorak') || lower.includes('burnside')
-        const invoiceHint = lower.includes('invoice') || lower.includes('payment') || lower.includes('chase')
-        const quoteHint = lower.includes('quote') || lower.includes('follow up') || lower.includes('follow-up')
-
-        const jobId = fitzroyMatch
-          ? '00000000-0000-0000-0000-000000000010'
-          : toorakMatch
-            ? '00000000-0000-0000-0000-000000000020'
-            : null
-        const recipientName = fitzroyMatch ? 'the Hendersons' : toorakMatch ? 'Tom Caruso' : null
-        const hint = invoiceHint ? 'invoice' : quoteHint ? 'quote_followup' : 'general'
-        const recipientDisplay = recipientName ?? 'the client'
-
-        return NextResponse.json({
-          intent: 'email_draft',
-          message: `Drafting an email to ${recipientDisplay}…`,
-          event: {
-            type: 'open_email_draft',
-            job_id: jobId,
-            recipient_name: recipientName,
-            intent_hint: hint,
-          },
-        })
-      }
-      // Demo email_sync_status: detect "email connected", "email sync status" etc
-      if (
-        (lower.includes('email') && lower.includes('connected')) ||
-        (lower.includes('email') && lower.includes('sync')) ||
-        (lower.includes('gmail') && lower.includes('connected')) ||
-        lower === 'email sync status'
-      ) {
-        const result = await handleEmailSyncStatus(builderId)
-        return NextResponse.json(result)
-      }
-      // Demo simulate_email: detect "simulate email", "test email sync" etc
-      if (
-        (lower.includes('simulate') && lower.includes('email')) ||
-        (lower.includes('test') && lower.includes('email')) ||
-        lower.includes('simulate email') ||
-        lower.includes('test email sync')
-      ) {
-        const result = await handleSimulateEmail(builderId)
-        return NextResponse.json(result)
-      }
-      // Demo margin_query: detect margin/profit/cost overrun keywords
-      if (
-        lower.includes('margin') ||
-        lower.includes('profit') ||
-        lower.includes('bleeding') ||
-        lower.includes('losing money') ||
-        lower.includes('cost overrun') ||
-        lower.includes('which job is') ||
-        (lower.includes('how') && lower.includes('margin'))
-      ) {
-        return NextResponse.json(handleMarginQuery())
-      }
-      // Demo job_query: detect known job keywords
-      const demoJob = findDemoJob({ address: lower })
-      if (demoJob) {
-        return NextResponse.json(handleJobQuery({ address: lower }))
-      }
-      // Demo activate job: detect activation keywords
-      if (
-        lower.includes('activate') ||
-        (lower.includes('toorak') && (lower.includes('go') || lower.includes('start') || lower.includes('kick off')))
-      ) {
-        return NextResponse.json({
-          intent: 'job_query',
-          message:
-            'The Toorak quote for $127,500 was sent to Tom Caruso 5 days ago. If Tom has verbally approved, you can activate the job now — this creates the milestone timeline and invoice schedule in one click.',
-          event: {
-            type: 'suggest_job_activation',
-            job_id: TOORAK_JOB_ID,
-            quote_id: TOORAK_QUOTE_ID,
-          },
-        })
-      }
-      // Demo list_workers: detect staff/crew/team/worker listing
-      if (
-        lower.includes('staff') ||
-        lower.includes('my workers') ||
-        lower.includes('my crew') ||
-        lower.includes('my team') ||
-        lower.includes('list workers') ||
-        lower.includes('show workers') ||
-        (lower.includes('list') && lower.includes('worker')) ||
-        (lower.includes('who') && (lower.includes('crew') || lower.includes('worker') || lower.includes('team')))
-      ) {
-        return NextResponse.json({
-          intent: 'job_query',
-          message: 'You have 2 workers on your crew:\n• Jack Thompson — Carpenter (on Fitzroy job)\n• Mick Reynolds — Plumber (on Fitzroy job)\n\nType "add [name], they\'re a [trade]" to invite someone new.',
-        })
-      }
-      // Demo job listing: detect "quote", "list jobs", "all jobs", "my jobs"
-      if (
-        (lower.includes('quote') && !lower.includes('email') && !lower.includes('draft') && !lower.includes('follow')) ||
-        lower.includes('my jobs') ||
-        lower.includes('list jobs') ||
-        lower.includes('all jobs') ||
-        lower.includes('show jobs') ||
-        lower.includes('what jobs')
-      ) {
-        return NextResponse.json({
-          intent: 'job_query',
-          message: 'You have 3 active jobs:\n• 14 Merri St, Fitzroy — active (JOB-2025-001)\n• 8 Burnside Rd, Toorak — quoted (JOB-2025-002)\n• 52 Bendigo St, Brunswick — quoting (JOB-2025-003)\n\nAsk me about any of them by address.',
-        })
-      }
-      return NextResponse.json(handleUnknown())
+      const result = await routeDemoMessage(message, builderId, forceCreate)
+      return NextResponse.json(result)
     }
 
     // Pre-classify: worker/staff/crew listing — classify-intent has no intent for this
@@ -1383,140 +1562,22 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
     const anthropic = new Anthropic({ apiKey })
 
-    // Step 1: Classify intent
-    const classified = await classifyIntent(message, anthropic)
+    // Extract all actions from the message
+    const actions = await extractActions(message, anthropic)
 
-    // Step 2: Route to handler
-    if (classified.intent === 'morning_brief') {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-
-      const brief =
-        supabaseUrl && serviceRoleKey
-          ? await getLiveMorningBrief(builderId, supabaseUrl, serviceRoleKey)
-          : getDemoMorningBrief()
-
-      return NextResponse.json({
-        intent: 'morning_brief',
-        message: brief.message,
-        alerts: brief.alerts,
-      })
+    const ctx: OrchestrationContext = {
+      builder_id: builderId,
+      force_create: forceCreate,
+      resolved_job_id: null,
+      resolved_job: null,
+      is_duplicate: false,
     }
 
-    if (classified.intent === 'add_worker') {
-      const { name, role, email, phone } = classified.entities
-      if (!name || !role) {
-        return NextResponse.json({
-          intent: 'add_worker',
-          message: `Got it — who are you adding and what's their trade? For example: "add Sarah she's a plumber"`,
-        })
-      }
-      const result = await createWorker({
-        builder_id: builderId,
-        name,
-        role,
-        email,
-        phone,
-      })
-      return NextResponse.json({
-        intent: 'add_worker',
-        message: `Added ${name} as a ${result.worker.role.charAt(0).toUpperCase() + result.worker.role.slice(1)}. Invite link is ready — send it in two taps.`,
-        worker: result.worker,
-        invite_url: result.invite_url,
-        event: result.modal_event,
-      })
+    const result = await orchestrateActions(actions, ctx, anthropic)
+    if (result.intent === 'unknown') {
+      return NextResponse.json(await smartFallback(message, builderId, anthropic))
     }
-
-    if (classified.intent === 'new_job') {
-      const address = classified.entities.address
-      if (!address) {
-        return NextResponse.json({
-          intent: 'new_job',
-          message: `Which address is this job at? For example: 'new job at 14 Smith St Fitzroy'`,
-        })
-      }
-      const forceCreate = body.force_create === true
-      const result = await createJob({
-        builder_id: builderId,
-        address,
-        client_name: classified.entities.client_name,
-        force_create: forceCreate,
-      })
-      if (result.duplicate && result.existing_job) {
-        return NextResponse.json({
-          intent: 'new_job',
-          message: `Heads up — you've already got a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Want to open that job instead?`,
-          duplicate: true,
-          existing_job: result.existing_job,
-          event: result.event,
-        })
-      }
-      return NextResponse.json({
-        intent: 'new_job',
-        message: `New job at ${result.job!.address} created. Upload your plans to start the quote.`,
-        job: result.job,
-        event: result.event,
-      })
-    }
-
-    if (classified.intent === 'job_query') {
-      // Live path: if no specific address, list all jobs from DB
-      const address = classified.entities.address ?? classified.entities.job_name ?? ''
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-      if (!address && supabaseUrl && serviceRoleKey) {
-        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
-        const { data: jobs } = await supabase
-          .from('jobs')
-          .select('id, address, status, job_ref')
-          .eq('builder_id', builderId)
-          .not('status', 'eq', 'archived')
-          .order('created_at', { ascending: false })
-          .limit(10)
-        if (jobs && jobs.length > 0) {
-          const lines = (jobs as Array<{ id: string; address: string; status: string; job_ref: string | null }>)
-            .map(j => `• ${j.address} — ${j.status}${j.job_ref ? ` (${j.job_ref})` : ''}`)
-            .join('\n')
-          return NextResponse.json({
-            intent: 'job_query',
-            message: `You have ${jobs.length} active job${jobs.length === 1 ? '' : 's'}:\n${lines}\n\nAsk me about any of them by address.`,
-          })
-        }
-        return NextResponse.json({
-          intent: 'job_query',
-          message: 'You don\'t have any active jobs yet. Try "new job at [address]" to get started.',
-        })
-      }
-      return NextResponse.json(handleJobQuery(classified.entities))
-    }
-
-    if (classified.intent === 'variation') {
-      return NextResponse.json(handleVariationIntent(classified.entities, builderId))
-    }
-
-    if (classified.intent === 'invoice') {
-      return NextResponse.json(handleInvoice())
-    }
-
-    if (classified.intent === 'email_draft') {
-      return NextResponse.json(handleEmailDraft(classified.entities))
-    }
-
-    if (classified.intent === 'email_sync_status') {
-      const result = await handleEmailSyncStatus(builderId)
-      return NextResponse.json(result)
-    }
-
-    if (classified.intent === 'simulate_email') {
-      const result = await handleSimulateEmail(builderId)
-      return NextResponse.json(result)
-    }
-
-    if (classified.intent === 'margin_query') {
-      return NextResponse.json(handleMarginQuery())
-    }
-
-    return NextResponse.json(await smartFallback(message, builderId, anthropic))
+    return NextResponse.json(result)
   } catch (err) {
     console.error('[/api/chat] Error:', err)
     return NextResponse.json(

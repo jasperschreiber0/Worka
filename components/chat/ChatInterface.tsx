@@ -97,6 +97,7 @@ interface ChatApiResponse {
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
   event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
+  events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }>
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -291,6 +292,8 @@ export default function ChatInterface({
           status: pendingUpload.status as import('@/lib/types/database.types').JobStatus,
           job_type: null,
           notes: null,
+          budget_estimate: null,
+          scope_notes: null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         },
@@ -544,9 +547,15 @@ export default function ChatInterface({
       const data: ChatApiResponse = await res.json()
 
       // Build assistant message — attach duplicateJob if relevant
+      // Check both event (backwards compat) and events[] (multi-action)
+      const allEvents = [
+        ...(data.events ?? []),
+        ...(data.event && !data.events?.some((e) => e.type === data.event?.type) ? [data.event] : []),
+      ]
+
       let duplicateJob: DuplicateJob | undefined
       if (
-        data.event?.type === 'show_duplicate_warning' &&
+        allEvents.some((e) => e.type === 'show_duplicate_warning') &&
         data.existing_job
       ) {
         duplicateJob = {
@@ -558,7 +567,7 @@ export default function ChatInterface({
 
       // Attach variation card if present
       let variationCard: VariationCardVariation | undefined
-      if (data.event?.type === 'show_variation' && data.variation) {
+      if (allEvents.some((e) => e.type === 'show_variation') && data.variation) {
         const v = data.variation
         variationCard = {
           id: v.id,
@@ -586,132 +595,105 @@ export default function ChatInterface({
       setMessages((prev) => [...prev, assistantMessage])
 
       // Handle Layer 3 events
-      if (
-        data.event?.type === 'open_worker_modal' &&
-        data.worker &&
-        data.invite_url
-      ) {
-        setWorkerModal({
-          isOpen: true,
-          worker: data.worker,
-          inviteUrl: data.invite_url,
-        })
-      }
-
-      if (
-        data.event?.type === 'open_upload_panel' &&
-        data.job
-      ) {
-        setUploadPanel({
-          isOpen: true,
-          job: data.job,
-        })
-      }
-
-      // Handle job snapshot event (Session 9)
-      if (data.event?.type === 'open_job_snapshot') {
-        const evt = data.event as OpenJobSnapshotEvent
-        onJobMention?.({
-          id: evt.job_id,
-          address: evt.job_address,
-          status: evt.job_status,
-          client_name: evt.client_name,
-        })
-      }
-
-      // Handle email draft event — open EmailDraftModal immediately
-      if (data.event?.type === 'open_email_draft') {
-        const evt = data.event as OpenEmailDraftEvent
-        setEmailDraftModal({
-          isOpen: true,
-          jobId: evt.job_id,
-          recipientName: evt.recipient_name ?? undefined,
-          intentHint: evt.intent_hint as EmailIntentHint,
-        })
-      }
-
-      // Handle suggest_email_draft — append a message with a "Draft email" action button
-      if (data.event?.type === 'suggest_email_draft') {
-        const evt = data.event as SuggestEmailDraftEvent
-        const suggestMessage: Message = {
-          id: generateId(),
-          role: 'assistant',
-          content: '',
-          alerts: [
-            {
-              priority: 'high',
-              message: data.message,
-              action: 'Draft email',
-              entity_id: evt.job_id,
-              entity_type: 'invoice',
-            },
-          ],
-          timestamp: new Date(),
+      // Dispatch all Layer 3 events — handles both events[] (multi-action) and
+      // legacy event field (backwards compat). allEvents is built above.
+      for (const evt of allEvents) {
+        if (evt.type === 'open_worker_modal' && data.worker && data.invite_url) {
+          setWorkerModal({
+            isOpen: true,
+            worker: data.worker,
+            inviteUrl: data.invite_url,
+          })
         }
-        // Replace the last assistant message with the suggest message (it already has message text)
-        // Actually the data.message is already set in assistantMessage above — add action button via separate alert message
-        setMessages((prev) => {
-          const updated = [...prev]
-          // Find the last assistant message (just added) and add the action alert
-          const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
-          if (lastIdx >= 0) {
-            updated[lastIdx] = {
-              ...updated[lastIdx],
-              alerts: [
-                {
-                  priority: 'high',
-                  message: 'Want me to draft a follow-up email?',
-                  action: 'Draft email',
-                  entity_id: evt.job_id,
-                  entity_type: evt.intent_hint === 'variation' ? 'variation' : evt.intent_hint === 'invoice' ? 'invoice' : evt.intent_hint === 'quote_followup' ? 'quote' : 'job',
-                },
-              ],
+
+        if (evt.type === 'open_upload_panel' && data.job) {
+          setUploadPanel({
+            isOpen: true,
+            job: data.job,
+          })
+        }
+
+        if (evt.type === 'open_job_snapshot') {
+          const e = evt as OpenJobSnapshotEvent
+          onJobMention?.({
+            id: e.job_id,
+            address: e.job_address,
+            status: e.job_status,
+            client_name: e.client_name,
+          })
+        }
+
+        if (evt.type === 'open_email_draft') {
+          const e = evt as OpenEmailDraftEvent
+          setEmailDraftModal({
+            isOpen: true,
+            jobId: e.job_id,
+            recipientName: e.recipient_name ?? undefined,
+            intentHint: e.intent_hint as EmailIntentHint,
+          })
+        }
+
+        if (evt.type === 'suggest_email_draft') {
+          const e = evt as SuggestEmailDraftEvent
+          setMessages((prev) => {
+            const updated = [...prev]
+            const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
+            if (lastIdx >= 0) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                alerts: [
+                  {
+                    priority: 'high' as const,
+                    message: 'Want me to draft a follow-up email?',
+                    action: 'Draft email',
+                    entity_id: e.job_id,
+                    entity_type: e.intent_hint === 'variation' ? 'variation' as const : e.intent_hint === 'invoice' ? 'invoice' as const : e.intent_hint === 'quote_followup' ? 'quote' as const : 'job' as const,
+                  },
+                ],
+              }
             }
-          }
-          return updated
-        })
-        void suggestMessage // suppress unused warning
-      }
+            return updated
+          })
+        }
 
-      // Handle suggest_job_activation event — add "Activate job" action button in chat
-      if (data.event?.type === 'suggest_job_activation') {
-        const evt = data.event as SuggestJobActivationEvent
-        setMessages((prev) => {
-          const updated = [...prev]
-          const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
-          if (lastIdx >= 0) {
-            updated[lastIdx] = {
-              ...updated[lastIdx],
-              alerts: [
-                {
-                  priority: 'high',
-                  message: 'If Tom has verbally approved, activate the job now to create the milestone timeline and invoice schedule.',
-                  action: 'Activate job',
-                  entity_id: evt.job_id,
-                  entity_type: 'job',
-                },
-              ],
+        if (evt.type === 'suggest_job_activation') {
+          const e = evt as SuggestJobActivationEvent
+          setMessages((prev) => {
+            const updated = [...prev]
+            const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
+            if (lastIdx >= 0) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                alerts: [
+                  {
+                    priority: 'high' as const,
+                    message: 'If Tom has verbally approved, activate the job now to create the milestone timeline and invoice schedule.',
+                    action: 'Activate job',
+                    entity_id: e.job_id,
+                    entity_type: 'job' as const,
+                  },
+                ],
+              }
             }
-          }
-          return updated
-        })
+            return updated
+          })
+        }
+
+        if (evt.type === 'inbound_email_alert') {
+          const e = evt as InboundEmailAlertEvent
+          setInboundEmailAlert({
+            email: e.email,
+            job_address: e.job_address,
+            intent: e.intent,
+            suggested_action: e.suggested_action,
+          })
+        }
       }
 
-      // Handle inbound_email_alert event — surface matched email in chat
-      if (data.event?.type === 'inbound_email_alert') {
-        const evt = data.event as InboundEmailAlertEvent
-        setInboundEmailAlert({
-          email: evt.email,
-          job_address: evt.job_address,
-          intent: evt.intent,
-          suggested_action: evt.suggested_action,
-        })
-      }
-
-      // Trigger general query callback for non-job intents
+      // Trigger general query callback — check intent string which may be compound e.g. "morning_brief+job_query"
       if (
-        data.intent === 'morning_brief' ||
-        data.intent === 'add_worker' ||
+        data.intent?.includes('morning_brief') ||
+        data.intent?.includes('add_worker') ||
         data.intent === 'unknown'
       ) {
         onGeneralQuery?.()

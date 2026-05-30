@@ -81,6 +81,8 @@ export interface Job {
   status: JobStatus
   job_type: string | null
   notes: string | null
+  budget_estimate: number | null
+  scope_notes: string | null
   created_at: string
   updated_at: string
 }
@@ -356,6 +358,34 @@ export type IntentType =
   | 'variation'
   | 'invoice'
   | 'unknown'
+
+// ─── Multi-action extraction types ───────────────────────────────────────────
+
+export type ActionType =
+  | 'morning_brief'
+  | 'add_worker'
+  | 'create_job'
+  | 'job_query'
+  | 'variation'
+  | 'invoice'
+  | 'email_draft'
+  | 'email_sync_status'
+  | 'simulate_email'
+  | 'margin_query'
+  | 'open_upload_panel'
+  | 'review_assumptions'
+  | 'unknown'
+
+export interface ExtractedAction {
+  type: ActionType
+  entities: Record<string, string>
+  confidence: number
+}
+
+export interface ExtractActionsResponse {
+  actions: ExtractedAction[]
+  raw_context: Record<string, string>
+}
 
 export interface ClassifyIntentRequest {
   message: string
