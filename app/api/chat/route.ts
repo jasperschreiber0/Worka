@@ -1502,18 +1502,26 @@ async function orchestrateActions(
           job_address?: string
           assignee_name?: string
         }
+
+        // If no specific task was extracted, ask for it — don't log a vague entry
+        const isVagueTask = !description || description.length > 120 || description === 'task'
+        if (isVagueTask) {
+          messageParts.push(
+            `What's the specific task? Tell me like:\n\n` +
+            `• "Add task at Brunswick: install footings — assign to Jack"\n` +
+            `• "Schedule Mick to check plumbing at Fitzroy tomorrow"\n\n` +
+            `Full task scheduling with due dates and worker notifications is coming — for now I'll log it to the job.`
+          )
+          break
+        }
+
         const jobRef = job_address ?? ctx.resolved_job?.address ?? 'the job'
-        const taskDesc = description ?? 'task'
         const assignLine = assignee_name ? ` for ${assignee_name}` : ' for your crew'
-
-        stateChanges.push({ status: 'info', label: `Task logged: ${taskDesc}` })
-
-        const taskParts = [
-          `Task noted${assignLine} at ${jobRef}: "${taskDesc}".`,
-          `Full task scheduling — with due dates, status tracking, and worker notifications — is being built now.`,
-          `For now, I've logged it here. Your crew can see assigned tasks in the worker portal at /worker.`,
-        ]
-        messageParts.push(taskParts.join(' '))
+        stateChanges.push({ status: 'info', label: `Task logged: ${description}` })
+        messageParts.push(
+          `Task noted${assignLine} at ${jobRef}: "${description}".\n\n` +
+          `Full task scheduling — due dates, status tracking, and worker notifications — is coming. Your crew can see assigned tasks in the worker portal.`
+        )
         break
       }
 
@@ -1797,6 +1805,47 @@ async function orchestrateActions(
         break
       }
 
+      case 'roadmap': {
+        messageParts.push(
+          `Here's what's coming to WorkA:\n\n` +
+          `**Already live:**\n` +
+          `• Morning brief — daily alerts ranked by urgency\n` +
+          `• Job creation, quoting, and plan intake via PDF upload\n` +
+          `• Variation logging and client approval flow\n` +
+          `• Invoice creation and overdue tracking\n` +
+          `• Email drafting and communication history\n` +
+          `• Worker invites and mobile worker portal\n` +
+          `• Margin analysis across active jobs\n` +
+          `• Client meeting prep and payment risk analysis\n\n` +
+          `**Coming next:**\n` +
+          `• Full task scheduling — assign tasks to workers with due dates and notifications\n` +
+          `• Team notifications and in-app worker messaging\n` +
+          `• CSV rate sheet import from suppliers\n` +
+          `• Xero sync — push invoices directly to your accounting software\n` +
+          `• SWMS generation — auto-draft Safe Work Method Statements from job scope\n` +
+          `• Site diary and weather-delay logging\n` +
+          `• Client portal — let clients view quote status and approve variations online\n\n` +
+          `Anything specific you want prioritised? Reply and I'll note it.`
+        )
+        break
+      }
+
+      case 'team_notifications': {
+        messageParts.push(
+          `Team messaging and notifications are on the roadmap — here's where things stand:\n\n` +
+          `**What exists now:**\n` +
+          `• Workers can log into the worker portal (/worker) to see their assigned job for the day\n` +
+          `• You can invite crew via WorkA — they get an SMS/email link\n` +
+          `• Communication history is tracked per job in the Comms tab\n\n` +
+          `**What's coming:**\n` +
+          `• In-app task notifications pushed to workers' phones when you assign them a task\n` +
+          `• Builder dashboard alerts when workers check in or complete tasks\n` +
+          `• Group messaging per job site\n\n` +
+          `For now, use the worker portal (/worker) for site updates and email/SMS via the Comms tab for client comms.`
+        )
+        break
+      }
+
       case 'unknown':
       default: {
         if (actions.length === 1) {
@@ -1868,8 +1917,20 @@ Actions available — tell the builder to type these if they want to act:
 - "invoice for [stage] on [address]" — create an invoice
 - "email [client] about [topic]" — draft a client email
 - "how's my margin" — margin overview
+- "meeting with [client]" — get a pre-meeting briefing on a client/job
+- "what's most likely to stop me getting paid" — payment risk analysis
+- "have we worked with [client] before" — client history lookup
+- "add task at [address]: [description]" — log a task for your crew
 
-Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD.`
+What WorkA does NOT have yet (but is coming):
+- Xero sync
+- SWMS (Safe Work Method Statements) generation
+- Full task scheduling with worker notifications
+- CSV rate sheet import from suppliers
+- Team group chat
+- Client portal
+
+Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD. If asked what WorkA can't do or what's coming, be honest about the roadmap items above.`
 
   const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
   try {
@@ -2060,12 +2121,21 @@ async function routeDemoMessage(
     }
   }
 
-  // Task assignment
-  if (lower.includes('task') || lower.includes('assign') || lower.includes('schedule') && lower.includes('staff')) {
-    if (!actions.some((a) => a.type === 'add_task')) {
-      const descMatch = lower.match(/(?:add task|task)(?:\s+to\s+\S+)?:\s*(.+)/i)
-      actions.push({ type: 'add_task', entities: { description: descMatch?.[1] ?? lower.substring(0, 80) }, confidence: 75 })
-    }
+  // Task assignment — only trigger for imperative creation, not capability questions
+  const isTaskCapabilityQuestion =
+    lower.includes('can you') || lower.includes('how do') || lower.includes('how to') ||
+    lower.includes('able to') || lower.includes('what can') || lower.includes('what else') ||
+    lower.includes('is there') || lower.includes('do you')
+  const isImperativeTask =
+    lower.match(/add task/) ||
+    lower.match(/assign\s+\w+\s+to/) ||
+    lower.match(/schedule\s+\w+\s+to/) ||
+    lower.match(/task(?:\s+to\s|\s+for\s|\s+at\s|\s*:)/)
+  if (isImperativeTask && !isTaskCapabilityQuestion && !actions.some((a) => a.type === 'add_task')) {
+    const descMatch = lower.match(/(?:add task|task)(?:\s+to\s+\S+)?:\s*(.+)/i)
+    const assignMatch = lower.match(/assign\s+\w+\s+to\s+(?:do\s+)?(.+)/i)
+    const desc = descMatch?.[1] ?? assignMatch?.[1] ?? undefined
+    actions.push({ type: 'add_task', entities: { ...(desc ? { description: desc } : {}) }, confidence: 75 })
   }
 
   // Rate / pricing upload
@@ -2126,6 +2196,32 @@ async function routeDemoMessage(
     const name = rawName.charAt(0).toUpperCase() + rawName.slice(1)
     const dateMatch = lower.match(/(monday|tuesday|wednesday|thursday|friday|next week|this week)/i)
     actions.push({ type: 'worker_onboarding', entities: { name, ...(dateMatch ? { start_date: dateMatch[1] } : {}) }, confidence: 88 })
+  }
+
+  // Roadmap / what's coming
+  if (
+    lower.includes('coming to worka') || lower.includes('coming to work a') ||
+    lower.includes('roadmap') || lower.includes("what's planned") || lower.includes('whats planned') ||
+    lower.includes('future features') || lower.includes('what will worka') ||
+    lower.includes('list everything') || lower.includes('whats coming') || lower.includes("what's coming") ||
+    (lower.includes('coming') && (lower.includes('worka') || lower.includes('work a') || lower.includes('features')))
+  ) {
+    if (!actions.some(a => a.type === 'roadmap')) {
+      actions.push({ type: 'roadmap', entities: {}, confidence: 90 })
+    }
+  }
+
+  // Team chat / notifications
+  if (
+    lower.includes('team chat') || lower.includes('team message') || lower.includes('team notif') ||
+    lower.includes('notify workers') || lower.includes('notify crew') || lower.includes('notify staff') ||
+    lower.includes('push notification') || lower.includes('group chat') ||
+    (lower.includes('message') && (lower.includes('crew') || lower.includes('workers') || lower.includes('staff'))) ||
+    (lower.includes('notification') && (lower.includes('worker') || lower.includes('crew') || lower.includes('team')))
+  ) {
+    if (!actions.some(a => a.type === 'team_notifications')) {
+      actions.push({ type: 'team_notifications', entities: {}, confidence: 88 })
+    }
   }
 
   // Contradiction detection — must run AFTER other detections so it can clear conflicting actions

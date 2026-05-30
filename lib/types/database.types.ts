@@ -389,6 +389,8 @@ export type ActionType =
   | 'payment_risk'
   | 'conflict_detected'
   | 'worker_onboarding'
+  | 'roadmap'
+  | 'team_notifications'
   | 'unknown'
 
 export interface ExtractedAction {
