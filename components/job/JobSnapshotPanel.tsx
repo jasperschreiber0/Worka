@@ -161,6 +161,7 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
             quote={snapshot.quote}
             onViewQuote={onViewQuote ?? (() => {})}
             onActivateJob={handleActivateJob}
+            onStartQuote={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
           />
         )
       case 'variations':
