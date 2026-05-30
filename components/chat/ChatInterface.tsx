@@ -220,6 +220,7 @@ export default function ChatInterface({
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
+  const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
   const [workerModal, setWorkerModal] = useState<WorkerModalState>({
     isOpen: false,
     worker: null,
@@ -515,7 +516,12 @@ export default function ChatInterface({
     const trimmed = text.trim()
     if (!trimmed || loading) return
 
-    // Add user message to state
+    // If we're awaiting an address for a new job, silently prefix the API payload
+    // but NOT when forceCreate is true (that's a button action with a known address already)
+    const apiPayload = (awaitingAddressForNewJob && !forceCreate) ? `new job at ${trimmed}` : trimmed
+    setAwaitingAddressForNewJob(false)
+
+    // Add user message to state — always show what the user typed, never the prefixed version
     const userMessage: Message = {
       id: generateId(),
       role: 'user',
@@ -532,7 +538,7 @@ export default function ChatInterface({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: trimmed,
+          message: apiPayload,
           builder_id: builderId,
           ...(forceCreate ? { force_create: true } : {}),
         }),
@@ -641,7 +647,7 @@ export default function ChatInterface({
                     message: 'Want me to draft a follow-up email?',
                     action: 'Draft email',
                     entity_id: e.job_id,
-                    entity_type: 'invoice' as const,
+                    entity_type: e.intent_hint === 'variation' ? 'variation' as const : e.intent_hint === 'invoice' ? 'invoice' as const : e.intent_hint === 'quote_followup' ? 'quote' as const : 'job' as const,
                   },
                 ],
               }
@@ -692,6 +698,13 @@ export default function ChatInterface({
       ) {
         onGeneralQuery?.()
       }
+
+      // Set address follow-up flag when a create_job came back with no job (address was missing)
+      const isNoAddressResponse = !data.job && !data.duplicate &&
+        (data.intent === 'new_job' || data.intent === 'create_job' || data.intent?.startsWith('create_job+'))
+      if (isNoAddressResponse && data.message?.toLowerCase().includes('address')) {
+        setAwaitingAddressForNewJob(true)
+      }
     } catch {
       const errorMessage: Message = {
         id: generateId(),
@@ -702,13 +715,17 @@ export default function ChatInterface({
       setMessages((prev) => [...prev, errorMessage])
     } finally {
       setLoading(false)
+      inputRef.current?.focus()
     }
-  }, [loading])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingAddressForNewJob])
 
-  // Handler: open an existing job (wired fully in Session 9)
-  const handleOpenJob = useCallback((_jobId: string) => {
-    // No-op for now — wired in Session 9
-  }, [])
+  const handleOpenJob = useCallback((jobId: string) => {
+    const job = messages.find(m => m.duplicateJob?.id === jobId)?.duplicateJob
+    if (job) {
+      onJobMention?.({ id: job.id, address: job.address, status: job.status })
+    }
+  }, [messages, onJobMention])
 
   // Handler: approve variation from chat card — POST resolve then open notification modal
   const handleVariationApprove = useCallback(async (variationId: string) => {

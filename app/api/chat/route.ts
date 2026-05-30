@@ -241,29 +241,41 @@ Your job is to parse a builder's natural-language message and return ALL actions
     Entities: { job_address? }
 
 11. open_upload_panel
-    Trigger: explicit mention of uploading plans, files, drawings
+    Trigger: builder explicitly asks to upload plans/files NOW (future intent)
     Entities: {}
-    Note: only emit this as a SEPARATE action if the builder explicitly asks to upload
-    and there is NO create_job action (create_job already implies upload panel opens)
+    Note: only emit if the builder says they WANT to upload (e.g. "upload the plans", "I'll upload now")
+    Do NOT emit for past uploads ("I've uploaded the plans", "I uploaded them") — use review_assumptions instead
+    Do NOT emit if create_job is also present (create_job already opens the upload panel for new jobs)
 
 12. review_assumptions
-    Trigger: asking to see assumptions, unresolved items, what needs clarifying before quote
+    Trigger: asking to see assumptions, unresolved items, what needs clarifying before the quote can be sent
+    Also triggered by: "I've uploaded the plans" / "I uploaded the plans" / "plans are uploaded" — the builder
+    has already uploaded and wants to know what's outstanding
     Entities: {}
 
-13. unknown
+13. update_job_context
+    Trigger: builder mentions new context about a job mid-conversation WITHOUT creating a new job
+    (material changes, client preferences, timeline updates, scope changes on an existing job)
+    Entities: { scope_notes?, budget_hint?, client_name? }
+    Examples: "the client is leaning toward polished concrete", "budget has changed to $420k",
+              "they want it done by August", "client now wants to add a deck"
+    ONLY emit if the message is about an EXISTING job (not a new one)
+
+14. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
 
 ### raw_context
 Capture any additional context not mapped to a specific action:
-- budget mentions without a create_job action
-- timeline constraints ("needs to be done by Christmas")
-- notes about scope or client preferences
+- timeline constraints ("needs to be done by Christmas", "quote by Friday")
+- notes about scope or client preferences not covered by update_job_context
 Keep values as short strings.
 
 ### Rules
 - Return ALL actions the builder is requesting — never discard intent
 - Order actions by logical dependency: create_job before open_upload_panel, create_job before review_assumptions
+- "I've uploaded the plans" → review_assumptions (past tense = upload already done, surface what's next)
+- "upload the plans" / "I need to upload" → open_upload_panel (future intent)
 - If confidence is below 50 for an action, still include it but set confidence accurately
 - For create_job: strip leading articles ("at", "for", "on") from address; strip trailing instructions
 - For add_worker: normalise role to lowercase
@@ -593,7 +605,7 @@ const SEED_JOBS: Array<{
   },
   {
     id: '00000000-0000-0000-0000-000000000020',
-    address: '8 Burnside Ave, Toorak VIC 3142',
+    address: '8 Burnside Rd, Toorak VIC 3142',
     status: 'quoted',
     tokens: ['8 burnside'],
     job_ref: 'JOB-2025-002',
@@ -1140,9 +1152,36 @@ async function orchestrateActions(
           accumulated.job = result.existing_job
           // Surface the duplicate warning — but do NOT stop. Continue remaining actions.
           events.push({ type: 'show_duplicate_warning', job_id: result.existing_job.id })
+
+          // Write extracted context back to the existing job — only update null fields
+          // to avoid overwriting data the builder previously set deliberately.
+          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+          if ((client_name || budget_hint || scope_notes) && sbUrl && sbKey) {
+            const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+            const { data: existingRow } = await sb
+              .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', result.existing_job.id).single()
+            if (existingRow) {
+              const updates: Record<string, unknown> = {}
+              if (budget_hint && !existingRow.budget_estimate) {
+                updates.budget_estimate = parseFloat(budget_hint.replace(/,/g, ''))
+              }
+              if (scope_notes && !existingRow.scope_notes) {
+                updates.scope_notes = scope_notes
+              }
+              if (client_name && !existingRow.notes) {
+                updates.notes = `Client: ${client_name}`
+              }
+              if (Object.keys(updates).length > 0) {
+                await sb.from('jobs').update(updates).eq('id', result.existing_job.id)
+              }
+            }
+          }
+
           const contextHints: string[] = []
           if (client_name) contextHints.push(`client ${client_name} noted`)
           if (budget_hint) contextHints.push(`budget ~$${budget_hint} noted`)
+          if (scope_notes) contextHints.push(`scope noted`)
           const hintStr = contextHints.length > 0 ? ` (${contextHints.join(', ')})` : ''
           messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status})${hintStr}. Opening that job now.`)
         } else {
@@ -1166,9 +1205,41 @@ async function orchestrateActions(
       }
 
       case 'review_assumptions': {
-        // Surface assumption review for the resolved job
-        // In demo mode this is a message; in live mode it would open the assumption panel
-        if (ctx.resolved_job_id) {
+        const jobId = ctx.resolved_job_id
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (jobId && sbUrl && sbKey) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+
+          const { data: quoteRow } = await sb
+            .from('quotes')
+            .select('id, status')
+            .eq('job_id', jobId)
+            .in('status', ['draft', 'pending_review'])
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+
+          if (quoteRow) {
+            const { data: items } = await sb
+              .from('quote_line_items')
+              .select('description, confidence')
+              .eq('quote_id', quoteRow.id)
+              .eq('is_assumption', true)
+              .eq('assumption_status', 'unresolved')
+
+            if (items && items.length > 0) {
+              const list = items.map(i => `• ${i.description}`).join('\n')
+              messageParts.push(`${items.length} assumption${items.length === 1 ? '' : 's'} need your input before the quote can be sent:\n${list}`)
+            } else {
+              messageParts.push('No unresolved assumptions — quote is clear to send once you\'re happy with the numbers.')
+            }
+          } else {
+            messageParts.push("No draft quote yet for this job. Once the plans are processed, I'll flag every assumption that needs your input.")
+          }
+        } else if (jobId) {
+          // Demo mode — no DB available
           messageParts.push('I\'ll surface any unresolved assumptions once your plans are processed.')
         } else {
           messageParts.push('Upload the plans first and I\'ll flag every assumption that needs your input before the quote can be issued.')
@@ -1226,6 +1297,38 @@ async function orchestrateActions(
         break
       }
 
+      case 'update_job_context': {
+        // Builder mentioned new context about an existing job mid-conversation.
+        // Only update fields that are currently null to avoid overwriting deliberate data.
+        const jobId = ctx.resolved_job_id
+        const { scope_notes: newScope, budget_hint: newBudget, client_name: newClient } = action.entities
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (jobId && sbUrl && sbKey && (newScope || newBudget || newClient)) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const { data: existingRow } = await sb
+            .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', jobId).single()
+          if (existingRow) {
+            const updates: Record<string, unknown> = {}
+            if (newBudget && !existingRow.budget_estimate) {
+              updates.budget_estimate = parseFloat(newBudget.replace(/,/g, ''))
+            }
+            if (newScope && !existingRow.scope_notes) {
+              updates.scope_notes = newScope
+            }
+            if (newClient && !existingRow.notes) {
+              updates.notes = `Client: ${newClient}`
+            }
+            if (Object.keys(updates).length > 0) {
+              await sb.from('jobs').update(updates).eq('id', jobId)
+              messageParts.push('Got it — noted on the job.')
+            }
+          }
+        }
+        break
+      }
+
       case 'unknown':
       default: {
         if (actions.length === 1) {
@@ -1251,6 +1354,70 @@ async function orchestrateActions(
     // Backwards compat: expose first event as event field for existing UI code
     event: events.length > 0 ? events[0] : undefined,
     ...accumulated,
+  }
+}
+
+async function smartFallback(
+  message: string,
+  builderId: string,
+  anthropic: Anthropic
+): Promise<ChatResponse> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  let jobLines = '- 14 Merri St, Fitzroy VIC 3065 (active, JOB-2025-001)\n- 8 Burnside Rd, Toorak VIC 3142 (quoted, JOB-2025-002)\n- 52 Bendigo St, Brunswick VIC 3056 (quoting, JOB-2025-003)'
+  let workerLines = '- Jack Thompson (Carpenter)\n- Mick Reynolds (Plumber)'
+
+  if (supabaseUrl && serviceRoleKey) {
+    const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+    const [{ data: jobs }, { data: workers }] = await Promise.all([
+      supabase.from('jobs').select('address, status, job_ref').eq('builder_id', builderId).not('status', 'eq', 'archived').limit(10),
+      supabase.from('workers').select('name, role').eq('builder_id', builderId).limit(20),
+    ])
+    jobLines = jobs?.length
+      ? (jobs as Array<{ address: string; status: string; job_ref: string | null }>)
+          .map(j => `- ${j.address} (${j.status}${j.job_ref ? ', ' + j.job_ref : ''})`).join('\n')
+      : 'No active jobs yet.'
+    workerLines = workers?.length
+      ? (workers as Array<{ name: string; role: string }>).map(w => `- ${w.name} (${w.role})`).join('\n')
+      : 'No workers yet.'
+  }
+
+  const systemPrompt = `You are WorkA — an AI operations manager for Australian residential builders. Answer in plain English. Be direct and brief (builders are busy on site).
+
+Active jobs:
+${jobLines}
+
+Crew:
+${workerLines}
+
+Actions available — tell the builder to type these if they want to act:
+- "whats on today" — daily brief and alerts
+- "new job at [address]" — create a job
+- "add [name], they're a [trade]" — invite a crew member
+- "show my jobs" / "show my team" — lists
+- "log a variation on [address]" — record a scope change
+- "invoice for [stage] on [address]" — create an invoice
+- "email [client] about [topic]" — draft a client email
+- "how's my margin" — margin overview
+
+Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD.`
+
+  const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: message }],
+    })
+    const text = resp.content[0].type === 'text' ? resp.content[0].text : null
+    return {
+      intent: 'unknown',
+      message: text ?? fallbackMsg,
+    }
+  } catch {
+    return { intent: 'unknown', message: fallbackMsg }
   }
 }
 
@@ -1308,14 +1475,15 @@ async function routeDemoMessage(
     }
   }
 
-  // Assumptions review
+  // Assumptions review (also triggered by "I uploaded/I've uploaded the plans")
   if (
     lower.includes('assumption') ||
     lower.includes('assumptions') ||
     lower.includes('unresolved') ||
     lower.includes('what needs resolving') ||
     lower.includes('before we can issue') ||
-    lower.includes('before we quote')
+    lower.includes('before we quote') ||
+    (lower.includes('uploaded') && lower.includes('plan'))
   ) {
     actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
   }
@@ -1454,6 +1622,48 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       return NextResponse.json(result)
     }
 
+    // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
+    const lowerMsg = message.toLowerCase()
+    if (
+      lowerMsg.includes('staff') ||
+      lowerMsg.includes('my workers') ||
+      lowerMsg.includes('my crew') ||
+      lowerMsg.includes('my team') ||
+      lowerMsg.includes('list workers') ||
+      lowerMsg.includes('show workers') ||
+      (lowerMsg.includes('list') && lowerMsg.includes('worker')) ||
+      (lowerMsg.includes('who') && (lowerMsg.includes('crew') || lowerMsg.includes('worker') || lowerMsg.includes('team')))
+    ) {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (supabaseUrl && serviceRoleKey) {
+        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+        const { data: workers } = await supabase
+          .from('workers')
+          .select('name, role, status')
+          .eq('builder_id', builderId)
+          .order('created_at', { ascending: false })
+          .limit(20)
+        if (workers && workers.length > 0) {
+          const lines = (workers as Array<{ name: string; role: string; status: string }>)
+            .map(w => `• ${w.name} — ${w.role} (${w.status})`)
+            .join('\n')
+          return NextResponse.json({
+            intent: 'job_query',
+            message: `You have ${workers.length} worker${workers.length === 1 ? '' : 's'} on your crew:\n${lines}\n\nType "add [name], they're a [trade]" to invite someone new.`,
+          })
+        }
+        return NextResponse.json({
+          intent: 'job_query',
+          message: 'No workers on your crew yet. Type "add [name], they\'re a [trade]" to invite your first one.',
+        })
+      }
+      return NextResponse.json({
+        intent: 'job_query',
+        message: 'You have 2 workers on your crew:\n• Jack Thompson — Carpenter (on Fitzroy job)\n• Mick Reynolds — Plumber (on Fitzroy job)\n\nType "add [name], they\'re a [trade]" to invite someone new.',
+      })
+    }
+
     const anthropic = new Anthropic({ apiKey })
 
     // Extract all actions from the message
@@ -1468,8 +1678,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     const result = await orchestrateActions(actions, ctx, anthropic)
+    if (result.intent === 'unknown') {
+      return NextResponse.json(await smartFallback(message, builderId, anthropic))
+    }
     return NextResponse.json(result)
-
   } catch (err) {
     console.error('[/api/chat] Error:', err)
     return NextResponse.json(

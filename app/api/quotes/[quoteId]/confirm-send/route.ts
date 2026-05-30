@@ -119,7 +119,7 @@ export async function POST(
       const { Resend } = await import('resend')
       const resend = new Resend(resendApiKey)
       await resend.emails.send({
-        from: 'quotes@worka.com.au',
+        from: 'quotes@getworka.com',
         to: body.to,
         subject: body.subject,
         text: body.body,
