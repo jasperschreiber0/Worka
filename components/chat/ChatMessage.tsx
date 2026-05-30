@@ -5,7 +5,8 @@ import DuplicateWarning from './DuplicateWarning'
 import VariationCard, { type VariationCardVariation } from './VariationCard'
 import MarginCard, { type MarginJob } from './MarginCard'
 import StateUpdateCard from './StateUpdateCard'
-import type { StateChange } from '@/app/api/chat/route'
+import JobListCard from './JobListCard'
+import type { StateChange, JobListItem } from '@/app/api/chat/route'
 
 // ─── Lightweight markdown renderer ───────────────────────────────────────────
 
@@ -134,6 +135,7 @@ export interface Message {
   duplicateJob?: DuplicateJob
   variation?: VariationCardVariation
   marginJobs?: MarginJob[]
+  jobList?: JobListItem[]
   stateChanges?: StateChange[]
   timestamp: Date
 }
@@ -141,6 +143,7 @@ export interface Message {
 interface ChatMessageProps {
   message: Message
   onOpenJob?: (jobId: string) => void
+  onOpenJobFromList?: (jobId: string, address: string, status: string, clientName?: string) => void
   onCreateAnyway?: () => void
   onAction?: (action: string, entityId?: string, entityType?: string) => void
   onVariationApprove?: (variationId: string) => void
@@ -172,7 +175,7 @@ function relativeTime(date: Date): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob }: ChatMessageProps) {
+export default function ChatMessage({ message, onOpenJob, onOpenJobFromList, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const hasAlerts = message.alerts && message.alerts.length > 0
   const hasDuplicate = !!message.duplicateJob
@@ -280,15 +283,16 @@ export default function ChatMessage({ message, onOpenJob, onCreateAnyway, onActi
     )
   }
 
-  // Assistant message without alerts → plain bubble
+  // Assistant message without alerts → plain bubble (+ optional job list)
   return (
     <div className="flex justify-start mb-4" role="listitem">
       <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
         <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
-          <p className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap break-words">
-            {message.content}
-          </p>
+          <MarkdownContent text={message.content} />
         </div>
+        {message.jobList && message.jobList.length > 0 && onOpenJobFromList && (
+          <JobListCard jobs={message.jobList} onOpenJob={onOpenJobFromList} />
+        )}
         {message.stateChanges && message.stateChanges.length > 0 && (
           <StateUpdateCard changes={message.stateChanges} />
         )}

@@ -124,6 +124,14 @@ export interface StateChange {
   label: string
 }
 
+export interface JobListItem {
+  id: string
+  address: string
+  status: string
+  client_name?: string
+  job_ref?: string | null
+}
+
 interface ChatResponse {
   intent: string
   message: string
@@ -136,6 +144,7 @@ interface ChatResponse {
   variation?: DemoVariation
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
+  job_list?: JobListItem[]
   state_changes?: StateChange[]
   // Single event preserved for backwards compat; primary path uses events[]
   event?: ChatEvent
@@ -1956,12 +1965,34 @@ Rules: never invent data you don't have. Keep responses under 4 sentences unless
 // Builds an action list from keyword detection then calls orchestrateActions
 // with a null anthropic reference (no AI calls needed in demo mode).
 
+const DEMO_JOB_LIST: JobListItem[] = [
+  { id: '00000000-0000-0000-0000-000000000010', address: '14 Merri St, Fitzroy', status: 'active', client_name: 'The Hendersons', job_ref: 'JOB-2025-001' },
+  { id: '00000000-0000-0000-0000-000000000020', address: '8 Burnside Rd, Toorak', status: 'quoted', client_name: 'Tom Caruso', job_ref: 'JOB-2025-002' },
+  { id: '00000000-0000-0000-0000-000000000030', address: '52 Bendigo St, Brunswick', status: 'quoting', job_ref: 'JOB-2025-003' },
+]
+
 async function routeDemoMessage(
   message: string,
   builderId: string,
   forceCreate: boolean
 ): Promise<ChatResponse> {
   const lower = message.toLowerCase()
+
+  // Fast-path: job list — return structured data directly so tapping opens the panel
+  const isJobListQuery =
+    lower === 'show my jobs' || lower === 'my jobs' || lower === 'list jobs' ||
+    lower.includes('show my jobs') || lower.includes('list my jobs') ||
+    lower.includes('lost my jobs') || lower.includes('where are my jobs') ||
+    (lower.includes('show') && lower.includes('job') && !lower.includes('quote') && !lower.includes('invoice')) ||
+    (lower.includes('list') && lower.includes('job') && !lower.includes('quote'))
+  if (isJobListQuery) {
+    return {
+      intent: 'job_query',
+      message: 'You have 3 active jobs. Tap one to open it.',
+      job_list: DEMO_JOB_LIST,
+    }
+  }
+
   const actions: ExtractedAction[] = []
 
   // Morning brief
@@ -2324,6 +2355,40 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         intent: 'job_query',
         message: 'You have 2 workers on your crew:\n• Jack Thompson — Carpenter (on Fitzroy job)\n• Mick Reynolds — Plumber (on Fitzroy job)\n\nType "add [name], they\'re a [trade]" to invite someone new.',
       })
+    }
+
+    // Pre-extract fast path: job listing bypasses LLM extraction
+    const isJobListQuery =
+      lowerMsg === 'show my jobs' || lowerMsg === 'my jobs' || lowerMsg === 'list jobs' ||
+      lowerMsg.includes('show my jobs') || lowerMsg.includes('list my jobs') ||
+      lowerMsg.includes('lost my jobs') || lowerMsg.includes('where are my jobs') ||
+      (lowerMsg.includes('show') && lowerMsg.includes('job') && !lowerMsg.includes('quote') && !lowerMsg.includes('invoice')) ||
+      (lowerMsg.includes('list') && lowerMsg.includes('job') && !lowerMsg.includes('quote'))
+    if (isJobListQuery) {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (supabaseUrl && serviceRoleKey) {
+        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+        const { data: jobs } = await supabase
+          .from('jobs')
+          .select('id, address, status, job_ref')
+          .eq('builder_id', builderId)
+          .not('status', 'eq', 'archived')
+          .order('created_at', { ascending: false })
+          .limit(20)
+        if (jobs && jobs.length > 0) {
+          const jobItems = jobs as Array<{ id: string; address: string; status: string; job_ref: string | null }>
+          return NextResponse.json({
+            intent: 'job_query',
+            message: `You have ${jobItems.length} active job${jobItems.length === 1 ? '' : 's'}. Tap one to open it.`,
+            job_list: jobItems.map(j => ({ id: j.id, address: j.address, status: j.status, job_ref: j.job_ref })),
+          })
+        }
+        return NextResponse.json({
+          intent: 'job_query',
+          message: 'No active jobs yet. Type "new job at [address]" to create your first one.',
+        })
+      }
     }
 
     const anthropic = new Anthropic({ apiKey })
