@@ -241,29 +241,41 @@ Your job is to parse a builder's natural-language message and return ALL actions
     Entities: { job_address? }
 
 11. open_upload_panel
-    Trigger: explicit mention of uploading plans, files, drawings
+    Trigger: builder explicitly asks to upload plans/files NOW (future intent)
     Entities: {}
-    Note: only emit this as a SEPARATE action if the builder explicitly asks to upload
-    and there is NO create_job action (create_job already implies upload panel opens)
+    Note: only emit if the builder says they WANT to upload (e.g. "upload the plans", "I'll upload now")
+    Do NOT emit for past uploads ("I've uploaded the plans", "I uploaded them") — use review_assumptions instead
+    Do NOT emit if create_job is also present (create_job already opens the upload panel for new jobs)
 
 12. review_assumptions
-    Trigger: asking to see assumptions, unresolved items, what needs clarifying before quote
+    Trigger: asking to see assumptions, unresolved items, what needs clarifying before the quote can be sent
+    Also triggered by: "I've uploaded the plans" / "I uploaded the plans" / "plans are uploaded" — the builder
+    has already uploaded and wants to know what's outstanding
     Entities: {}
 
-13. unknown
+13. update_job_context
+    Trigger: builder mentions new context about a job mid-conversation WITHOUT creating a new job
+    (material changes, client preferences, timeline updates, scope changes on an existing job)
+    Entities: { scope_notes?, budget_hint?, client_name? }
+    Examples: "the client is leaning toward polished concrete", "budget has changed to $420k",
+              "they want it done by August", "client now wants to add a deck"
+    ONLY emit if the message is about an EXISTING job (not a new one)
+
+14. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
 
 ### raw_context
 Capture any additional context not mapped to a specific action:
-- budget mentions without a create_job action
-- timeline constraints ("needs to be done by Christmas")
-- notes about scope or client preferences
+- timeline constraints ("needs to be done by Christmas", "quote by Friday")
+- notes about scope or client preferences not covered by update_job_context
 Keep values as short strings.
 
 ### Rules
 - Return ALL actions the builder is requesting — never discard intent
 - Order actions by logical dependency: create_job before open_upload_panel, create_job before review_assumptions
+- "I've uploaded the plans" → review_assumptions (past tense = upload already done, surface what's next)
+- "upload the plans" / "I need to upload" → open_upload_panel (future intent)
 - If confidence is below 50 for an action, still include it but set confidence accurately
 - For create_job: strip leading articles ("at", "for", "on") from address; strip trailing instructions
 - For add_worker: normalise role to lowercase
@@ -1140,9 +1152,37 @@ async function orchestrateActions(
           accumulated.job = result.existing_job
           // Surface the duplicate warning — but do NOT stop. Continue remaining actions.
           events.push({ type: 'show_duplicate_warning', job_id: result.existing_job.id })
+
+          // Write extracted context back to the existing job — only update null fields
+          // to avoid overwriting data the builder previously set deliberately.
+          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+          if ((client_name || budget_hint || scope_notes) && sbUrl && sbKey) {
+            const { createClient: mkClient } = await import('@supabase/supabase-js')
+            const sb = mkClient(sbUrl, sbKey, { auth: { persistSession: false } })
+            const { data: existingRow } = await sb
+              .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', result.existing_job.id).single()
+            if (existingRow) {
+              const updates: Record<string, unknown> = {}
+              if (budget_hint && !existingRow.budget_estimate) {
+                updates.budget_estimate = parseFloat(budget_hint.replace(/,/g, ''))
+              }
+              if (scope_notes && !existingRow.scope_notes) {
+                updates.scope_notes = scope_notes
+              }
+              if (client_name && !existingRow.notes) {
+                updates.notes = `Client: ${client_name}`
+              }
+              if (Object.keys(updates).length > 0) {
+                await sb.from('jobs').update(updates).eq('id', result.existing_job.id)
+              }
+            }
+          }
+
           const contextHints: string[] = []
           if (client_name) contextHints.push(`client ${client_name} noted`)
           if (budget_hint) contextHints.push(`budget ~$${budget_hint} noted`)
+          if (scope_notes) contextHints.push(`scope noted`)
           const hintStr = contextHints.length > 0 ? ` (${contextHints.join(', ')})` : ''
           messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status})${hintStr}. Opening that job now.`)
         } else {
@@ -1166,9 +1206,42 @@ async function orchestrateActions(
       }
 
       case 'review_assumptions': {
-        // Surface assumption review for the resolved job
-        // In demo mode this is a message; in live mode it would open the assumption panel
-        if (ctx.resolved_job_id) {
+        const jobId = ctx.resolved_job_id
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (jobId && sbUrl && sbKey) {
+          const { createClient: mkClient } = await import('@supabase/supabase-js')
+          const sb = mkClient(sbUrl, sbKey, { auth: { persistSession: false } })
+
+          const { data: quoteRow } = await sb
+            .from('quotes')
+            .select('id, status')
+            .eq('job_id', jobId)
+            .in('status', ['draft', 'pending_review'])
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+
+          if (quoteRow) {
+            const { data: items } = await sb
+              .from('quote_line_items')
+              .select('description, confidence')
+              .eq('quote_id', quoteRow.id)
+              .eq('is_assumption', true)
+              .eq('assumption_status', 'unresolved')
+
+            if (items && items.length > 0) {
+              const list = items.map(i => `• ${i.description}`).join('\n')
+              messageParts.push(`${items.length} assumption${items.length === 1 ? '' : 's'} need your input before the quote can be sent:\n${list}`)
+            } else {
+              messageParts.push('No unresolved assumptions — quote is clear to send once you\'re happy with the numbers.')
+            }
+          } else {
+            messageParts.push("No draft quote yet for this job. Once the plans are processed, I'll flag every assumption that needs your input.")
+          }
+        } else if (jobId) {
+          // Demo mode — no DB available
           messageParts.push('I\'ll surface any unresolved assumptions once your plans are processed.')
         } else {
           messageParts.push('Upload the plans first and I\'ll flag every assumption that needs your input before the quote can be issued.')
@@ -1223,6 +1296,39 @@ async function orchestrateActions(
         const result = handleMarginQuery()
         if (result.message) messageParts.push(result.message)
         if (result.margin_jobs) accumulated.margin_jobs = result.margin_jobs
+        break
+      }
+
+      case 'update_job_context': {
+        // Builder mentioned new context about an existing job mid-conversation.
+        // Only update fields that are currently null to avoid overwriting deliberate data.
+        const jobId = ctx.resolved_job_id
+        const { scope_notes: newScope, budget_hint: newBudget, client_name: newClient } = action.entities
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (jobId && sbUrl && sbKey && (newScope || newBudget || newClient)) {
+          const { createClient: mkClient } = await import('@supabase/supabase-js')
+          const sb = mkClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const { data: existingRow } = await sb
+            .from('jobs').select('budget_estimate, scope_notes, notes').eq('id', jobId).single()
+          if (existingRow) {
+            const updates: Record<string, unknown> = {}
+            if (newBudget && !existingRow.budget_estimate) {
+              updates.budget_estimate = parseFloat(newBudget.replace(/,/g, ''))
+            }
+            if (newScope && !existingRow.scope_notes) {
+              updates.scope_notes = newScope
+            }
+            if (newClient && !existingRow.notes) {
+              updates.notes = `Client: ${newClient}`
+            }
+            if (Object.keys(updates).length > 0) {
+              await sb.from('jobs').update(updates).eq('id', jobId)
+              messageParts.push('Got it — noted on the job.')
+            }
+          }
+        }
         break
       }
 
@@ -1372,14 +1478,15 @@ async function routeDemoMessage(
     }
   }
 
-  // Assumptions review
+  // Assumptions review (also triggered by "I uploaded/I've uploaded the plans")
   if (
     lower.includes('assumption') ||
     lower.includes('assumptions') ||
     lower.includes('unresolved') ||
     lower.includes('what needs resolving') ||
     lower.includes('before we can issue') ||
-    lower.includes('before we quote')
+    lower.includes('before we quote') ||
+    (lower.includes('uploaded') && lower.includes('plan'))
   ) {
     actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
   }
@@ -1518,7 +1625,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       return NextResponse.json(result)
     }
 
-    // Pre-classify: worker/staff/crew listing — classify-intent has no intent for this
+    // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
     const lowerMsg = message.toLowerCase()
     if (
       lowerMsg.includes('staff') ||

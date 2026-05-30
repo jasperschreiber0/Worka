@@ -374,6 +374,7 @@ export type ActionType =
   | 'margin_query'
   | 'open_upload_panel'
   | 'review_assumptions'
+  | 'update_job_context'
   | 'unknown'
 
 export interface ExtractedAction {
