@@ -382,6 +382,8 @@ export type ActionType =
   | 'open_upload_panel'
   | 'review_assumptions'
   | 'update_job_context'
+  | 'add_task'
+  | 'upload_rates'
   | 'unknown'
 
 export interface ExtractedAction {

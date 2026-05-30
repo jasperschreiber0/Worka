@@ -741,6 +741,7 @@ function AssumptionReviewInner({
 
           {!isLoading && !isComplete && current && (
             <AssumptionCard
+              key={current.id}
               assumption={current}
               index={currentIndex}
               total={total}

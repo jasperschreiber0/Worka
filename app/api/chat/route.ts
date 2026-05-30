@@ -269,7 +269,17 @@ Your job is to parse a builder's natural-language message and return ALL actions
               "they want it done by August", "client now wants to add a deck"
     ONLY emit if the message is about an EXISTING job (not a new one)
 
-14. unknown
+15. add_task
+    Trigger: adding a task, checklist item, or site instruction for staff on a job
+    Entities: { job_address?, description, assignee_name? }
+    Examples: "add task to 52 Bendigo: install footings", "assign Jack to dig the trenches at Brunswick"
+
+16. upload_rates
+    Trigger: wanting to upload past quotes, historical pricing, rate sheets, cost data, or supplier prices
+    Entities: {}
+    Examples: "upload past quotes", "how do I add my pricing database", "import my rates", "upload supplier prices"
+
+17. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
 
@@ -1456,6 +1466,37 @@ async function orchestrateActions(
         break
       }
 
+      case 'add_task': {
+        const { description, job_address, assignee_name } = action.entities as {
+          description?: string
+          job_address?: string
+          assignee_name?: string
+        }
+        const jobRef = job_address ?? ctx.resolved_job?.address ?? 'the job'
+        const taskDesc = description ?? 'task'
+        const assignLine = assignee_name ? ` for ${assignee_name}` : ' for your crew'
+
+        stateChanges.push({ status: 'info', label: `Task logged: ${taskDesc}` })
+
+        const taskParts = [
+          `Task noted${assignLine} at ${jobRef}: "${taskDesc}".`,
+          `Full task scheduling — with due dates, status tracking, and worker notifications — is being built now.`,
+          `For now, I've logged it here. Your crew can see assigned tasks in the worker portal at /worker.`,
+        ]
+        messageParts.push(taskParts.join(' '))
+        break
+      }
+
+      case 'upload_rates': {
+        messageParts.push(
+          `To load your past pricing into WorkA, you have two paths:\n\n` +
+          `**Past quotes (PDF/plan-based):** Upload them through any job's Files tab — WorkA extracts quantities and rates, then stores them as learned rates for future quotes.\n\n` +
+          `**Rate sheet / supplier prices (CSV):** This import is coming in the next release. Prepare a CSV with columns: trade_category, description, unit, rate_ex_gst. Once available, WorkA will use your rates first and fall back to the platform average only when yours are missing.\n\n` +
+          `In the meantime, after you approve a quote, WorkA automatically captures those rates and improves future estimates.`
+        )
+        break
+      }
+
       case 'unknown':
       default: {
         if (actions.length === 1) {
@@ -1706,6 +1747,24 @@ async function routeDemoMessage(
   ) {
     if (!actions.some((a) => a.type === 'job_query')) {
       actions.push({ type: 'job_query', entities: { address: 'toorak' }, confidence: 80 })
+    }
+  }
+
+  // Task assignment
+  if (lower.includes('task') || lower.includes('assign') || lower.includes('schedule') && lower.includes('staff')) {
+    if (!actions.some((a) => a.type === 'add_task')) {
+      const descMatch = lower.match(/(?:add task|task)(?:\s+to\s+\S+)?:\s*(.+)/i)
+      actions.push({ type: 'add_task', entities: { description: descMatch?.[1] ?? lower.substring(0, 80) }, confidence: 75 })
+    }
+  }
+
+  // Rate / pricing upload
+  if (
+    (lower.includes('upload') || lower.includes('import') || lower.includes('add')) &&
+    (lower.includes('rate') || lower.includes('price') || lower.includes('pricing') || lower.includes('past quote') || lower.includes('database'))
+  ) {
+    if (!actions.some((a) => a.type === 'upload_rates')) {
+      actions.push({ type: 'upload_rates', entities: {}, confidence: 80 })
     }
   }
 
