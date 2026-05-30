@@ -382,6 +382,13 @@ export type ActionType =
   | 'open_upload_panel'
   | 'review_assumptions'
   | 'update_job_context'
+  | 'add_task'
+  | 'upload_rates'
+  | 'client_lookup'
+  | 'meeting_prep'
+  | 'payment_risk'
+  | 'conflict_detected'
+  | 'worker_onboarding'
   | 'unknown'
 
 export interface ExtractedAction {

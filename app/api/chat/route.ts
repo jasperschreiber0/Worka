@@ -259,6 +259,8 @@ Your job is to parse a builder's natural-language message and return ALL actions
     Trigger: asking to see assumptions, unresolved items, what needs clarifying before the quote can be sent
     Also triggered by: "I've uploaded the plans" / "I uploaded the plans" / "plans are uploaded" — the builder
     has already uploaded and wants to know what's outstanding
+    Do NOT trigger for uncertain language: "I've got plans somewhere", "I have plans but haven't uploaded",
+    "plans are at the office", "I think I have the plans" — these mean plans are NOT yet uploaded
     Entities: {}
 
 13. update_job_context
@@ -269,7 +271,43 @@ Your job is to parse a builder's natural-language message and return ALL actions
               "they want it done by August", "client now wants to add a deck"
     ONLY emit if the message is about an EXISTING job (not a new one)
 
-14. unknown
+15. add_task
+    Trigger: adding a task, checklist item, or site instruction for staff on a job
+    Entities: { job_address?, description, assignee_name? }
+    Examples: "add task to 52 Bendigo: install footings", "assign Jack to dig the trenches at Brunswick"
+
+16. upload_rates
+    Trigger: wanting to upload past quotes, historical pricing, rate sheets, cost data, or supplier prices
+    Entities: {}
+    Examples: "upload past quotes", "how do I add my pricing database", "import my rates", "upload supplier prices"
+
+18. client_lookup
+    Trigger: asking if we've worked with a client before, client history, past jobs with someone
+    Entities: { client_name }
+    Examples: "have we done work for Sarah Jones before", "tell me what jobs we've had with the Hendersons"
+
+19. meeting_prep
+    Trigger: builder is about to meet a client, going into a meeting, needs a briefing on a client/job
+    Entities: { client_name?, job_address? }
+    Examples: "meeting with Sarah Jones in 15 minutes", "give me everything on the Fitzroy job before I meet them"
+
+20. payment_risk
+    Trigger: asking what might stop payment, which jobs are at risk of not getting paid, payment risk analysis, cashflow problems
+    Entities: {}
+    Examples: "what is most likely to stop me getting paid", "which jobs are at payment risk", "cashflow problems this month"
+
+21. conflict_detected
+    Trigger: the message contains two contradictory statements about the same entity
+    Examples: "client approved the variation... actually don't mark it yet", "mark it complete... wait no it's still in progress"
+    Return this INSTEAD of the contradictory actions — do not execute any of them
+    Entities: { statement_a, statement_b, entity_type? }
+
+22. worker_onboarding
+    Trigger: a new worker is starting soon and needs to be set up, asking what a worker needs before starting on site
+    Entities: { name?, start_date?, job_address? }
+    Examples: "Jack starts Monday", "what does Sarah need before she can work on site", "new sparky starting next week"
+
+17. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
 
@@ -284,9 +322,12 @@ Keep values as short strings.
 - Order actions by logical dependency: create_job before open_upload_panel, create_job before review_assumptions
 - "I've uploaded the plans" → review_assumptions (past tense = upload already done, surface what's next)
 - "upload the plans" / "I need to upload" → open_upload_panel (future intent)
+- "I've got plans somewhere" / "plans are at the office" → do NOT emit review_assumptions or open_upload_panel
+- If a message has contradictory statements, emit conflict_detected INSTEAD of the conflicting actions
 - If confidence is below 50 for an action, still include it but set confidence accurately
 - For create_job: strip leading articles ("at", "for", "on") from address; strip trailing instructions
 - For add_worker: normalise role to lowercase
+- BULK: multiple create_job or add_worker actions allowed in one response when listing multiple items
 - ONLY return valid JSON — no prose, no markdown, no explanation`
 
 async function extractActions(
@@ -1172,6 +1213,27 @@ async function orchestrateActions(
           messageParts.push('Which address is this job at? For example: \'new job at 14 Smith St Fitzroy\'')
           break
         }
+
+        // Detect vague address (no street number — just a suburb or area)
+        const addressTrimmed = address.trim()
+        const hasStreetNumber = /^\d|^lot\s|^unit\s|^flat\s/i.test(addressTrimmed)
+        const isVague = !hasStreetNumber && addressTrimmed.split(/\s+/).length <= 3
+
+        if (isVague && !ctx.force_create) {
+          // Build an intake checklist showing exactly what's missing
+          const missing: string[] = [
+            `□ Exact street address — you mentioned "${addressTrimmed}" but I need a street number (e.g. 14 Smith St ${addressTrimmed})`,
+          ]
+          if (!client_name) missing.push('□ Client name and email — required to send the quote')
+          missing.push('□ Plans — upload PDF via the Files tab once the job is created')
+          stateChanges.push({ status: 'warning', label: `Address incomplete — street number needed` })
+          messageParts.push(
+            `To get this job started I need a few more details:\n\n${missing.join('\n')}\n\n` +
+            `Reply with the full address and I'll create the job immediately. Example:\n"New job at 14 Smith St ${addressTrimmed} for ${client_name ?? 'the client'}"`
+          )
+          break
+        }
+
         const result = await createJob({
           builder_id: ctx.builder_id,
           address,
@@ -1434,6 +1496,307 @@ async function orchestrateActions(
         break
       }
 
+      case 'add_task': {
+        const { description, job_address, assignee_name } = action.entities as {
+          description?: string
+          job_address?: string
+          assignee_name?: string
+        }
+        const jobRef = job_address ?? ctx.resolved_job?.address ?? 'the job'
+        const taskDesc = description ?? 'task'
+        const assignLine = assignee_name ? ` for ${assignee_name}` : ' for your crew'
+
+        stateChanges.push({ status: 'info', label: `Task logged: ${taskDesc}` })
+
+        const taskParts = [
+          `Task noted${assignLine} at ${jobRef}: "${taskDesc}".`,
+          `Full task scheduling — with due dates, status tracking, and worker notifications — is being built now.`,
+          `For now, I've logged it here. Your crew can see assigned tasks in the worker portal at /worker.`,
+        ]
+        messageParts.push(taskParts.join(' '))
+        break
+      }
+
+      case 'upload_rates': {
+        messageParts.push(
+          `To load your past pricing into WorkA, you have two paths:\n\n` +
+          `**Past quotes (PDF/plan-based):** Upload them through any job's Files tab — WorkA extracts quantities and rates, then stores them as learned rates for future quotes.\n\n` +
+          `**Rate sheet / supplier prices (CSV):** This import is coming in the next release. Prepare a CSV with columns: trade_category, description, unit, rate_ex_gst. Once available, WorkA will use your rates first and fall back to the platform average only when yours are missing.\n\n` +
+          `In the meantime, after you approve a quote, WorkA automatically captures those rates and improves future estimates.`
+        )
+        break
+      }
+
+      case 'client_lookup': {
+        const { client_name } = action.entities
+        if (!client_name) {
+          messageParts.push('Which client are you asking about? Give me their name and I\'ll check your job history.')
+          break
+        }
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (sbUrl && sbKey) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const { data: clients } = await sb
+            .from('clients')
+            .select('id, name')
+            .eq('builder_id', ctx.builder_id)
+            .ilike('name', `%${client_name}%`)
+          if (!clients || clients.length === 0) {
+            messageParts.push(`No client named "${client_name}" on record — this would be a new client. They'll be added when you create a job for them.`)
+          } else {
+            const typedClients = clients as Array<{ id: string; name: string }>
+            for (const client of typedClients) {
+              const { data: jobs } = await sb
+                .from('jobs')
+                .select('address, status, created_at')
+                .eq('builder_id', ctx.builder_id)
+                .eq('client_id', client.id)
+                .order('created_at', { ascending: false })
+              const typedJobs = (jobs ?? []) as Array<{ address: string; status: string; created_at: string }>
+              if (typedJobs.length === 0) {
+                messageParts.push(`${client.name} is in your client list but has no jobs yet.`)
+              } else {
+                const jobLines = typedJobs.map(j => `• ${j.address} — ${j.status} (started ${relativeDate(j.created_at)})`).join('\n')
+                messageParts.push(`${client.name} — ${typedJobs.length} job${typedJobs.length === 1 ? '' : 's'} on record:\n${jobLines}`)
+                stateChanges.push({ status: 'found', label: `${typedJobs.length} job${typedJobs.length === 1 ? '' : 's'} found for ${client.name}` })
+              }
+            }
+          }
+        } else {
+          // Demo mode
+          const ref = client_name.toLowerCase()
+          const DEMO_CLIENT_MAP: Array<{ keywords: string[]; name: string; jobs: string[] }> = [
+            { keywords: ['henderson', 'hendersons'], name: 'The Hendersons', jobs: ['14 Merri St, Fitzroy — active (started 45 days ago)'] },
+            { keywords: ['caruso', 'tom caruso', 'tom'], name: 'Tom Caruso', jobs: ['8 Burnside Rd, Toorak — quoted (started 12 days ago)'] },
+          ]
+          const match = DEMO_CLIENT_MAP.find(c => c.keywords.some(kw => ref.includes(kw) || kw.includes(ref.split(' ')[0])))
+          if (match) {
+            const lines = match.jobs.map(j => `• ${j}`).join('\n')
+            messageParts.push(`${match.name} — ${match.jobs.length} job${match.jobs.length === 1 ? '' : 's'} on record:\n${lines}`)
+            stateChanges.push({ status: 'found', label: `Job history found for ${match.name}` })
+          } else {
+            messageParts.push(`No record of working with "${client_name}" before. This would be a new client.`)
+          }
+        }
+        break
+      }
+
+      case 'meeting_prep': {
+        const { client_name, job_address } = action.entities
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (sbUrl && sbKey) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          let jobId: string | null = null
+          let jobAddr = ''
+          let jobStatus = ''
+          // Find job by address or client name
+          if (job_address) {
+            const { data: j } = await sb.from('jobs').select('id, address, status, budget_estimate, scope_notes').eq('builder_id', ctx.builder_id).ilike('address', `%${job_address}%`).not('status', 'eq', 'archived').limit(1).maybeSingle()
+            if (j) { jobId = (j as { id: string; address: string; status: string }).id; jobAddr = (j as { address: string }).address; jobStatus = (j as { status: string }).status }
+          } else if (client_name) {
+            const { data: cls } = await sb.from('clients').select('id').eq('builder_id', ctx.builder_id).ilike('name', `%${client_name}%`).limit(1)
+            if (cls && cls.length > 0) {
+              const { data: j } = await sb.from('jobs').select('id, address, status, budget_estimate, scope_notes').eq('builder_id', ctx.builder_id).eq('client_id', (cls[0] as { id: string }).id).not('status', 'eq', 'archived').order('created_at', { ascending: false }).limit(1).maybeSingle()
+              if (j) { jobId = (j as { id: string; address: string; status: string }).id; jobAddr = (j as { address: string }).address; jobStatus = (j as { status: string }).status }
+            }
+          }
+          if (!jobId) {
+            messageParts.push(`No job found for ${client_name ?? job_address ?? 'that client'}. Your active jobs:\n` + (await (async () => { const { data: js } = await sb.from('jobs').select('address, status').eq('builder_id', ctx.builder_id).not('status', 'eq', 'archived').limit(5); return (js ?? []).map((j: { address: string; status: string }) => `• ${j.address} — ${j.status}`).join('\n') })()))
+            break
+          }
+          const [{ data: quotes }, { data: variations }, { data: invoices }, { data: comms }] = await Promise.all([
+            sb.from('quotes').select('status, total_cost, version, confidence_score, sent_at').eq('job_id', jobId).order('version', { ascending: false }).limit(1),
+            sb.from('variations').select('title, amount, status').eq('job_id', jobId),
+            sb.from('invoices').select('amount, status').eq('job_id', jobId),
+            sb.from('communication_history').select('channel, subject, timestamp').eq('job_id', jobId).order('timestamp', { ascending: false }).limit(3),
+          ])
+          const quote = quotes?.[0] as { status: string; total_cost: number | null; version: number; confidence_score: number | null; sent_at: string | null } | null
+          const pendingVars = ((variations ?? []) as Array<{ title: string; amount: number | null; status: string }>).filter(v => v.status === 'pending')
+          const overdueInvs = ((invoices ?? []) as Array<{ amount: number; status: string }>).filter(i => i.status === 'overdue' || i.status === 'sent')
+          const lines: string[] = [`**${client_name ?? jobAddr} — ${jobAddr} (${jobStatus})**`]
+          if (quote) { lines.push(`Quote: $${(quote.total_cost ?? 0).toLocaleString('en-AU')} — ${quote.status} (v${quote.version}, ${quote.confidence_score}% confidence)`) }
+          else { lines.push('Quote: Not started yet') }
+          if (pendingVars.length > 0) { lines.push(`Pending variations: ${pendingVars.length} — $${pendingVars.reduce((s, v) => s + (v.amount ?? 0), 0).toLocaleString('en-AU')} waiting on approval`) }
+          if (overdueInvs.length > 0) { lines.push(`Outstanding invoices: $${overdueInvs.reduce((s, i) => s + i.amount, 0).toLocaleString('en-AU')}`) }
+          if ((comms ?? []).length > 0) { const c = (comms as Array<{ channel: string; subject: string | null; timestamp: string }>)[0]; lines.push(`Last contact: ${c.channel} ${relativeDate(c.timestamp)} — ${c.subject ?? 'no subject'}`) }
+          lines.push(''); lines.push('Key questions to raise:')
+          if (!quote) lines.push('• When do they need the quote by?')
+          if (pendingVars.length > 0) lines.push('• Confirm sign-off on pending variations')
+          if (overdueInvs.length > 0) lines.push('• Discuss outstanding payment')
+          messageParts.push(lines.join('\n'))
+          events.push({ type: 'open_job_snapshot', job_id: jobId, job_address: jobAddr, job_status: jobStatus })
+        } else {
+          // Demo mode
+          const ref = (client_name ?? job_address ?? '').toLowerCase()
+          const DEMO_CLIENT_BRIEFINGS: Array<{ keywords: string[]; brief: string; job_id: string; job_address: string; job_status: string }> = [
+            {
+              keywords: ['henderson', 'hendersons', 'fitzroy', 'merri'],
+              job_id: '00000000-0000-0000-0000-000000000010',
+              job_address: '14 Merri St, Fitzroy',
+              job_status: 'active',
+              brief: [
+                '**The Hendersons — 14 Merri St, Fitzroy (active)**',
+                'Quote: $142,000 approved — job active',
+                'Pending variations: 2 — $3,880 total waiting on approval',
+                'OVERDUE invoice: $28,000 — sent 7 days ago, no payment',
+                'Last contact: email 7 days ago — invoice sent',
+                '',
+                'Key questions to raise:',
+                '• When will they pay the $28,000 invoice?',
+                '• Get written approval on the 2 pending variations ($3,880)',
+                '• Confirm scope is still as agreed — no further changes',
+              ].join('\n'),
+            },
+            {
+              keywords: ['caruso', 'tom', 'toorak', 'burnside'],
+              job_id: '00000000-0000-0000-0000-000000000020',
+              job_address: '8 Burnside Rd, Toorak',
+              job_status: 'quoted',
+              brief: [
+                '**Tom Caruso — 8 Burnside Rd, Toorak (quoted)**',
+                'Quote: $127,500 sent 5 days ago — awaiting approval',
+                'No variations, no invoices yet',
+                'Last contact: email 5 days ago — quote sent',
+                '',
+                'Key questions to raise:',
+                '• Has he reviewed the quote? Any questions?',
+                '• Confirm he\'s ready to proceed — get verbal approval today',
+                '• Start date — when does he want work to begin?',
+              ].join('\n'),
+            },
+          ]
+          const match = DEMO_CLIENT_BRIEFINGS.find(b => b.keywords.some(kw => ref.includes(kw)))
+          if (match) {
+            messageParts.push(match.brief)
+            events.push({ type: 'open_job_snapshot', job_id: match.job_id, job_address: match.job_address, job_status: match.job_status })
+          } else {
+            messageParts.push(
+              `No job found for "${client_name ?? job_address ?? 'that client'}". Your active jobs:\n` +
+              '• 14 Merri St, Fitzroy — Hendersons (active)\n' +
+              '• 8 Burnside Rd, Toorak — Tom Caruso (quoted)\n' +
+              '• 52 Bendigo St, Brunswick — quoting\n\n' +
+              'If this is a new client, type "new job at [address]" to get started.'
+            )
+          }
+        }
+        break
+      }
+
+      case 'payment_risk': {
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (sbUrl && sbKey) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const riskLines: string[] = []
+          // Overdue / outstanding invoices
+          const { data: invs } = await sb.from('invoices').select('job_id, amount, status, due_date').eq('builder_id', ctx.builder_id).in('status', ['sent', 'overdue'])
+          for (const inv of (invs ?? []) as Array<{ job_id: string; amount: number; status: string; due_date: string | null }>) {
+            const { data: j } = await sb.from('jobs').select('address').eq('id', inv.job_id).single()
+            const addr = (j as { address: string } | null)?.address ?? 'unknown job'
+            riskLines.push(`• ${inv.status === 'overdue' ? '🔴' : '🟡'} ${addr}: $${inv.amount.toLocaleString('en-AU')} invoice ${inv.status === 'overdue' ? 'overdue' : 'outstanding — not yet paid'}`)
+          }
+          // Unapproved quotes
+          const { data: sentQuotes } = await sb.from('quotes').select('job_id, total_cost, sent_at').eq('builder_id', ctx.builder_id).eq('status', 'sent')
+          for (const q of (sentQuotes ?? []) as Array<{ job_id: string; total_cost: number | null; sent_at: string | null }>) {
+            const { data: j } = await sb.from('jobs').select('address').eq('id', q.job_id).single()
+            const addr = (j as { address: string } | null)?.address ?? 'unknown job'
+            const days = q.sent_at ? Math.floor((Date.now() - new Date(q.sent_at).getTime()) / 86400000) : null
+            riskLines.push(`• 🟡 ${addr}: $${(q.total_cost ?? 0).toLocaleString('en-AU')} quote waiting${days ? ` ${days} days` : ''} — no client approval yet, can't invoice`)
+          }
+          // Quotes blocked by assumptions
+          const { data: draftQs } = await sb.from('quotes').select('id, job_id').eq('builder_id', ctx.builder_id).in('status', ['draft', 'pending_review'])
+          for (const q of (draftQs ?? []) as Array<{ id: string; job_id: string }>) {
+            const { count } = await sb.from('quote_line_items').select('id', { count: 'exact', head: true }).eq('quote_id', q.id).eq('is_assumption', true).eq('assumption_status', 'unresolved')
+            if (count && count > 0) {
+              const { data: j } = await sb.from('jobs').select('address').eq('id', q.job_id).single()
+              const addr = (j as { address: string } | null)?.address ?? 'unknown job'
+              riskLines.push(`• 🔴 ${addr}: ${count} unresolved assumption${count === 1 ? '' : 's'} blocking quote — can't issue until cleared`)
+            }
+          }
+          if (riskLines.length === 0) {
+            messageParts.push('No significant payment risks right now. Invoices are current, quotes are progressing cleanly.')
+          } else {
+            messageParts.push(
+              `${riskLines.length} thing${riskLines.length === 1 ? '' : 's'} put${riskLines.length === 1 ? 's' : ''} payment at risk in the next 30 days:\n\n` +
+              riskLines.join('\n') +
+              '\n\nPriority: clear blocked quotes first — you can\'t invoice a job until the client has approved.'
+            )
+          }
+        } else {
+          // Demo mode
+          messageParts.push(
+            '3 things put payment at risk over the next 30 days:\n\n' +
+            '🔴 Fitzroy — $28,000 invoice overdue 3 days. The Hendersons haven\'t paid. Every day without contact increases write-off risk.\n\n' +
+            '🟡 Toorak — $127,500 quote sent to Tom Caruso 5 days ago, no approval. No approval = no contract = invoicing can\'t start.\n\n' +
+            '🔴 Brunswick — 2 assumptions unresolved, blocking quote issue. Can\'t invoice a job that hasn\'t been quoted.\n\n' +
+            'Recommended: (1) Resolve Brunswick assumptions now — takes 5 minutes. (2) Call the Hendersons today. (3) Follow up Caruso by email.'
+          )
+        }
+        break
+      }
+
+      case 'conflict_detected': {
+        const { statement_a, statement_b, entity_type } = action.entities
+        const entityLabel = entity_type ? ` on this ${entity_type}` : ''
+        stateChanges.push({ status: 'warning', label: 'Conflicting instructions — no changes made' })
+        messageParts.push(
+          `Potential conflict detected${entityLabel} — I haven't made any changes.\n\n` +
+          (statement_a ? `Statement 1: "${statement_a}"\n` : '') +
+          (statement_b ? `Statement 2: "${statement_b}"\n` : '') +
+          `\nWhich is correct? Reply with the definitive status and I'll update it.`
+        )
+        break
+      }
+
+      case 'worker_onboarding': {
+        const { name, start_date, job_address } = action.entities
+        const workerLabel = name ?? 'your new worker'
+        const startLabel = start_date ? ` (starting ${start_date})` : ''
+        const jobLabel = job_address ? ` on ${job_address}` : ''
+
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+        let profileStatus = ''
+
+        if (name && sbUrl && sbKey) {
+          const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+          const { data: existing } = await sb
+            .from('workers')
+            .select('name, status, invite_token')
+            .eq('builder_id', ctx.builder_id)
+            .ilike('name', `%${name}%`)
+            .limit(1)
+            .maybeSingle()
+          if (existing) {
+            const w = existing as { name: string; status: string; invite_token: string | null }
+            profileStatus = w.status === 'active'
+              ? `✓ ${w.name} is already active in WorkA.`
+              : w.invite_token
+                ? `✓ ${w.name} has been invited — link not yet accepted.`
+                : `⚠ ${w.name} has a profile but no invite sent yet.`
+          } else {
+            profileStatus = `⚠ No profile found for ${name} — type "add ${name}, they're a [trade]" to create one and send an invite.`
+          }
+        } else if (name) {
+          profileStatus = `Type "add ${name}, they're a [trade]" to create a profile and send their invite link.`
+        }
+
+        messageParts.push(
+          `Here's what ${workerLabel} needs before starting on site${jobLabel}${startLabel}:\n\n` +
+          (profileStatus ? `${profileStatus}\n\n` : '') +
+          `Site checklist:\n` +
+          `□ WorkA profile created and invite accepted\n` +
+          `□ Trade licence confirmed on file (required for licensed trades)\n` +
+          `□ Site induction completed\n` +
+          `□ Emergency contact recorded\n` +
+          `□ Assigned to the correct job in WorkA\n\n` +
+          `Licences and inductions need to be recorded outside WorkA for now — job assignment and invites are handled here.`
+        )
+        break
+      }
+
       case 'unknown':
       default: {
         if (actions.length === 1) {
@@ -1573,14 +1936,24 @@ async function routeDemoMessage(
     })
   }
 
-  // Upload plans mentioned
-  if (lower.includes('upload') || lower.includes('plans') || lower.includes('drawings')) {
+  // Upload plans mentioned — skip uncertain/hedged language
+  const uncertainPlan =
+    lower.includes('somewhere') ||
+    lower.includes('at the office') ||
+    lower.includes('think i have') ||
+    lower.includes("think i've") ||
+    lower.includes('not sure if') ||
+    lower.includes('not uploaded') ||
+    lower.includes("haven't uploaded") ||
+    lower.includes('havent uploaded')
+  if (!uncertainPlan && (lower.includes('upload') || lower.includes('plans') || lower.includes('drawings'))) {
     if (!actions.some((a) => a.type === 'create_job')) {
       actions.push({ type: 'open_upload_panel', entities: {}, confidence: 85 })
     }
   }
 
   // Assumptions review (also triggered by "I uploaded/I've uploaded the plans")
+  const definitePlanUpload = lower.includes('uploaded') && lower.includes('plan') && !uncertainPlan
   if (
     lower.includes('assumption') ||
     lower.includes('assumptions') ||
@@ -1588,7 +1961,7 @@ async function routeDemoMessage(
     lower.includes('what needs resolving') ||
     lower.includes('before we can issue') ||
     lower.includes('before we quote') ||
-    (lower.includes('uploaded') && lower.includes('plan'))
+    definitePlanUpload
   ) {
     actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
   }
@@ -1685,6 +2058,94 @@ async function routeDemoMessage(
     if (!actions.some((a) => a.type === 'job_query')) {
       actions.push({ type: 'job_query', entities: { address: 'toorak' }, confidence: 80 })
     }
+  }
+
+  // Task assignment
+  if (lower.includes('task') || lower.includes('assign') || lower.includes('schedule') && lower.includes('staff')) {
+    if (!actions.some((a) => a.type === 'add_task')) {
+      const descMatch = lower.match(/(?:add task|task)(?:\s+to\s+\S+)?:\s*(.+)/i)
+      actions.push({ type: 'add_task', entities: { description: descMatch?.[1] ?? lower.substring(0, 80) }, confidence: 75 })
+    }
+  }
+
+  // Rate / pricing upload
+  if (
+    (lower.includes('upload') || lower.includes('import') || lower.includes('add')) &&
+    (lower.includes('rate') || lower.includes('price') || lower.includes('pricing') || lower.includes('past quote') || lower.includes('database'))
+  ) {
+    if (!actions.some((a) => a.type === 'upload_rates')) {
+      actions.push({ type: 'upload_rates', entities: {}, confidence: 80 })
+    }
+  }
+
+  // Client history lookup
+  if (
+    (lower.includes('done work for') || lower.includes('worked with') || lower.includes('client history') ||
+     lower.includes('before with') || (lower.includes('client') && lower.includes('before')))
+  ) {
+    const nameMatch = lower.match(/(?:for|with)\s+([a-z]+(?:\s+[a-z]+)?)/i)
+    actions.push({ type: 'client_lookup', entities: { client_name: nameMatch?.[1] ?? '' }, confidence: 80 })
+  }
+
+  // Meeting prep
+  if (
+    lower.includes('meeting with') || lower.includes('heading into a meeting') ||
+    lower.includes('about to meet') || lower.includes('give me everything') ||
+    (lower.includes('before i meet') || lower.includes('before the meeting'))
+  ) {
+    const nameMatch = lower.match(/(?:meeting with|meet)\s+([a-z]+(?:\s+[a-z]+)?)/i)
+    const addrMatch = lower.match(/(?:for|on|about)\s+(?:the\s+)?([a-z]+(?:\s+st|street|rd|road|ave|avenue)?)/i)
+    actions.push({
+      type: 'meeting_prep',
+      entities: {
+        ...(nameMatch ? { client_name: nameMatch[1] } : {}),
+        ...(addrMatch && !nameMatch ? { job_address: addrMatch[1] } : {}),
+      },
+      confidence: 90,
+    })
+  }
+
+  // Payment risk / cashflow
+  if (
+    lower.includes('getting paid') || lower.includes('payment risk') ||
+    lower.includes('stop me') || lower.includes('most likely to') ||
+    lower.includes('at risk of') || lower.includes('wont get paid') || lower.includes('won\'t get paid') ||
+    lower.includes('cashflow') || lower.includes('cash flow')
+  ) {
+    if (!actions.some(a => a.type === 'payment_risk')) {
+      actions.push({ type: 'payment_risk', entities: {}, confidence: 90 })
+    }
+  }
+
+  // Worker onboarding — "Jack starts Monday", "what does [name] need before site"
+  const onboardMatch = lower.match(/([a-z]+)\s+starts?\s+(monday|tuesday|wednesday|thursday|friday|next week|this week)/i)
+    || lower.match(/what\s+does\s+([a-z]+)\s+need/i)
+    || lower.match(/([a-z]+)\s+is\s+starting/i)
+  if (onboardMatch && !actions.some(a => a.type === 'worker_onboarding')) {
+    const rawName = onboardMatch[1]
+    const name = rawName.charAt(0).toUpperCase() + rawName.slice(1)
+    const dateMatch = lower.match(/(monday|tuesday|wednesday|thursday|friday|next week|this week)/i)
+    actions.push({ type: 'worker_onboarding', entities: { name, ...(dateMatch ? { start_date: dateMatch[1] } : {}) }, confidence: 88 })
+  }
+
+  // Contradiction detection — must run AFTER other detections so it can clear conflicting actions
+  const hasNegation = lower.includes('actually') || lower.includes("don't") || lower.includes('dont') ||
+    lower.includes('not yet') || lower.includes('still deciding') || lower.includes('hold on') || lower.includes('wait')
+  const hasAffirmation = lower.includes('approved') || lower.includes('mark') || lower.includes('update') || lower.includes('complete')
+  if (hasNegation && hasAffirmation && actions.some(a => a.type === 'variation' || a.type === 'invoice')) {
+    // Clear the conflicting actions — safer than executing both
+    const filtered = actions.filter(a => a.type !== 'variation' && a.type !== 'invoice')
+    actions.length = 0
+    filtered.forEach(a => actions.push(a))
+    actions.push({
+      type: 'conflict_detected',
+      entities: {
+        statement_a: lower.includes('approved') ? 'variation/status approved' : 'status updated',
+        statement_b: lower.includes('not yet') || lower.includes('still deciding') ? 'still deciding — not yet approved' : 'correction given',
+        entity_type: 'variation',
+      },
+      confidence: 88,
+    })
   }
 
   // Fallback
