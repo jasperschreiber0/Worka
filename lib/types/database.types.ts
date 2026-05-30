@@ -384,6 +384,9 @@ export type ActionType =
   | 'update_job_context'
   | 'add_task'
   | 'upload_rates'
+  | 'client_lookup'
+  | 'meeting_prep'
+  | 'payment_risk'
   | 'unknown'
 
 export interface ExtractedAction {

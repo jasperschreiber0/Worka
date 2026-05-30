@@ -11,6 +11,8 @@ import type {
   ExtractedAction,
 } from '@/lib/types/database.types'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
+import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
+import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -279,6 +281,21 @@ Your job is to parse a builder's natural-language message and return ALL actions
     Entities: {}
     Examples: "upload past quotes", "how do I add my pricing database", "import my rates", "upload supplier prices"
 
+18. client_lookup
+    Trigger: asking if we've worked with a client before, client history, past jobs with someone
+    Entities: { client_name }
+    Examples: "have we done work for Sarah Jones before", "tell me what jobs we've had with the Hendersons"
+
+19. meeting_prep
+    Trigger: builder is about to meet a client, going into a meeting, needs a briefing on a client/job
+    Entities: { client_name?, job_address? }
+    Examples: "meeting with Sarah Jones in 15 minutes", "give me everything on the Fitzroy job before I meet them"
+
+20. payment_risk
+    Trigger: asking what might stop payment, which jobs are at risk of not getting paid, payment risk analysis
+    Entities: {}
+    Examples: "what is most likely to stop me getting paid", "which jobs are at payment risk", "payment risk in the next 30 days"
+
 17. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
@@ -363,7 +380,12 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[] } {
   ]
 
   const message =
-    'Good morning, Dave. Here\'s what needs your attention today. You have an overdue invoice on the Fitzroy job, two variations waiting on approval, and a quote sent to Tom Caruso last week with no reply.'
+    'Good morning. Here\'s what needs your attention.\n\n' +
+    'Suggested order:\n' +
+    '1. Resolve Brunswick assumptions — 2 items are blocking the quote from being issued\n' +
+    '2. Call the Hendersons — $28,000 invoice is 3 days overdue\n' +
+    '3. Follow up Tom Caruso at Toorak — quote sent 5 days ago, no response\n' +
+    '4. Approve 2 Fitzroy variations ($3,880 total)'
 
   return { message, alerts }
 }
@@ -526,11 +548,17 @@ async function getLiveMorningBrief(
   const highCount = alerts.filter((a) => a.priority === 'high').length
   const medCount = alerts.filter((a) => a.priority === 'medium').length
 
+  // Build suggested order from high-priority alerts
+  const highAlerts = alerts.filter((a) => a.priority === 'high')
+  const medAlerts = alerts.filter((a) => a.priority === 'medium')
+  const priorityItems = [...highAlerts, ...medAlerts].slice(0, 4)
+
   let message = 'Good morning. Here\'s what needs your attention today.'
   if (highCount === 0 && medCount === 0) {
     message = 'Good morning. No urgent items — things are looking clear today.'
-  } else if (highCount > 0) {
-    message = `Good morning. You have ${highCount} item${highCount !== 1 ? 's' : ''} that need${highCount === 1 ? 's' : ''} immediate attention.`
+  } else {
+    const itemLines = priorityItems.map((a, i) => `${i + 1}. ${a.message}${a.action ? ' → ' + a.action : ''}`).join('\n')
+    message = `Good morning. ${highCount > 0 ? `${highCount} item${highCount !== 1 ? 's' : ''} need${highCount === 1 ? 's' : ''} immediate attention.` : 'Here\'s what needs your attention.'}\n\nSuggested order:\n${itemLines}`
   }
 
   return { message, alerts }
@@ -1354,10 +1382,16 @@ async function orchestrateActions(
             stateChanges.push({ status: 'warning', label: 'No draft quote yet — plans may still be processing' })
             messageParts.push("Plans found but no draft quote yet. Once extraction completes, I'll flag every assumption that needs your input.")
           }
-        } else if (jobId) {
-          messageParts.push('I\'ll surface any unresolved assumptions once your plans are processed.')
         } else {
-          messageParts.push('Upload the plans first and I\'ll flag every assumption that needs your input before the quote can be issued.')
+          // Demo mode — surface demo assumptions regardless of jobId
+          const unresolved = DEMO_ASSUMPTIONS.filter(a => a.resolution_type === 'unresolved')
+          if (unresolved.length > 0) {
+            const list = unresolved.map(a => `• ${a.description} (${a.trade_category})`).join('\n')
+            stateChanges.push({ status: 'blocked', label: `${unresolved.length} assumption${unresolved.length === 1 ? '' : 's'} blocking quote` })
+            messageParts.push(`${unresolved.length} assumptions need your input before the quote can be issued:\n\n${list}\n\nClick "Review assumptions" to work through them one by one.`)
+          } else {
+            messageParts.push('No unresolved assumptions — quote is ready to advance.')
+          }
         }
         break
       }
