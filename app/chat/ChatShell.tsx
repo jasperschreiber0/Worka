@@ -46,6 +46,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
   const [pendingUpload, setPendingUpload] = useState<ActiveJob | null>(null)
 
   const [autoMessage, setAutoMessage] = useState<string | null>(null)
+  const [pendingFillInput, setPendingFillInput] = useState<string | null>(null)
   const consumedRef = useRef(false)
 
   useEffect(() => {
@@ -120,6 +121,10 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
     setPendingEmailDraft({ jobId, intentHint: 'invoice' })
   }, [])
 
+  const handleAddTask = useCallback((jobAddress: string) => {
+    setPendingFillInput(`add task at ${jobAddress}: `)
+  }, [])
+
   return (
     <div className="h-screen flex overflow-hidden bg-white">
       {/* ── Left: chat ────────────────────────────────────────────────────── */}
@@ -139,6 +144,8 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onPendingUploadConsumed={handleUploadConsumed}
           autoMessage={autoMessage}
           onAutoMessageConsumed={handleAutoMessageConsumed}
+          pendingFillInput={pendingFillInput}
+          onFillInputConsumed={() => setPendingFillInput(null)}
         />
       </div>
 
@@ -158,6 +165,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onComposeEmail={handleComposeEmail}
           onUploadPlans={handleUploadPlans}
           onAddInvoice={handleAddInvoice}
+          onAddTask={handleAddTask}
           builderId={builderId}
         />
       </div>
@@ -169,6 +177,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
             job={activeJob}
             onClose={handlePanelClose}
             onViewQuote={handleViewQuote}
+            onAddTask={handleAddTask}
           />
         )}
       </div>

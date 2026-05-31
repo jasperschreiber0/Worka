@@ -161,6 +161,8 @@ interface ChatInterfaceProps {
   onPendingUploadConsumed?: () => void
   autoMessage?: string | null
   onAutoMessageConsumed?: () => void
+  pendingFillInput?: string | null
+  onFillInputConsumed?: () => void
 }
 
 // ─── Sign-out button ──────────────────────────────────────────────────────────
@@ -217,6 +219,8 @@ export default function ChatInterface({
   onPendingUploadConsumed,
   autoMessage,
   onAutoMessageConsumed,
+  pendingFillInput,
+  onFillInputConsumed,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -249,6 +253,9 @@ export default function ChatInterface({
     jobAddress: string
     quoteTotalCost: number
   } | null>(null)
+
+  const [isListening, setIsListening] = useState(false)
+  const recognitionRef = useRef<{ stop: () => void } | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -311,6 +318,22 @@ export default function ChatInterface({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingUpload])
+
+  // Fill input when "Add task" FAB is tapped from the job panel
+  useEffect(() => {
+    if (pendingFillInput) {
+      setInput(pendingFillInput)
+      onFillInputConsumed?.()
+      setTimeout(() => {
+        const ta = inputRef.current
+        if (ta) {
+          ta.focus()
+          ta.setSelectionRange(ta.value.length, ta.value.length)
+        }
+      }, 50)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFillInput])
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))
@@ -891,6 +914,39 @@ export default function ChatInterface({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasSentInitial, sendMessage])
 
+  // Voice input — toggles speech recognition on/off
+  const toggleVoice = useCallback(() => {
+    if (isListening) {
+      recognitionRef.current?.stop()
+      setIsListening(false)
+      return
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SpeechRecognitionCtor = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) return
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rec = new SpeechRecognitionCtor() as any
+    rec.continuous = false
+    rec.interimResults = false
+    rec.lang = 'en-AU'
+    rec.onstart = () => setIsListening(true)
+    rec.onend = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+    rec.onerror = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+    rec.onresult = (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => {
+      const transcript = Array.from(e.results).map(r => r[0].transcript).join(' ')
+      setInput(transcript)
+      inputRef.current?.focus()
+    }
+    recognitionRef.current = rec
+    rec.start()
+  }, [isListening])
+
   // Handle form submit
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -1117,22 +1173,66 @@ export default function ChatInterface({
       )}
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3 pb-safe">
+      <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 pt-2 pb-3 pb-safe">
+        {/* Quick actions */}
+        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none" aria-label="Quick actions">
+          {([
+            { label: "What's on", msg: 'whats on today' },
+            { label: 'New job', fill: 'New job at ' },
+            { label: 'Show jobs', msg: 'show my jobs' },
+            { label: 'Add task', fill: 'remind ' },
+            { label: 'My team', msg: 'show my team' },
+          ] as Array<{ label: string; msg?: string; fill?: string }>).map(({ label, msg, fill }) => (
+            <button
+              key={label}
+              type="button"
+              disabled={loading}
+              onClick={() => {
+                if (fill) {
+                  setInput(fill)
+                  inputRef.current?.focus()
+                } else if (msg) {
+                  sendMessage(msg)
+                }
+              }}
+              className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 text-slate-700 hover:bg-brand-50 hover:text-brand-700 active:bg-brand-100 transition-colors disabled:opacity-40 whitespace-nowrap"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <form onSubmit={handleSubmit} className="flex items-end gap-2">
           <label htmlFor="chat-input" className="sr-only">
             Type a message
           </label>
+          {/* Mic button */}
+          <button
+            type="button"
+            onClick={toggleVoice}
+            disabled={loading}
+            aria-label={isListening ? 'Stop recording' : 'Start voice input'}
+            className={`flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-colors disabled:opacity-40 ${
+              isListening
+                ? 'bg-red-100 text-red-600 animate-pulse'
+                : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+            }`}
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+            </svg>
+          </button>
           <textarea
             ref={inputRef}
             id="chat-input"
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder="Ask something — e.g. 'whats on today'"
+            placeholder={isListening ? 'Listening…' : 'Ask something or tap a button above'}
             rows={1}
             disabled={loading}
             className="flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent transition-shadow duration-150 disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
-            style={{ minHeight: '38px', maxHeight: '120px' }}
+            style={{ minHeight: '40px', maxHeight: '120px' }}
           />
           <button
             type="submit"
@@ -1143,7 +1243,7 @@ export default function ChatInterface({
             Send
           </button>
         </form>
-        <p className="mt-1.5 text-xs text-slate-400">
+        <p className="mt-1.5 text-xs text-slate-400 hidden sm:block">
           Press <kbd className="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1">Enter</kbd> to send
           &nbsp;&middot;&nbsp;
           <kbd className="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1">Shift+Enter</kbd> for new line

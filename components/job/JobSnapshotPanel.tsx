@@ -38,6 +38,7 @@ export interface JobSnapshotPanelProps {
   onUploadPlans?: (job: ActiveJob) => void
   onAddInvoice?: (jobId: string) => void
   onJobActivated?: (jobId: string) => void
+  onAddTask?: (jobAddress: string) => void
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ interface ActivationModalState {
   quote: JobSnapshot['quote'] | null
 }
 
-export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated, onAddTask }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -265,14 +266,14 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-b border-slate-200 bg-white">
-        <div className="flex -mb-px">
+      <div className="flex-shrink-0 border-b border-slate-200 bg-white overflow-x-auto scrollbar-none">
+        <div className="flex -mb-px min-w-max">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-1 text-center py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
+              className={`min-w-[64px] px-4 min-h-[44px] flex items-center justify-center text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
                 activeTab === tab.id
                   ? 'border-brand-500 text-brand-600'
                   : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -285,7 +286,21 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Content ─────────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto bg-slate-50">
+      <div className="flex-1 overflow-y-auto bg-slate-50 relative">
+        {/* Floating "Add task" button — visible when a job is open */}
+        {job && onAddTask && (
+          <button
+            type="button"
+            onClick={() => onAddTask(job.address)}
+            className="absolute bottom-4 right-4 z-10 flex items-center gap-2 px-4 py-2.5 rounded-full bg-brand-500 text-white text-sm font-medium shadow-lg hover:bg-brand-600 active:bg-brand-700 transition-colors"
+            aria-label="Add task to this job"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            Add task
+          </button>
+        )}
         {job ? (
           renderTabContent()
         ) : (
