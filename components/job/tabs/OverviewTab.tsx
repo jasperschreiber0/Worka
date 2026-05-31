@@ -225,7 +225,7 @@ export default function OverviewTab({ overview, job, quote }: OverviewTabProps) 
           <div className="space-y-1.5">
             {job.risks.map((risk, i) => (
               <div key={i} className={`flex items-start gap-2 rounded-lg border px-3 py-2 ${riskColour(risk.level)}`}>
-                <span className="text-xs font-semibold uppercase tracking-wide flex-shrink-0 mt-0.5 w-10">
+                <span className="text-xs font-semibold uppercase tracking-wide flex-shrink-0 mt-0.5 min-w-[52px]">
                   {risk.level}
                 </span>
                 <p className="text-xs leading-snug">{risk.message}</p>

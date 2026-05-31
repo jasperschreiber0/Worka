@@ -97,6 +97,7 @@ interface ChatApiResponse {
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
   job_list?: import('@/app/api/chat/route').JobListItem[]
+  worker_list?: import('@/app/api/chat/route').WorkerListItem[]
   state_changes?: import('@/app/api/chat/route').StateChange[]
   event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
   events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }>
@@ -622,6 +623,7 @@ export default function ChatInterface({
         variation: variationCard,
         marginJobs: data.margin_jobs,
         jobList: data.job_list,
+        workerList: data.worker_list,
         stateChanges: data.state_changes,
         timestamp: new Date(),
       }
@@ -869,6 +871,15 @@ export default function ChatInterface({
     }
   }, [onJobMention])
 
+  // Handler: assign task from worker card — pre-fills input
+  const handleAssignWorkerTask = useCallback((workerFirstName: string) => {
+    setInput(`remind ${workerFirstName} to `)
+    setTimeout(() => {
+      const ta = inputRef.current
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length) }
+    }, 50)
+  }, [])
+
   // Handler: create job anyway (skip duplicate check) — pass address so the API knows what to create
   const handleCreateAnyway = useCallback((address: string) => {
     sendMessage(`new job at ${address}`, true)
@@ -1033,6 +1044,7 @@ export default function ChatInterface({
           <ChatMessage
             key={message.id}
             message={message}
+            builderId={builderId}
             onOpenJob={handleOpenJob}
             onOpenJobFromList={handleOpenJobFromList}
             onCreateAnyway={handleCreateAnyway}
@@ -1040,6 +1052,7 @@ export default function ChatInterface({
             onVariationApprove={handleVariationApprove}
             onVariationReject={handleVariationReject}
             onOpenMarginJob={handleOpenMarginJob}
+            onAssignWorkerTask={handleAssignWorkerTask}
           />
         ))}
 

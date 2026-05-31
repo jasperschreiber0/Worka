@@ -6,6 +6,7 @@ import VariationCard, { type VariationCardVariation } from './VariationCard'
 import MarginCard, { type MarginJob } from './MarginCard'
 import StateUpdateCard from './StateUpdateCard'
 import JobListCard from './JobListCard'
+import WorkerListCard, { type WorkerListItem } from './WorkerListCard'
 import type { StateChange, JobListItem } from '@/app/api/chat/route'
 
 // ─── Lightweight markdown renderer ───────────────────────────────────────────
@@ -136,12 +137,14 @@ export interface Message {
   variation?: VariationCardVariation
   marginJobs?: MarginJob[]
   jobList?: JobListItem[]
+  workerList?: WorkerListItem[]
   stateChanges?: StateChange[]
   timestamp: Date
 }
 
 interface ChatMessageProps {
   message: Message
+  builderId?: string
   onOpenJob?: (jobId: string) => void
   onOpenJobFromList?: (jobId: string, address: string, status: string, clientName?: string) => void
   onCreateAnyway?: (address: string) => void
@@ -149,6 +152,7 @@ interface ChatMessageProps {
   onVariationApprove?: (variationId: string) => void
   onVariationReject?: (variationId: string) => void
   onOpenMarginJob?: (jobId: string) => void
+  onAssignWorkerTask?: (workerName: string) => void
 }
 
 // ─── Relative time helper ─────────────────────────────────────────────────────
@@ -175,7 +179,7 @@ function relativeTime(date: Date): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatMessage({ message, onOpenJob, onOpenJobFromList, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob }: ChatMessageProps) {
+export default function ChatMessage({ message, builderId = '00000000-0000-0000-0000-000000000001', onOpenJob, onOpenJobFromList, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob, onAssignWorkerTask }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const hasAlerts = message.alerts && message.alerts.length > 0
   const hasDuplicate = !!message.duplicateJob
@@ -283,7 +287,7 @@ export default function ChatMessage({ message, onOpenJob, onOpenJobFromList, onC
     )
   }
 
-  // Assistant message without alerts → plain bubble (+ optional job list)
+  // Assistant message without alerts → plain bubble (+ optional job/worker list)
   return (
     <div className="flex justify-start mb-4" role="listitem">
       <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
@@ -292,6 +296,13 @@ export default function ChatMessage({ message, onOpenJob, onOpenJobFromList, onC
         </div>
         {message.jobList && message.jobList.length > 0 && onOpenJobFromList && (
           <JobListCard jobs={message.jobList} onOpenJob={onOpenJobFromList} />
+        )}
+        {message.workerList && message.workerList.length > 0 && (
+          <WorkerListCard
+            workers={message.workerList}
+            builderId={builderId}
+            onAssignTask={onAssignWorkerTask}
+          />
         )}
         {message.stateChanges && message.stateChanges.length > 0 && (
           <StateUpdateCard changes={message.stateChanges} />

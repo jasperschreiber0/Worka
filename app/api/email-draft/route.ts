@@ -210,10 +210,14 @@ ${contextMessage ? `Additional context from builder: ${contextMessage}` : ''}
 
 Write a brief, professional email that:
 - Sounds like a tradie builder — professional but not overly corporate
-- References the specific job address
+- References the specific job address and client name if known
 - Gets to the point quickly
 - Uses Australian English
 - Includes a subject line
+- Signs off with: ${builderName}\n${businessName}
+
+IMPORTANT: Do NOT use square bracket placeholders like [Client Name], [Job Address], [Phone Number] etc.
+Use the actual values from the job context. If a value is unknown, omit that detail entirely rather than using a placeholder.
 
 Respond with ONLY valid JSON in this exact format:
 {

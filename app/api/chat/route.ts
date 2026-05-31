@@ -134,6 +134,15 @@ export interface JobListItem {
   job_ref?: string | null
 }
 
+export interface WorkerListItem {
+  id: string
+  name: string
+  role: string
+  status: 'invited' | 'active' | 'inactive'
+  email: string | null
+  phone: string | null
+}
+
 interface ChatResponse {
   intent: string
   message: string
@@ -147,6 +156,7 @@ interface ChatResponse {
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
   job_list?: JobListItem[]
+  worker_list?: WorkerListItem[]
   state_changes?: StateChange[]
   // Single event preserved for backwards compat; primary path uses events[]
   event?: ChatEvent
@@ -1783,10 +1793,10 @@ async function orchestrateActions(
 
       case 'upload_rates': {
         messageParts.push(
-          `To load your past pricing into WorkA, you have two paths:\n\n` +
-          `**Past quotes (PDF/plan-based):** Upload them through any job's Files tab — WorkA extracts quantities and rates, then stores them as learned rates for future quotes.\n\n` +
-          `**Rate sheet / supplier prices (CSV):** This import is coming in the next release. Prepare a CSV with columns: trade_category, description, unit, rate_ex_gst. Once available, WorkA will use your rates first and fall back to the platform average only when yours are missing.\n\n` +
-          `In the meantime, after you approve a quote, WorkA automatically captures those rates and improves future estimates.`
+          `Two ways to load your pricing into WorkA:\n\n` +
+          `**1. Past quotes or plans (PDF)** — upload through the Files tab on any job. WorkA extracts quantities and rates automatically and stores them as your learned rates.\n\n` +
+          `**2. Supplier price sheets (CSV)** — coming in the next release. Prepare a spreadsheet with columns: trade_category, description, unit, rate_ex_gst.\n\n` +
+          `Either way, once your rates are in, WorkA uses them first for every future quote — no more guessing.`
         )
         break
       }
@@ -2500,7 +2510,7 @@ async function routeDemoMessage(
   // Rate / pricing upload
   if (
     (lower.includes('upload') || lower.includes('import') || lower.includes('add')) &&
-    (lower.includes('rate') || lower.includes('price') || lower.includes('pricing') || lower.includes('past quote') || lower.includes('database'))
+    (lower.includes('rate') || lower.includes('price') || lower.includes('pricing') || lower.includes('past quote') || lower.includes('database') || lower.includes('data'))
   ) {
     if (!actions.some((a) => a.type === 'upload_rates')) {
       actions.push({ type: 'upload_rates', entities: {}, confidence: 80 })
@@ -2677,27 +2687,31 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
         const { data: workers } = await supabase
           .from('workers')
-          .select('name, role, status')
+          .select('id, name, role, status, email, phone')
           .eq('builder_id', builderId)
+          .neq('status', 'inactive')
           .order('created_at', { ascending: false })
-          .limit(20)
+          .limit(50)
         if (workers && workers.length > 0) {
-          const lines = (workers as Array<{ name: string; role: string; status: string }>)
-            .map(w => `• ${w.name} — ${w.role} (${w.status})`)
-            .join('\n')
+          const typedWorkers = workers as WorkerListItem[]
           return NextResponse.json({
             intent: 'job_query',
-            message: `You have ${workers.length} worker${workers.length === 1 ? '' : 's'} on your crew:\n${lines}\n\nType "add [name], they're a [trade]" to invite someone new.`,
+            message: `${typedWorkers.length} worker${typedWorkers.length === 1 ? '' : 's'} on your crew. Tap a name to edit details or assign a task.`,
+            worker_list: typedWorkers,
           })
         }
         return NextResponse.json({
           intent: 'job_query',
-          message: 'No workers on your crew yet. Type "add [name], they\'re a [trade]" to invite your first one.',
+          message: 'No workers on your crew yet. Type "add Jack, he\'s a carpenter" to invite your first one.',
         })
       }
       return NextResponse.json({
         intent: 'job_query',
-        message: 'You have 2 workers on your crew:\n• Jack Thompson — Carpenter (on Fitzroy job)\n• Mick Reynolds — Plumber (on Fitzroy job)\n\nType "add [name], they\'re a [trade]" to invite someone new.',
+        message: '2 workers on your crew. Tap a name to edit details or assign a task.',
+        worker_list: [
+          { id: 'w-jack-001', name: 'Jack Thompson', role: 'Carpenter', status: 'invited', email: null, phone: null },
+          { id: 'w-mick-002', name: 'Mick Reynolds', role: 'Plumber', status: 'invited', email: null, phone: null },
+        ] as WorkerListItem[],
       })
     }
 
