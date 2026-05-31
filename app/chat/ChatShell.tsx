@@ -146,6 +146,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onAutoMessageConsumed={handleAutoMessageConsumed}
           pendingFillInput={pendingFillInput}
           onFillInputConsumed={() => setPendingFillInput(null)}
+          activeJobAddress={activeJob?.address ?? null}
         />
       </div>
 

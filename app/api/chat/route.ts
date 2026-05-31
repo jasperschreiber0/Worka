@@ -1793,10 +1793,10 @@ async function orchestrateActions(
 
       case 'upload_rates': {
         messageParts.push(
-          `Two ways to load your pricing into WorkA:\n\n` +
-          `**1. Past quotes or plans (PDF)** — upload through the Files tab on any job. WorkA extracts quantities and rates automatically and stores them as your learned rates.\n\n` +
-          `**2. Supplier price sheets (CSV)** — coming in the next release. Prepare a spreadsheet with columns: trade_category, description, unit, rate_ex_gst.\n\n` +
-          `Either way, once your rates are in, WorkA uses them first for every future quote — no more guessing.`
+          `To load your past pricing into WorkA:\n\n` +
+          `**Past quotes (PDF)** — tap **Upload data** in the sidebar, or go to any job → Files tab and upload a quote PDF. WorkA reads the line items, quantities, and rates, then stores them as your learned rates for future quotes.\n\n` +
+          `**Supplier price lists (CSV)** — coming in the next release. Format: trade_category, description, unit, rate_ex_gst.\n\n` +
+          `Once your rates are loaded, WorkA uses them automatically on every new quote — no re-entering rates job by job.`
         )
         break
       }
@@ -2231,7 +2231,7 @@ What WorkA does NOT have yet (but is coming):
 - Team group chat
 - Client portal
 
-Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD. If asked what WorkA can't do or what's coming, be honest about the roadmap items above.`
+Rules: never invent data you don't have. Keep responses under 4 sentences unless listing items. All amounts in AUD. If asked what WorkA can't do or what's coming, be honest about the roadmap items above. Never use "G'day" or other Australian slang — plain English only.`
 
   const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
   try {
@@ -2499,12 +2499,34 @@ async function routeDemoMessage(
     lower.match(/remind\s+\w+\s+to/) ||
     lower.match(/task(?:\s+to\s|\s+for\s|\s+at\s|\s*:)/)
   if (isImperativeTask && !isTaskCapabilityQuestion && !actions.some((a) => a.type === 'add_task')) {
+    // "task for Jack at Brunswick: install footings" or "task for Jack: install footings"
+    const taskForMatch = lower.match(/task\s+for\s+(\w+)(?:\s+at\s+([\w\s]+?))?\s*:\s*(.+)/i)
     const descMatch = lower.match(/(?:add task|task)(?:\s+to\s+\S+)?:\s*(.+)/i)
     const assignMatch = lower.match(/assign\s+\w+\s+to\s+(?:do\s+)?(.+)/i)
     const remindMatch = lower.match(/remind\s+(\w+)\s+to\s+(.+?)(?:\s+at\s+|\s+on\s+|\s+for\s+|$)/i)
-    const desc = descMatch?.[1] ?? assignMatch?.[1] ?? (remindMatch ? remindMatch[2] : undefined)
-    const assignee = remindMatch ? remindMatch[1].charAt(0).toUpperCase() + remindMatch[1].slice(1) : undefined
-    actions.push({ type: 'add_task', entities: { ...(desc ? { description: desc } : {}), ...(assignee ? { assignee_name: assignee } : {}) }, confidence: 75 })
+
+    let desc: string | undefined
+    let assignee: string | undefined
+    let jobAddress: string | undefined
+
+    if (taskForMatch) {
+      assignee = taskForMatch[1].charAt(0).toUpperCase() + taskForMatch[1].slice(1)
+      jobAddress = taskForMatch[2]?.trim()
+      desc = taskForMatch[3]
+    } else {
+      desc = descMatch?.[1] ?? assignMatch?.[1] ?? (remindMatch ? remindMatch[2] : undefined)
+      assignee = remindMatch ? remindMatch[1].charAt(0).toUpperCase() + remindMatch[1].slice(1) : undefined
+    }
+
+    actions.push({
+      type: 'add_task',
+      entities: {
+        ...(desc ? { description: desc } : {}),
+        ...(assignee ? { assignee_name: assignee } : {}),
+        ...(jobAddress ? { job_address: jobAddress } : {}),
+      },
+      confidence: 75,
+    })
   }
 
   // Rate / pricing upload
@@ -2752,6 +2774,23 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         intent: 'job_query',
         message: `You have ${DEMO_JOB_LIST.length} active jobs. Tap one to open it.`,
         job_list: DEMO_JOB_LIST,
+      })
+    }
+
+    // Pre-extract fast path: data/rate upload — never let this fall through to Haiku
+    const isUploadDataQuery =
+      (lowerMsg.includes('upload') || lowerMsg.includes('import')) &&
+      (lowerMsg.includes('data') || lowerMsg.includes('rate') || lowerMsg.includes('price') ||
+       lowerMsg.includes('pricing') || lowerMsg.includes('past quote') || lowerMsg.includes('history') ||
+       lowerMsg.includes('csv') || lowerMsg.includes('spreadsheet'))
+    if (isUploadDataQuery) {
+      return NextResponse.json({
+        intent: 'upload_rates',
+        message:
+          `To load your past pricing into WorkA:\n\n` +
+          `**Past quotes (PDF)** — tap **Upload data** in the sidebar, or go to any job → Files tab and upload a quote PDF. WorkA reads the line items, quantities, and rates, then stores them as your learned rates for future quotes.\n\n` +
+          `**Supplier price lists (CSV)** — coming in the next release. Format: trade_category, description, unit, rate_ex_gst.\n\n` +
+          `Once your rates are loaded, WorkA uses them automatically on every new quote — no re-entering rates job by job.`,
       })
     }
 

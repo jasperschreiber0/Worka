@@ -164,6 +164,7 @@ interface ChatInterfaceProps {
   onAutoMessageConsumed?: () => void
   pendingFillInput?: string | null
   onFillInputConsumed?: () => void
+  activeJobAddress?: string | null
 }
 
 // ─── Sign-out button ──────────────────────────────────────────────────────────
@@ -222,6 +223,7 @@ export default function ChatInterface({
   onAutoMessageConsumed,
   pendingFillInput,
   onFillInputConsumed,
+  activeJobAddress,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -871,14 +873,15 @@ export default function ChatInterface({
     }
   }, [onJobMention])
 
-  // Handler: assign task from worker card — pre-fills input
+  // Handler: assign task from worker card — pre-fills input with job context if panel is open
   const handleAssignWorkerTask = useCallback((workerFirstName: string) => {
-    setInput(`remind ${workerFirstName} to `)
+    const jobSuffix = activeJobAddress ? ` at ${activeJobAddress}` : ''
+    setInput(`task for ${workerFirstName}${jobSuffix}: `)
     setTimeout(() => {
       const ta = inputRef.current
       if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length) }
     }, 50)
-  }, [])
+  }, [activeJobAddress])
 
   // Handler: create job anyway (skip duplicate check) — pass address so the API knows what to create
   const handleCreateAnyway = useCallback((address: string) => {
