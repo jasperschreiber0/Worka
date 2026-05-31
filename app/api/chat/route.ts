@@ -320,6 +320,16 @@ Your job is to parse a builder's natural-language message and return ALL actions
     Entities: { name?, start_date?, job_address? }
     Examples: "Jack starts Monday", "what does Sarah need before she can work on site", "new sparky starting next week"
 
+23. roadmap
+    Trigger: asking what is coming to WorkA, what features are planned, what's on the roadmap
+    Entities: {}
+    Examples: "what's coming to WorkA", "what features are planned", "roadmap", "what's next for WorkA"
+
+24. team_notifications
+    Trigger: asking about team messaging, group chat, notifying workers or crew, push notifications to staff
+    Entities: {}
+    Examples: "can I message my crew", "team chat", "notify workers", "push notifications to staff"
+
 17. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
@@ -581,8 +591,10 @@ async function getLiveMorningBrief(
   const priorityItems = [...highAlerts, ...medAlerts].slice(0, 4)
 
   let message = 'Good morning. Here\'s what needs your attention today.'
-  if (highCount === 0 && medCount === 0) {
-    message = 'Good morning. No urgent items — things are looking clear today.'
+  if (alerts.length === 0) {
+    message = 'Good morning. No jobs set up yet — type **"new job at [address]"** to create your first one, or **"add Jack, he\'s a carpenter"** to invite your crew.'
+  } else if (highCount === 0 && medCount === 0) {
+    message = 'Good morning. No urgent items today — everything is on track.'
   } else {
     const itemLines = priorityItems.map((a, i) => `${i + 1}. ${a.message}${a.action ? ' → ' + a.action : ''}`).join('\n')
     message = `Good morning. ${highCount > 0 ? `${highCount} item${highCount !== 1 ? 's' : ''} need${highCount === 1 ? 's' : ''} immediate attention.` : 'Here\'s what needs your attention.'}\n\nSuggested order:\n${itemLines}`
@@ -1162,7 +1174,7 @@ function handleEmailDraft(entities: Record<string, string>): Partial<ChatRespons
   const jobDisplay = job_reference ? ` about the ${job_reference} job` : ''
 
   return {
-    message: `Drafting an email to ${recipientDisplay}${jobDisplay}…`,
+    message: `I'll draft an email to ${recipientDisplay}${jobDisplay} for you to review — nothing will be sent until you approve it.`,
     event: {
       type: 'open_email_draft',
       job_id: resolvedJobId,
@@ -1199,7 +1211,7 @@ async function handleEmailSyncStatus(builderId: string): Promise<Partial<ChatRes
 
     return { message: `${providerName} is connected and monitoring your inbox.${connectedPhrase}${syncPhrase}${todayPhrase}` }
   } catch {
-    return { message: 'Email sync status is unavailable right now. Try again in a moment.' }
+    return { message: 'Email sync isn\'t connected yet — go to **Settings → Email sync** to link your Gmail or Outlook inbox.' }
   }
 }
 
@@ -1557,6 +1569,11 @@ async function orchestrateActions(
         const jobId = ctx.resolved_job_id
         if (jobId && !events.some((e) => e.type === 'open_upload_panel')) {
           events.push({ type: 'open_upload_panel', job_id: jobId })
+        } else if (!jobId) {
+          messageParts.push(
+            'To upload plans: open a job from the panel on the right, tap the **Files** tab, and use the upload button. WorkA reads the PDF, extracts quantities automatically, and flags any assumptions for you to review before the quote goes out.\n\n' +
+            'Which job are you uploading plans for? I can open it for you.'
+          )
         }
         break
       }
@@ -2188,7 +2205,7 @@ Actions available — tell the builder to type these if they want to act:
 - "meeting with [client]" — get a pre-meeting briefing on a client/job
 - "what's most likely to stop me getting paid" — payment risk analysis
 - "have we worked with [client] before" — client history lookup
-- "add task at [address]: [description]" — log a task for your crew
+- "remind Jack to install footings at Brunswick" or "add task at Brunswick: install footings" — log a task for your crew
 
 Worker management: removing/deactivating a worker is not yet available via chat — direct the builder to Settings → Team. Workers can be set to inactive status there.
 
@@ -2313,7 +2330,7 @@ async function routeDemoMessage(
   }
 
   // New job — extract address, client, budget, scope (single job)
-  const newJobMatch = lower.match(/(?:new\s+(?:job|rear|kitchen|bathroom|renovation|extension|project|build)\s+at|job\s+at)\s+(.+?)(?:\s+for|\s+client|\s+budget|\s+help|\s+quote|\s+start|,|$)/i)
+  const newJobMatch = lower.match(/(?:new\s+(?:job|rear|kitchen|bathroom|renovation|extension|project|build)\s+at|create\s+(?:a\s+)?job\s+at|job\s+at)\s+(.+?)(?:\s+for|\s+client|\s+budget|\s+help|\s+quote|\s+start|,|$)/i)
   const forceMatch = lower.includes('create job anyway')
   if ((newJobMatch || forceMatch) && !actions.some(a => a.type === 'create_job')) {
     const rawAddress = newJobMatch ? newJobMatch[1].trim() : 'unknown address'
@@ -2469,12 +2486,15 @@ async function routeDemoMessage(
     lower.match(/add task/) ||
     lower.match(/assign\s+\w+\s+to/) ||
     lower.match(/schedule\s+\w+\s+to/) ||
+    lower.match(/remind\s+\w+\s+to/) ||
     lower.match(/task(?:\s+to\s|\s+for\s|\s+at\s|\s*:)/)
   if (isImperativeTask && !isTaskCapabilityQuestion && !actions.some((a) => a.type === 'add_task')) {
     const descMatch = lower.match(/(?:add task|task)(?:\s+to\s+\S+)?:\s*(.+)/i)
     const assignMatch = lower.match(/assign\s+\w+\s+to\s+(?:do\s+)?(.+)/i)
-    const desc = descMatch?.[1] ?? assignMatch?.[1] ?? undefined
-    actions.push({ type: 'add_task', entities: { ...(desc ? { description: desc } : {}) }, confidence: 75 })
+    const remindMatch = lower.match(/remind\s+(\w+)\s+to\s+(.+?)(?:\s+at\s+|\s+on\s+|\s+for\s+|$)/i)
+    const desc = descMatch?.[1] ?? assignMatch?.[1] ?? (remindMatch ? remindMatch[2] : undefined)
+    const assignee = remindMatch ? remindMatch[1].charAt(0).toUpperCase() + remindMatch[1].slice(1) : undefined
+    actions.push({ type: 'add_task', entities: { ...(desc ? { description: desc } : {}), ...(assignee ? { assignee_name: assignee } : {}) }, confidence: 75 })
   }
 
   // Rate / pricing upload
