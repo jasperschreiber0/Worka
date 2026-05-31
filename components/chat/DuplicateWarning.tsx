@@ -13,7 +13,7 @@ export interface DuplicateWarningJob {
 export interface DuplicateWarningProps {
   existingJob: DuplicateWarningJob
   onOpenJob: (jobId: string) => void
-  onCreateAnyway: () => void
+  onCreateAnyway: (address: string) => void
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -35,8 +35,8 @@ export default function DuplicateWarning({
   }, [existingJob.id, onOpenJob])
 
   const handleCreateAnyway = useCallback(() => {
-    onCreateAnyway()
-  }, [onCreateAnyway])
+    onCreateAnyway(existingJob.address)
+  }, [existingJob.address, onCreateAnyway])
 
   return (
     <div

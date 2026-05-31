@@ -11,6 +11,8 @@ import type {
   ExtractedAction,
 } from '@/lib/types/database.types'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
+import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
+import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -216,10 +218,12 @@ Your job is to parse a builder's natural-language message and return ALL actions
 
 2. add_worker
    Trigger: adding, inviting, or creating a new crew member
+   BULK: if multiple crew members are named in one message, return ONE add_worker action per person
    Entities: { name, role, email?, phone? }
 
 3. create_job
    Trigger: creating a new job, new quote, new project at an address
+   BULK: if the builder lists multiple addresses in one message, return ONE create_job action per address
    Entities: {
      address,           ← required: cleanest possible street address
      client_name?,      ← client's name if mentioned
@@ -403,7 +407,12 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[] } {
   ]
 
   const message =
-    'Good morning, Dave. Here\'s what needs your attention today. You have an overdue invoice on the Fitzroy job, two variations waiting on approval, and a quote sent to Tom Caruso last week with no reply.'
+    'Good morning. Here\'s what needs your attention.\n\n' +
+    'Suggested order:\n' +
+    '1. Resolve Brunswick assumptions — 2 items are blocking the quote from being issued\n' +
+    '2. Call the Hendersons — $28,000 invoice is 3 days overdue\n' +
+    '3. Follow up Tom Caruso at Toorak — quote sent 5 days ago, no response\n' +
+    '4. Approve 2 Fitzroy variations ($3,880 total)'
 
   return { message, alerts }
 }
@@ -566,11 +575,17 @@ async function getLiveMorningBrief(
   const highCount = alerts.filter((a) => a.priority === 'high').length
   const medCount = alerts.filter((a) => a.priority === 'medium').length
 
+  // Build suggested order from high-priority alerts
+  const highAlerts = alerts.filter((a) => a.priority === 'high')
+  const medAlerts = alerts.filter((a) => a.priority === 'medium')
+  const priorityItems = [...highAlerts, ...medAlerts].slice(0, 4)
+
   let message = 'Good morning. Here\'s what needs your attention today.'
   if (highCount === 0 && medCount === 0) {
     message = 'Good morning. No urgent items — things are looking clear today.'
-  } else if (highCount > 0) {
-    message = `Good morning. You have ${highCount} item${highCount !== 1 ? 's' : ''} that need${highCount === 1 ? 's' : ''} immediate attention.`
+  } else {
+    const itemLines = priorityItems.map((a, i) => `${i + 1}. ${a.message}${a.action ? ' → ' + a.action : ''}`).join('\n')
+    message = `Good morning. ${highCount > 0 ? `${highCount} item${highCount !== 1 ? 's' : ''} need${highCount === 1 ? 's' : ''} immediate attention.` : 'Here\'s what needs your attention.'}\n\nSuggested order:\n${itemLines}`
   }
 
   return { message, alerts }
@@ -1383,6 +1398,8 @@ async function orchestrateActions(
   const messageParts: string[] = []
   const stateChanges: StateChange[] = []
   let accumulated: Partial<ChatResponse> = {}
+  const bulkJobsCreated: { address: string; client?: string }[] = []
+  const bulkMode = actions.filter(a => a.type === 'create_job').length > 1
 
   for (const action of actions) {
     switch (action.type) {
@@ -1499,7 +1516,11 @@ async function orchestrateActions(
             }
           }
 
-          messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Opening that job now.`)
+          if (!bulkMode) {
+            messageParts.push(`You already have a job at ${result.existing_job.address} (currently ${result.existing_job.status}). Opening that job now.`)
+          } else {
+            bulkJobsCreated.push({ address: result.existing_job.address, client: client_name })
+          }
 
         } else {
           accumulated.job = result.job
@@ -1517,10 +1538,15 @@ async function orchestrateActions(
             await sb.from('jobs').update(dlUpdates).eq('id', result.job.id)
           }
 
-          const budgetStr = budget_hint ? ` Budget noted: ~$${parseInt(budget_hint).toLocaleString('en-AU')}.` : ''
-          const clientStr = client_name ? ` Client: ${client_name}.` : ''
-          messageParts.push(`New job at ${result.job.address} created.${clientStr}${budgetStr} Upload your plans to start the quote.`)
-          events.push({ type: 'open_upload_panel', job_id: result.job.id })
+          if (bulkMode) {
+            // Collect for summary message; don't open a panel for each
+            bulkJobsCreated.push({ address: result.job.address, client: client_name })
+          } else {
+            const budgetStr = budget_hint ? ` Budget noted: ~$${parseInt(budget_hint).toLocaleString('en-AU')}.` : ''
+            const clientStr = client_name ? ` Client: ${client_name}.` : ''
+            messageParts.push(`New job at ${result.job.address} created.${clientStr}${budgetStr} Upload your plans to start the quote.`)
+            events.push({ type: 'open_upload_panel', job_id: result.job.id })
+          }
         }
         break
       }
@@ -1612,10 +1638,16 @@ async function orchestrateActions(
             stateChanges.push({ status: 'warning', label: 'No draft quote yet — plans may still be processing' })
             messageParts.push("Plans found but no draft quote yet. Once extraction completes, I'll flag every assumption that needs your input.")
           }
-        } else if (jobId) {
-          messageParts.push('I\'ll surface any unresolved assumptions once your plans are processed.')
         } else {
-          messageParts.push('Upload the plans first and I\'ll flag every assumption that needs your input before the quote can be issued.')
+          // Demo mode — surface demo assumptions regardless of jobId
+          const unresolved = DEMO_ASSUMPTIONS.filter(a => a.resolution_type === 'unresolved')
+          if (unresolved.length > 0) {
+            const list = unresolved.map(a => `• ${a.description} (${a.trade_category})`).join('\n')
+            stateChanges.push({ status: 'blocked', label: `${unresolved.length} assumption${unresolved.length === 1 ? '' : 's'} blocking quote` })
+            messageParts.push(`${unresolved.length} assumptions need your input before the quote can be issued:\n\n${list}\n\nClick "Review assumptions" to work through them one by one.`)
+          } else {
+            messageParts.push('No unresolved assumptions — quote is ready to advance.')
+          }
         }
         break
       }
@@ -1727,7 +1759,7 @@ async function orchestrateActions(
         stateChanges.push({ status: 'info', label: `Task logged: ${description}` })
         messageParts.push(
           `Task noted${assignLine} at ${jobRef}: "${description}".\n\n` +
-          `Full task scheduling — due dates, status tracking, and worker notifications — is coming. Your crew can see assigned tasks in the worker portal.`
+          `Full task scheduling — due dates, status tracking, and worker notifications — is coming. Your crew can see assigned tasks in the worker portal at /worker.`
         )
         break
       }
@@ -2082,6 +2114,16 @@ async function orchestrateActions(
     }
   }
 
+  // Emit bulk job creation summary (suppressed per-job messages above)
+  if (bulkJobsCreated.length > 0) {
+    const jobList = bulkJobsCreated.map(j => `• ${j.address}${j.client ? ` — ${j.client}` : ''}`).join('\n')
+    messageParts.push(
+      `${bulkJobsCreated.length} job${bulkJobsCreated.length === 1 ? '' : 's'} created:\n${jobList}\n\n` +
+      `Open each job from the panel on the right and upload plans via the Files tab to start quoting.`
+    )
+    stateChanges.push({ status: 'saved', label: `${bulkJobsCreated.length} jobs created` })
+  }
+
   // If nothing produced a message (shouldn't happen, but be safe)
   if (messageParts.length === 0) {
     messageParts.push('I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.')
@@ -2147,6 +2189,12 @@ Actions available — tell the builder to type these if they want to act:
 - "what's most likely to stop me getting paid" — payment risk analysis
 - "have we worked with [client] before" — client history lookup
 - "add task at [address]: [description]" — log a task for your crew
+
+Worker management: removing/deactivating a worker is not yet available via chat — direct the builder to Settings → Team. Workers can be set to inactive status there.
+
+Upload & memory notes:
+- Uploading plans: use the upload button inside any job panel — WorkA extracts quantities and flags assumptions
+- Uploading past quotes or pricing: currently the builder can upload PDFs through a job's Files tab; CSV rate sheet import is coming. WorkA learns rates automatically from approved quotes.
 
 What WorkA does NOT have yet (but is coming):
 - Xero sync
@@ -2225,13 +2273,52 @@ async function routeDemoMessage(
     actions.push({ type: 'morning_brief', entities: {}, confidence: 90 })
   }
 
-  // New job — extract address, client, budget, scope
-  const newJobMatch = lower.match(/(?:new job|job)\s+at\s+(.+?)(?:\s+help|\s+quote|\s+start|$)/i)
+  // Bulk job creation — "I've got 3 jobs: 14 Smith St (Henderson), 8 Brown Rd (Caruso), 22 Jones Ave"
+  const bulkJobListMatch = lower.match(/(?:have|got|running|working on|managing|juggling)\s+(?:\d+\s+)?(?:jobs?|projects?|sites?)[:\s,]+(.+)/i)
+  if (bulkJobListMatch && !actions.some(a => a.type === 'create_job')) {
+    const rawList = bulkJobListMatch[1]
+    // Split on commas that are followed by a digit or uppercase (likely address boundary)
+    const entries = rawList.split(/,\s*(?=\d|\b[A-Z])/).map(s => s.trim()).filter(Boolean)
+    if (entries.length > 1) {
+      for (const entry of entries) {
+        const clientMatch = entry.match(/\(([^)]+)\)/)
+        const address = entry.replace(/\([^)]+\)/g, '').replace(/\bfor\b.*/i, '').trim()
+        if (address.length > 3) {
+          actions.push({
+            type: 'create_job',
+            entities: {
+              address,
+              ...(clientMatch ? { client_name: clientMatch[1].trim() } : {}),
+            },
+            confidence: 88,
+          })
+        }
+      }
+    }
+  }
+
+  // Crew bulk add — "My crew: Jack (carpenter), Mick (plumber), Sarah (tiler)"
+  const crewBulkMatch = lower.match(/(?:my crew|my team|my workers|my staff)[:\s]+(.+)/i)
+  if (crewBulkMatch && !actions.some(a => a.type === 'add_worker')) {
+    const crewList = crewBulkMatch[1]
+    const crewEntries = crewList.split(/,\s*/).map(s => s.trim()).filter(Boolean)
+    for (const entry of crewEntries) {
+      const roleMatch = entry.match(/\(([^)]+)\)/)
+      const rawName = entry.replace(/\([^)]+\)/g, '').trim()
+      if (rawName && roleMatch) {
+        const name = rawName.charAt(0).toUpperCase() + rawName.slice(1)
+        actions.push({ type: 'add_worker', entities: { name, role: roleMatch[1].toLowerCase() }, confidence: 88 })
+      }
+    }
+  }
+
+  // New job — extract address, client, budget, scope (single job)
+  const newJobMatch = lower.match(/(?:new\s+(?:job|rear|kitchen|bathroom|renovation|extension|project|build)\s+at|job\s+at)\s+(.+?)(?:\s+for|\s+client|\s+budget|\s+help|\s+quote|\s+start|,|$)/i)
   const forceMatch = lower.includes('create job anyway')
-  if (newJobMatch || forceMatch) {
+  if ((newJobMatch || forceMatch) && !actions.some(a => a.type === 'create_job')) {
     const rawAddress = newJobMatch ? newJobMatch[1].trim() : 'unknown address'
     // Extract client name
-    const clientMatch = message.match(/client\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)
+    const clientMatch = message.match(/(?:for|client)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)
     // Extract budget hint (strip non-numeric)
     const budgetMatch = message.match(/(?:budget|around|approx\.?|~)\s*\$?([\d,]+)/i)
     // Extract scope
@@ -2278,10 +2365,11 @@ async function routeDemoMessage(
     actions.push({ type: 'review_assumptions', entities: {}, confidence: 85 })
   }
 
-  // Add worker
-  const addMatch = lower.match(/add\s+(\w+)/)
-  const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|a)\s+(\w+)/i)
-  if (addMatch) {
+  // Add worker — single add; skip if crew bulk already matched
+  const addMatch = lower.match(/(?:^|\s)add\s+([a-z]+)(?:\s|,)/)
+  const roleMatch = lower.match(/(?:he(?:'s|s)|she(?:'s|s)|is\s+a|they(?:'re|re|'re)\s+a|a)\s+(\w+)/i)
+  const isAddWorkerIntent = addMatch && roleMatch && !lower.includes('task') && !lower.includes('rate') && !lower.includes('price') && !lower.includes('database') && !actions.some(a => a.type === 'add_worker')
+  if (isAddWorkerIntent) {
     const demoName = addMatch[1].charAt(0).toUpperCase() + addMatch[1].slice(1)
     const demoRole = roleMatch ? roleMatch[1].toLowerCase() : 'worker'
     actions.push({ type: 'add_worker', entities: { name: demoName, role: demoRole }, confidence: 90 })
@@ -2535,17 +2623,33 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       return NextResponse.json(result)
     }
 
-    // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
     const lowerMsg = message.toLowerCase()
+
+    // Pre-extract fast path: worker/staff/crew listing bypasses LLM extraction
+    // Excluded: how-to questions, removal/deletion requests — those go through the AI
+    const isActionableWorkerQuestion =
+      lowerMsg.includes('remove') ||
+      lowerMsg.includes('delete') ||
+      lowerMsg.includes('fire') ||
+      lowerMsg.includes('how do i') ||
+      lowerMsg.includes('how to') ||
+      lowerMsg.includes('can i') ||
+      lowerMsg.includes('am i able')
     if (
-      lowerMsg.includes('staff') ||
-      lowerMsg.includes('my workers') ||
-      lowerMsg.includes('my crew') ||
-      lowerMsg.includes('my team') ||
-      lowerMsg.includes('list workers') ||
-      lowerMsg.includes('show workers') ||
-      (lowerMsg.includes('list') && lowerMsg.includes('worker')) ||
-      (lowerMsg.includes('who') && (lowerMsg.includes('crew') || lowerMsg.includes('worker') || lowerMsg.includes('team')))
+      !isActionableWorkerQuestion &&
+      (
+        lowerMsg.includes('list workers') ||
+        lowerMsg.includes('show workers') ||
+        lowerMsg.includes('show my workers') ||
+        lowerMsg.includes('show my crew') ||
+        lowerMsg.includes('show my team') ||
+        lowerMsg.includes('my workers') ||
+        lowerMsg.includes('my crew') ||
+        lowerMsg.includes('my team') ||
+        (lowerMsg.includes('list') && lowerMsg.includes('worker')) ||
+        (lowerMsg.includes('who') && (lowerMsg.includes('crew') || lowerMsg.includes('worker') || lowerMsg.includes('team'))) ||
+        lowerMsg === 'staff'
+      )
     ) {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
       const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY

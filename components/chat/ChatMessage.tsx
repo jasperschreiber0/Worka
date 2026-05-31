@@ -144,7 +144,7 @@ interface ChatMessageProps {
   message: Message
   onOpenJob?: (jobId: string) => void
   onOpenJobFromList?: (jobId: string, address: string, status: string, clientName?: string) => void
-  onCreateAnyway?: () => void
+  onCreateAnyway?: (address: string) => void
   onAction?: (action: string, entityId?: string, entityType?: string) => void
   onVariationApprove?: (variationId: string) => void
   onVariationReject?: (variationId: string) => void

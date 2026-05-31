@@ -846,9 +846,9 @@ export default function ChatInterface({
     }
   }, [onJobMention])
 
-  // Handler: create job anyway (skip duplicate check)
-  const handleCreateAnyway = useCallback(() => {
-    sendMessage('create job anyway', true)
+  // Handler: create job anyway (skip duplicate check) — pass address so the API knows what to create
+  const handleCreateAnyway = useCallback((address: string) => {
+    sendMessage(`new job at ${address}`, true)
   }, [sendMessage])
 
   // Fire any pending action that needed sendMessage (e.g. "Review variations" from MorningBriefCard)
@@ -859,16 +859,33 @@ export default function ChatInterface({
     }
   }, [pendingAction, sendMessage])
 
-  // On mount: auto-send either the injected autoMessage (from homepage ?action=/?job= params)
-  // or the default morning brief if no override is provided.
+  // On mount: for new users (no jobs) inject a welcome message directly without an API call.
+  // For existing users, send the morning brief (or an injected autoMessage).
   useEffect(() => {
     if (!hasSentInitial) {
       setHasSentInitial(true)
       if (autoMessage) {
         onAutoMessageConsumed?.()
         sendMessage(autoMessage)
-      } else {
+      } else if (isDemo) {
         sendMessage('whats on today')
+      } else {
+        fetch(`/api/jobs?builder_id=${builderId}`)
+          .then(r => r.json())
+          .then((data: { jobs?: unknown[] }) => {
+            if (!data.jobs || data.jobs.length === 0) {
+              const firstName = userName.split(' ')[0]
+              setMessages([{
+                id: 'welcome-msg',
+                role: 'assistant',
+                content: `Morning ${firstName}. Let's get WorkA set up — it takes about 5 minutes.\n\nTell me your active jobs. You can list them all at once:\n\n"I've got 3 jobs on: 14 Smith St Fitzroy for the Hendersons, 8 Brown Rd Toorak for Caruso, 22 Jones Ave Collingwood"\n\nOr one at a time: "New job at 14 Smith St Fitzroy for the Hendersons"\n\nOnce your first job is in, upload the plans and I'll start building your quote automatically.\n\nYou can also add your crew: "My crew: Jack (carpenter), Mick (plumber), Sarah (tiler)"`,
+                timestamp: new Date(),
+              }])
+            } else {
+              sendMessage('whats on today')
+            }
+          })
+          .catch(() => sendMessage('whats on today'))
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

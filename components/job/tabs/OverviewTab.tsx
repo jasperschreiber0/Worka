@@ -11,6 +11,7 @@ import type { JobRisk } from '@/lib/job-snapshot-demo'
 interface OverviewTabProps {
   overview: JobSnapshot['overview']
   job: JobSnapshot['job'] & { risks?: JobRisk[] }
+  quote?: JobSnapshot['quote']
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -116,6 +117,55 @@ function riskColour(level: 'high' | 'medium' | 'low'): string {
   return 'bg-slate-50 border-slate-200 text-slate-600'
 }
 
+function computeNextActions(
+  job: OverviewTabProps['job'],
+  quote: JobSnapshot['quote'],
+  risks: JobRisk[]
+): string[] {
+  const actions: string[] = []
+
+  for (const risk of risks.filter(r => r.level === 'high')) {
+    if (risk.message.toLowerCase().includes('passed') || (risk.message.toLowerCase().includes('deadline') && risk.message.toLowerCase().includes('h'))) {
+      actions.push('Quote deadline urgent — finalise and send immediately')
+    } else if (risk.message.toLowerCase().includes('assumption') && risk.message.toLowerCase().includes('unresolved')) {
+      const n = quote?.unresolved_count ?? 0
+      actions.push(`Resolve ${n > 0 ? n : 'outstanding'} assumption${n !== 1 ? 's' : ''} — blocking quote from being issued`)
+    } else if (risk.message.toLowerCase().includes('no draft exists')) {
+      actions.push('Upload plans — no quote started yet')
+    }
+  }
+
+  for (const risk of risks.filter(r => r.level === 'medium')) {
+    if (risk.message.toLowerCase().includes('not yet processed') || risk.message.toLowerCase().includes('intake has not started')) {
+      if (!actions.some(a => a.includes('plan'))) actions.push('Plans uploading — check back in a few minutes')
+    } else if (risk.message.toLowerCase().includes('no plans uploaded') || risk.message.toLowerCase().includes('budget noted but no plans')) {
+      if (!actions.some(a => a.includes('plan'))) actions.push('Upload plans via the Files tab to start quoting')
+    } else if (risk.message.toLowerCase().includes('upload plans to start')) {
+      if (!actions.some(a => a.includes('plan'))) actions.push('Upload plans via the Files tab to start quoting')
+    }
+  }
+
+  for (const risk of risks.filter(r => r.level === 'low')) {
+    if (risk.message.toLowerCase().includes('client email')) {
+      actions.push('Add client email — required to send the quote')
+    }
+  }
+
+  if (quote?.status === 'sent' && !actions.some(a => a.includes('deadline') || a.includes('urgent'))) {
+    actions.push(`Follow up with client — quote sent ${quote.sent_at ?? 'recently'}, awaiting approval`)
+  }
+
+  if (quote?.status === 'approved' && job.status !== 'active') {
+    actions.push('Activate job — quote approved, create milestones and invoice schedule')
+  }
+
+  if (job.status === 'active' && !actions.length) {
+    actions.push('Check variations and invoice schedule are up to date')
+  }
+
+  return actions.filter(Boolean).slice(0, 4)
+}
+
 function formatDeadline(isoDate: string): string {
   const d = new Date(isoDate)
   const now = new Date()
@@ -127,7 +177,7 @@ function formatDeadline(isoDate: string): string {
   return `${label} (${diffDays} days)`
 }
 
-export default function OverviewTab({ overview, job }: OverviewTabProps) {
+export default function OverviewTab({ overview, job, quote }: OverviewTabProps) {
   const statusColour =
     job.status === 'active'
       ? 'bg-green-100 text-green-700'
@@ -139,6 +189,7 @@ export default function OverviewTab({ overview, job }: OverviewTabProps) {
 
   const hasDeadlines = job.quote_deadline || job.client_deadline
   const hasFinancials = overview.spend_to_date !== null || overview.margin_to_date !== null || job.budget_estimate !== null
+  const nextActions = computeNextActions(job, quote ?? null, job.risks ?? [])
 
   return (
     <div className="p-4 space-y-5">
@@ -152,6 +203,22 @@ export default function OverviewTab({ overview, job }: OverviewTabProps) {
         </div>
       </Section>
 
+      {/* Next actions — what to do right now */}
+      {nextActions.length > 0 && (
+        <Section label="Next actions">
+          <ol className="space-y-2">
+            {nextActions.map((action, i) => (
+              <li key={i} className="flex items-start gap-2.5">
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center mt-0.5">
+                  {i + 1}
+                </span>
+                <p className="text-sm text-slate-700 leading-snug">{action}</p>
+              </li>
+            ))}
+          </ol>
+        </Section>
+      )}
+
       {/* Risks */}
       {job.risks && job.risks.length > 0 && (
         <Section label="Risks">
@@ -164,6 +231,27 @@ export default function OverviewTab({ overview, job }: OverviewTabProps) {
                 <p className="text-xs leading-snug">{risk.message}</p>
               </div>
             ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Assumptions blocking quote */}
+      {quote && (quote.unresolved_count ?? 0) > 0 && (
+        <Section label="Assumptions">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+            <div className="flex items-start gap-2">
+              <svg className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <div>
+                <p className="text-sm font-medium text-amber-800">
+                  {quote.unresolved_count} assumption{quote.unresolved_count === 1 ? '' : 's'} unresolved
+                </p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  Quote cannot advance until resolved. Type &ldquo;review assumptions&rdquo; in chat to work through them.
+                </p>
+              </div>
+            </div>
           </div>
         </Section>
       )}

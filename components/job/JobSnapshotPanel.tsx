@@ -148,13 +148,19 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
 
   // Render the active tab content
   function renderTabContent() {
-    if (loading || !snapshot) {
-      return <SkeletonSection />
+    if (loading) return <SkeletonSection />
+    if (!snapshot) {
+      return (
+        <div className="p-6 text-center text-slate-400 text-sm">
+          <p>Job details not available yet.</p>
+          <p className="mt-1">Plans are still being processed.</p>
+        </div>
+      )
     }
 
     switch (activeTab) {
       case 'overview':
-        return <OverviewTab overview={snapshot.overview} job={{ ...snapshot.job, risks: snapshot.risks }} />
+        return <OverviewTab overview={snapshot.overview} job={{ ...snapshot.job, risks: snapshot.risks }} quote={snapshot.quote} />
       case 'quote':
         return (
           <QuoteTab
@@ -259,14 +265,14 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-b border-slate-200 bg-white px-4">
-        <div className="flex gap-0 overflow-x-auto scrollbar-hide -mb-px">
+      <div className="flex-shrink-0 border-b border-slate-200 bg-white">
+        <div className="flex -mb-px">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-shrink-0 px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
+              className={`flex-1 text-center py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
                 activeTab === tab.id
                   ? 'border-brand-500 text-brand-600'
                   : 'border-transparent text-slate-500 hover:text-slate-700'
