@@ -19,6 +19,7 @@ export interface UploadPanelProps {
   job: UploadPanelJob
   builderId: string
   onIntakeComplete?: (quoteId: string, assumptionCount: number) => void
+  preloadedFiles?: File[]
 }
 
 interface SelectedFile {
@@ -57,7 +58,7 @@ function isAcceptedFile(file: File): boolean {
 
 // ─── Inner component (rendered inside portal) ─────────────────────────────────
 
-function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete }: UploadPanelProps) {
+function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, preloadedFiles }: UploadPanelProps) {
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -94,6 +95,15 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete }:
       return () => clearTimeout(id)
     }
   }, [isOpen])
+
+  // Auto-populate files when opened with preloaded files from homepage
+  useEffect(() => {
+    if (isOpen && preloadedFiles && preloadedFiles.length > 0) {
+      setFiles(
+        preloadedFiles.map((file) => ({ file, id: generateFileId() }))
+      )
+    }
+  }, [isOpen, preloadedFiles])
 
   // Focus close button on open
   useEffect(() => {

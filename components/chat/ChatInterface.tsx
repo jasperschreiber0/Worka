@@ -165,6 +165,8 @@ interface ChatInterfaceProps {
   pendingFillInput?: string | null
   onFillInputConsumed?: () => void
   activeJobAddress?: string | null
+  pendingFiles?: File[] | null
+  onPendingFilesConsumed?: () => void
 }
 
 // ─── Sign-out button ──────────────────────────────────────────────────────────
@@ -224,6 +226,8 @@ export default function ChatInterface({
   pendingFillInput,
   onFillInputConsumed,
   activeJobAddress,
+  pendingFiles,
+  onPendingFilesConsumed,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -259,6 +263,7 @@ export default function ChatInterface({
 
   const [isListening, setIsListening] = useState(false)
   const recognitionRef = useRef<{ stop: () => void } | null>(null)
+  const [pendingFilesForUpload, setPendingFilesForUpload] = useState<File[] | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -337,6 +342,25 @@ export default function ChatInterface({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFillInput])
+
+  // Files staged from homepage upload zone — ask for address, then open panel with files pre-loaded
+  useEffect(() => {
+    if (!pendingFiles || pendingFiles.length === 0) return
+    const id = `msg-${Date.now()}-plans`
+    setMessages((prev) => [
+      ...prev,
+      {
+        id,
+        role: 'assistant',
+        content: "Got your plans — what's the address for this job?",
+        timestamp: new Date(),
+      },
+    ])
+    setAwaitingAddressForNewJob(true)
+    setPendingFilesForUpload(pendingFiles)
+    onPendingFilesConsumed?.()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFiles])
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))
@@ -1101,6 +1125,7 @@ export default function ChatInterface({
           }}
           builderId={builderId}
           onIntakeComplete={handleIntakeComplete}
+          preloadedFiles={pendingFilesForUpload ?? undefined}
         />
       )}
 
@@ -1196,7 +1221,7 @@ export default function ChatInterface({
             { label: "What's on", msg: 'whats on today' },
             { label: 'New job', fill: 'New job at ' },
             { label: 'Show jobs', msg: 'show my jobs' },
-            { label: 'Add task', fill: 'remind ' },
+            { label: 'Add task', fill: 'task for ' },
             { label: 'My team', msg: 'show my team' },
           ] as Array<{ label: string; msg?: string; fill?: string }>).map(({ label, msg, fill }) => (
             <button

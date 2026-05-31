@@ -445,6 +445,19 @@ async function getLiveMorningBrief(
   serviceRoleKey: string
 ): Promise<{ message: string; alerts: Alert[] }> {
   const supabase = createClient(supabaseUrl, serviceRoleKey)
+
+  // Zero-jobs early return — new builder who hasn't set anything up yet
+  const { count: jobCount } = await supabase
+    .from('jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('builder_id', builderId)
+  if ((jobCount ?? 0) === 0) {
+    return {
+      message: 'No jobs set up yet. Type "new job at [address]" to create your first one, or drop your plans on the homepage to start a quote.',
+      alerts: [],
+    }
+  }
+
   const alerts: Alert[] = []
 
   const { data: invoices } = await supabase
