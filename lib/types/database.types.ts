@@ -387,6 +387,10 @@ export type ActionType =
   | 'client_lookup'
   | 'meeting_prep'
   | 'payment_risk'
+  | 'conflict_detected'
+  | 'worker_onboarding'
+  | 'roadmap'
+  | 'team_notifications'
   | 'unknown'
 
 export interface ExtractedAction {

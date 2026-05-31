@@ -96,6 +96,7 @@ interface ChatApiResponse {
   variation?: DemoVariation
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
+  job_list?: import('@/app/api/chat/route').JobListItem[]
   state_changes?: import('@/app/api/chat/route').StateChange[]
   event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
   events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }>
@@ -597,6 +598,7 @@ export default function ChatInterface({
         duplicateJob,
         variation: variationCard,
         marginJobs: data.margin_jobs,
+        jobList: data.job_list,
         stateChanges: data.state_changes,
         timestamp: new Date(),
       }
@@ -727,7 +729,7 @@ export default function ChatInterface({
       inputRef.current?.focus()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [awaitingAddressForNewJob])
+  }, [awaitingAddressForNewJob, builderId, onJobMention, onGeneralQuery])
 
   const handleOpenJob = useCallback((jobId: string) => {
     const job = messages.find(m => m.duplicateJob?.id === jobId)?.duplicateJob
@@ -735,6 +737,10 @@ export default function ChatInterface({
       onJobMention?.({ id: job.id, address: job.address, status: job.status })
     }
   }, [messages, onJobMention])
+
+  const handleOpenJobFromList = useCallback((jobId: string, address: string, status: string, clientName?: string) => {
+    onJobMention?.({ id: jobId, address, status, client_name: clientName })
+  }, [onJobMention])
 
   // Handler: approve variation from chat card — POST resolve then open notification modal
   const handleVariationApprove = useCallback(async (variationId: string) => {
@@ -972,6 +978,7 @@ export default function ChatInterface({
             key={message.id}
             message={message}
             onOpenJob={handleOpenJob}
+            onOpenJobFromList={handleOpenJobFromList}
             onCreateAnyway={handleCreateAnyway}
             onAction={handleAction}
             onVariationApprove={handleVariationApprove}
