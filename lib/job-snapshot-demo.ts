@@ -19,6 +19,21 @@ export interface JobRisk {
   message: string
 }
 
+export interface JobTask {
+  id: string
+  description: string
+  assigned_to: string | null
+  assigned_worker_id: string | null
+  status: 'open' | 'done'
+  created_at: string
+}
+
+export interface JobWorkerRef {
+  id: string
+  name: string
+  role: string
+}
+
 export interface JobSnapshot {
   job: {
     id: string
@@ -90,6 +105,8 @@ export interface JobSnapshot {
     }>
     proof_events?: ProofEvent[]
   }
+  workers: JobWorkerRef[]
+  tasks: JobTask[]
   risks: JobRisk[]
 }
 
@@ -152,6 +169,36 @@ const JOB_1_FITZROY: JobSnapshot = {
       status: 'overdue',
       due_date: '3 days ago',
       sent_at: '7 days ago',
+    },
+  ],
+  workers: [
+    { id: 'w-jack-001', name: 'Jack Thompson', role: 'Carpenter' },
+    { id: 'w-mick-002', name: 'Mick Reynolds', role: 'Plumber' },
+  ],
+  tasks: [
+    {
+      id: 'demo-task-001',
+      description: 'Install kitchen cabinetry frames before Wednesday',
+      assigned_to: 'Jack Thompson',
+      assigned_worker_id: 'w-jack-001',
+      status: 'open',
+      created_at: 'yesterday',
+    },
+    {
+      id: 'demo-task-002',
+      description: 'Rough-in hot water connections to bathroom',
+      assigned_to: 'Mick Reynolds',
+      assigned_worker_id: 'w-mick-002',
+      status: 'open',
+      created_at: '2 days ago',
+    },
+    {
+      id: 'demo-task-003',
+      description: 'Site clean before client inspection',
+      assigned_to: null,
+      assigned_worker_id: null,
+      status: 'done',
+      created_at: '5 days ago',
     },
   ],
   files: [],
@@ -227,6 +274,8 @@ const JOB_2_TOORAK: JobSnapshot = {
     unresolved_count: 0,
     quote_ref: 'QT-JOB-2025-002-v1',
   },
+  workers: [],
+  tasks: [],
   variations: [],
   invoices: [],
   files: [],
@@ -318,6 +367,8 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     unresolved_count: 2,
     quote_ref: 'QT-JOB-2025-003-v1',
   },
+  workers: [],
+  tasks: [],
   variations: [],
   invoices: [],
   files: [],

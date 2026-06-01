@@ -106,13 +106,25 @@ export async function GET(
   // Workers on job
   const { data: jobWorkers } = await sb
     .from('job_workers')
-    .select('workers(name, role)')
+    .select('workers(id, name, role)')
     .eq('job_id', jobId)
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const workersOnJob = (jobWorkers ?? []).map((jw: any) =>
     jw.workers ? `${jw.workers.name} (${jw.workers.role})` : null
   ).filter(Boolean) as string[]
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const workerRefs = (jobWorkers ?? []).map((jw: any) =>
+    jw.workers ? { id: jw.workers.id, name: jw.workers.name, role: jw.workers.role } : null
+  ).filter(Boolean) as Array<{ id: string; name: string; role: string }>
+
+  // Tasks
+  const { data: jobTasks } = await sb
+    .from('job_tasks')
+    .select('id, description, assigned_to, assigned_worker_id, status, created_at')
+    .eq('job_id', jobId)
+    .order('created_at', { ascending: false })
 
   // Last activity: most recent of comms, files, or job.updated_at
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -218,6 +230,16 @@ export async function GET(
       file_type: f.file_type,
       intake_status: f.intake_status,
       uploaded_at: daysAgo(f.created_at),
+    })),
+    workers: workerRefs,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tasks: (jobTasks ?? []).map((t: any) => ({
+      id: t.id,
+      description: t.description,
+      assigned_to: t.assigned_to ?? null,
+      assigned_worker_id: t.assigned_worker_id ?? null,
+      status: t.status as 'open' | 'done',
+      created_at: daysAgo(t.created_at),
     })),
     comms: {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -9,6 +9,7 @@ import VariationsTab from '@/components/job/tabs/VariationsTab'
 import InvoicesTab from '@/components/job/tabs/InvoicesTab'
 import FilesTab from '@/components/job/tabs/FilesTab'
 import CommsTab from '@/components/job/tabs/CommsTab'
+import TasksTab from '@/components/job/tabs/TasksTab'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,7 +21,7 @@ export interface ActiveJob {
   client_name?: string
 }
 
-type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms'
+type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms' | 'tasks'
 
 interface Tab {
   id: TabId
@@ -48,6 +49,7 @@ const TABS: Tab[] = [
   { id: 'quote', label: 'Quote' },
   { id: 'variations', label: 'Variations' },
   { id: 'invoices', label: 'Invoices' },
+  { id: 'tasks', label: 'Tasks' },
   { id: 'files', label: 'Files' },
   { id: 'comms', label: 'Comms' },
 ]
@@ -196,6 +198,15 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
             onUploadPlans={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
           />
         )
+      case 'tasks':
+        return (
+          <TasksTab
+            tasks={snapshot.tasks}
+            workers={snapshot.workers}
+            jobId={snapshot.job.id}
+            builderId={builderId}
+          />
+        )
       case 'comms':
         return (
           <CommsTab
@@ -287,20 +298,6 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
 
       {/* ── Content ─────────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto bg-slate-50 relative">
-        {/* Floating "Add task" button — visible when a job is open */}
-        {job && onAddTask && (
-          <button
-            type="button"
-            onClick={() => onAddTask(job.address)}
-            className="absolute bottom-4 right-4 z-10 flex items-center gap-2 px-4 py-2.5 rounded-full bg-brand-500 text-white text-sm font-medium shadow-lg hover:bg-brand-600 active:bg-brand-700 transition-colors"
-            aria-label="Add task to this job"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-            Add task
-          </button>
-        )}
         {job ? (
           renderTabContent()
         ) : (
