@@ -1492,14 +1492,21 @@ async function orchestrateActions(
           break
         }
 
-        const result = await createJob({
-          builder_id: ctx.builder_id,
-          address,
-          client_name,
-          budget_hint,
-          scope_notes,
-          force_create: ctx.force_create,
-        })
+        let result: CreateJobResult
+        try {
+          result = await createJob({
+            builder_id: ctx.builder_id,
+            address,
+            client_name,
+            budget_hint,
+            scope_notes,
+            force_create: ctx.force_create,
+          })
+        } catch (jobErr) {
+          console.error('[create_job] Supabase error:', jobErr)
+          messageParts.push(`Couldn't save the job right now — please try again in a moment.`)
+          break
+        }
 
         // Update shared context so subsequent actions know which job to use
         ctx.resolved_job_id = result.job.id
@@ -2804,6 +2811,23 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           `**Past quotes (PDF)** — tap **Upload data** in the sidebar, or go to any job → Files tab and upload a quote PDF. WorkA reads the line items, quantities, and rates, then stores them as your learned rates for future quotes.\n\n` +
           `**Supplier price lists (CSV)** — coming in the next release. Format: trade_category, description, unit, rate_ex_gst.\n\n` +
           `Once your rates are loaded, WorkA uses them automatically on every new quote — no re-entering rates job by job.`,
+      })
+    }
+
+    // Pre-extract fast path: "new job" with no address — ask for address and set create_job intent
+    // Without this, the LLM sees no address and emits no action, falling to smartFallback (intent:unknown)
+    // which breaks the two-step address follow-up flow in ChatInterface.
+    const isNewJobNoAddress =
+      !forceCreate &&
+      (lowerMsg === 'new job' || lowerMsg === 'create job' || lowerMsg === 'create a job' ||
+       lowerMsg === 'add a job' || lowerMsg === 'add job' || lowerMsg === 'start a job' ||
+       (lowerMsg.startsWith('new job') && lowerMsg.length < 15) ||
+       (lowerMsg.startsWith('create job') && lowerMsg.length < 16)) &&
+      !lowerMsg.includes(' at ') && !lowerMsg.includes(' for ') && !lowerMsg.match(/\d/)
+    if (isNewJobNoAddress) {
+      return NextResponse.json({
+        intent: 'create_job',
+        message: 'What\'s the address for this job?',
       })
     }
 
