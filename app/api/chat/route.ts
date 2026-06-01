@@ -2151,6 +2151,64 @@ async function orchestrateActions(
         break
       }
 
+      case 'approve_quote': {
+        const clientName = action.entities.client_name ? ` from ${action.entities.client_name}` : ''
+        messageParts.push(
+          `Got it — client approval${clientName} noted.\n\n` +
+          `To advance the quote officially:\n` +
+          `1. Open the job panel → **Quote tab**\n` +
+          `2. Tap **Activate job** — this locks the quote, creates the milestone timeline and invoice schedule\n\n` +
+          `WorkA requires your confirmation so job status never changes without you reviewing it first.`
+        )
+        break
+      }
+
+      case 'end_of_day': {
+        const eodSbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+        const eodSbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (eodSbUrl && eodSbKey) {
+          const eodSb = createClient(eodSbUrl, eodSbKey, { auth: { persistSession: false } })
+          const [{ data: overdueInvs }, { data: pendingVars }, { data: unsentQuotes }] = await Promise.all([
+            eodSb.from('invoices').select('job_id, amount').eq('status', 'overdue').eq('builder_id', ctx.builder_id).limit(5),
+            eodSb.from('variations').select('job_id, title').eq('status', 'pending').eq('builder_id', ctx.builder_id).limit(5),
+            eodSb.from('quotes').select('job_id').eq('status', 'pending_review').eq('builder_id', ctx.builder_id).limit(5),
+          ])
+          const urgent: string[] = []
+          if (overdueInvs?.length) urgent.push(`${overdueInvs.length} overdue invoice${overdueInvs.length > 1 ? 's' : ''} — chase payment tonight`)
+          if (pendingVars?.length) urgent.push(`${pendingVars.length} variation${pendingVars.length > 1 ? 's' : ''} waiting for approval`)
+          if (unsentQuotes?.length) urgent.push(`${unsentQuotes.length} quote${unsentQuotes.length > 1 ? 's' : ''} ready to send`)
+          messageParts.push(
+            urgent.length > 0
+              ? `**Before you finish today:**\n\n${urgent.map((u, i) => `${i + 1}. ${u}`).join('\n')}\n\nType "whats on today" in the morning for your full brief.`
+              : "You're clear — no urgent actions before tomorrow. Good work."
+          )
+        } else {
+          messageParts.push(
+            `**Before you finish today:**\n\n` +
+            `1. Fitzroy — $28,000 invoice overdue 3 days. Chase the Hendersons tonight.\n` +
+            `2. Fitzroy — 2 variations pending client approval.\n` +
+            `3. Brunswick — 2 assumptions still unresolved before Friday deadline.\n\n` +
+            `**Recommended order:**\n` +
+            `1. Fitzroy → Invoices tab → follow up\n` +
+            `2. Fitzroy → Variations tab → send approval requests\n` +
+            `3. Brunswick → Quote tab → resolve assumptions\n\n` +
+            `Type "whats on today" in the morning for your full brief.`
+          )
+        }
+        break
+      }
+
+      case 'task_help': {
+        messageParts.push(
+          `To assign a task to a crew member, use:\n\n` +
+          `• **"task for Jack at Fitzroy: install kitchen frames"**\n` +
+          `• **"task for Mick at Brunswick: rough-in hot water"**\n\n` +
+          `Or open the job panel → **Tasks tab** to create tasks with a worker dropdown.\n\n` +
+          `What task did you want to set?`
+        )
+        break
+      }
+
       case 'unknown':
       default: {
         if (actions.length === 1) {
@@ -2653,6 +2711,41 @@ async function routeDemoMessage(
       },
       confidence: 88,
     })
+  }
+
+  // Client approval of quote — "client accepted", "Sarah approved the quote"
+  if (
+    (lower.includes('accepted') || lower.includes('approved') || lower.includes('signed off') || lower.includes('said yes')) &&
+    (lower.includes('quote') || lower.includes('client') || lower.includes('they') || lower.includes('she') || lower.includes('he')) &&
+    !actions.some(a => a.type === 'conflict_detected')
+  ) {
+    if (!actions.some(a => a.type === 'approve_quote')) {
+      const nameMatch = lower.match(/^([a-z]+)\s+(?:accepted|approved|signed|said)/i)
+      actions.push({ type: 'approve_quote', entities: { client_name: nameMatch?.[1] ?? '' }, confidence: 85 })
+    }
+  }
+
+  // End of day wrap-up — "driving home", "what do I need to finish"
+  if (
+    lower.includes('driving home') || lower.includes('heading home') || lower.includes('on my way home') ||
+    lower.includes('end of day') || lower.includes('end of the day') || lower.includes('before tomorrow') ||
+    lower.includes('before i go') || lower.includes('wrap up') ||
+    (lower.includes('what') && lower.includes('finish') && (lower.includes('tonight') || lower.includes('tomorrow morning')))
+  ) {
+    if (!actions.some(a => a.type === 'end_of_day')) {
+      actions.push({ type: 'end_of_day', entities: {}, confidence: 90 })
+    }
+  }
+
+  // Vague task intent — builder wants to set tasks but hasn't named one
+  if (
+    !actions.some(a => a.type === 'add_task') &&
+    (lower.includes('set tasks') || lower.includes('assign tasks') || lower.includes('set a task') ||
+     lower.includes('tasks for my') || lower.includes('tasks for the') ||
+     (lower.includes('task') && lower.includes('employee')) ||
+     (lower.includes('task') && lower.includes('crew') && !lower.includes('at ')))
+  ) {
+    actions.push({ type: 'task_help', entities: {}, confidence: 80 })
   }
 
   // Fallback

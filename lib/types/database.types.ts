@@ -391,6 +391,9 @@ export type ActionType =
   | 'worker_onboarding'
   | 'roadmap'
   | 'team_notifications'
+  | 'approve_quote'
+  | 'end_of_day'
+  | 'task_help'
   | 'unknown'
 
 export interface ExtractedAction {
