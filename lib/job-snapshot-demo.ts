@@ -400,3 +400,11 @@ const DEMO_SNAPSHOTS: Record<string, JobSnapshot> = {
 export function getDemoJobSnapshot(jobId: string): JobSnapshot | null {
   return DEMO_SNAPSHOTS[jobId] ?? null
 }
+
+export function getDemoJobList(): Array<{ id: string; address: string; status: string }> {
+  return [
+    { id: '00000000-0000-0000-0000-000000000010', address: '14 Merri St, Fitzroy VIC 3065', status: 'active' },
+    { id: '00000000-0000-0000-0000-000000000011', address: '8 Burnside Rd, Toorak VIC 3142', status: 'quoted' },
+    { id: '00000000-0000-0000-0000-000000000012', address: '52 Bendigo St, Brunswick VIC 3056', status: 'quoting' },
+  ]
+}
