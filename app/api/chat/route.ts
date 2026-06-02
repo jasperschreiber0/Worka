@@ -589,20 +589,41 @@ async function getLiveMorningBrief(
 
   if (activeJobs && activeJobs.length > 0) {
     const typedJobs = activeJobs as Job[]
+    const quotingJobs = typedJobs.filter((j: Job) => j.status === 'quoting')
+    const quotedJobs  = typedJobs.filter((j: Job) => j.status === 'quoted')
     const activeCount = typedJobs.filter((j: Job) => j.status === 'active').length
-    const quotingCount = typedJobs.filter((j: Job) => j.status === 'quoting').length
-    const quotedCount = typedJobs.filter((j: Job) => j.status === 'quoted').length
 
-    const parts: string[] = []
-    if (activeCount > 0) parts.push(`${activeCount} active job${activeCount !== 1 ? 's' : ''}`)
-    if (quotingCount > 0) parts.push(`${quotingCount} in quoting`)
-    if (quotedCount > 0) parts.push(`${quotedCount} quoted`)
+    // One alert per quoting job — builder needs to know WHICH jobs need action
+    for (const job of quotingJobs.slice(0, 3)) {
+      const shortAddr = (job as Job & { address: string }).address?.split(',')[0] ?? 'a job'
+      alerts.push({
+        priority: 'low',
+        message: `${shortAddr} — in quoting, no quote sent yet`,
+        action: 'Open job',
+        entity_id: (job as Job & { id: string }).id,
+        entity_type: 'job',
+      })
+    }
+    if (quotingJobs.length > 3) {
+      alerts.push({ priority: 'low', message: `${quotingJobs.length - 3} more jobs in quoting`, action: 'Show jobs', entity_type: 'job' })
+    }
 
-    alerts.push({
-      priority: 'low',
-      message: parts.join(' · '),
-      entity_type: 'job',
-    })
+    // Quoted jobs waiting on client — actionable
+    for (const job of quotedJobs.slice(0, 2)) {
+      const shortAddr = (job as Job & { address: string }).address?.split(',')[0] ?? 'a job'
+      alerts.push({
+        priority: 'low',
+        message: `${shortAddr} — quote sent, waiting on client`,
+        action: 'Open job',
+        entity_id: (job as Job & { id: string }).id,
+        entity_type: 'job',
+      })
+    }
+
+    // Summary line if there are active jobs + nothing else alarming
+    if (activeCount > 0 && quotingJobs.length === 0 && quotedJobs.length === 0) {
+      alerts.push({ priority: 'low', message: `${activeCount} active job${activeCount !== 1 ? 's' : ''} running`, action: 'Show jobs', entity_type: 'job' })
+    }
   }
 
   const highCount = alerts.filter((a) => a.priority === 'high').length

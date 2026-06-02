@@ -418,6 +418,16 @@ export default function ChatInterface({
         setPendingAction('show me the variations')
         return
       }
+      // Generic 'Open job' — entityId is the job_id from the alert
+      if (action === 'Open job' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: '' })
+        return
+      }
+      // Generic 'Show jobs' — sends the jobs list message
+      if (action === 'Show jobs') {
+        void sendMessage('show my jobs')
+        return
+      }
       // 'Chase payment' from morning brief (overdue invoice on Fitzroy job)
       if (action === 'Chase payment') {
         setEmailDraftModal({
