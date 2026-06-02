@@ -57,20 +57,27 @@ function WorkerRow({
   const [jobsLoading, setJobsLoading] = useState(false)
   const [assigningJobId, setAssigningJobId] = useState<string | null>(null)
   const [assignedJobIds, setAssignedJobIds] = useState<Set<string>>(new Set())
+  const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
+  const jobBtnRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!jobPickerOpen) return
     function handleClick(e: MouseEvent) {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
-        setJobPickerOpen(false)
-      }
+      const target = e.target as Node
+      const inDropdown = pickerRef.current?.contains(target)
+      const inButton = jobBtnRef.current?.contains(target)
+      if (!inDropdown && !inButton) setJobPickerOpen(false)
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
   }, [jobPickerOpen])
 
   async function openJobPicker() {
+    if (jobBtnRef.current) {
+      const rect = jobBtnRef.current.getBoundingClientRect()
+      setDropdownPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right })
+    }
     setJobPickerOpen(true)
     if (jobs.length > 0) return
     setJobsLoading(true)
@@ -211,8 +218,9 @@ function WorkerRow({
             {worker.status}
           </span>
           {/* Add to job */}
-          <div className="relative" ref={pickerRef}>
+          <div className="relative">
             <button
+              ref={jobBtnRef}
               type="button"
               onClick={() => void openJobPicker()}
               title="Add to job"
@@ -222,8 +230,12 @@ function WorkerRow({
                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
               </svg>
             </button>
-            {jobPickerOpen && (
-              <div className="absolute right-0 top-8 z-20 w-56 bg-white border border-slate-200 rounded-lg shadow-lg overflow-hidden">
+            {jobPickerOpen && dropdownPos && (
+              <div
+                ref={pickerRef}
+                style={{ position: 'fixed', top: dropdownPos.top, right: dropdownPos.right }}
+                className="z-50 w-56 bg-white border border-slate-200 rounded-lg shadow-lg overflow-hidden"
+              >
                 <div className="px-3 py-2 border-b border-slate-100 bg-slate-50">
                   <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Add to job</p>
                 </div>
