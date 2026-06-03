@@ -43,7 +43,7 @@ interface CreateTaskBody {
 }
 
 interface CompleteTaskBody {
-  action: 'complete'
+  action: 'complete' | 'reopen'
   task_id: string
   builder_id: string
 }
@@ -63,12 +63,13 @@ export async function POST(
 
   const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
 
-  // ── Complete action ───────────────────────────────────────────────────────
-  if ('action' in body && body.action === 'complete') {
+  // ── Complete / reopen action ──────────────────────────────────────────────
+  if ('action' in body && (body.action === 'complete' || body.action === 'reopen')) {
+    const newStatus = body.action === 'complete' ? 'done' : 'open'
     if (isDemoMode) {
       if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
       DEMO_TASKS[jobId] = DEMO_TASKS[jobId].map((t) =>
-        t.id === body.task_id ? { ...t, status: 'done' } : t
+        t.id === body.task_id ? { ...t, status: newStatus } : t
       )
       return NextResponse.json({ ok: true })
     }
@@ -76,7 +77,7 @@ export async function POST(
     const sb = await getSupabaseClient()
     const { error } = await sb
       .from('job_tasks')
-      .update({ status: 'done' })
+      .update({ status: newStatus })
       .eq('id', body.task_id)
       .eq('job_id', jobId)
 

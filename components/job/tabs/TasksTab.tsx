@@ -68,12 +68,24 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
     setCompleting(taskId)
     setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: 'done' } : t))
     setCompleting(null)
-
     try {
       await fetch(`/api/jobs/${jobId}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'complete', task_id: taskId, builder_id: builderId }),
+      })
+    } catch {
+      // optimistic state remains
+    }
+  }
+
+  async function handleReopen(taskId: string) {
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: 'open' } : t))
+    try {
+      await fetch(`/api/jobs/${jobId}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reopen', task_id: taskId, builder_id: builderId }),
       })
     } catch {
       // optimistic state remains
@@ -199,18 +211,26 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
           </p>
           <ul className="space-y-2">
             {done.map((task) => (
-              <li key={task.id} className="flex items-start gap-3 px-3 py-2.5 bg-slate-50 border border-slate-100 rounded-lg opacity-60">
+              <li key={task.id} className="flex items-start gap-3 px-3 py-2.5 bg-slate-50 border border-slate-100 rounded-lg">
                 <span className="flex-shrink-0 mt-0.5 w-5 h-5 rounded-full bg-brand-500 flex items-center justify-center">
                   <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                   </svg>
                 </span>
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1 opacity-60">
                   <p className="text-sm text-slate-500 line-through leading-snug">{task.description}</p>
                   {task.assigned_to && (
                     <p className="text-xs text-slate-400 mt-0.5">{task.assigned_to}</p>
                   )}
                 </div>
+                <button
+                  type="button"
+                  onClick={() => void handleReopen(task.id)}
+                  title="Reopen task"
+                  className="flex-shrink-0 text-xs text-slate-400 hover:text-brand-600 transition-colors px-1"
+                >
+                  Undo
+                </button>
               </li>
             ))}
           </ul>
