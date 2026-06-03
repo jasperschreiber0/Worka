@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import ChatMessage, { type Message, type DuplicateJob } from './ChatMessage'
 import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
@@ -1042,6 +1043,12 @@ export default function ChatInterface({
         </div>
 
         <div className="flex items-center gap-2">
+          <Link
+            href="/settings/rates"
+            className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
+          >
+            Data
+          </Link>
           {isDemo && (
             <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200">
               Demo
