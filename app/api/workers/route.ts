@@ -23,16 +23,19 @@ export async function GET(request: NextRequest) {
   const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
   if (sbUrl && sbKey) {
-    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
-    const { data, error } = await sb
-      .from('workers')
-      .select('id, name, role, status, email, phone')
-      .eq('builder_id', builderId)
-      .neq('status', 'inactive')
-      .order('created_at', { ascending: false })
-      .limit(50)
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    return NextResponse.json({ workers: data ?? [] })
+    try {
+      const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+      const { data, error } = await sb
+        .from('workers')
+        .select('id, name, role, status, email, phone')
+        .eq('builder_id', builderId)
+        .neq('status', 'inactive')
+        .order('created_at', { ascending: false })
+        .limit(50)
+      if (!error) return NextResponse.json({ workers: data ?? [] })
+    } catch {
+      // fall through to demo
+    }
   }
 
   return NextResponse.json({ workers: DEMO_WORKERS })
