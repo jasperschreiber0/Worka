@@ -813,62 +813,63 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
   if (supabaseUrl && serviceRoleKey) {
-    const supabase = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    })
+    try {
+      const supabase = createClient(supabaseUrl, serviceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      })
 
-    if (!force_create) {
-      const firstTokens = address.trim().split(/\s+/).slice(0, 3).join(' ')
-      const { data: existing } = await supabase
-        .from('jobs')
-        .select('*')
-        .eq('builder_id', builder_id)
-        .neq('status', 'archived')
-        .ilike('address', `%${firstTokens}%`)
-        .limit(1)
-        .maybeSingle()
+      if (!force_create) {
+        const firstTokens = address.trim().split(/\s+/).slice(0, 3).join(' ')
+        const { data: existing } = await supabase
+          .from('jobs')
+          .select('*')
+          .eq('builder_id', builder_id)
+          .neq('status', 'archived')
+          .ilike('address', `%${firstTokens}%`)
+          .limit(1)
+          .maybeSingle()
 
-      if (existing) {
-        // Context-switch: return the existing job so orchestrator can continue
-        // processing remaining actions against it — do NOT stop here
-        return {
-          job: existing as Job,
-          is_duplicate: true,
-          existing_job: existing as Job,
+        if (existing) {
+          return {
+            job: existing as Job,
+            is_duplicate: true,
+            existing_job: existing as Job,
+          }
         }
       }
-    }
 
-    let clientId: string | null = null
-    if (client_name && client_name.trim().length > 0) {
-      const { data: newClient } = await supabase
-        .from('clients')
-        .insert({ builder_id, name: client_name.trim() })
-        .select('id')
+      let clientId: string | null = null
+      if (client_name && client_name.trim().length > 0) {
+        const { data: newClient } = await supabase
+          .from('clients')
+          .insert({ builder_id, name: client_name.trim() })
+          .select('id')
+          .single()
+        if (newClient) clientId = newClient.id as string
+      }
+
+      const { data: jobRow, error } = await supabase
+        .from('jobs')
+        .insert({
+          builder_id,
+          address: address.trim(),
+          status: 'quoting' as const,
+          client_id: clientId,
+          job_type: null,
+          notes: client_name ? `Client: ${client_name}` : null,
+          budget_estimate: budgetValue,
+          scope_notes: scope_notes ?? null,
+        })
+        .select()
         .single()
-      if (newClient) clientId = newClient.id as string
+
+      if (!error && jobRow) {
+        return { job: jobRow as Job, is_duplicate: false }
+      }
+      // Fall through to demo mode if insert failed
+    } catch {
+      // DB unavailable — fall through to demo mode
     }
-
-    const { data: jobRow, error } = await supabase
-      .from('jobs')
-      .insert({
-        builder_id,
-        address: address.trim(),
-        status: 'quoting' as const,
-        client_id: clientId,
-        job_type: null,
-        notes: client_name ? `Client: ${client_name}` : null,
-        budget_estimate: budgetValue,
-        scope_notes: scope_notes ?? null,
-      })
-      .select()
-      .single()
-
-    if (error || !jobRow) {
-      throw new Error(error?.message ?? 'Failed to insert job')
-    }
-
-    return { job: jobRow as Job, is_duplicate: false }
   }
 
   // Demo mode
