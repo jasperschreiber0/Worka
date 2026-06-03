@@ -20,6 +20,7 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
   const [description, setDescription] = useState('')
   const [selectedWorkerId, setSelectedWorkerId] = useState<string>('')
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [completing, setCompleting] = useState<string | null>(null)
 
   const open = tasks.filter((t) => t.status === 'open')
@@ -28,10 +29,12 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
   async function handleCreate() {
     if (!description.trim()) return
     setSaving(true)
+    setSaveError(null)
 
     const worker = workers.find((w) => w.id === selectedWorkerId) ?? null
+    const optimisticId = `optimistic-${Date.now()}`
     const optimistic: JobTask = {
-      id: `optimistic-${Date.now()}`,
+      id: optimisticId,
       description: description.trim(),
       assigned_to: worker?.name ?? null,
       assigned_worker_id: worker?.id ?? null,
@@ -57,10 +60,14 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
       })
       if (res.ok) {
         const { task } = await res.json() as { task: JobTask }
-        setTasks((prev) => prev.map((t) => t.id === optimistic.id ? task : t))
+        setTasks((prev) => prev.map((t) => t.id === optimisticId ? task : t))
+      } else {
+        setTasks((prev) => prev.filter((t) => t.id !== optimisticId))
+        setSaveError("Couldn't save the task — tap to try again.")
       }
     } catch {
-      // optimistic state remains
+      setTasks((prev) => prev.filter((t) => t.id !== optimisticId))
+      setSaveError("Couldn't save the task — tap to try again.")
     }
   }
 
@@ -136,6 +143,15 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
       </div>
 
       {/* ── Add task button / form ───────────────────────────────────────────── */}
+      {saveError && (
+        <button
+          type="button"
+          onClick={() => { setSaveError(null); setShowForm(true) }}
+          className="w-full text-left px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 hover:bg-red-100 transition-colors"
+        >
+          {saveError}
+        </button>
+      )}
       {!showForm ? (
         <button
           type="button"

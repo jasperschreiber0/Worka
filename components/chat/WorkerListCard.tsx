@@ -46,6 +46,7 @@ function WorkerRow({
 }) {
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [name, setName] = useState(worker.name)
   const [role, setRole] = useState(worker.role)
   const [email, setEmail] = useState(worker.email ?? '')
@@ -128,7 +129,6 @@ function WorkerRow({
   }
 
   async function handleDeactivate() {
-    if (!confirm(`Remove ${worker.name} from your crew?`)) return
     const res = await fetch(`/api/workers/${worker.id}?builder_id=${builderId}`, { method: 'DELETE' })
     if (res.ok) onRemoved?.(worker.id)
   }
@@ -177,30 +177,50 @@ function WorkerRow({
               />
             </div>
           </div>
-          <div className="flex items-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving || !name.trim() || !role.trim()}
-              className="px-3 py-1.5 text-xs font-medium rounded-md bg-brand-500 text-white disabled:opacity-50 hover:bg-brand-600 transition-colors"
-            >
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setEditing(false)}
-              className="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleDeactivate}
-              className="ml-auto px-3 py-1.5 text-xs font-medium rounded-md text-red-600 hover:bg-red-50 transition-colors"
-            >
-              Remove
-            </button>
-          </div>
+          {confirmingRemove ? (
+            <div className="flex items-center gap-2 pt-1 bg-red-50 rounded-md px-2 py-1.5 border border-red-200">
+              <p className="text-xs text-red-700 flex-1">Remove {worker.name}?</p>
+              <button
+                type="button"
+                onClick={() => void handleDeactivate()}
+                className="px-2 py-1 text-xs font-semibold rounded bg-red-600 text-white hover:bg-red-700 transition-colors"
+              >
+                Yes, remove
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingRemove(false)}
+                className="px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={saving || !name.trim() || !role.trim()}
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-brand-500 text-white disabled:opacity-50 hover:bg-brand-600 transition-colors"
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setEditing(false); setConfirmingRemove(false) }}
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingRemove(true)}
+                className="ml-auto px-3 py-1.5 text-xs font-medium rounded-md text-red-600 hover:bg-red-50 transition-colors"
+              >
+                Remove
+              </button>
+            </div>
+          )}
         </div>
       </div>
     )
