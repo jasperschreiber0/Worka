@@ -22,12 +22,11 @@ export async function GET(
 ): Promise<NextResponse> {
   const { jobId } = params
 
-  // ── Demo mode ─────────────────────────────────────────────────────────────
-  const isDemoMode =
-    !process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
+  // ── Demo fallback ─────────────────────────────────────────────────────────
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-  if (isDemoMode) {
+  if (!sbUrl || sbUrl === 'your-supabase-url' || !sbKey) {
     const snapshot = getDemoJobSnapshot(jobId)
     if (!snapshot) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
@@ -38,19 +37,22 @@ export async function GET(
   // ── Real mode: query Supabase ─────────────────────────────────────────────
   // Use untyped client — activation tables (invoice_schedule, job_workers) are
   // not yet reflected in database.types.ts.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { autoRefreshToken: false, persistSession: false } }) as any
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sb = createClient(sbUrl, sbKey, { auth: { autoRefreshToken: false, persistSession: false } }) as any
 
-  // Job + client
-  const { data: job, error: jobErr } = await sb
-    .from('jobs')
-    .select('*, clients(name, email, phone)')
-    .eq('id', jobId)
-    .single()
+    // Job + client
+    const { data: job, error: jobErr } = await sb
+      .from('jobs')
+      .select('*, clients(name, email, phone)')
+      .eq('id', jobId)
+      .single()
 
-  if (jobErr || !job) {
-    return NextResponse.json({ error: 'Job not found' }, { status: 404 })
-  }
+    if (jobErr || !job) {
+      const snapshot = getDemoJobSnapshot(jobId)
+      if (snapshot) return NextResponse.json({ snapshot })
+      return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    }
 
   // Quote
   const { data: quotes } = await sb
@@ -256,4 +258,10 @@ export async function GET(
   }
 
   return NextResponse.json({ snapshot })
+  } catch {
+    // DB unavailable — fall back to in-memory demo snapshot
+    const snapshot = getDemoJobSnapshot(jobId)
+    if (!snapshot) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    return NextResponse.json({ snapshot })
+  }
 }

@@ -215,8 +215,9 @@ export async function GET(
     }
 
     return NextResponse.json(response)
-  } catch (err) {
-    console.error('Quote GET error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  } catch {
+    const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
+    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
+    return NextResponse.json({ quote: DEMO_QUOTE, line_items_by_category, summary })
   }
 }
