@@ -1836,9 +1836,10 @@ async function orchestrateActions(
       case 'upload_rates': {
         messageParts.push(
           `To load your past pricing into WorkA:\n\n` +
-          `**Past quotes (PDF)** — tap **Upload data** in the sidebar, or go to any job → Files tab and upload a quote PDF. WorkA reads the line items, quantities, and rates, then stores them as your learned rates for future quotes.\n\n` +
-          `**Supplier price lists (CSV)** — coming in the next release. Format: trade_category, description, unit, rate_ex_gst.\n\n` +
-          `Once your rates are loaded, WorkA uses them automatically on every new quote — no re-entering rates job by job.`
+          `**CSV rate sheet** — go to **Settings → Rates & pricing** and upload a CSV with your historical rates. WorkA will use these rates automatically on every new quote.\n\n` +
+          `Format: \`trade_category, description, unit, rate_ex_gst\` — download the template from the settings page.\n\n` +
+          `**Past quotes (PDF)** — upload a quote PDF in any job's Files tab. WorkA reads the line items and stores them as your learned rates.\n\n` +
+          `Once your rates are loaded, no more re-entering rates job by job.`
         )
         break
       }

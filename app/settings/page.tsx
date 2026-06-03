@@ -7,6 +7,16 @@ export const metadata: Metadata = {
 
 const SETTINGS_SECTIONS = [
   {
+    href: '/settings/rates',
+    label: 'Rates & pricing',
+    description: 'Import your historical rates so WorkA quotes accurately from day one.',
+    icon: (
+      <svg className="w-5 h-5 text-brand-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M3 14h18M9 10v4m6-4v4M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" />
+      </svg>
+    ),
+  },
+  {
     href: '/settings/email',
     label: 'Email sync',
     description: 'Connect Gmail or Outlook to monitor job-related emails.',
