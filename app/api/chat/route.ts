@@ -593,8 +593,13 @@ async function getLiveMorningBrief(
     const quotedJobs  = typedJobs.filter((j: Job) => j.status === 'quoted')
     const activeCount = typedJobs.filter((j: Job) => j.status === 'active').length
 
+    // Jobs that already have a deadline alert don't need the generic "in quoting" alert too
+    const deadlineJobIds = new Set(
+      alerts.filter((a) => a.entity_type === 'job' && a.action?.includes('quote')).map((a) => a.entity_id).filter(Boolean)
+    )
+
     // One alert per quoting job — builder needs to know WHICH jobs need action
-    for (const job of quotingJobs.slice(0, 3)) {
+    for (const job of quotingJobs.filter((j) => !deadlineJobIds.has((j as Job & { id: string }).id)).slice(0, 3)) {
       const shortAddr = (job as Job & { address: string }).address?.split(',')[0] ?? 'a job'
       alerts.push({
         priority: 'low',
