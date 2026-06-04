@@ -46,12 +46,38 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
   const [pendingUpload, setPendingUpload] = useState<ActiveJob | null>(null)
 
   const [autoMessage, setAutoMessage] = useState<string | null>(null)
+  const [pendingFillInput, setPendingFillInput] = useState<string | null>(null)
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null)
   const consumedRef = useRef(false)
+
+  // Decode base64 files staged in sessionStorage by HeroUploadZone
+  function popStagedFiles(): File[] {
+    try {
+      const raw = sessionStorage.getItem('worka_pending_files')
+      if (!raw) return []
+      sessionStorage.removeItem('worka_pending_files')
+      const entries = JSON.parse(raw) as Array<{ name: string; type: string; data: string }>
+      return entries.map(({ name, type, data }) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0))
+        return new File([bytes], name, { type })
+      })
+    } catch {
+      return []
+    }
+  }
 
   useEffect(() => {
     if (consumedRef.current) return
     const action = searchParams.get('action')
     const jobId = searchParams.get('job')
+
+    if (action === 'upload_plans') {
+      consumedRef.current = true
+      const files = popStagedFiles()
+      if (files.length > 0) setPendingFiles(files)
+      router.replace('/chat')
+      return
+    }
 
     if (action && ACTION_MESSAGES[action]) {
       consumedRef.current = true
@@ -120,6 +146,10 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
     setPendingEmailDraft({ jobId, intentHint: 'invoice' })
   }, [])
 
+  const handleAddTask = useCallback((jobAddress: string) => {
+    setPendingFillInput(`add task at ${jobAddress}: `)
+  }, [])
+
   return (
     <div className="h-screen flex overflow-hidden bg-white">
       {/* ── Left: chat ────────────────────────────────────────────────────── */}
@@ -139,6 +169,11 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onPendingUploadConsumed={handleUploadConsumed}
           autoMessage={autoMessage}
           onAutoMessageConsumed={handleAutoMessageConsumed}
+          pendingFillInput={pendingFillInput}
+          onFillInputConsumed={() => setPendingFillInput(null)}
+          activeJobAddress={activeJob?.address ?? null}
+          pendingFiles={pendingFiles}
+          onPendingFilesConsumed={() => setPendingFiles(null)}
         />
       </div>
 
@@ -158,18 +193,22 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           onComposeEmail={handleComposeEmail}
           onUploadPlans={handleUploadPlans}
           onAddInvoice={handleAddInvoice}
+          onAddTask={handleAddTask}
           builderId={builderId}
         />
       </div>
 
-      {/* ── Mobile bottom sheet ────────────────────────────────────────────── */}
-      {panelVisible && activeJob && (
-        <MobileJobSheet
-          job={activeJob}
-          onClose={handlePanelClose}
-          onViewQuote={handleViewQuote}
-        />
-      )}
+      {/* ── Mobile bottom sheet (hidden on md+ where side panel shows) ─────── */}
+      <div className="md:hidden">
+        {panelVisible && activeJob && (
+          <MobileJobSheet
+            job={activeJob}
+            onClose={handlePanelClose}
+            onViewQuote={handleViewQuote}
+            onAddTask={handleAddTask}
+          />
+        )}
+      </div>
     </div>
   )
 }

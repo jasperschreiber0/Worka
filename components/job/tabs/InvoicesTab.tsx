@@ -80,10 +80,17 @@ export default function InvoicesTab({ invoices, onAddInvoice }: InvoicesTabProps
               </div>
               <div className="flex-shrink-0 flex items-center gap-1.5 mt-0.5">
                 <span
-                  className={`w-2.5 h-2.5 rounded-full ${statusDotClass(inv.status)}`}
-                  aria-label={statusLabel(inv.status)}
-                  title={statusLabel(inv.status)}
+                  className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(inv.status)}`}
+                  aria-hidden="true"
                 />
+                <span className={`text-xs font-medium ${
+                  inv.status === 'overdue' ? 'text-red-600' :
+                  inv.status === 'paid' ? 'text-green-600' :
+                  inv.status === 'sent' ? 'text-amber-600' :
+                  'text-slate-500'
+                }`}>
+                  {statusLabel(inv.status)}
+                </span>
               </div>
             </li>
           ))}

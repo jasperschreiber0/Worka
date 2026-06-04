@@ -28,7 +28,7 @@ export default function LoginForm() {
 
     try {
       if (!supabaseUrl || (email === DEMO_EMAIL && password === DEMO_PASSWORD)) {
-        router.push(next as string)
+        router.push(next as never)
         return
       }
 
@@ -40,7 +40,7 @@ export default function LoginForm() {
         return
       }
 
-      router.push(next as string)
+      router.push(next as never)
       router.refresh()
     } finally {
       setLoading(false)
@@ -49,7 +49,7 @@ export default function LoginForm() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center px-4">
-      {/* â”€â”€ Logo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* â"€â"€ Logo â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */}
       <Link href="/" className="flex items-center gap-2.5 mb-10 no-underline">
         <div className="w-10 h-10 rounded-xl bg-brand-500 flex items-center justify-center flex-shrink-0">
           <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -59,10 +59,10 @@ export default function LoginForm() {
         <span className="text-2xl font-bold text-slate-900 tracking-tight">WorkA</span>
       </Link>
 
-      {/* â”€â”€ Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* â"€â"€ Card â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */}
       <div className="w-full max-w-sm bg-white rounded-2xl shadow-md border border-slate-100 px-8 py-8">
         <h1 className="text-xl font-bold text-slate-900 mb-1">Sign in</h1>
-        <p className="text-sm text-slate-500 mb-6">Welcome back â€” your jobs are waiting.</p>
+        <p className="text-sm text-slate-500 mb-6">Welcome back — your jobs are waiting.</p>
 
         {/* Demo banner */}
         {!supabaseUrl && (
@@ -104,7 +104,7 @@ export default function LoginForm() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="input"
-              placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
+              placeholder="••••••••"
             />
           </div>
 
@@ -119,7 +119,7 @@ export default function LoginForm() {
             disabled={loading}
             className="btn-primary w-full py-2.5 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {loading ? 'Signing inâ€¦' : 'Sign in'}
+            {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
 

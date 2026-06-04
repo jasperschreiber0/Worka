@@ -14,6 +14,26 @@ export interface ProofEvent {
   timestamp: string
 }
 
+export interface JobRisk {
+  level: 'high' | 'medium' | 'low'
+  message: string
+}
+
+export interface JobTask {
+  id: string
+  description: string
+  assigned_to: string | null
+  assigned_worker_id: string | null
+  status: 'open' | 'done'
+  created_at: string
+}
+
+export interface JobWorkerRef {
+  id: string
+  name: string
+  role: string
+}
+
 export interface JobSnapshot {
   job: {
     id: string
@@ -26,6 +46,10 @@ export interface JobSnapshot {
     created_at: string
     days_active: number
     job_ref?: string
+    budget_estimate: number | null
+    scope_notes: string | null
+    quote_deadline: string | null  // ISO date or null
+    client_deadline: string | null // ISO date or null
   }
   overview: {
     started: string
@@ -81,6 +105,9 @@ export interface JobSnapshot {
     }>
     proof_events?: ProofEvent[]
   }
+  workers: JobWorkerRef[]
+  tasks: JobTask[]
+  risks: JobRisk[]
 }
 
 // ─── Job 1: Fitzroy (active) ──────────────────────────────────────────────────
@@ -97,6 +124,10 @@ const JOB_1_FITZROY: JobSnapshot = {
     created_at: '45 days ago',
     days_active: 45,
     job_ref: 'JOB-2025-001',
+    budget_estimate: null,
+    scope_notes: 'Full kitchen and bathroom renovation',
+    quote_deadline: null,
+    client_deadline: null,
   },
   overview: {
     started: '45 days ago',
@@ -140,6 +171,36 @@ const JOB_1_FITZROY: JobSnapshot = {
       sent_at: '7 days ago',
     },
   ],
+  workers: [
+    { id: 'w-jack-001', name: 'Jack Thompson', role: 'Carpenter' },
+    { id: 'w-mick-002', name: 'Mick Reynolds', role: 'Plumber' },
+  ],
+  tasks: [
+    {
+      id: 'demo-task-001',
+      description: 'Install kitchen cabinetry frames before Wednesday',
+      assigned_to: 'Jack Thompson',
+      assigned_worker_id: 'w-jack-001',
+      status: 'open',
+      created_at: 'yesterday',
+    },
+    {
+      id: 'demo-task-002',
+      description: 'Rough-in hot water connections to bathroom',
+      assigned_to: 'Mick Reynolds',
+      assigned_worker_id: 'w-mick-002',
+      status: 'open',
+      created_at: '2 days ago',
+    },
+    {
+      id: 'demo-task-003',
+      description: 'Site clean before client inspection',
+      assigned_to: null,
+      assigned_worker_id: null,
+      status: 'done',
+      created_at: '5 days ago',
+    },
+  ],
   files: [],
   comms: {
     messages: [
@@ -170,6 +231,10 @@ const JOB_1_FITZROY: JobSnapshot = {
     ],
     proof_events: [],
   },
+  risks: [
+    { level: 'high', message: '2 variations pending approval.' },
+    { level: 'high', message: 'Invoice for $28,000 overdue 3 days.' },
+  ],
 }
 
 // ─── Job 2: Toorak (quoted) ───────────────────────────────────────────────────
@@ -186,6 +251,10 @@ const JOB_2_TOORAK: JobSnapshot = {
     created_at: '12 days ago',
     days_active: 12,
     job_ref: 'JOB-2025-002',
+    budget_estimate: 127500,
+    scope_notes: null,
+    quote_deadline: null,
+    client_deadline: null,
   },
   overview: {
     started: '12 days ago',
@@ -205,6 +274,8 @@ const JOB_2_TOORAK: JobSnapshot = {
     unresolved_count: 0,
     quote_ref: 'QT-JOB-2025-002-v1',
   },
+  workers: [],
+  tasks: [],
   variations: [],
   invoices: [],
   files: [],
@@ -253,6 +324,10 @@ const JOB_2_TOORAK: JobSnapshot = {
       },
     ],
   },
+  risks: [
+    { level: 'medium', message: 'Quote sent 5 days ago with no response from Tom Caruso.' },
+    { level: 'low', message: 'Client email on file — ready to follow up.' },
+  ],
 }
 
 // ─── Job 3: Brunswick (quoting) ───────────────────────────────────────────────
@@ -269,6 +344,10 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     created_at: '3 days ago',
     days_active: 3,
     job_ref: 'JOB-2025-003',
+    budget_estimate: 380000,
+    scope_notes: 'Rear extension',
+    quote_deadline: null,
+    client_deadline: null,
   },
   overview: {
     started: '3 days ago',
@@ -288,6 +367,8 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     unresolved_count: 2,
     quote_ref: 'QT-JOB-2025-003-v1',
   },
+  workers: [],
+  tasks: [],
   variations: [],
   invoices: [],
   files: [],
@@ -295,6 +376,11 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     messages: [],
     proof_events: [],
   },
+  risks: [
+    { level: 'medium', message: 'Budget noted ($380,000) but no plans uploaded yet.' },
+    { level: 'medium', message: '2 assumptions need resolving before quote can be sent.' },
+    { level: 'low', message: 'Client email missing — required to send quote.' },
+  ],
 }
 
 // ─── Lookup map ───────────────────────────────────────────────────────────────
@@ -313,4 +399,12 @@ const DEMO_SNAPSHOTS: Record<string, JobSnapshot> = {
 
 export function getDemoJobSnapshot(jobId: string): JobSnapshot | null {
   return DEMO_SNAPSHOTS[jobId] ?? null
+}
+
+export function getDemoJobList(): Array<{ id: string; address: string; status: string }> {
+  return [
+    { id: '00000000-0000-0000-0000-000000000010', address: '14 Merri St, Fitzroy VIC 3065', status: 'active' },
+    { id: '00000000-0000-0000-0000-000000000011', address: '8 Burnside Rd, Toorak VIC 3142', status: 'quoted' },
+    { id: '00000000-0000-0000-0000-000000000012', address: '52 Bendigo St, Brunswick VIC 3056', status: 'quoting' },
+  ]
 }
