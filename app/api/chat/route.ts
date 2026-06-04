@@ -40,6 +40,11 @@ interface UploadPanelEvent {
   job_id: string
 }
 
+interface PickJobForTaskEvent {
+  type: 'pick_job_for_task'
+  task_description: string
+}
+
 interface DuplicateWarningEvent {
   type: 'show_duplicate_warning'
   job_id: string
@@ -106,6 +111,7 @@ type ChatEvent =
   | SuggestEmailDraftEvent
   | InboundEmailAlertEvent
   | SuggestJobActivationEvent
+  | PickJobForTaskEvent
 
 export interface MarginJob {
   id: string
@@ -1821,20 +1827,41 @@ async function orchestrateActions(
         if (isVagueTask) {
           messageParts.push(
             `What's the specific task? Tell me like:\n\n` +
-            `• "Add task at Brunswick: install footings — assign to Jack"\n` +
-            `• "Schedule Mick to check plumbing at Fitzroy tomorrow"\n\n` +
-            `Full task scheduling with due dates and worker notifications is coming — for now I'll log it to the job.`
+            `• "Add task at Brunswick: install footings"\n` +
+            `• "task for Fitzroy: check plumbing"`
           )
           break
         }
 
+        // If no job was specified or resolved, ask the builder to pick one
+        if (!job_address && !ctx.resolved_job) {
+          // Build job list for the picker
+          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+          let pickerJobs: JobListItem[] = DEMO_JOB_LIST
+          if (sbUrl && sbKey) {
+            try {
+              const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+              const { data } = await sb
+                .from('jobs')
+                .select('id, address, status')
+                .eq('builder_id', ctx.builder_id)
+                .in('status', ['quoting', 'quoted', 'active'])
+                .order('created_at', { ascending: false })
+                .limit(8)
+              if (data?.length) pickerJobs = (data as Array<{ id: string; address: string; status: string }>).map(j => ({ id: j.id, address: j.address, status: j.status }))
+            } catch { /* fall through to demo list */ }
+          }
+          events.push({ type: 'pick_job_for_task', task_description: description } as PickJobForTaskEvent)
+          accumulated.job_list = pickerJobs
+          messageParts.push(`Which job is "${description}" for?`)
+          break
+        }
+
         const jobRef = job_address ?? ctx.resolved_job?.address ?? 'the job'
-        const assignLine = assignee_name ? ` for ${assignee_name}` : ' for your crew'
+        const assignLine = assignee_name ? ` for ${assignee_name}` : ''
         stateChanges.push({ status: 'info', label: `Task logged: ${description}` })
-        messageParts.push(
-          `Task noted${assignLine} at ${jobRef}: "${description}".\n\n` +
-          `Full task scheduling — due dates, status tracking, and worker notifications — is coming. Your crew can see assigned tasks in the worker portal at /worker.`
-        )
+        messageParts.push(`Task added${assignLine}: "${description}" — ${jobRef}.`)
         break
       }
 

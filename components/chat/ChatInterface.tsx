@@ -85,6 +85,11 @@ interface SuggestJobActivationEvent {
   quote_id: string
 }
 
+interface PickJobForTaskEvent {
+  type: 'pick_job_for_task'
+  task_description: string
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -100,8 +105,8 @@ interface ChatApiResponse {
   job_list?: import('@/app/api/chat/route').JobListItem[]
   worker_list?: import('@/app/api/chat/route').WorkerListItem[]
   state_changes?: import('@/app/api/chat/route').StateChange[]
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
-  events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }>
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | PickJobForTaskEvent | { type: string; [key: string]: unknown }
+  events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | PickJobForTaskEvent | { type: string; [key: string]: unknown }>
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -235,6 +240,7 @@ export default function ChatInterface({
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
   const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
+  const [pendingTask, setPendingTask] = useState<{ description: string; jobs: Array<{ id: string; address: string; status: string }> } | null>(null)
   const [workerModal, setWorkerModal] = useState<WorkerModalState>({
     isOpen: false,
     worker: null,
@@ -590,6 +596,7 @@ export default function ChatInterface({
     // but NOT when forceCreate is true (that's a button action with a known address already)
     const apiPayload = (awaitingAddressForNewJob && !forceCreate) ? `new job at ${trimmed}` : trimmed
     setAwaitingAddressForNewJob(false)
+    setPendingTask(null)
 
     // Add user message to state — always show what the user typed, never the prefixed version
     const userMessage: Message = {
@@ -726,6 +733,14 @@ export default function ChatInterface({
               }
             }
             return updated
+          })
+        }
+
+        if (evt.type === 'pick_job_for_task') {
+          const e = evt as PickJobForTaskEvent
+          setPendingTask({
+            description: e.task_description,
+            jobs: data.job_list ?? [],
           })
         }
 
@@ -1232,7 +1247,57 @@ export default function ChatInterface({
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
       <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 pt-2 pb-3 pb-safe">
-        {/* Quick actions */}
+        {/* Job picker — shown when a task needs a job assigned */}
+        {pendingTask ? (
+          <div className="mb-2">
+            <p className="text-xs text-slate-500 mb-1.5">
+              Adding: <span className="font-medium text-slate-700">&ldquo;{pendingTask.description}&rdquo;</span> — pick a job:
+            </p>
+            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {pendingTask.jobs.map((job) => {
+                const shortAddr = job.address.split(',')[0]
+                return (
+                  <button
+                    key={job.id}
+                    type="button"
+                    disabled={loading}
+                    onClick={async () => {
+                      const desc = pendingTask.description
+                      setPendingTask(null)
+                      // Optimistically add a user-side confirmation message
+                      const confirmMsg: Message = {
+                        id: generateId(),
+                        role: 'assistant',
+                        content: `Task added: "${desc}" — ${shortAddr}.`,
+                        timestamp: new Date(),
+                      }
+                      // Create the task directly
+                      try {
+                        await fetch(`/api/jobs/${job.id}/tasks`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ description: desc, builder_id: builderId, assigned_to: null }),
+                        })
+                      } catch { /* best-effort */ }
+                      setMessages((prev) => [...prev, confirmMsg])
+                    }}
+                    className="flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-full bg-brand-50 border border-brand-200 text-brand-700 hover:bg-brand-100 active:bg-brand-200 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    {shortAddr}
+                  </button>
+                )
+              })}
+              <button
+                type="button"
+                onClick={() => setPendingTask(null)}
+                className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors whitespace-nowrap"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+        /* Quick actions */
         <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none" aria-label="Quick actions">
           {([
             { label: "What's on", msg: 'whats on today' },
@@ -1259,6 +1324,7 @@ export default function ChatInterface({
             </button>
           ))}
         </div>
+        )}
 
         <form onSubmit={handleSubmit} className="flex items-end gap-2">
           <label htmlFor="chat-input" className="sr-only">
