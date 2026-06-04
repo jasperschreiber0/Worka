@@ -404,7 +404,7 @@ export default function ChatInterface({
   )
 
   // Pending action that requires sendMessage (defined later)
-  const [pendingAction, setPendingAction] = useState<string | null>(null)
+ const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
 
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
@@ -477,8 +477,18 @@ export default function ChatInterface({
         })
         return
       }
+      // 'Review quote' — open job snapshot panel to the quote tab
+      if (action === 'Review quote' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        return
+      }
+      // 'Open job' — open job snapshot panel
+      if (action === 'Open job' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        return
+      }
     },
-    [uploadPanel.job]
+    [uploadPanel.job, onJobMention]
   )
 
   // Handler: assumption review complete
@@ -592,6 +602,11 @@ export default function ChatInterface({
   const sendMessage = useCallback(async (text: string, forceCreate?: boolean) => {
     const trimmed = text.trim()
     if (!trimmed || loading) return
+    const apiMessage =
+      awaitingAddressForNewJob && !trimmed.toLowerCase().startsWith('new job')
+        ? `new job at ${trimmed}`
+        : trimmed
+    setAwaitingAddressForNewJob(false)
 
     // If we're awaiting an address for a new job, silently prefix the API payload
     // but NOT when forceCreate is true (that's a button action with a known address already)
