@@ -349,3 +349,10 @@ const DEMO_SNAPSHOTS: Record<string, JobSnapshot> = {
 export function getDemoJobSnapshot(jobId: string): JobSnapshot | null {
   return DEMO_SNAPSHOTS[jobId] ?? null
 }
+
+export function getDemoJobList(): Array<{ id: string; address: string; status: string }> {
+  const seen = new Set<string>()
+  return Object.values(DEMO_SNAPSHOTS)
+    .filter((s) => { if (seen.has(s.job.id)) return false; seen.add(s.job.id); return true })
+    .map((s) => ({ id: s.job.id, address: s.job.address, status: s.job.status }))
+}

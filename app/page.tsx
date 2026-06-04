@@ -39,7 +39,7 @@ export default function HomePage() {
           </div>
 
           {/* CTA */}
-          <Link href="/chat" className="btn-primary px-4 py-2 text-sm no-underline">
+          <Link href="/jobs" className="btn-primary px-4 py-2 text-sm no-underline">
             Open WorkA →
           </Link>
         </div>
@@ -240,7 +240,7 @@ export default function HomePage() {
             <h2 className="text-2xl sm:text-3xl font-bold text-slate-900">
               Your quotes pipeline
             </h2>
-            <Link href="/chat" className="btn-secondary text-sm no-underline">
+            <Link href="/jobs" className="btn-secondary text-sm no-underline">
               Open WorkA →
             </Link>
           </div>
@@ -291,7 +291,7 @@ export default function HomePage() {
             </p>
 
             <Link
-              href="/chat?action=new_quote"
+              href="/jobs?action=new_quote"
               className="btn-primary px-8 py-3 text-base no-underline"
             >
               Start with your next quote →

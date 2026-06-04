@@ -106,6 +106,13 @@ type ChatEvent =
   | SuggestEmailDraftEvent
   | InboundEmailAlertEvent
   | SuggestJobActivationEvent
+  | PickJobForTaskEvent
+
+export interface PickJobForTaskEvent {
+  type: 'pick_job_for_task'
+  task_description: string
+  jobs: JobListItem[]
+}
 
 export interface MarginJob {
   id: string
@@ -514,6 +521,9 @@ async function getLiveMorningBrief(
     .lte('quote_deadline', twoDaysFromNow)
     .in('status', ['quoting', 'quoted'])
 
+  // Track jobs that already have a deadline alert — exclude from the generic "in quoting" summary
+  const deadlineJobIds = new Set<string>()
+
   if (upcomingDeadlines && upcomingDeadlines.length > 0) {
     for (const job of upcomingDeadlines as Array<{ id: string; address: string; quote_deadline: string; status: string }>) {
       const deadline = new Date(job.quote_deadline)
@@ -526,6 +536,7 @@ async function getLiveMorningBrief(
         entity_id: job.id,
         entity_type: 'job',
       })
+      deadlineJobIds.add(job.id)
     }
   }
 
@@ -567,8 +578,9 @@ async function getLiveMorningBrief(
   if (activeJobs && activeJobs.length > 0) {
     const typedJobs = activeJobs as Job[]
     const activeCount = typedJobs.filter((j: Job) => j.status === 'active').length
-    const quotingCount = typedJobs.filter((j: Job) => j.status === 'quoting').length
-    const quotedCount = typedJobs.filter((j: Job) => j.status === 'quoted').length
+    // Exclude quoting jobs that already have a dedicated deadline alert — avoids duplicate entries
+    const quotingCount = typedJobs.filter((j: Job) => j.status === 'quoting' && !deadlineJobIds.has(j.id)).length
+    const quotedCount = typedJobs.filter((j: Job) => j.status === 'quoted' && !deadlineJobIds.has(j.id)).length
 
     const parts: string[] = []
     if (activeCount > 0) parts.push(`${activeCount} active job${activeCount !== 1 ? 's' : ''}`)
@@ -1771,6 +1783,36 @@ async function orchestrateActions(
           break
         }
 
+        // No job context — show job picker chips instead of asking in text
+        if (!job_address && !ctx.resolved_job) {
+          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+          let jobList: JobListItem[] = []
+          if (sbUrl && sbKey) {
+            try {
+              const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+              const { data } = await sb
+                .from('jobs')
+                .select('id, address, status')
+                .eq('builder_id', ctx.builder_id)
+                .not('status', 'eq', 'archived')
+                .order('created_at', { ascending: false })
+                .limit(10)
+              jobList = (data ?? []) as JobListItem[]
+            } catch { /* fall through to demo */ }
+          }
+          if (!jobList.length) {
+            jobList = [
+              { id: '00000000-0000-0000-0000-000000000010', address: '14 Merri St, Fitzroy VIC 3065', status: 'active' },
+              { id: '00000000-0000-0000-0000-000000000020', address: '8 Burnside Rd, Toorak VIC 3142', status: 'quoted' },
+              { id: '00000000-0000-0000-0000-000000000030', address: '52 Bendigo St, Brunswick VIC 3056', status: 'quoting' },
+            ]
+          }
+          events.push({ type: 'pick_job_for_task', task_description: description, jobs: jobList } as PickJobForTaskEvent)
+          // No message — the chip UI communicates the intent
+          break
+        }
+
         const jobRef = job_address ?? ctx.resolved_job?.address ?? 'the job'
         const assignLine = assignee_name ? ` for ${assignee_name}` : ' for your crew'
         stateChanges.push({ status: 'info', label: `Task logged: ${description}` })
@@ -1783,10 +1825,11 @@ async function orchestrateActions(
 
       case 'upload_rates': {
         messageParts.push(
-          `To load your past pricing into WorkA, you have two paths:\n\n` +
-          `**Past quotes (PDF/plan-based):** Upload them through any job's Files tab — WorkA extracts quantities and rates, then stores them as learned rates for future quotes.\n\n` +
-          `**Rate sheet / supplier prices (CSV):** This import is coming in the next release. Prepare a CSV with columns: trade_category, description, unit, rate_ex_gst. Once available, WorkA will use your rates first and fall back to the platform average only when yours are missing.\n\n` +
-          `In the meantime, after you approve a quote, WorkA automatically captures those rates and improves future estimates.`
+          `You can upload your rates in Settings → Rates & pricing.\n\n` +
+          `Supported formats:\n` +
+          `• **CSV** — any spreadsheet with description, unit, and rate columns\n` +
+          `• **PDF** — past quotes or invoices (AI extracts unit rates automatically)\n\n` +
+          `WorkA uses your imported rates first when building quotes, and falls back to platform averages only for items you haven't priced yet.`
         )
         break
       }

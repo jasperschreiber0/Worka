@@ -32,6 +32,8 @@ export interface JobSnapshotPanelProps {
   onClose: () => void
   userRole?: PermissionRole
   builderId?: string
+  /** Hide the close button — used when the panel is the primary full-page view */
+  standalone?: boolean
   onViewQuote?: (quoteId: string) => void
   onVariationApprove?: (variationId: string) => void
   onComposeEmail?: (jobId: string) => void
@@ -90,7 +92,7 @@ interface ActivationModalState {
   quote: JobSnapshot['quote'] | null
 }
 
-export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated, onAddTask }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, standalone = false, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated, onAddTask }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -245,23 +247,25 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
               )}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
-            aria-label="Close job snapshot"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-              aria-hidden="true"
+          {!standalone && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+              aria-label="Close job snapshot"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden="true"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 
