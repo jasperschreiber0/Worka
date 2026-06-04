@@ -57,10 +57,27 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
         <div className="space-y-3">
           {sorted.map((alert, index) => {
             const config = priorityConfig[alert.priority]
+            const isClickable = !!(alert.action && onAction)
             return (
               <div
                 key={alert.entity_id ? `${alert.entity_id}-${index}` : index}
-                className="flex items-start gap-3"
+                role={isClickable ? 'button' : undefined}
+                tabIndex={isClickable ? 0 : undefined}
+                aria-label={isClickable ? alert.action : undefined}
+                className={`flex items-start gap-3 rounded-md px-2 py-1.5 -mx-2 transition-colors ${
+                  isClickable
+                    ? 'cursor-pointer hover:bg-brand-100 focus:outline-none focus:ring-1 focus:ring-brand-400'
+                    : ''
+                }`}
+                onClick={() => {
+                  if (isClickable) onAction!(alert.action!, alert.entity_id, alert.entity_type)
+                }}
+                onKeyDown={(e) => {
+                  if (isClickable && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault()
+                    onAction!(alert.action!, alert.entity_id, alert.entity_type)
+                  }
+                }}
               >
                 {/* Priority dot */}
                 <span
@@ -73,31 +90,21 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                   <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                     <span className={config.badge}>{config.label}</span>
                   </div>
-                  <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
-                  {alert.action && (
-                    <button
-                      type="button"
-                      className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-brand-600 hover:text-brand-700 hover:underline transition-colors focus:outline-none focus:ring-1 focus:ring-brand-400 rounded"
-                      aria-label={`${alert.action} for this item`}
-                      onClick={() => {
-                        if (onAction && alert.action) {
-                          onAction(alert.action, alert.entity_id, alert.entity_type)
-                        }
-                      }}
-                    >
-                      {alert.action}
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
+                    {isClickable && (
                       <svg
-                        className="w-3 h-3"
+                        className="w-3.5 h-3.5 flex-shrink-0 text-brand-500"
                         fill="none"
                         viewBox="0 0 24 24"
                         stroke="currentColor"
-                        strokeWidth={2}
+                        strokeWidth={2.5}
                         aria-hidden="true"
                       >
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                       </svg>
-                    </button>
-                  )}
+                    )}
+                  </div>
                 </div>
               </div>
             )

@@ -396,8 +396,18 @@ export default function ChatInterface({
         })
         return
       }
+      // 'Review quote' — open job snapshot panel to the quote tab
+      if (action === 'Review quote' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        return
+      }
+      // 'Open job' — open job snapshot panel
+      if (action === 'Open job' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        return
+      }
     },
-    [uploadPanel.job]
+    [uploadPanel.job, onJobMention]
   )
 
   // Handler: assumption review complete
