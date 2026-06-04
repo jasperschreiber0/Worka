@@ -88,6 +88,7 @@ interface SuggestJobActivationEvent {
 interface PickJobForTaskEvent {
   type: 'pick_job_for_task'
   task_description: string
+  jobs: Array<{ id: string; address: string; status: string }>
 }
 
 interface ChatApiResponse {
@@ -672,7 +673,10 @@ export default function ChatInterface({
         timestamp: new Date(),
       }
 
-      setMessages((prev) => [...prev, assistantMessage])
+      // Don't add an empty assistant bubble (e.g. pick_job_for_task shows chips only)
+      if (data.message?.trim()) {
+        setMessages((prev) => [...prev, assistantMessage])
+      }
 
       // Handle Layer 3 events
       // Dispatch all Layer 3 events — handles both events[] (multi-action) and
@@ -740,7 +744,7 @@ export default function ChatInterface({
           const e = evt as PickJobForTaskEvent
           setPendingTask({
             description: e.task_description,
-            jobs: data.job_list ?? [],
+            jobs: e.jobs ?? [],
           })
         }
 

@@ -43,6 +43,7 @@ interface UploadPanelEvent {
 interface PickJobForTaskEvent {
   type: 'pick_job_for_task'
   task_description: string
+  jobs: JobListItem[]
 }
 
 interface DuplicateWarningEvent {
@@ -1852,9 +1853,8 @@ async function orchestrateActions(
               if (data?.length) pickerJobs = (data as Array<{ id: string; address: string; status: string }>).map(j => ({ id: j.id, address: j.address, status: j.status }))
             } catch { /* fall through to demo list */ }
           }
-          events.push({ type: 'pick_job_for_task', task_description: description } as PickJobForTaskEvent)
-          accumulated.job_list = pickerJobs
-          messageParts.push(`Which job is "${description}" for?`)
+          events.push({ type: 'pick_job_for_task', task_description: description, jobs: pickerJobs } as PickJobForTaskEvent)
+          // No message — the chips at the bottom handle everything
           break
         }
 
