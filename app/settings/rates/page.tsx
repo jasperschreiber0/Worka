@@ -150,7 +150,7 @@ function downloadExampleCSV() {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-type Stage = 'idle' | 'preview' | 'importing' | 'done'
+type Stage = 'idle' | 'extracting' | 'preview' | 'importing' | 'done'
 
 interface ExistingRate {
   id: string
@@ -193,10 +193,46 @@ export default function RatesPage() {
   }, [builderId, importedCount])
 
   function handleFile(file: File) {
-    if (!file.name.endsWith('.csv') && file.type !== 'text/csv') {
-      alert('Please upload a .csv file.')
+    const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf'
+    const isCsv = file.name.toLowerCase().endsWith('.csv') || file.type === 'text/csv'
+
+    if (!isPdf && !isCsv) {
+      alert('Please upload a CSV or PDF file.')
       return
     }
+
+    if (isPdf) {
+      setStage('extracting')
+      const form = new FormData()
+      form.append('file', file)
+      fetch('/api/rates/extract-pdf', { method: 'POST', body: form })
+        .then((r) => r.json())
+        .then((data: { rates?: Array<{ trade_category_id: number; trade_category_name: string; description: string; unit: string; rate: number }>; error?: string; demo?: boolean }) => {
+          if (data.error || !data.rates?.length) {
+            setStage('idle')
+            setImportError(data.error ?? 'No rates found in this PDF.')
+            return
+          }
+          // Convert to ParsedRow format — already matched by Claude
+          const parsed: ParsedRow[] = data.rates.map((r) => ({
+            raw_category: r.trade_category_name,
+            matched_category: { id: r.trade_category_id, name: r.trade_category_name },
+            description: r.description,
+            unit: r.unit,
+            rate: r.rate,
+            valid: true,
+          }))
+          setRows(parsed)
+          setStage('preview')
+          if (data.demo) setImportError('Demo mode — example rates shown. Connect your Anthropic API key to extract from real PDFs.')
+        })
+        .catch(() => {
+          setStage('idle')
+          setImportError('Upload failed — please try again.')
+        })
+      return
+    }
+
     const reader = new FileReader()
     reader.onload = (e) => {
       const text = e.target?.result as string
@@ -336,7 +372,7 @@ export default function RatesPage() {
         )}
 
         {/* ── Upload section ───────────────────────────────────────────── */}
-        {(stage === 'idle' || stage === 'preview') && (
+        {(stage === 'idle' || stage === 'preview' || stage === 'extracting') && (
           <section className="mb-6">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -370,12 +406,12 @@ export default function RatesPage() {
                   {stage === 'preview' ? 'Drop another CSV to replace' : 'Drop your CSV here, or click to browse'}
                 </p>
                 <p className="text-xs text-slate-400">
-                  Columns: trade_category · description · unit · rate_ex_gst
+                  CSV or PDF — past quotes, invoices, supplier price lists
                 </p>
                 <input
                   ref={inputRef}
                   type="file"
-                  accept=".csv,text/csv"
+                  accept=".csv,.pdf,text/csv,application/pdf"
                   className="sr-only"
                   onChange={handleInputChange}
                 />
@@ -495,19 +531,21 @@ export default function RatesPage() {
           </section>
         )}
 
-        {/* ── Importing spinner ────────────────────────────────────────── */}
-        {stage === 'importing' && (
+        {/* ── Extracting / Importing spinner ──────────────────────────── */}
+        {(stage === 'extracting' || stage === 'importing') && (
           <div className="mb-6 bg-white rounded-xl border border-slate-200 px-5 py-6 flex items-center gap-4">
             <svg className="w-5 h-5 text-brand-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24" aria-hidden="true">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
-            <span className="text-sm text-slate-600">Importing {validCount} rates…</span>
+            <span className="text-sm text-slate-600">
+              {stage === 'extracting' ? 'Reading PDF and extracting rates…' : `Importing ${validCount} rates…`}
+            </span>
           </div>
         )}
 
         {/* ── Previously imported ──────────────────────────────────────── */}
-        {!loadingExisting && existingRates.length > 0 && stage !== 'importing' && (
+        {!loadingExisting && existingRates.length > 0 && stage !== 'importing' && stage !== 'extracting' && (
           <section>
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
               Previously imported ({existingRates.length})
@@ -538,7 +576,7 @@ export default function RatesPage() {
         )}
 
         {/* ── How it works ─────────────────────────────────────────────── */}
-        {stage !== 'preview' && stage !== 'importing' && (
+        {stage !== 'preview' && stage !== 'importing' && stage !== 'extracting' && (
           <section className="mt-6">
             <div className="bg-slate-100 rounded-xl px-5 py-4">
               <p className="text-xs font-semibold text-slate-600 mb-2">How WorkA uses your rates</p>
