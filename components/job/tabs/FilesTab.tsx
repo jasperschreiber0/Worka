@@ -101,7 +101,7 @@ export default function FilesTab({ files, onUploadPlans }: FilesTabProps) {
 
             {/* File details */}
             <div className="min-w-0 flex-1">
-              <p className="text-sm text-slate-800 font-medium truncate">{file.filename}</p>
+              <p className="text-sm text-slate-800 font-medium truncate" title={file.filename}>{file.filename}</p>
               <p className="text-xs text-slate-500 mt-0.5">
                 Uploaded {file.uploaded_at} &middot;{' '}
                 <span className={intakeStatusClass(file.intake_status)}>
@@ -117,9 +117,7 @@ export default function FilesTab({ files, onUploadPlans }: FilesTabProps) {
       <button
         type="button"
         className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors mt-1"
-        onClick={() => {
-          // Future session: trigger UploadPanel
-        }}
+        onClick={onUploadPlans}
       >
         Upload plans
         <svg

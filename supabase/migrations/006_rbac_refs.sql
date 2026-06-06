@@ -7,9 +7,9 @@ ALTER TABLE workers
   CHECK (permission_role IN ('owner', 'site_manager', 'subcontractor', 'tradesperson'));
 
 -- Update seeded workers to sensible roles
-UPDATE workers SET permission_role = 'site_manager'   WHERE id = '00000000-0000-0000-0000-000000000002'; -- Tom Chen, carpenter
-UPDATE workers SET permission_role = 'subcontractor'  WHERE id = '00000000-0000-0000-0000-000000000003'; -- Maria Santos, plumber
-UPDATE workers SET permission_role = 'tradesperson'   WHERE id = '00000000-0000-0000-0000-000000000004'; -- James O'Brien, painter
+UPDATE workers SET permission_role = 'site_manager'   WHERE id = '00000000-0000-0000-0000-000000000021'; -- Jack Morrison, carpenter
+UPDATE workers SET permission_role = 'subcontractor'  WHERE id = '00000000-0000-0000-0000-000000000022'; -- Mick Tran, plumber
+UPDATE workers SET permission_role = 'tradesperson'   WHERE id = '00000000-0000-0000-0000-000000000023'; -- Sarah Chen, painter
 
 -- ─── 1b. Human-readable reference columns ─────────────────────────────────────
 

@@ -17,7 +17,9 @@ export interface UploadPanelProps {
   isOpen: boolean
   onClose: () => void
   job: UploadPanelJob
+  builderId: string
   onIntakeComplete?: (quoteId: string, assumptionCount: number) => void
+  preloadedFiles?: File[]
 }
 
 interface SelectedFile {
@@ -48,8 +50,6 @@ const ACCEPTED_MIME_TYPES = [
   'image/heif',
 ]
 
-const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
-
 function isAcceptedFile(file: File): boolean {
   if (ACCEPTED_MIME_TYPES.includes(file.type)) return true
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
@@ -58,7 +58,7 @@ function isAcceptedFile(file: File): boolean {
 
 // ─── Inner component (rendered inside portal) ─────────────────────────────────
 
-function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPanelProps) {
+function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, preloadedFiles }: UploadPanelProps) {
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -95,6 +95,15 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
       return () => clearTimeout(id)
     }
   }, [isOpen])
+
+  // Auto-populate files when opened with preloaded files from homepage
+  useEffect(() => {
+    if (isOpen && preloadedFiles && preloadedFiles.length > 0) {
+      setFiles(
+        preloadedFiles.map((file) => ({ file, id: generateFileId() }))
+      )
+    }
+  }, [isOpen, preloadedFiles])
 
   // Focus close button on open
   useEffect(() => {
@@ -194,35 +203,54 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
     [addFiles]
   )
 
-  // ── Real upload handler ────────────────────────────────────────────────────
+  // ── Upload handler ────────────────────────────────────────────────────────
+  // Two-step: (1) POST metadata → get presigned URL + DB record,
+  //           (2) PUT file bytes directly to Supabase Storage.
+  // This bypasses Vercel's 4.5 MB request body limit for large plan files.
 
   const handleUpload = useCallback(async () => {
     if (files.length === 0 || uploading) return
 
-    // Upload the first file (one at a time for intake progress)
     const selectedFile = files[0]
 
     setUploading(true)
     setUploadError(null)
 
     try {
-      const formData = new FormData()
-      formData.append('file', selectedFile.file)
-      formData.append('job_id', job.id)
-      formData.append('builder_id', DEMO_BUILDER_ID)
-
-      const res = await fetch('/api/upload', {
+      // Step 1: register file and get presigned upload URL
+      const metaRes = await fetch('/api/upload', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: job.id,
+          builder_id: builderId,
+          filename: selectedFile.file.name,
+          content_type: selectedFile.file.type || 'application/octet-stream',
+          size: selectedFile.file.size,
+        }),
       })
 
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Upload failed' }))
+      if (!metaRes.ok) {
+        const body = await metaRes.json().catch(() => ({ error: 'Upload failed' }))
         throw new Error((body as { error?: string }).error ?? 'Upload failed')
       }
 
-      const data = await res.json() as { file: DBFile; intake_started: boolean }
-      setUploadedFile(data.file)
+      const { file: dbFile, upload_url } = await metaRes.json() as { file: DBFile; upload_url: string }
+
+      // Step 2: PUT file directly to Supabase Storage (skipped in demo mode)
+      if (upload_url && !upload_url.startsWith('demo://')) {
+        const putRes = await fetch(upload_url, {
+          method: 'PUT',
+          body: selectedFile.file,
+          headers: { 'Content-Type': selectedFile.file.type || 'application/octet-stream' },
+        })
+
+        if (!putRes.ok) {
+          throw new Error('File transfer to storage failed — please try again.')
+        }
+      }
+
+      setUploadedFile(dbFile)
       setIntakeStarted(true)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed — please try again.'
@@ -230,7 +258,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
     } finally {
       setUploading(false)
     }
-  }, [files, uploading, job.id])
+  }, [files, uploading, job.id, builderId])
 
   // ── Intake complete handler ────────────────────────────────────────────────
 
@@ -331,7 +359,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
             <IntakeProgress
               fileId={uploadedFile.id}
               jobId={job.id}
-              builderId={DEMO_BUILDER_ID}
+              builderId={builderId}
               filename={uploadedFile.filename}
               onComplete={handleIntakeComplete}
               onError={handleIntakeError}

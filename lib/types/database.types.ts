@@ -81,8 +81,17 @@ export interface Job {
   status: JobStatus
   job_type: string | null
   notes: string | null
+  budget_estimate: number | null
+  scope_notes: string | null
+  quote_deadline: string | null   // ISO date: "YYYY-MM-DD"
+  client_deadline: string | null  // ISO date: "YYYY-MM-DD"
   created_at: string
   updated_at: string
+}
+
+export interface StateChange {
+  status: 'saved' | 'found' | 'warning' | 'blocked' | 'info'
+  label: string
 }
 
 export interface Quote {
@@ -356,6 +365,47 @@ export type IntentType =
   | 'variation'
   | 'invoice'
   | 'unknown'
+
+// ─── Multi-action extraction types ───────────────────────────────────────────
+
+export type ActionType =
+  | 'morning_brief'
+  | 'add_worker'
+  | 'create_job'
+  | 'job_query'
+  | 'variation'
+  | 'invoice'
+  | 'email_draft'
+  | 'email_sync_status'
+  | 'simulate_email'
+  | 'margin_query'
+  | 'open_upload_panel'
+  | 'review_assumptions'
+  | 'update_job_context'
+  | 'add_task'
+  | 'upload_rates'
+  | 'client_lookup'
+  | 'meeting_prep'
+  | 'payment_risk'
+  | 'conflict_detected'
+  | 'worker_onboarding'
+  | 'roadmap'
+  | 'team_notifications'
+  | 'approve_quote'
+  | 'end_of_day'
+  | 'task_help'
+  | 'unknown'
+
+export interface ExtractedAction {
+  type: ActionType
+  entities: Record<string, string>
+  confidence: number
+}
+
+export interface ExtractActionsResponse {
+  actions: ExtractedAction[]
+  raw_context: Record<string, string>
+}
 
 export interface ClassifyIntentRequest {
   message: string

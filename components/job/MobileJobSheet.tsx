@@ -10,11 +10,12 @@ interface MobileJobSheetProps {
   job: ActiveJob
   onClose: () => void
   onViewQuote?: (quoteId: string) => void
+  onAddTask?: (jobAddress: string) => void
 }
 
 // ─── Inner sheet (rendered in portal) ────────────────────────────────────────
 
-function MobileJobSheetInner({ job, onClose, onViewQuote }: MobileJobSheetProps) {
+function MobileJobSheetInner({ job, onClose, onViewQuote, onAddTask }: MobileJobSheetProps) {
   const [visible, setVisible] = useState(false)
   const sheetRef = useRef<HTMLDivElement>(null)
 
@@ -46,22 +47,22 @@ function MobileJobSheetInner({ job, onClose, onViewQuote }: MobileJobSheetProps)
 
   return (
     <>
-      {/* Backdrop */}
+      {/* Backdrop — hidden on md+ (side panel is used there instead) */}
       <div
-        className={`fixed inset-0 bg-black/30 z-30 transition-opacity duration-300 ${
+        className={`md:hidden fixed inset-0 bg-black/30 z-30 transition-opacity duration-300 ${
           visible ? 'opacity-100' : 'opacity-0'
         }`}
         onClick={handleClose}
         aria-hidden="true"
       />
 
-      {/* Sheet */}
+      {/* Sheet — hidden on md+ (side panel is used there instead) */}
       <div
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
         aria-label={`Job snapshot: ${job.address}`}
-        className={`fixed inset-x-0 bottom-0 z-40 bg-white rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col transition-transform duration-300 ease-in-out ${
+        className={`md:hidden fixed inset-x-0 bottom-0 z-40 bg-white rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col transition-transform duration-300 ease-in-out ${
           visible ? 'translate-y-0' : 'translate-y-full'
         }`}
       >
@@ -72,7 +73,7 @@ function MobileJobSheetInner({ job, onClose, onViewQuote }: MobileJobSheetProps)
 
         {/* Content — reuse JobSnapshotPanel */}
         <div className="flex-1 overflow-y-auto">
-          <JobSnapshotPanel job={job} onClose={handleClose} onViewQuote={onViewQuote} />
+          <JobSnapshotPanel job={job} onClose={handleClose} onViewQuote={onViewQuote} onAddTask={(addr) => { handleClose(); onAddTask?.(addr) }} />
         </div>
       </div>
     </>
@@ -81,7 +82,7 @@ function MobileJobSheetInner({ job, onClose, onViewQuote }: MobileJobSheetProps)
 
 // ─── Portal wrapper ───────────────────────────────────────────────────────────
 
-export default function MobileJobSheet({ job, onClose, onViewQuote }: MobileJobSheetProps) {
+export default function MobileJobSheet({ job, onClose, onViewQuote, onAddTask }: MobileJobSheetProps) {
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
@@ -92,7 +93,7 @@ export default function MobileJobSheet({ job, onClose, onViewQuote }: MobileJobS
   if (!mounted) return null
 
   return createPortal(
-    <MobileJobSheetInner job={job} onClose={onClose} onViewQuote={onViewQuote} />,
+    <MobileJobSheetInner job={job} onClose={onClose} onViewQuote={onViewQuote} onAddTask={onAddTask} />,
     document.body
   )
 }

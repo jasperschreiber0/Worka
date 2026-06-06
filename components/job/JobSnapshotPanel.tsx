@@ -9,6 +9,7 @@ import VariationsTab from '@/components/job/tabs/VariationsTab'
 import InvoicesTab from '@/components/job/tabs/InvoicesTab'
 import FilesTab from '@/components/job/tabs/FilesTab'
 import CommsTab from '@/components/job/tabs/CommsTab'
+import TasksTab from '@/components/job/tabs/TasksTab'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,7 +21,7 @@ export interface ActiveJob {
   client_name?: string
 }
 
-type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms'
+type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms' | 'tasks'
 
 interface Tab {
   id: TabId
@@ -38,6 +39,7 @@ export interface JobSnapshotPanelProps {
   onUploadPlans?: (job: ActiveJob) => void
   onAddInvoice?: (jobId: string) => void
   onJobActivated?: (jobId: string) => void
+  onAddTask?: (jobAddress: string) => void
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -47,6 +49,7 @@ const TABS: Tab[] = [
   { id: 'quote', label: 'Quote' },
   { id: 'variations', label: 'Variations' },
   { id: 'invoices', label: 'Invoices' },
+  { id: 'tasks', label: 'Tasks' },
   { id: 'files', label: 'Files' },
   { id: 'comms', label: 'Comms' },
 ]
@@ -89,7 +92,7 @@ interface ActivationModalState {
   quote: JobSnapshot['quote'] | null
 }
 
-export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated }: JobSnapshotPanelProps) {
+export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated, onAddTask }: JobSnapshotPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
@@ -148,19 +151,26 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
 
   // Render the active tab content
   function renderTabContent() {
-    if (loading || !snapshot) {
-      return <SkeletonSection />
+    if (loading) return <SkeletonSection />
+    if (!snapshot) {
+      return (
+        <div className="p-6 text-center text-slate-400 text-sm">
+          <p>Job details not available yet.</p>
+          <p className="mt-1">Plans are still being processed.</p>
+        </div>
+      )
     }
 
     switch (activeTab) {
       case 'overview':
-        return <OverviewTab overview={snapshot.overview} job={snapshot.job} />
+        return <OverviewTab overview={snapshot.overview} job={{ ...snapshot.job, risks: snapshot.risks }} quote={snapshot.quote} />
       case 'quote':
         return (
           <QuoteTab
             quote={snapshot.quote}
             onViewQuote={onViewQuote ?? (() => {})}
             onActivateJob={handleActivateJob}
+            onStartQuote={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
           />
         )
       case 'variations':
@@ -186,6 +196,15 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
           <FilesTab
             files={snapshot.files}
             onUploadPlans={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
+          />
+        )
+      case 'tasks':
+        return (
+          <TasksTab
+            tasks={snapshot.tasks}
+            workers={snapshot.workers}
+            jobId={snapshot.job.id}
+            builderId={builderId}
           />
         )
       case 'comms':
@@ -258,14 +277,14 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-b border-slate-200 bg-white px-4">
-        <div className="flex gap-0 overflow-x-auto scrollbar-hide -mb-px">
+      <div className="flex-shrink-0 border-b border-slate-200 bg-white overflow-x-auto scrollbar-none">
+        <div className="flex -mb-px min-w-max">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-shrink-0 px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
+              className={`min-w-[64px] px-4 min-h-[44px] flex items-center justify-center text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
                 activeTab === tab.id
                   ? 'border-brand-500 text-brand-600'
                   : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -278,7 +297,7 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Content ─────────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto bg-slate-50">
+      <div className="flex-1 overflow-y-auto bg-slate-50 relative">
         {job ? (
           renderTabContent()
         ) : (

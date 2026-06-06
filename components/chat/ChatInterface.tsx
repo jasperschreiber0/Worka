@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import ChatMessage, { type Message, type DuplicateJob } from './ChatMessage'
 import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
@@ -84,6 +85,12 @@ interface SuggestJobActivationEvent {
   quote_id: string
 }
 
+interface PickJobForTaskEvent {
+  type: 'pick_job_for_task'
+  task_description: string
+  jobs: Array<{ id: string; address: string; status: string }>
+}
+
 interface ChatApiResponse {
   intent: string
   message: string
@@ -96,7 +103,11 @@ interface ChatApiResponse {
   variation?: DemoVariation
   all_variations?: DemoVariation[]
   margin_jobs?: MarginJob[]
-  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | { type: string; [key: string]: unknown }
+  job_list?: import('@/app/api/chat/route').JobListItem[]
+  worker_list?: import('@/app/api/chat/route').WorkerListItem[]
+  state_changes?: import('@/app/api/chat/route').StateChange[]
+  event?: WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | PickJobForTaskEvent | { type: string; [key: string]: unknown }
+  events?: Array<WorkerModalEvent | UploadPanelEvent | DuplicateWarningEvent | OpenJobSnapshotEvent | ShowVariationEvent | OpenEmailDraftEvent | SuggestEmailDraftEvent | InboundEmailAlertEvent | SuggestJobActivationEvent | PickJobForTaskEvent | { type: string; [key: string]: unknown }>
 }
 
 // ─── Worker modal state ───────────────────────────────────────────────────────
@@ -158,6 +169,11 @@ interface ChatInterfaceProps {
   onPendingUploadConsumed?: () => void
   autoMessage?: string | null
   onAutoMessageConsumed?: () => void
+  pendingFillInput?: string | null
+  onFillInputConsumed?: () => void
+  activeJobAddress?: string | null
+  pendingFiles?: File[] | null
+  onPendingFilesConsumed?: () => void
 }
 
 // ─── Sign-out button ──────────────────────────────────────────────────────────
@@ -214,11 +230,18 @@ export default function ChatInterface({
   onPendingUploadConsumed,
   autoMessage,
   onAutoMessageConsumed,
+  pendingFillInput,
+  onFillInputConsumed,
+  activeJobAddress,
+  pendingFiles,
+  onPendingFilesConsumed,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
+  const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
+  const [pendingTask, setPendingTask] = useState<{ description: string; jobs: Array<{ id: string; address: string; status: string }> } | null>(null)
   const [workerModal, setWorkerModal] = useState<WorkerModalState>({
     isOpen: false,
     worker: null,
@@ -246,9 +269,18 @@ export default function ChatInterface({
     quoteTotalCost: number
   } | null>(null)
 
+  const [isListening, setIsListening] = useState(false)
+  const recognitionRef = useRef<{ stop: () => void } | null>(null)
+  const [pendingFilesForUpload, setPendingFilesForUpload] = useState<File[] | null>(null)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // Focus input on mount so user can start typing immediately
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
 
   // When a quoteId is passed from the snapshot panel's "View quote" button,
   // open QuoteView immediately and notify the parent that we consumed it.
@@ -290,6 +322,10 @@ export default function ChatInterface({
           status: pendingUpload.status as import('@/lib/types/database.types').JobStatus,
           job_type: null,
           notes: null,
+          budget_estimate: null,
+          scope_notes: null,
+          quote_deadline: null,
+          client_deadline: null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         },
@@ -298,6 +334,41 @@ export default function ChatInterface({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingUpload])
+
+  // Fill input when "Add task" FAB is tapped from the job panel
+  useEffect(() => {
+    if (pendingFillInput) {
+      setInput(pendingFillInput)
+      onFillInputConsumed?.()
+      setTimeout(() => {
+        const ta = inputRef.current
+        if (ta) {
+          ta.focus()
+          ta.setSelectionRange(ta.value.length, ta.value.length)
+        }
+      }, 50)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFillInput])
+
+  // Files staged from homepage upload zone — ask for address, then open panel with files pre-loaded
+  useEffect(() => {
+    if (!pendingFiles || pendingFiles.length === 0) return
+    const id = `msg-${Date.now()}-plans`
+    setMessages((prev) => [
+      ...prev,
+      {
+        id,
+        role: 'assistant',
+        content: "Got your plans — what's the address for this job?",
+        timestamp: new Date(),
+      },
+    ])
+    setAwaitingAddressForNewJob(true)
+    setPendingFilesForUpload(pendingFiles)
+    onPendingFilesConsumed?.()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFiles])
 
   const handleCloseWorkerModal = useCallback(() => {
     setWorkerModal((prev) => ({ ...prev, isOpen: false }))
@@ -355,6 +426,16 @@ export default function ChatInterface({
         setPendingAction('show me the variations')
         return
       }
+      // Generic 'Open job' — entityId is the job_id from the alert
+      if (action === 'Open job' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: '' })
+        return
+      }
+      // Generic 'Show jobs' — sends the jobs list message
+      if (action === 'Show jobs') {
+        void sendMessage('show my jobs')
+        return
+      }
       // 'Chase payment' from morning brief (overdue invoice on Fitzroy job)
       if (action === 'Chase payment') {
         setEmailDraftModal({
@@ -396,8 +477,18 @@ export default function ChatInterface({
         })
         return
       }
+      // 'Review quote' — open job snapshot panel to the quote tab
+      if (action === 'Review quote' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        return
+      }
+      // 'Open job' — open job snapshot panel
+      if (action === 'Open job' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        return
+      }
     },
-    [uploadPanel.job]
+    [uploadPanel.job, onJobMention]
   )
 
   // Handler: assumption review complete
@@ -517,7 +608,13 @@ export default function ChatInterface({
         : trimmed
     setAwaitingAddressForNewJob(false)
 
-    // Add user message to state
+    // If we're awaiting an address for a new job, silently prefix the API payload
+    // but NOT when forceCreate is true (that's a button action with a known address already)
+    const apiPayload = (awaitingAddressForNewJob && !forceCreate) ? `new job at ${trimmed}` : trimmed
+    setAwaitingAddressForNewJob(false)
+    setPendingTask(null)
+
+    // Add user message to state — always show what the user typed, never the prefixed version
     const userMessage: Message = {
       id: generateId(),
       role: 'user',
@@ -534,7 +631,7 @@ export default function ChatInterface({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-         message: apiMessage,
+          message: apiPayload,
           builder_id: builderId,
           ...(forceCreate ? { force_create: true } : {}),
         }),
@@ -543,9 +640,15 @@ export default function ChatInterface({
       const data: ChatApiResponse = await res.json()
 
       // Build assistant message — attach duplicateJob if relevant
+      // Check both event (backwards compat) and events[] (multi-action)
+      const allEvents = [
+        ...(data.events ?? []),
+        ...(data.event && !data.events?.some((e) => e.type === data.event?.type) ? [data.event] : []),
+      ]
+
       let duplicateJob: DuplicateJob | undefined
       if (
-        data.event?.type === 'show_duplicate_warning' &&
+        allEvents.some((e) => e.type === 'show_duplicate_warning') &&
         data.existing_job
       ) {
         duplicateJob = {
@@ -557,7 +660,7 @@ export default function ChatInterface({
 
       // Attach variation card if present
       let variationCard: VariationCardVariation | undefined
-      if (data.event?.type === 'show_variation' && data.variation) {
+      if (allEvents.some((e) => e.type === 'show_variation') && data.variation) {
         const v = data.variation
         variationCard = {
           id: v.id,
@@ -579,144 +682,135 @@ export default function ChatInterface({
         duplicateJob,
         variation: variationCard,
         marginJobs: data.margin_jobs,
+        jobList: data.job_list,
+        workerList: data.worker_list,
+        stateChanges: data.state_changes,
         timestamp: new Date(),
       }
 
-      setMessages((prev) => [...prev, assistantMessage])
-      if (data.intent === 'new_job' && !data.job && !data.duplicate) {
-        setAwaitingAddressForNewJob(true)
+      // Don't add an empty assistant bubble (e.g. pick_job_for_task shows chips only)
+      if (data.message?.trim()) {
+        setMessages((prev) => [...prev, assistantMessage])
       }
 
       // Handle Layer 3 events
-      if (
-        data.event?.type === 'open_worker_modal' &&
-        data.worker &&
-        data.invite_url
-      ) {
-        setWorkerModal({
-          isOpen: true,
-          worker: data.worker,
-          inviteUrl: data.invite_url,
-        })
-      }
-
-      if (
-        data.event?.type === 'open_upload_panel' &&
-        data.job
-      ) {
-        setUploadPanel({
-          isOpen: true,
-          job: data.job,
-        })
-      }
-
-      // Handle job snapshot event (Session 9)
-      if (data.event?.type === 'open_job_snapshot') {
-        const evt = data.event as OpenJobSnapshotEvent
-        onJobMention?.({
-          id: evt.job_id,
-          address: evt.job_address,
-          status: evt.job_status,
-          client_name: evt.client_name,
-        })
-      }
-
-      // Handle email draft event — open EmailDraftModal immediately
-      if (data.event?.type === 'open_email_draft') {
-        const evt = data.event as OpenEmailDraftEvent
-        setEmailDraftModal({
-          isOpen: true,
-          jobId: evt.job_id,
-          recipientName: evt.recipient_name ?? undefined,
-          intentHint: evt.intent_hint as EmailIntentHint,
-        })
-      }
-
-      // Handle suggest_email_draft — append a message with a "Draft email" action button
-      if (data.event?.type === 'suggest_email_draft') {
-        const evt = data.event as SuggestEmailDraftEvent
-        const suggestMessage: Message = {
-          id: generateId(),
-          role: 'assistant',
-          content: '',
-          alerts: [
-            {
-              priority: 'high',
-              message: data.message,
-              action: 'Draft email',
-              entity_id: evt.job_id,
-              entity_type: 'invoice',
-            },
-          ],
-          timestamp: new Date(),
+      // Dispatch all Layer 3 events — handles both events[] (multi-action) and
+      // legacy event field (backwards compat). allEvents is built above.
+      for (const evt of allEvents) {
+        if (evt.type === 'open_worker_modal' && data.worker && data.invite_url) {
+          setWorkerModal({
+            isOpen: true,
+            worker: data.worker,
+            inviteUrl: data.invite_url,
+          })
         }
-        // Replace the last assistant message with the suggest message (it already has message text)
-        // Actually the data.message is already set in assistantMessage above — add action button via separate alert message
-        setMessages((prev) => {
-          const updated = [...prev]
-          // Find the last assistant message (just added) and add the action alert
-          const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
-          if (lastIdx >= 0) {
-            updated[lastIdx] = {
-              ...updated[lastIdx],
-              alerts: [
-                {
-                  priority: 'high',
-                  message: 'Want me to draft a follow-up email?',
-                  action: 'Draft email',
-                  entity_id: evt.job_id,
-                  entity_type: 'invoice',
-                },
-              ],
+
+        if (evt.type === 'open_upload_panel' && data.job) {
+          setUploadPanel({
+            isOpen: true,
+            job: data.job,
+          })
+        }
+
+        if (evt.type === 'open_job_snapshot') {
+          const e = evt as OpenJobSnapshotEvent
+          onJobMention?.({
+            id: e.job_id,
+            address: e.job_address,
+            status: e.job_status,
+            client_name: e.client_name,
+          })
+        }
+
+        if (evt.type === 'open_email_draft') {
+          const e = evt as OpenEmailDraftEvent
+          setEmailDraftModal({
+            isOpen: true,
+            jobId: e.job_id,
+            recipientName: e.recipient_name ?? undefined,
+            intentHint: e.intent_hint as EmailIntentHint,
+          })
+        }
+
+        if (evt.type === 'suggest_email_draft') {
+          const e = evt as SuggestEmailDraftEvent
+          setMessages((prev) => {
+            const updated = [...prev]
+            const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
+            if (lastIdx >= 0) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                alerts: [
+                  {
+                    priority: 'high' as const,
+                    message: 'Want me to draft a follow-up email?',
+                    action: 'Draft email',
+                    entity_id: e.job_id,
+                    entity_type: e.intent_hint === 'variation' ? 'variation' as const : e.intent_hint === 'invoice' ? 'invoice' as const : e.intent_hint === 'quote_followup' ? 'quote' as const : 'job' as const,
+                  },
+                ],
+              }
             }
-          }
-          return updated
-        })
-        void suggestMessage // suppress unused warning
-      }
+            return updated
+          })
+        }
 
-      // Handle suggest_job_activation event — add "Activate job" action button in chat
-      if (data.event?.type === 'suggest_job_activation') {
-        const evt = data.event as SuggestJobActivationEvent
-        setMessages((prev) => {
-          const updated = [...prev]
-          const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
-          if (lastIdx >= 0) {
-            updated[lastIdx] = {
-              ...updated[lastIdx],
-              alerts: [
-                {
-                  priority: 'high',
-                  message: 'If Tom has verbally approved, activate the job now to create the milestone timeline and invoice schedule.',
-                  action: 'Activate job',
-                  entity_id: evt.job_id,
-                  entity_type: 'job',
-                },
-              ],
+        if (evt.type === 'pick_job_for_task') {
+          const e = evt as PickJobForTaskEvent
+          setPendingTask({
+            description: e.task_description,
+            jobs: e.jobs ?? [],
+          })
+        }
+
+        if (evt.type === 'suggest_job_activation') {
+          const e = evt as SuggestJobActivationEvent
+          setMessages((prev) => {
+            const updated = [...prev]
+            const lastIdx = updated.findLastIndex((m) => m.role === 'assistant')
+            if (lastIdx >= 0) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                alerts: [
+                  {
+                    priority: 'high' as const,
+                    message: 'If Tom has verbally approved, activate the job now to create the milestone timeline and invoice schedule.',
+                    action: 'Activate job',
+                    entity_id: e.job_id,
+                    entity_type: 'job' as const,
+                  },
+                ],
+              }
             }
-          }
-          return updated
-        })
+            return updated
+          })
+        }
+
+        if (evt.type === 'inbound_email_alert') {
+          const e = evt as InboundEmailAlertEvent
+          setInboundEmailAlert({
+            email: e.email,
+            job_address: e.job_address,
+            intent: e.intent,
+            suggested_action: e.suggested_action,
+          })
+        }
       }
 
-      // Handle inbound_email_alert event — surface matched email in chat
-      if (data.event?.type === 'inbound_email_alert') {
-        const evt = data.event as InboundEmailAlertEvent
-        setInboundEmailAlert({
-          email: evt.email,
-          job_address: evt.job_address,
-          intent: evt.intent,
-          suggested_action: evt.suggested_action,
-        })
-      }
-
-      // Trigger general query callback for non-job intents
+      // Trigger general query callback — check intent string which may be compound e.g. "morning_brief+job_query"
       if (
-        data.intent === 'morning_brief' ||
-        data.intent === 'add_worker' ||
+        data.intent?.includes('morning_brief') ||
+        data.intent?.includes('add_worker') ||
         data.intent === 'unknown'
       ) {
         onGeneralQuery?.()
+      }
+
+      // Set address follow-up flag when a create_job came back with no job (address was missing)
+      const isNoAddressResponse = !data.job && !data.duplicate &&
+        (data.intent === 'new_job' || data.intent === 'create_job' || data.intent?.startsWith('create_job+'))
+      if (isNoAddressResponse && data.message?.toLowerCase().includes('address')) {
+        setAwaitingAddressForNewJob(true)
       }
     } catch {
       const errorMessage: Message = {
@@ -728,13 +822,21 @@ export default function ChatInterface({
       setMessages((prev) => [...prev, errorMessage])
     } finally {
       setLoading(false)
+      inputRef.current?.focus()
     }
-  }, [loading, awaitingAddressForNewJob])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingAddressForNewJob, builderId, onJobMention, onGeneralQuery])
 
-  // Handler: open an existing job (wired fully in Session 9)
-  const handleOpenJob = useCallback((_jobId: string) => {
-    // No-op for now — wired in Session 9
-  }, [])
+  const handleOpenJob = useCallback((jobId: string) => {
+    const job = messages.find(m => m.duplicateJob?.id === jobId)?.duplicateJob
+    if (job) {
+      onJobMention?.({ id: job.id, address: job.address, status: job.status })
+    }
+  }, [messages, onJobMention])
+
+  const handleOpenJobFromList = useCallback((jobId: string, address: string, status: string, clientName?: string) => {
+    onJobMention?.({ id: jobId, address, status, client_name: clientName })
+  }, [onJobMention])
 
   // Handler: approve variation from chat card — POST resolve then open notification modal
   const handleVariationApprove = useCallback(async (variationId: string) => {
@@ -840,9 +942,19 @@ export default function ChatInterface({
     }
   }, [onJobMention])
 
-  // Handler: create job anyway (skip duplicate check)
-  const handleCreateAnyway = useCallback(() => {
-    sendMessage('create job anyway', true)
+  // Handler: assign task from worker card — pre-fills input with job context if panel is open
+  const handleAssignWorkerTask = useCallback((workerFirstName: string) => {
+    const jobSuffix = activeJobAddress ? ` at ${activeJobAddress}` : ''
+    setInput(`task for ${workerFirstName}${jobSuffix}: `)
+    setTimeout(() => {
+      const ta = inputRef.current
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length) }
+    }, 50)
+  }, [activeJobAddress])
+
+  // Handler: create job anyway (skip duplicate check) — pass address so the API knows what to create
+  const handleCreateAnyway = useCallback((address: string) => {
+    sendMessage(`new job at ${address}`, true)
   }, [sendMessage])
 
   // Fire any pending action that needed sendMessage (e.g. "Review variations" from MorningBriefCard)
@@ -853,20 +965,70 @@ export default function ChatInterface({
     }
   }, [pendingAction, sendMessage])
 
-  // On mount: auto-send either the injected autoMessage (from homepage ?action=/?job= params)
-  // or the default morning brief if no override is provided.
+  // On mount: for new users (no jobs) inject a welcome message directly without an API call.
+  // For existing users, send the morning brief (or an injected autoMessage).
   useEffect(() => {
     if (!hasSentInitial) {
       setHasSentInitial(true)
       if (autoMessage) {
         onAutoMessageConsumed?.()
         sendMessage(autoMessage)
-      } else {
+      } else if (isDemo) {
         sendMessage('whats on today')
+      } else {
+        fetch(`/api/jobs?builder_id=${builderId}`)
+          .then(r => r.json())
+          .then((data: { jobs?: unknown[] }) => {
+            if (!data.jobs || data.jobs.length === 0) {
+              const firstName = userName.split(' ')[0]
+              setMessages([{
+                id: 'welcome-msg',
+                role: 'assistant',
+                content: `Morning ${firstName}. Let's get WorkA set up — it takes about 5 minutes.\n\nTell me your active jobs. You can list them all at once:\n\n"I've got 3 jobs on: 14 Smith St Fitzroy for the Hendersons, 8 Brown Rd Toorak for Caruso, 22 Jones Ave Collingwood"\n\nOr one at a time: "New job at 14 Smith St Fitzroy for the Hendersons"\n\nOnce your first job is in, upload the plans and I'll start building your quote automatically.\n\nYou can also add your crew: "My crew: Jack (carpenter), Mick (plumber), Sarah (tiler)"`,
+                timestamp: new Date(),
+              }])
+            } else {
+              sendMessage('whats on today')
+            }
+          })
+          .catch(() => sendMessage('whats on today'))
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasSentInitial, sendMessage])
+
+  // Voice input — toggles speech recognition on/off
+  const toggleVoice = useCallback(() => {
+    if (isListening) {
+      recognitionRef.current?.stop()
+      setIsListening(false)
+      return
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SpeechRecognitionCtor = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) return
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rec = new SpeechRecognitionCtor() as any
+    rec.continuous = false
+    rec.interimResults = false
+    rec.lang = 'en-AU'
+    rec.onstart = () => setIsListening(true)
+    rec.onend = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+    rec.onerror = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+    rec.onresult = (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => {
+      const transcript = Array.from(e.results).map(r => r[0].transcript).join(' ')
+      setInput(transcript)
+      inputRef.current?.focus()
+    }
+    recognitionRef.current = rec
+    rec.start()
+  }, [isListening])
 
   // Handle form submit
   const handleSubmit = (e: React.FormEvent) => {
@@ -921,6 +1083,12 @@ export default function ChatInterface({
         </div>
 
         <div className="flex items-center gap-2">
+          <Link
+            href="/settings/rates"
+            className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
+          >
+            Data
+          </Link>
           {isDemo && (
             <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200">
               Demo
@@ -960,12 +1128,15 @@ export default function ChatInterface({
           <ChatMessage
             key={message.id}
             message={message}
+            builderId={builderId}
             onOpenJob={handleOpenJob}
+            onOpenJobFromList={handleOpenJobFromList}
             onCreateAnyway={handleCreateAnyway}
             onAction={handleAction}
             onVariationApprove={handleVariationApprove}
             onVariationReject={handleVariationReject}
             onOpenMarginJob={handleOpenMarginJob}
+            onAssignWorkerTask={handleAssignWorkerTask}
           />
         ))}
 
@@ -1009,7 +1180,9 @@ export default function ChatInterface({
             address: uploadPanel.job.address,
             status: uploadPanel.job.status,
           }}
+          builderId={builderId}
           onIntakeComplete={handleIntakeComplete}
+          preloadedFiles={pendingFilesForUpload ?? undefined}
         />
       )}
 
@@ -1098,22 +1271,117 @@ export default function ChatInterface({
       )}
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3 pb-safe">
+      <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 pt-2 pb-3 pb-safe">
+        {/* Job picker — shown when a task needs a job assigned */}
+        {pendingTask ? (
+          <div className="mb-2">
+            <p className="text-xs text-slate-500 mb-1.5">
+              Adding: <span className="font-medium text-slate-700">&ldquo;{pendingTask.description}&rdquo;</span> — pick a job:
+            </p>
+            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {pendingTask.jobs.map((job) => {
+                const shortAddr = job.address.split(',')[0]
+                return (
+                  <button
+                    key={job.id}
+                    type="button"
+                    disabled={loading}
+                    onClick={async () => {
+                      const desc = pendingTask.description
+                      setPendingTask(null)
+                      // Optimistically add a user-side confirmation message
+                      const confirmMsg: Message = {
+                        id: generateId(),
+                        role: 'assistant',
+                        content: `Task added: "${desc}" — ${shortAddr}.`,
+                        timestamp: new Date(),
+                      }
+                      // Create the task directly
+                      try {
+                        await fetch(`/api/jobs/${job.id}/tasks`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ description: desc, builder_id: builderId, assigned_to: null }),
+                        })
+                      } catch { /* best-effort */ }
+                      setMessages((prev) => [...prev, confirmMsg])
+                    }}
+                    className="flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-full bg-brand-50 border border-brand-200 text-brand-700 hover:bg-brand-100 active:bg-brand-200 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    {shortAddr}
+                  </button>
+                )
+              })}
+              <button
+                type="button"
+                onClick={() => setPendingTask(null)}
+                className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors whitespace-nowrap"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+        /* Quick actions */
+        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none" aria-label="Quick actions">
+          {([
+            { label: "What's on", msg: 'whats on today' },
+            { label: 'New job', fill: 'New job at ' },
+            { label: 'Show jobs', msg: 'show my jobs' },
+            { label: 'Add task', fill: 'task for ' },
+            { label: 'My team', msg: 'show my team' },
+          ] as Array<{ label: string; msg?: string; fill?: string }>).map(({ label, msg, fill }) => (
+            <button
+              key={label}
+              type="button"
+              disabled={loading}
+              onClick={() => {
+                if (fill) {
+                  setInput(fill)
+                  inputRef.current?.focus()
+                } else if (msg) {
+                  sendMessage(msg)
+                }
+              }}
+              className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 text-slate-700 hover:bg-brand-50 hover:text-brand-700 active:bg-brand-100 transition-colors disabled:opacity-40 whitespace-nowrap"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        )}
+
         <form onSubmit={handleSubmit} className="flex items-end gap-2">
           <label htmlFor="chat-input" className="sr-only">
             Type a message
           </label>
+          {/* Mic button */}
+          <button
+            type="button"
+            onClick={toggleVoice}
+            disabled={loading}
+            aria-label={isListening ? 'Stop recording' : 'Start voice input'}
+            className={`flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-colors disabled:opacity-40 ${
+              isListening
+                ? 'bg-red-100 text-red-600 animate-pulse'
+                : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+            }`}
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+            </svg>
+          </button>
           <textarea
             ref={inputRef}
             id="chat-input"
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder="Ask something — e.g. 'whats on today'"
+            placeholder={isListening ? 'Listening…' : 'Ask something or tap a button above'}
             rows={1}
             disabled={loading}
             className="flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent transition-shadow duration-150 disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
-            style={{ minHeight: '38px', maxHeight: '120px' }}
+            style={{ minHeight: '40px', maxHeight: '120px' }}
           />
           <button
             type="submit"
@@ -1124,7 +1392,7 @@ export default function ChatInterface({
             Send
           </button>
         </form>
-        <p className="mt-1.5 text-xs text-slate-400">
+        <p className="mt-1.5 text-xs text-slate-400 hidden sm:block">
           Press <kbd className="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1">Enter</kbd> to send
           &nbsp;&middot;&nbsp;
           <kbd className="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1">Shift+Enter</kbd> for new line
