@@ -10,17 +10,25 @@ interface ExtractedCategory {
   count: number
 }
 
-interface ExtractionResult {
+interface FileResult {
   fileName: string
   totalRates: number
   categories: ExtractedCategory[]
 }
 
+interface FileJob {
+  file: File
+  status: 'queued' | 'processing' | 'done' | 'error'
+  stepIndex: number
+  statusText: string
+  result?: FileResult
+  errorMessage?: string
+}
+
 type PageState =
   | { kind: 'idle' }
-  | { kind: 'processing'; fileName: string; status: string }
-  | { kind: 'success'; result: ExtractionResult }
-  | { kind: 'error'; message: string }
+  | { kind: 'running'; jobs: FileJob[] }
+  | { kind: 'done'; jobs: FileJob[] }
 
 // ─── Demo extraction simulation ───────────────────────────────────────────────
 
@@ -32,20 +40,35 @@ const PROCESSING_STEPS = [
   'Matching to WorkA rate library…',
 ]
 
-async function simulateExtraction(fileName: string): Promise<ExtractionResult> {
-  await new Promise((r) => setTimeout(r, 2800))
+// Vary results slightly per file so multi-file results look distinct
+const DEMO_CATEGORIES: ExtractedCategory[] = [
+  { name: 'Concrete & site works', count: 7 },
+  { name: 'Framing & structural', count: 6 },
+  { name: 'Roofing', count: 4 },
+  { name: 'Electrical', count: 5 },
+  { name: 'Plumbing', count: 5 },
+  { name: 'Fit-out & finishes', count: 7 },
+]
+
+function demoResultForFile(file: File): FileResult {
+  // Seed variation based on filename length so multiple files look different
+  const seed = file.name.length % 3
+  const categories = DEMO_CATEGORIES.map((c, i) => ({
+    ...c,
+    count: Math.max(1, c.count + (i % 2 === seed ? 2 : -1)),
+  }))
   return {
-    fileName,
-    totalRates: 34,
-    categories: [
-      { name: 'Concrete & site works', count: 7 },
-      { name: 'Framing & structural', count: 6 },
-      { name: 'Roofing', count: 4 },
-      { name: 'Electrical', count: 5 },
-      { name: 'Plumbing', count: 5 },
-      { name: 'Fit-out & finishes', count: 7 },
-    ],
+    fileName: file.name,
+    totalRates: categories.reduce((s, c) => s + c.count, 0),
+    categories,
   }
+}
+
+const ACCEPTED_EXTENSIONS = ['.csv', '.pdf']
+
+function isAccepted(file: File) {
+  const ext = '.' + (file.name.split('.').pop()?.toLowerCase() ?? '')
+  return ACCEPTED_EXTENSIONS.includes(ext)
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -54,38 +77,50 @@ export default function RatesSettingsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [state, setState] = useState<PageState>({ kind: 'idle' })
-  const [stepIndex, setStepIndex] = useState(0)
 
-  const handleFile = useCallback(async (file: File) => {
-    setState({ kind: 'processing', fileName: file.name, status: PROCESSING_STEPS[0] })
-    setStepIndex(0)
+  const processQueue = useCallback(async (files: File[]) => {
+    const jobs: FileJob[] = files.map((f) => ({
+      file: f,
+      status: 'queued',
+      stepIndex: 0,
+      statusText: 'Queued',
+    }))
 
-    // Cycle through status messages
-    for (let i = 1; i < PROCESSING_STEPS.length; i++) {
-      await new Promise((r) => setTimeout(r, 500))
-      setStepIndex(i)
-      setState((s) =>
-        s.kind === 'processing' ? { ...s, status: PROCESSING_STEPS[i] } : s
-      )
+    setState({ kind: 'running', jobs: [...jobs] })
+
+    for (let i = 0; i < jobs.length; i++) {
+      // Mark as processing
+      jobs[i] = { ...jobs[i], status: 'processing', stepIndex: 0, statusText: PROCESSING_STEPS[0] }
+      setState({ kind: 'running', jobs: [...jobs] })
+
+      // Step through status messages
+      for (let step = 1; step < PROCESSING_STEPS.length; step++) {
+        await new Promise((r) => setTimeout(r, 480))
+        jobs[i] = { ...jobs[i], stepIndex: step, statusText: PROCESSING_STEPS[step] }
+        setState({ kind: 'running', jobs: [...jobs] })
+      }
+
+      // Simulate extraction
+      await new Promise((r) => setTimeout(r, 600))
+      jobs[i] = {
+        ...jobs[i],
+        status: 'done',
+        result: demoResultForFile(jobs[i].file),
+      }
+      setState({ kind: 'running', jobs: [...jobs] })
     }
 
-    try {
-      const result = await simulateExtraction(file.name)
-      setState({ kind: 'success', result })
-    } catch {
-      setState({ kind: 'error', message: 'Failed to extract rates. Check the file format and try again.' })
-    }
+    setState({ kind: 'done', jobs: [...jobs] })
   }, [])
 
   const handleFilesSelected = useCallback(
     (files: FileList | null) => {
       if (!files || files.length === 0) return
-      const file = files[0]
-      const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-      if (!['csv', 'pdf'].includes(ext)) return
-      handleFile(file)
+      const valid = Array.from(files).filter(isAccepted)
+      if (valid.length === 0) return
+      processQueue(valid)
     },
-    [handleFile]
+    [processQueue]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -106,6 +141,23 @@ export default function RatesSettingsPage() {
     },
     [handleFilesSelected]
   )
+
+  // Merged category totals across all completed files
+  const mergedCategories = (() => {
+    if (state.kind !== 'done') return []
+    const map = new Map<string, number>()
+    for (const job of state.jobs) {
+      if (job.result) {
+        for (const cat of job.result.categories) {
+          map.set(cat.name, (map.get(cat.name) ?? 0) + cat.count)
+        }
+      }
+    }
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }))
+  })()
+
+  const totalRates = mergedCategories.reduce((s, c) => s + c.count, 0)
+  const completedJobs = state.kind === 'done' ? state.jobs.filter((j) => j.status === 'done') : []
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -151,7 +203,7 @@ export default function RatesSettingsPage() {
             </a>
           </div>
 
-          {/* Upload zone — only shown when idle */}
+          {/* ── Idle: drop zone ───────────────────────────────────────────── */}
           {state.kind === 'idle' && (
             <div
               className={`rounded-xl border-2 transition-colors duration-150 bg-white cursor-pointer ${
@@ -163,13 +215,14 @@ export default function RatesSettingsPage() {
               onClick={() => fileInputRef.current?.click()}
               role="button"
               tabIndex={0}
-              aria-label="Upload rate sheet"
+              aria-label="Upload rate sheets"
               onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
             >
               <input
                 ref={fileInputRef}
                 type="file"
                 accept=".csv,.pdf"
+                multiple
                 className="sr-only"
                 onChange={(e) => handleFilesSelected(e.target.files)}
               />
@@ -179,68 +232,99 @@ export default function RatesSettingsPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                   </svg>
                 </div>
-                <p className="text-sm font-medium text-slate-700">Drop your CSV here, or click to browse</p>
-                <p className="text-xs text-slate-400">CSV or PDF — past quotes, invoices, supplier price lists</p>
+                <p className="text-sm font-medium text-slate-700">Drop your files here, or click to browse</p>
+                <p className="text-xs text-slate-400">CSV or PDF — you can drop multiple files at once</p>
               </div>
             </div>
           )}
 
-          {/* Processing state */}
-          {state.kind === 'processing' && (
-            <div className="bg-white rounded-xl border border-slate-200 px-4 py-4 space-y-3">
-              <div className="flex items-center gap-3">
-                <svg className="w-5 h-5 text-brand-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-800 truncate">{state.fileName}</p>
-                  <p className="text-xs text-slate-500 mt-0.5">{state.status}</p>
-                </div>
-              </div>
-              {/* Progress bar */}
-              <div className="h-1 bg-slate-100 rounded-full overflow-hidden">
+          {/* ── Running: per-file queue ───────────────────────────────────── */}
+          {(state.kind === 'running' || state.kind === 'done') && (
+            <div className="space-y-2">
+              {state.jobs.map((job, i) => (
                 <div
-                  className="h-full bg-brand-500 rounded-full transition-all duration-500"
-                  style={{ width: `${((stepIndex + 1) / PROCESSING_STEPS.length) * 100}%` }}
-                />
-              </div>
+                  key={i}
+                  className={`bg-white rounded-xl border px-4 py-3 ${
+                    job.status === 'done'
+                      ? 'border-green-200'
+                      : job.status === 'error'
+                      ? 'border-red-200'
+                      : 'border-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    {/* Status icon */}
+                    {job.status === 'done' && (
+                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-green-100 flex items-center justify-center">
+                        <svg className="w-3.5 h-3.5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                      </span>
+                    )}
+                    {job.status === 'error' && (
+                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-red-100 flex items-center justify-center">
+                        <svg className="w-3.5 h-3.5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </span>
+                    )}
+                    {job.status === 'processing' && (
+                      <svg className="w-5 h-5 text-brand-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    )}
+                    {job.status === 'queued' && (
+                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center">
+                        <svg className="w-3 h-3 text-slate-400" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                          <circle cx="12" cy="12" r="4" />
+                        </svg>
+                      </span>
+                    )}
+
+                    {/* File name + status */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-800 truncate">{job.file.name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {job.status === 'done' && job.result
+                          ? `${job.result.totalRates} rates extracted`
+                          : job.status === 'error'
+                          ? job.errorMessage ?? 'Extraction failed'
+                          : job.status === 'queued'
+                          ? 'Waiting…'
+                          : job.statusText}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Progress bar — only while processing */}
+                  {job.status === 'processing' && (
+                    <div className="mt-2.5 h-1 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-brand-500 rounded-full transition-all duration-500"
+                        style={{ width: `${((job.stepIndex + 1) / PROCESSING_STEPS.length) * 100}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
-          {/* Success state */}
-          {state.kind === 'success' && (
-            <div className="space-y-3">
-              {/* Summary card */}
-              <div className="bg-white rounded-xl border border-green-200 px-4 py-4">
-                <div className="flex items-start gap-3">
-                  <span className="flex-shrink-0 w-7 h-7 rounded-full bg-green-100 flex items-center justify-center mt-0.5">
-                    <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                    </svg>
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-slate-900">
-                      {state.result.totalRates} rates extracted
-                    </p>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      from &ldquo;{state.result.fileName}&rdquo;
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setState({ kind: 'idle' })}
-                    className="flex-shrink-0 text-slate-400 hover:text-slate-600 transition-colors"
-                    aria-label="Upload another file"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-
-                {/* Category breakdown */}
-                <div className="mt-4 border-t border-slate-100 pt-3 space-y-2">
-                  {state.result.categories.map((cat) => (
+          {/* ── Done: combined summary + actions ─────────────────────────── */}
+          {state.kind === 'done' && completedJobs.length > 0 && (
+            <div className="mt-4 space-y-3">
+              <div className="bg-white rounded-xl border border-slate-200 px-4 py-4">
+                <p className="text-sm font-semibold text-slate-900 mb-3">
+                  {totalRates} rates ready to apply
+                  {completedJobs.length > 1 && (
+                    <span className="text-slate-400 font-normal ml-1.5">
+                      across {completedJobs.length} files
+                    </span>
+                  )}
+                </p>
+                <div className="space-y-2">
+                  {mergedCategories.map((cat) => (
                     <div key={cat.name} className="flex items-center justify-between gap-3">
                       <span className="text-sm text-slate-700">{cat.name}</span>
                       <span className="text-xs font-medium text-slate-500 flex-shrink-0">
@@ -251,7 +335,6 @@ export default function RatesSettingsPage() {
                 </div>
               </div>
 
-              {/* Actions */}
               <div className="flex gap-3">
                 <button className="btn-primary flex-1 py-2.5 text-sm">
                   Apply rates
@@ -260,32 +343,9 @@ export default function RatesSettingsPage() {
                   onClick={() => setState({ kind: 'idle' })}
                   className="btn-secondary px-4 py-2.5 text-sm"
                 >
-                  Upload another
+                  Upload more
                 </button>
               </div>
-            </div>
-          )}
-
-          {/* Error state */}
-          {state.kind === 'error' && (
-            <div className="bg-white rounded-xl border border-red-200 px-4 py-4">
-              <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-7 h-7 rounded-full bg-red-100 flex items-center justify-center mt-0.5">
-                  <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-slate-900">Extraction failed</p>
-                  <p className="text-xs text-slate-500 mt-0.5">{state.message}</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setState({ kind: 'idle' })}
-                className="mt-3 btn-secondary w-full py-2 text-sm"
-              >
-                Try again
-              </button>
             </div>
           )}
         </section>
