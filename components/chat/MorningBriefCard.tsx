@@ -20,19 +20,16 @@ interface MorningBriefCardProps {
 
 const priorityConfig = {
   high: {
-    dot: 'bg-red-500',
     badge: 'badge-high',
     label: 'HIGH',
     order: 0,
   },
   medium: {
-    dot: 'bg-amber-500',
     badge: 'badge-medium',
     label: 'MED',
     order: 1,
   },
   low: {
-    dot: 'bg-slate-400',
     badge: 'badge-low',
     label: 'LOW',
     order: 2,
@@ -42,62 +39,56 @@ const priorityConfig = {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function MorningBriefCard({ message, alerts, onAction }: MorningBriefCardProps) {
-  // Sort alerts by priority: high → medium → low
   const sorted = [...alerts].sort(
     (a, b) => priorityConfig[a.priority].order - priorityConfig[b.priority].order
   )
 
+  // Strip any "Suggested order:" suffix the AI sometimes appends — the alert
+  // cards below already convey that ordered list.
+  const summaryText = message.split(/\n+suggested order[:\s]/i)[0].trim()
+
   return (
     <div className="rounded-lg border border-brand-200 bg-brand-50 p-4 max-w-full">
-      {/* Summary text */}
-      <p className="text-sm font-medium text-slate-800 mb-4 leading-relaxed">{message}</p>
+      <p className="text-sm text-slate-700 leading-relaxed mb-3">{summaryText}</p>
 
-      {/* Alerts list */}
       {sorted.length > 0 && (
-        <div className="space-y-3">
+        <div className="space-y-2">
           {sorted.map((alert, index) => {
             const config = priorityConfig[alert.priority]
             return (
               <div
                 key={alert.entity_id ? `${alert.entity_id}-${index}` : index}
-                className="flex items-start gap-3"
+                className="bg-white rounded-md border border-slate-100 px-3 py-2.5"
               >
-                {/* Priority dot */}
-                <span
-                  className={`mt-1 flex-shrink-0 w-2 h-2 rounded-full ${config.dot}`}
-                  aria-hidden="true"
-                />
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                    <span className={config.badge}>{config.label}</span>
-                  </div>
-                  <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
-                  {alert.action && (
-                    <button
-                      type="button"
-                      className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-brand-600 hover:text-brand-700 hover:underline transition-colors focus:outline-none focus:ring-1 focus:ring-brand-400 rounded"
-                      aria-label={`${alert.action} for this item`}
-                      onClick={() => {
-                        if (onAction && alert.action) {
-                          onAction(alert.action, alert.entity_id, alert.entity_type)
-                        }
-                      }}
-                    >
-                      {alert.action}
-                      <svg
-                        className="w-3 h-3"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                        aria-hidden="true"
+                <div className="flex items-start gap-2">
+                  <span className={`${config.badge} flex-shrink-0 mt-0.5`}>{config.label}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
+                    {alert.action && (
+                      <button
+                        type="button"
+                        className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand-600 hover:text-brand-700 hover:underline transition-colors focus:outline-none focus:ring-1 focus:ring-brand-400 rounded"
+                        aria-label={`${alert.action} for this item`}
+                        onClick={() => {
+                          if (onAction && alert.action) {
+                            onAction(alert.action, alert.entity_id, alert.entity_type)
+                          }
+                        }}
                       >
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                      </svg>
-                    </button>
-                  )}
+                        {alert.action}
+                        <svg
+                          className="w-3 h-3"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                          aria-hidden="true"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             )
