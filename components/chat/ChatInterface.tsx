@@ -241,6 +241,7 @@ export default function ChatInterface({
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
   const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [pendingTask, setPendingTask] = useState<{ description: string; jobs: Array<{ id: string; address: string; status: string }> } | null>(null)
   const [workerModal, setWorkerModal] = useState<WorkerModalState>({
     isOpen: false,
