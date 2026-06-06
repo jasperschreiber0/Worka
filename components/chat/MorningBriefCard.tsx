@@ -1,7 +1,5 @@
 'use client'
 
-import { MarkdownContent } from './ChatMessage'
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface Alert {
@@ -22,19 +20,16 @@ interface MorningBriefCardProps {
 
 const priorityConfig = {
   high: {
-    dot: 'bg-red-500',
     badge: 'badge-high',
     label: 'HIGH',
     order: 0,
   },
   medium: {
-    dot: 'bg-amber-500',
     badge: 'badge-medium',
     label: 'MED',
     order: 1,
   },
   low: {
-    dot: 'bg-slate-400',
     badge: 'badge-low',
     label: 'LOW',
     order: 2,
@@ -44,21 +39,20 @@ const priorityConfig = {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function MorningBriefCard({ message, alerts, onAction }: MorningBriefCardProps) {
-  // Sort alerts by priority: high → medium → low
   const sorted = [...alerts].sort(
     (a, b) => priorityConfig[a.priority].order - priorityConfig[b.priority].order
   )
 
+  // Strip any "Suggested order:" suffix the AI sometimes appends — the alert
+  // cards below already convey that ordered list.
+  const summaryText = message.split(/\n+suggested order[:\s]/i)[0].trim()
+
   return (
     <div className="rounded-lg border border-brand-200 bg-brand-50 p-4 max-w-full">
-      {/* Summary text */}
-      <div className="mb-4 text-sm font-medium text-slate-800 leading-relaxed">
-        <MarkdownContent text={message} />
-      </div>
+      <p className="text-sm text-slate-700 leading-relaxed mb-3">{summaryText}</p>
 
-      {/* Alerts list */}
       {sorted.length > 0 && (
-        <div className="space-y-3">
+        <div className="space-y-2">
           {sorted.map((alert, index) => {
             const config = priorityConfig[alert.priority]
             const isClickable = !!(alert.action && onAction)
@@ -68,9 +62,9 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                 role={isClickable ? 'button' : undefined}
                 tabIndex={isClickable ? 0 : undefined}
                 aria-label={isClickable ? alert.action : undefined}
-                className={`flex items-start gap-3 rounded-md px-2 py-1.5 -mx-2 transition-colors ${
+                className={`bg-white rounded-md border border-slate-100 px-3 py-2.5 transition-colors ${
                   isClickable
-                    ? 'cursor-pointer hover:bg-brand-100 focus:outline-none focus:ring-1 focus:ring-brand-400'
+                    ? 'cursor-pointer hover:border-brand-200 hover:bg-brand-50 focus:outline-none focus:ring-1 focus:ring-brand-400'
                     : ''
                 }`}
                 onClick={() => {
@@ -83,32 +77,28 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                   }
                 }}
               >
-                {/* Priority dot */}
-                <span
-                  className={`mt-1 flex-shrink-0 w-2 h-2 rounded-full ${config.dot}`}
-                  aria-hidden="true"
-                />
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                    <span className={config.badge}>{config.label}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
+                <div className="flex items-start gap-2">
+                  <span className={`${config.badge} flex-shrink-0 mt-0.5`}>{config.label}</span>
+                  <div className="flex-1 min-w-0">
                     <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
-                    {isClickable && (
-                      <svg
-                        className="w-3.5 h-3.5 flex-shrink-0 text-brand-500"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2.5}
-                        aria-hidden="true"
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                      </svg>
+                    {alert.action && (
+                      <p className="mt-1 text-xs font-medium text-brand-600">
+                        {alert.action} →
+                      </p>
                     )}
                   </div>
+                  {isClickable && (
+                    <svg
+                      className="w-3.5 h-3.5 flex-shrink-0 text-slate-300 mt-0.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2.5}
+                      aria-hidden="true"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  )}
                 </div>
               </div>
             )

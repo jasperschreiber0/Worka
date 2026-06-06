@@ -1074,6 +1074,12 @@ export default function ChatInterface({
             </svg>
           </div>
           <span className="text-lg font-bold text-slate-900 tracking-tight">WorkA</span>
+          <span
+            className="hidden sm:inline-block text-[10px] font-mono text-slate-400 leading-none mt-0.5"
+            title={`v${process.env.NEXT_PUBLIC_APP_VERSION} · ${process.env.NEXT_PUBLIC_COMMIT_SHA}`}
+          >
+            v{process.env.NEXT_PUBLIC_APP_VERSION}·{process.env.NEXT_PUBLIC_COMMIT_SHA}
+          </span>
         </div>
 
         <div className="flex items-center gap-2">
