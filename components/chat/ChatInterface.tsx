@@ -403,8 +403,6 @@ export default function ChatInterface({
     [uploadPanel.job]
   )
 
-  // Pending action that requires sendMessage (defined later)
- const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
 
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
