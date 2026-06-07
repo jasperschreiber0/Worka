@@ -1083,6 +1083,12 @@ export default function ChatInterface({
 
         <div className="flex items-center gap-2">
           <Link
+            href="/dashboard"
+            className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
+          >
+            Dashboard
+          </Link>
+          <Link
             href="/settings/rates"
             className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
           >

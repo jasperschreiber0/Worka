@@ -11,6 +11,7 @@ import FilesTab from '@/components/job/tabs/FilesTab'
 import CommsTab from '@/components/job/tabs/CommsTab'
 import TasksTab from '@/components/job/tabs/TasksTab'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
+import ProofTab from '@/components/job/tabs/ProofTab'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,7 +22,7 @@ export interface ActiveJob {
   client_name?: string
 }
 
-type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms' | 'tasks'
+type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms' | 'tasks' | 'proof'
 
 interface Tab {
   id: TabId
@@ -52,6 +53,7 @@ const TABS: Tab[] = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'files', label: 'Files' },
   { id: 'comms', label: 'Comms' },
+  { id: 'proof', label: 'Proof' },
 ]
 
 function capitalise(str: string): string {
@@ -214,6 +216,8 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
             onComposeEmail={job && onComposeEmail ? () => onComposeEmail(job.id) : undefined}
           />
         )
+      case 'proof':
+        return <ProofTab jobId={snapshot.job.id} />
       default:
         return <SkeletonSection />
     }
