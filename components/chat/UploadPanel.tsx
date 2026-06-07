@@ -319,8 +319,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
           // Size: full-width bottom sheet on mobile, fixed-width sidebar on desktop
           'w-full sm:w-[420px] sm:max-w-[90vw]',
           'h-[90dvh] sm:h-full',
-          // Style
-          'bg-white',
+          // Shape + shadow
           'rounded-t-2xl sm:rounded-none sm:rounded-l-2xl',
           'shadow-2xl',
           // Slide-in transitions
@@ -329,14 +328,19 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
             ? 'translate-y-0 sm:translate-y-0 sm:translate-x-0'
             : 'translate-y-full sm:translate-y-0 sm:translate-x-full',
         ].join(' ')}
+        style={{ background: 'var(--bg-surface)' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* ── Header ────────────────────────────────────────────────── */}
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 flex-shrink-0">
+        <div
+          className="flex items-center gap-3 px-5 py-4 flex-shrink-0"
+          style={{ borderBottom: '1px solid var(--bg-border)' }}
+        >
           <button
             ref={closeButtonRef}
             onClick={onClose}
-            className="flex items-center justify-center w-8 h-8 rounded-full text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-colors flex-shrink-0"
+            className="flex items-center justify-center w-8 h-8 rounded-full transition-colors flex-shrink-0"
+            style={{ color: 'var(--text-secondary)' }}
             aria-label="Close upload panel"
           >
             {/* Left arrow icon */}
@@ -351,10 +355,10 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
             </svg>
           </button>
           <div className="min-w-0">
-            <p className="text-xs font-medium text-slate-400 uppercase tracking-wide leading-none mb-0.5">
+            <p className="text-xs font-medium uppercase tracking-wide leading-none mb-0.5" style={{ color: 'var(--text-tertiary)' }}>
               Upload plans
             </p>
-            <h2 className="text-base font-semibold text-slate-900 truncate leading-tight">
+            <h2 className="text-base font-semibold truncate leading-tight" style={{ color: 'var(--text-primary)' }}>
               {job.address}
             </h2>
           </div>
@@ -379,7 +383,8 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
               {/* Upload error */}
               {uploadError && (
                 <div
-                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+                  className="rounded-lg px-4 py-3 text-sm"
+                  style={{ background: 'rgba(244,67,54,0.1)', border: '1px solid rgba(244,67,54,0.25)', color: 'var(--status-red)' }}
                   role="alert"
                 >
                   {uploadError}
@@ -408,20 +413,24 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
                   'transition-colors duration-150',
                   dragOver
                     ? 'border-brand-500 bg-brand-50'
-                    : 'border-slate-300 bg-slate-50 hover:border-brand-400 hover:bg-brand-50',
+                    : 'hover:border-brand-400',
                 ].join(' ')}
+                style={!dragOver ? { borderColor: 'var(--bg-border)', background: 'var(--bg-elevated)' } : undefined}
               >
                 {files.length === 0 ? (
                   <>
                     {/* File icon */}
-                    <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 shadow-sm flex items-center justify-center">
+                    <div
+                      className="w-12 h-12 rounded-xl shadow-sm flex items-center justify-center"
+                      style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}
+                    >
                       <svg
                         width="24"
                         height="24"
                         viewBox="0 0 24 24"
                         fill="none"
                         aria-hidden="true"
-                        className="text-slate-400"
+                        style={{ color: 'var(--text-tertiary)' }}
                       >
                         <path
                           d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
@@ -440,29 +449,30 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
                       </svg>
                     </div>
                     <div>
-                      <p className="text-sm font-semibold text-slate-700">
+                      <p className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
                         Drop plans here
                       </p>
-                      <p className="text-xs text-slate-500 mt-0.5">or tap to browse</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>or tap to browse</p>
                     </div>
-                    <p className="text-xs text-slate-400">PDF · DWG · Images accepted</p>
+                    <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>PDF · DWG · Images accepted</p>
                   </>
                 ) : (
                   <div className="w-full space-y-2" onClick={(e) => e.stopPropagation()}>
                     {files.map((sf) => (
                       <div
                         key={sf.id}
-                        className="flex items-center gap-3 bg-white border border-slate-200 rounded-lg px-3 py-2.5 text-left"
+                        className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left"
+                        style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}
                       >
                         {/* File type icon */}
-                        <div className="w-8 h-8 rounded-md bg-brand-50 border border-brand-100 flex items-center justify-center flex-shrink-0">
+                        <div className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,107,43,0.1)', border: '1px solid rgba(255,107,43,0.2)' }}>
                           <svg
                             width="14"
                             height="14"
                             viewBox="0 0 24 24"
                             fill="none"
                             aria-hidden="true"
-                            className="text-brand-500"
+                            style={{ color: 'var(--orange-primary)' }}
                           >
                             <path
                               d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
@@ -481,10 +491,10 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
                           </svg>
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-slate-800 truncate leading-tight">
+                          <p className="text-sm font-medium truncate leading-tight" style={{ color: 'var(--text-primary)' }}>
                             {sf.file.name}
                           </p>
-                          <p className="text-xs text-slate-400 mt-0.5">
+                          <p className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
                             {formatFileSize(sf.file.size)}
                           </p>
                         </div>
@@ -493,7 +503,8 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
                             e.stopPropagation()
                             removeFile(sf.id)
                           }}
-                          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"
+                          style={{ color: 'var(--text-tertiary)' }}
                           aria-label={`Remove ${sf.file.name}`}
                         >
                           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
@@ -510,7 +521,8 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
                     {/* "Add more" hint */}
                     <button
                       onClick={handleBrowseClick}
-                      className="w-full text-xs text-brand-600 hover:text-brand-700 font-medium py-1.5 text-center transition-colors"
+                      className="w-full text-xs font-medium py-1.5 text-center transition-colors"
+                      style={{ color: 'var(--orange-primary)' }}
                     >
                       + Add more files
                     </button>
@@ -532,27 +544,27 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
 
               {/* Accepted file types list */}
               <div className="space-y-1.5">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                <p className="text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--text-secondary)' }}>
                   Accepted file types
                 </p>
-                <ul className="space-y-1 text-sm text-slate-600">
+                <ul className="space-y-1 text-sm" style={{ color: 'var(--text-secondary)' }}>
                   <li className="flex items-start gap-2">
-                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    <span className="mt-0.5" style={{ color: 'var(--text-tertiary)' }} aria-hidden="true">•</span>
                     Architectural plans (PDF/DWG)
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    <span className="mt-0.5" style={{ color: 'var(--text-tertiary)' }} aria-hidden="true">•</span>
                     Site photos (JPG/PNG)
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    <span className="mt-0.5" style={{ color: 'var(--text-tertiary)' }} aria-hidden="true">•</span>
                     Engineer drawings
                   </li>
                 </ul>
               </div>
 
               {/* Info text */}
-              <p className="text-sm text-slate-500 leading-relaxed">
+              <p className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                 WorkA will extract quantities and draft your quote. You review everything before it
                 goes anywhere.
               </p>
@@ -562,7 +574,10 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
 
         {/* ── Footer CTA (hidden during intake) ─────────────────── */}
         {!intakeStarted && (
-          <div className="flex-shrink-0 px-5 py-4 border-t border-slate-200 bg-white">
+          <div
+            className="flex-shrink-0 px-5 py-4"
+            style={{ borderTop: '1px solid var(--bg-border)', background: 'var(--bg-surface)' }}
+          >
             <button
               onClick={handleUpload}
               disabled={files.length === 0 || uploading}
@@ -571,7 +586,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
               {uploading ? (
                 <span className="flex items-center justify-center gap-2">
                   <svg
-                    className="animate-spin w-4 h-4 text-white"
+                    className="animate-spin w-4 h-4"
                     fill="none"
                     viewBox="0 0 24 24"
                     aria-hidden="true"
@@ -605,7 +620,8 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
       {/* ── Toast ────────────────────────────────────────────────────── */}
       {toast && (
         <div
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] bg-slate-800 text-white text-sm font-medium px-4 py-2.5 rounded-xl shadow-lg pointer-events-none"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] text-sm font-medium px-4 py-2.5 rounded-xl shadow-lg pointer-events-none"
+          style={{ background: 'var(--bg-elevated)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
           role="status"
           aria-live="polite"
         >
