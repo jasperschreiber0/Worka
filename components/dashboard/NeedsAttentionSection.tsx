@@ -42,9 +42,19 @@ export default function NeedsAttentionSection({ alerts, onJobOpen }: NeedsAttent
   if (sorted.length === 0) {
     return (
       <div>
-        <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Needs Attention</h2>
-        <div className="rounded-lg border border-slate-200 bg-white px-4 py-6 text-center">
-          <p className="text-sm text-slate-400">Nothing needs attention right now.</p>
+        <h2
+          className="text-[12px] font-semibold uppercase tracking-wide mb-3"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          Needs Attention
+        </h2>
+        <div
+          className="rounded-lg border px-4 py-6 text-center"
+          style={{ background: 'var(--bg-surface)', borderColor: 'var(--bg-border)' }}
+        >
+          <p className="text-[13px]" style={{ color: 'var(--text-tertiary)' }}>
+            Nothing needs attention right now.
+          </p>
         </div>
       </div>
     )
@@ -52,7 +62,12 @@ export default function NeedsAttentionSection({ alerts, onJobOpen }: NeedsAttent
 
   return (
     <div>
-      <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Needs Attention</h2>
+      <h2
+        className="text-[12px] font-semibold uppercase tracking-wide mb-3"
+        style={{ color: 'var(--text-secondary)' }}
+      >
+        Needs Attention
+      </h2>
       <div className="space-y-2">
         {sorted.map((alert, i) => {
           const config = PRIORITY_CONFIG[alert.priority]
@@ -63,17 +78,37 @@ export default function NeedsAttentionSection({ alerts, onJobOpen }: NeedsAttent
               tabIndex={0}
               onClick={() => handleClick(alert)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick(alert) } }}
-              className="bg-white rounded-lg border border-slate-100 px-4 py-3 cursor-pointer hover:border-brand-200 hover:bg-brand-50 transition-colors focus:outline-none focus:ring-1 focus:ring-brand-400"
+              className="rounded-lg border px-4 py-3 cursor-pointer transition-colors focus:outline-none focus:ring-1"
+              style={{
+                background: 'var(--bg-surface)',
+                borderColor: 'var(--bg-border)',
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-elevated)'
+                ;(e.currentTarget as HTMLDivElement).style.borderColor = 'var(--orange-primary)'
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-surface)'
+                ;(e.currentTarget as HTMLDivElement).style.borderColor = 'var(--bg-border)'
+              }}
             >
               <div className="flex items-start gap-2.5">
                 <span className={`${config.badge} flex-shrink-0 mt-0.5`}>{config.label}</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
+                  <p className="text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>
+                    {alert.message}
+                  </p>
                   {alert.action && (
-                    <p className="mt-1 text-xs font-medium text-brand-600">{alert.action} →</p>
+                    <p className="mt-1 text-[11px] font-medium" style={{ color: 'var(--orange-primary)' }}>
+                      {alert.action} →
+                    </p>
                   )}
                 </div>
-                <svg className="w-3.5 h-3.5 flex-shrink-0 text-slate-300 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
+                <svg
+                  className="w-3.5 h-3.5 flex-shrink-0 mt-0.5"
+                  style={{ color: 'var(--text-tertiary)' }}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
               </div>

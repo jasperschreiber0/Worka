@@ -57,33 +57,66 @@ export default function RecentActivityFeed({ activity }: RecentActivityFeedProps
   if (activity.length === 0) {
     return (
       <div>
-        <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Recent Activity</h2>
-        <p className="text-sm text-slate-400">No recent activity.</p>
+        <h2
+          className="text-[12px] font-semibold uppercase tracking-wide mb-3"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          Recent Activity
+        </h2>
+        <p className="text-[13px]" style={{ color: 'var(--text-tertiary)' }}>
+          No recent activity.
+        </p>
       </div>
     )
   }
 
   return (
     <div>
-      <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Recent Activity</h2>
+      <h2
+        className="text-[12px] font-semibold uppercase tracking-wide mb-3"
+        style={{ color: 'var(--text-secondary)' }}
+      >
+        Recent Activity
+      </h2>
       <div className="space-y-0">
         {activity.map((item, i) => (
-          <div key={item.id} className="flex items-start gap-3 py-2.5 border-b border-slate-100 last:border-0">
+          <div
+            key={item.id}
+            className="flex items-start gap-3 py-2.5 last:border-0"
+            style={{ borderBottom: i < activity.length - 1 ? '1px solid var(--bg-border)' : undefined }}
+          >
             {/* Timeline dot + icon */}
             <div className="flex flex-col items-center flex-shrink-0 mt-0.5">
-              <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-slate-500">
+              <div
+                className="w-6 h-6 rounded-full flex items-center justify-center"
+                style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+              >
                 {TYPE_ICONS[item.type]}
               </div>
-              {i < activity.length - 1 && <div className="w-px flex-1 bg-slate-100 mt-1 min-h-[12px]" />}
+              {i < activity.length - 1 && (
+                <div
+                  className="w-px flex-1 mt-1 min-h-[12px]"
+                  style={{ background: 'var(--bg-border)' }}
+                />
+              )}
             </div>
             {/* Content */}
             <div className="flex-1 min-w-0 pb-1">
-              <p className="text-sm text-slate-700 leading-snug">{item.description}</p>
+              <p className="text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>
+                {item.description}
+              </p>
               {item.job_address && (
-                <p className="text-xs text-slate-400 mt-0.5 truncate">{item.job_address}</p>
+                <p className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--text-tertiary)' }}>
+                  {item.job_address}
+                </p>
               )}
             </div>
-            <span className="text-xs text-slate-400 flex-shrink-0 mt-0.5">{relativeTime(item.timestamp)}</span>
+            <span
+              className="text-[11px] flex-shrink-0 mt-0.5"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              {relativeTime(item.timestamp)}
+            </span>
           </div>
         ))}
       </div>
