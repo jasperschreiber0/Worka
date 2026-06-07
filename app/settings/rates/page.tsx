@@ -238,11 +238,12 @@ export default function RatesPage() {
       const text = e.target?.result as string
       const parsed = parseCSV(text)
       if (!parsed.length) {
-        alert('Could not read the CSV. Make sure it has headers: trade_category, description, unit, rate_ex_gst')
+        setImportError('Could not read this CSV — no matching rows found. Download the template to see the expected format.')
         return
       }
       setRows(parsed)
       setStage('preview')
+      setTimeout(() => document.getElementById('import-actions')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100)
     }
     reader.readAsText(file)
   }
@@ -347,11 +348,16 @@ export default function RatesPage() {
               </span>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-green-800">
-                  {validCount} rate{validCount !== 1 ? 's' : ''} imported
+                  {validCount} rate{validCount !== 1 ? 's' : ''} saved to WorkA
                 </p>
                 <p className="mt-0.5 text-xs text-green-700">
-                  WorkA will use these rates when quoting. Upload another file or go back to chat.
+                  These rates are now active. WorkA will use them when quoting your next job.
                 </p>
+                {!process.env.NEXT_PUBLIC_SUPABASE_URL && (
+                  <p className="mt-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                    Demo mode — rates are held in memory and will reset when the server restarts. Connect Supabase to persist them.
+                  </p>
+                )}
                 <div className="mt-3 flex gap-2">
                   <button
                     onClick={resetToIdle}
@@ -388,6 +394,12 @@ export default function RatesPage() {
                 Download template
               </button>
             </div>
+
+            {importError && stage === 'idle' && (
+              <p className="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {importError}
+              </p>
+            )}
 
             <div className="bg-white rounded-xl border border-slate-200 px-5 py-4 mb-3">
               {/* Drop zone */}
@@ -508,25 +520,35 @@ export default function RatesPage() {
             </div>
 
             {importError && (
-              <p className="mt-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              <p className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                 {importError}
               </p>
             )}
 
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                onClick={resetToIdle}
-                className="text-sm text-slate-600 border border-slate-200 rounded-xl px-4 py-2 hover:bg-slate-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleImport}
-                disabled={validCount === 0}
-                className="text-sm font-semibold text-white bg-brand-500 hover:bg-brand-600 rounded-xl px-5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Import {validCount} rate{validCount !== 1 ? 's' : ''}
-              </button>
+            <div id="import-actions" className="mt-4 bg-white border border-brand-200 rounded-xl px-5 py-4 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-900">
+                  Ready to save {validCount} rate{validCount !== 1 ? 's' : ''}
+                </p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {skippedCount > 0 ? `${skippedCount} row${skippedCount !== 1 ? 's' : ''} will be skipped — unknown category.` : 'All rows matched successfully.'}
+                </p>
+              </div>
+              <div className="flex gap-2 flex-shrink-0">
+                <button
+                  onClick={resetToIdle}
+                  className="text-sm text-slate-600 border border-slate-200 rounded-xl px-4 py-2 hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleImport}
+                  disabled={validCount === 0}
+                  className="text-sm font-semibold text-white bg-brand-500 hover:bg-brand-600 rounded-xl px-5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Save to WorkA
+                </button>
+              </div>
             </div>
           </section>
         )}
