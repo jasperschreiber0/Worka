@@ -109,7 +109,14 @@ Return ONLY valid JSON:
 
     return NextResponse.json({ rates })
   } catch (err) {
-    console.error('[extract-pdf] Error:', err)
-    return NextResponse.json({ error: 'PDF extraction failed — try uploading as CSV instead.' }, { status: 500 })
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('[extract-pdf] Error:', message)
+    // Surface the real error so it's visible in the UI during debugging
+    return NextResponse.json({ error: `PDF extraction failed: ${message}` }, { status: 500 })
   }
+}
+
+// Increase body size limit for PDF uploads
+export const config = {
+  api: { bodyParser: false },
 }

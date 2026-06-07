@@ -22,6 +22,9 @@ const nextConfig = {
   },
   experimental: {
     typedRoutes: false,
+    serverActions: {
+      bodySizeLimit: '20mb',
+    },
   },
   images: {
     remotePatterns: [
