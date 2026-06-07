@@ -7,12 +7,12 @@ interface JobListCardProps {
   onOpenJob: (jobId: string, address: string, status: string, clientName?: string) => void
 }
 
-function statusStyle(status: string): string {
-  if (status === 'active') return 'bg-green-100 text-green-700'
-  if (status === 'quoted') return 'bg-blue-100 text-blue-700'
-  if (status === 'quoting') return 'bg-amber-100 text-amber-700'
-  if (status === 'complete') return 'bg-slate-100 text-slate-600'
-  return 'bg-slate-100 text-slate-500'
+function statusStyle(status: string): React.CSSProperties {
+  if (status === 'active') return { backgroundColor: 'rgba(76,175,80,0.12)', color: 'var(--status-green)' }
+  if (status === 'quoted') return { backgroundColor: 'rgba(33,150,243,0.12)', color: 'var(--status-blue)' }
+  if (status === 'quoting') return { backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' }
+  if (status === 'complete') return { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }
+  return { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-tertiary)' }
 }
 
 function capitalize(s: string) {
@@ -21,32 +21,42 @@ function capitalize(s: string) {
 
 export default function JobListCard({ jobs, onOpenJob }: JobListCardProps) {
   return (
-    <div className="mt-2 rounded-2xl rounded-tl-sm border border-slate-200 bg-white shadow-sm overflow-hidden">
+    <div
+      className="mt-2 overflow-hidden"
+      style={{ borderRadius: 6, border: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+    >
       {jobs.map((job, i) => (
         <button
           key={job.id}
           type="button"
           onClick={() => onOpenJob(job.id, job.address, job.status, job.client_name)}
-          className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors active:bg-slate-100 hover:bg-slate-50 ${
-            i < jobs.length - 1 ? 'border-b border-slate-100' : ''
-          }`}
+          className="w-full flex items-center justify-between px-4 py-3 text-left transition-colors"
+          style={{
+            borderTop: i > 0 ? '0.5px solid var(--bg-border)' : 'none',
+            backgroundColor: 'transparent',
+          }}
+          onMouseOver={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+          onMouseOut={(e) => { e.currentTarget.style.backgroundColor = 'transparent' }}
         >
           <div className="min-w-0 flex-1 pr-3">
-            <p className="text-sm font-medium text-slate-900 truncate">{job.address}</p>
+            <p className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{job.address}</p>
             <div className="flex items-center gap-2 mt-0.5">
               {job.client_name && (
-                <span className="text-xs text-slate-500 truncate">{job.client_name}</span>
+                <span className="text-xs truncate" style={{ color: 'var(--text-secondary)' }}>{job.client_name}</span>
               )}
               {job.job_ref && (
-                <span className="text-xs text-slate-400">{job.job_ref}</span>
+                <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>{job.job_ref}</span>
               )}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            <span className={`text-xs font-medium px-2 py-0.5 rounded ${statusStyle(job.status)}`}>
+            <span
+              className="text-xs font-medium px-2 py-0.5 rounded"
+              style={statusStyle(job.status)}
+            >
               {capitalize(job.status)}
             </span>
-            <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true" style={{ color: 'var(--text-tertiary)' }}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
           </div>

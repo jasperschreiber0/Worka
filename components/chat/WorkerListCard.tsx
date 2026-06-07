@@ -25,10 +25,28 @@ interface WorkerListCardProps {
   onWorkerRemoved?: (workerId: string) => void
 }
 
-function statusPill(status: string) {
-  if (status === 'active') return 'bg-green-100 text-green-700'
-  if (status === 'invited') return 'bg-amber-100 text-amber-700'
-  return 'bg-slate-100 text-slate-500'
+function statusPillStyle(status: string): React.CSSProperties {
+  if (status === 'active') return { backgroundColor: 'rgba(76,175,80,0.12)', color: 'var(--status-green)' }
+  if (status === 'invited') return { backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' }
+  return { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-tertiary)' }
+}
+
+const INPUT_STYLE: React.CSSProperties = {
+  width: '100%',
+  fontSize: 13,
+  padding: '6px 10px',
+  borderRadius: 4,
+  border: '0.5px solid var(--bg-border)',
+  backgroundColor: 'var(--bg-shell)',
+  color: 'var(--text-primary)',
+  outline: 'none',
+}
+
+const LABEL_STYLE: React.CSSProperties = {
+  display: 'block',
+  fontSize: 11,
+  color: 'var(--text-tertiary)',
+  marginBottom: 4,
 }
 
 function WorkerRow({
@@ -52,7 +70,6 @@ function WorkerRow({
   const [email, setEmail] = useState(worker.email ?? '')
   const [phone, setPhone] = useState(worker.phone ?? '')
 
-  // Add to job
   const [jobPickerOpen, setJobPickerOpen] = useState(false)
   const [jobs, setJobs] = useState<JobOption[]>([])
   const [jobsLoading, setJobsLoading] = useState(false)
@@ -135,116 +152,105 @@ function WorkerRow({
 
   if (editing) {
     return (
-      <div className="px-3 py-3 bg-slate-50 border-b border-slate-100 last:border-b-0">
-        <div className="space-y-2">
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-xs text-slate-500 mb-0.5">Name</label>
-              <input
-                value={name}
-                onChange={e => setName(e.target.value)}
-                className="w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-brand-400"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-slate-500 mb-0.5">Trade / Role</label>
-              <input
-                value={role}
-                onChange={e => setRole(e.target.value)}
-                className="w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-brand-400"
-              />
-            </div>
+      <div
+        style={{
+          padding: '12px',
+          borderTop: '0.5px solid var(--bg-border)',
+          backgroundColor: 'var(--bg-elevated)',
+        }}
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+          <div>
+            <label style={LABEL_STYLE}>Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} style={INPUT_STYLE} />
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-xs text-slate-500 mb-0.5">Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="optional"
-                className="w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-brand-400"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-slate-500 mb-0.5">Phone</label>
-              <input
-                type="tel"
-                value={phone}
-                onChange={e => setPhone(e.target.value)}
-                placeholder="optional"
-                className="w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-brand-400"
-              />
-            </div>
+          <div>
+            <label style={LABEL_STYLE}>Trade / Role</label>
+            <input value={role} onChange={e => setRole(e.target.value)} style={INPUT_STYLE} />
           </div>
-          {confirmingRemove ? (
-            <div className="flex items-center gap-2 pt-1 bg-red-50 rounded-md px-2 py-1.5 border border-red-200">
-              <p className="text-xs text-red-700 flex-1">Remove {worker.name}?</p>
-              <button
-                type="button"
-                onClick={() => void handleDeactivate()}
-                className="px-2 py-1 text-xs font-semibold rounded bg-red-600 text-white hover:bg-red-700 transition-colors"
-              >
-                Yes, remove
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmingRemove(false)}
-                className="px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={saving || !name.trim() || !role.trim()}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-brand-500 text-white disabled:opacity-50 hover:bg-brand-600 transition-colors"
-              >
-                {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setEditing(false); setConfirmingRemove(false) }}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmingRemove(true)}
-                className="ml-auto px-3 py-1.5 text-xs font-medium rounded-md text-red-600 hover:bg-red-50 transition-colors"
-              >
-                Remove
-              </button>
-            </div>
-          )}
         </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+          <div>
+            <label style={LABEL_STYLE}>Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="optional" style={{ ...INPUT_STYLE, color: email ? 'var(--text-primary)' : 'var(--text-tertiary)' }} />
+          </div>
+          <div>
+            <label style={LABEL_STYLE}>Phone</label>
+            <input type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="optional" style={{ ...INPUT_STYLE, color: phone ? 'var(--text-primary)' : 'var(--text-tertiary)' }} />
+          </div>
+        </div>
+        {confirmingRemove ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 4, backgroundColor: 'rgba(244,67,54,0.08)', border: '0.5px solid rgba(244,67,54,0.25)' }}>
+            <p style={{ fontSize: 12, color: 'var(--status-red)', flex: 1 }}>Remove {worker.name}?</p>
+            <button
+              type="button"
+              onClick={() => void handleDeactivate()}
+              style={{ padding: '4px 10px', fontSize: 12, fontWeight: 600, borderRadius: 4, border: 'none', backgroundColor: 'var(--status-red)', color: '#fff', cursor: 'pointer' }}
+            >
+              Yes, remove
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingRemove(false)}
+              style={{ padding: '4px 10px', fontSize: 12, borderRadius: 4, border: 'none', backgroundColor: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || !name.trim() || !role.trim()}
+              style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, borderRadius: 4, border: 'none', backgroundColor: 'var(--orange-primary)', color: '#fff', cursor: 'pointer', opacity: (saving || !name.trim() || !role.trim()) ? 0.5 : 1 }}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setEditing(false); setConfirmingRemove(false) }}
+              style={{ padding: '5px 12px', fontSize: 12, borderRadius: 4, border: '0.5px solid var(--bg-border)', backgroundColor: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingRemove(true)}
+              style={{ marginLeft: 'auto', padding: '5px 12px', fontSize: 12, borderRadius: 4, border: 'none', backgroundColor: 'transparent', color: 'var(--status-red)', cursor: 'pointer' }}
+            >
+              Remove
+            </button>
+          </div>
+        )}
       </div>
     )
   }
 
   return (
-    <div className="border-b border-slate-100 last:border-b-0">
-      <div className="flex items-center px-3 py-2.5 min-h-[52px]">
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-slate-900 truncate">{worker.name}</p>
-          <p className="text-xs text-slate-500 capitalize">{worker.role}</p>
+    <div style={{ borderTop: '0.5px solid var(--bg-border)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', minHeight: 52 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{worker.name}</p>
+          <p style={{ fontSize: 12, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{worker.role}</p>
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <span className={`text-xs font-medium px-2 py-0.5 rounded-full capitalize ${statusPill(worker.status)}`}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          <span
+            className="text-xs font-medium px-2 py-0.5 rounded-full capitalize"
+            style={statusPillStyle(worker.status)}
+          >
             {worker.status}
           </span>
           {/* Add to job */}
-          <div className="relative">
+          <div style={{ position: 'relative' }}>
             <button
               ref={jobBtnRef}
               type="button"
               onClick={() => void openJobPicker()}
               title="Add to job"
-              className="w-7 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
+              style={{ width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, border: 'none', backgroundColor: 'transparent', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+              onMouseOver={(e) => { e.currentTarget.style.color = 'var(--orange-primary)'; e.currentTarget.style.backgroundColor = 'var(--orange-subtle)' }}
+              onMouseOut={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; e.currentTarget.style.backgroundColor = 'transparent' }}
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
@@ -253,42 +259,49 @@ function WorkerRow({
             {jobPickerOpen && dropdownPos && (
               <div
                 ref={pickerRef}
-                style={{ position: 'fixed', top: dropdownPos.top, right: dropdownPos.right }}
-                className="z-50 w-56 bg-white border border-slate-200 rounded-lg shadow-lg overflow-hidden"
+                style={{ position: 'fixed', top: dropdownPos.top, right: dropdownPos.right, zIndex: 50, width: 220, borderRadius: 6, border: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-elevated)', overflow: 'hidden' }}
               >
-                <div className="px-3 py-2 border-b border-slate-100 bg-slate-50">
-                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Add to job</p>
+                <div style={{ padding: '8px 12px', borderBottom: '0.5px solid var(--bg-border)' }}>
+                  <p style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>Add to job</p>
                 </div>
                 {jobsLoading ? (
-                  <div className="px-3 py-3 text-xs text-slate-400">Loading jobs…</div>
+                  <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-tertiary)' }}>Loading jobs…</div>
                 ) : jobs.length === 0 ? (
-                  <div className="px-3 py-3 text-xs text-slate-400">No active jobs found.</div>
+                  <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-tertiary)' }}>No active jobs found.</div>
                 ) : (
-                  <ul>
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                     {jobs.map((job) => {
                       const done = assignedJobIds.has(job.id)
                       return (
-                        <li key={job.id}>
+                        <li key={job.id} style={{ borderTop: '0.5px solid var(--bg-border)' }}>
                           <button
                             type="button"
                             onClick={() => !done && void assignToJob(job.id)}
                             disabled={assigningJobId === job.id || done}
-                            className={`w-full text-left px-3 py-2.5 flex items-center gap-2 transition-colors text-sm ${
-                              done
-                                ? 'text-green-700 bg-green-50 cursor-default'
-                                : 'text-slate-700 hover:bg-slate-50'
-                            }`}
+                            style={{
+                              width: '100%',
+                              textAlign: 'left',
+                              padding: '8px 12px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              fontSize: 12,
+                              border: 'none',
+                              backgroundColor: done ? 'rgba(76,175,80,0.08)' : 'transparent',
+                              color: done ? 'var(--status-green)' : 'var(--text-secondary)',
+                              cursor: done ? 'default' : 'pointer',
+                            }}
                           >
                             {done ? (
-                              <svg className="w-4 h-4 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true" style={{ color: 'var(--status-green)' }}>
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                               </svg>
                             ) : assigningJobId === job.id ? (
-                              <span className="w-4 h-4 flex-shrink-0 text-slate-400 text-xs">…</span>
+                              <span style={{ width: 16, fontSize: 12, color: 'var(--text-tertiary)' }}>…</span>
                             ) : (
-                              <span className="w-4 h-4 flex-shrink-0" />
+                              <span style={{ width: 16 }} />
                             )}
-                            <span className="truncate leading-snug">{job.address.split(',')[0]}</span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.address.split(',')[0]}</span>
                           </button>
                         </li>
                       )
@@ -303,7 +316,9 @@ function WorkerRow({
               type="button"
               onClick={() => onAssignTask(worker.name.split(' ')[0])}
               title="Assign task"
-              className="w-7 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
+              style={{ width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, border: 'none', backgroundColor: 'transparent', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+              onMouseOver={(e) => { e.currentTarget.style.color = 'var(--orange-primary)'; e.currentTarget.style.backgroundColor = 'var(--orange-subtle)' }}
+              onMouseOut={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; e.currentTarget.style.backgroundColor = 'transparent' }}
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 0 2-2h2a2 2 0 0 0 2 2m-6 9 2 2 4-4" />
@@ -314,7 +329,9 @@ function WorkerRow({
             type="button"
             onClick={() => setEditing(true)}
             title="Edit worker"
-            className="w-7 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+            style={{ width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, border: 'none', backgroundColor: 'transparent', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+            onMouseOver={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+            onMouseOut={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; e.currentTarget.style.backgroundColor = 'transparent' }}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" />
@@ -341,16 +358,24 @@ export default function WorkerListCard({ workers: initialWorkers, builderId, onA
 
   if (workers.length === 0) {
     return (
-      <div className="mt-2 rounded-xl border border-slate-200 bg-white shadow-sm px-4 py-3 text-sm text-slate-500">
+      <div
+        className="mt-2 px-4 py-3 text-sm"
+        style={{ borderRadius: 6, border: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-secondary)' }}
+      >
         No active workers on your crew.
       </div>
     )
   }
 
   return (
-    <div className="mt-2 rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-      <div className="px-3 py-2 border-b border-slate-100 bg-slate-50">
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Your crew ({workers.length})</p>
+    <div
+      className="mt-2 overflow-hidden"
+      style={{ borderRadius: 6, border: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+    >
+      <div style={{ padding: '8px 12px', borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-elevated)' }}>
+        <p style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>
+          Your crew ({workers.length})
+        </p>
       </div>
       {workers.map(worker => (
         <WorkerRow
