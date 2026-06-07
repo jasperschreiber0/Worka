@@ -6,6 +6,7 @@ export interface Alert {
   priority: 'high' | 'medium' | 'low'
   message: string
   action?: string
+  quick_action?: string   // one-tap execute (shown as a button, bypasses navigation)
   entity_id?: string
   entity_type?: 'job' | 'invoice' | 'variation' | 'quote'
 }
@@ -14,6 +15,7 @@ interface MorningBriefCardProps {
   message: string
   alerts: Alert[]
   onAction?: (action: string, entityId?: string, entityType?: string) => void
+  onQuickAction?: (quickAction: string, entityId?: string, entityType?: string) => void
 }
 
 // ─── Priority order ───────────────────────────────────────────────────────────
@@ -42,7 +44,7 @@ const BLOCKER_STYLE: Record<NonNullable<BlockerType>, React.CSSProperties> = {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function MorningBriefCard({ message, alerts, onAction }: MorningBriefCardProps) {
+export default function MorningBriefCard({ message, alerts, onAction, onQuickAction }: MorningBriefCardProps) {
   const sorted = [...alerts].sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority])
   const summaryText = message.split(/\n+suggested order[:\s]/i)[0].trim()
 
@@ -121,10 +123,31 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                     >
                       {alert.message}
                     </p>
-                    {alert.action && (
-                      <p className="mt-1.5 text-[12px] font-medium" style={{ color: 'var(--orange-primary)' }}>
-                        {alert.action} →
-                      </p>
+                    {(alert.action || alert.quick_action) && (
+                      <div className="mt-2 flex items-center gap-2 flex-wrap">
+                        {alert.action && (
+                          <span className="text-[12px] font-medium" style={{ color: 'var(--orange-primary)' }}>
+                            {alert.action} →
+                          </span>
+                        )}
+                        {alert.quick_action && onQuickAction && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onQuickAction(alert.quick_action!, alert.entity_id, alert.entity_type)
+                            }}
+                            className="text-[11px] font-semibold px-2 py-0.5 rounded-[3px] transition-colors"
+                            style={{
+                              backgroundColor: isHigh ? 'rgba(255,107,43,0.15)' : 'var(--bg-elevated)',
+                              border: '0.5px solid rgba(255,107,43,0.4)',
+                              color: 'var(--orange-primary)',
+                            }}
+                          >
+                            {alert.quick_action}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                   {isClickable && (

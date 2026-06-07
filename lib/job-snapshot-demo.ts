@@ -135,9 +135,17 @@ const JOB_1_FITZROY: JobSnapshot = {
     last_activity: '2 days ago',
     notes: null,
     margin_to_date: null,
-    spend_to_date: null,
+    spend_to_date: 112000,
   },
-  quote: null,
+  quote: {
+    id: 'demo-fitzroy-quote',
+    status: 'approved',
+    total_cost: 142000,
+    confidence_score: 95,
+    sent_at: '45 days ago',
+    version: 1,
+    unresolved_count: 0,
+  },
   variations: [
     {
       id: 'demo-var-001',

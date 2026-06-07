@@ -525,6 +525,38 @@ export default function ChatInterface({
   )
 
 
+  // Handler: quick-action button (one-tap execute, no navigation)
+  const handleQuickAction = useCallback(
+    (quickAction: string, entityId?: string, entityType?: string) => {
+      if (quickAction === 'Send chaser now') {
+        // Draft payment chaser immediately
+        void fetchAndInjectEmailDraft(
+          entityType === 'invoice' ? '00000000-0000-0000-0000-000000000010' : (entityId ?? null),
+          'the Hendersons',
+          'invoice',
+        )
+        return
+      }
+      if (quickAction === 'Draft follow-up') {
+        void fetchAndInjectEmailDraft(entityId ?? null, null, 'quote_followup')
+        return
+      }
+      if (quickAction.startsWith('Approve all')) {
+        // Approve all pending variations for this job
+        void sendMessage(`approve all variations for job ${entityId ?? ''}`)
+        return
+      }
+      if (quickAction === 'Draft email') {
+        void fetchAndInjectEmailDraft(entityId ?? null, null, 'general')
+        return
+      }
+      // Fallback — treat as a regular action
+      handleAction(quickAction, entityId, entityType)
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fetchAndInjectEmailDraft, sendMessage]
+  )
+
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
     (action: string, entityId?: string, entityType?: string) => {
@@ -1362,6 +1394,7 @@ export default function ChatInterface({
             onOpenJobFromList={handleOpenJobFromList}
             onCreateAnyway={handleCreateAnyway}
             onAction={handleAction}
+            onQuickAction={handleQuickAction}
             onVariationApprove={handleVariationApprove}
             onVariationReject={handleVariationReject}
             onOpenMarginJob={handleOpenMarginJob}

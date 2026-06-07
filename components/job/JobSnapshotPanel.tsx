@@ -401,6 +401,15 @@ export default function JobSnapshotPanel({
                         {snapshot.job.client_phone}
                       </div>
                     )}
+                    {/* Feature 15: Last contact date */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Last contact</span>
+                      {snapshot.comms.messages.length > 0 ? (
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{snapshot.comms.messages[0].timestamp}</span>
+                      ) : (
+                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>No contact yet</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </SectionGroup>
@@ -426,6 +435,21 @@ export default function JobSnapshotPanel({
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoiced</span>
                   <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(paidSentInvoiceTotal)}</span>
                 </div>
+                {/* Feature 18: Margin health */}
+                {quoteTotalCost != null && quoteTotalCost > 0 && snapshot.overview.spend_to_date != null && (() => {
+                  const marginPct = (quoteTotalCost - snapshot.overview.spend_to_date) / quoteTotalCost * 100
+                  const marginColor = marginPct >= 15 ? 'var(--status-green)' : marginPct >= 8 ? 'var(--status-amber)' : 'var(--status-red)'
+                  const marginLabel = marginPct >= 15 ? 'Healthy' : marginPct >= 8 ? 'Watch' : 'At risk'
+                  return (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Margin</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 12, fontWeight: 500, color: marginColor }}>{Math.round(marginPct)}%</span>
+                        <span style={{ fontSize: 10, fontWeight: 600, color: marginColor, backgroundColor: 'transparent', border: `1px solid ${marginColor}`, borderRadius: 4, padding: '1px 5px' }}>{marginLabel}</span>
+                      </div>
+                    </div>
+                  )
+                })()}
                 {/* Progress bar */}
                 {quoteTotalCost != null && quoteTotalCost > 0 && (
                   <>
@@ -460,7 +484,7 @@ export default function JobSnapshotPanel({
 
             {/* ── 3. TIMELINE ─────────────────────────────────────────────── */}
             <SectionGroup label="Timeline">
-              <div style={{ ...CARD_STYLE, display: 'flex', gap: 0 }}>
+              <div style={{ ...CARD_STYLE, display: 'flex', gap: 0, marginBottom: (['quoting', 'quoted', 'active'].includes(displayStatus)) ? 8 : 0 }}>
                 {STAGES.map((stage, idx) => {
                   const isComplete = idx < currentStageIndex
                   const isCurrent = idx === currentStageIndex
@@ -520,6 +544,17 @@ export default function JobSnapshotPanel({
                   )
                 })}
               </div>
+              {/* Feature 16: Next milestone callout */}
+              {(['quoting', 'quoted', 'active'] as string[]).includes(displayStatus) && (() => {
+                const nextLabel = displayStatus === 'quoting' ? 'Send quote' : displayStatus === 'quoted' ? 'Client approval' : 'Next invoice milestone'
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px' }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: 'var(--orange-primary)', flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>{nextLabel}</span>
+                    <span style={{ fontSize: 10, color: 'var(--orange-primary)' }}>→ next</span>
+                  </div>
+                )
+              })()}
             </SectionGroup>
 
             {/* ── 4. PENDING ACTIONS ──────────────────────────────────────── */}

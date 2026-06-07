@@ -111,6 +111,7 @@ interface ChatMessageProps {
   onOpenJobFromList?: (jobId: string, address: string, status: string, clientName?: string) => void
   onCreateAnyway?: (address: string) => void
   onAction?: (action: string, entityId?: string, entityType?: string) => void
+  onQuickAction?: (quickAction: string, entityId?: string, entityType?: string) => void
   onVariationApprove?: (variationId: string) => void
   onVariationReject?: (variationId: string) => void
   onOpenMarginJob?: (jobId: string) => void
@@ -189,6 +190,7 @@ export default function ChatMessage({
   onOpenJobFromList,
   onCreateAnyway,
   onAction,
+  onQuickAction,
   onVariationApprove,
   onVariationReject,
   onOpenMarginJob,
@@ -213,7 +215,7 @@ export default function ChatMessage({
   if (message.alerts && message.alerts.length > 0) {
     return (
       <MsgRow avatar={<WorkaAvatar />} label="WORKA" timestamp={message.timestamp}>
-        <MorningBriefCard message={message.content} alerts={message.alerts} onAction={onAction} />
+        <MorningBriefCard message={message.content} alerts={message.alerts} onAction={onAction} onQuickAction={onQuickAction} />
       </MsgRow>
     )
   }
