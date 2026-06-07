@@ -408,18 +408,8 @@ export default function ChatInterface({
         isOpen: true,
         job: {
           id: pendingUpload.id,
-          builder_id: builderId,
           address: pendingUpload.address,
-          client_id: null,
-          status: pendingUpload.status as import('@/lib/types/database.types').JobStatus,
-          job_type: null,
-          notes: null,
-          budget_estimate: null,
-          scope_notes: null,
-          quote_deadline: null,
-          client_deadline: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          status: pendingUpload.status,
         },
       })
       onPendingUploadConsumed?.()
