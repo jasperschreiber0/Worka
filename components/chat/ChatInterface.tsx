@@ -1396,7 +1396,7 @@ export default function ChatInterface({
                 onJobMention?.({ id: job.id, address: job.address, status: job.status })
                 // Queue plan files into the upload panel via pendingFilesForUpload
                 setPendingFilesForUpload(planFiles.map(f => f.file))
-                setUploadPanel({ isOpen: true, job: { id: job.id, address: job.address, status: job.status, quote_id: null, client_name: null, builder_id: builderId, created_at: new Date().toISOString() } })
+                setUploadPanel({ isOpen: true, job: { id: job.id, address: job.address, status: job.status as import('@/lib/types/database.types').JobStatus, quote_id: null, client_name: null, builder_id: builderId, created_at: new Date().toISOString() } })
               }
 
               if (otherFiles.length > 0) {
