@@ -56,7 +56,7 @@ export function MarkdownContent({ text }: { text: string }) {
       nodes.push(
         <ul key={`ul-${i}`} className="list-disc pl-4 space-y-0.5 my-1">
           {items.map((item, idx) => (
-            <li key={idx} className="text-sm text-slate-800 leading-snug">{renderInline(item)}</li>
+            <li key={idx} className="text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>{renderInline(item)}</li>
           ))}
         </ul>
       )
@@ -78,7 +78,7 @@ export function MarkdownContent({ text }: { text: string }) {
       nodes.push(
         <ol key={`ol-${i}`} className="list-decimal pl-4 space-y-0.5 my-1">
           {items.map((item, idx) => (
-            <li key={idx} className="text-sm text-slate-800 leading-snug">{renderInline(item)}</li>
+            <li key={idx} className="text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>{renderInline(item)}</li>
           ))}
         </ol>
       )
@@ -100,8 +100,8 @@ export function MarkdownContent({ text }: { text: string }) {
       nodes.push(
         <ul key={`cb-${i}`} className="space-y-1 my-1">
           {items.map((item, idx) => (
-            <li key={idx} className="flex items-start gap-1.5 text-sm text-slate-800 leading-snug">
-              <span className={item.startsWith('✓') ? 'text-green-600' : item.startsWith('⚠') ? 'text-amber-500' : 'text-slate-400'}>{item.charAt(0)}</span>
+            <li key={idx} className="flex items-start gap-1.5 text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>
+              <span className={item.startsWith('✓') ? 'text-green-500' : item.startsWith('⚠') ? 'text-amber-400' : 'text-[#555555]'}>{item.charAt(0)}</span>
               <span>{renderInline(item.slice(2))}</span>
             </li>
           ))}
@@ -112,7 +112,7 @@ export function MarkdownContent({ text }: { text: string }) {
 
     // Regular paragraph line
     nodes.push(
-      <p key={`p-${i}`} className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap">{renderInline(trimmed)}</p>
+      <p key={`p-${i}`} className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: 'var(--text-primary)' }}>{renderInline(trimmed)}</p>
     )
     i++
   }
@@ -188,14 +188,30 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
 
   if (isUser) {
     return (
-      <div className="flex justify-end mb-4" role="listitem">
-        <div className="max-w-xs sm:max-w-md lg:max-w-lg">
-          <div className="rounded-2xl rounded-tr-sm px-4 py-2.5 bg-brand-500 text-white">
-            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-              {message.content}
-            </p>
-          </div>
-          <p className="text-xs text-slate-400 text-right mt-1 px-1">
+      <div className="flex items-start gap-2.5 mb-5" role="listitem">
+        {/* YOU avatar */}
+        <div
+          className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center"
+          style={{ backgroundColor: 'var(--bg-elevated)' }}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true" style={{ color: 'var(--text-tertiary)' }}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p
+            className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            YOU
+          </p>
+          <p
+            className="text-[13px] italic leading-[1.5] whitespace-pre-wrap break-words"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            {message.content}
+          </p>
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
             {relativeTime(message.timestamp)}
           </p>
         </div>
@@ -206,10 +222,17 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
   // Assistant message with alerts → render MorningBriefCard
   if (hasAlerts && message.alerts) {
     return (
-      <div className="flex justify-start mb-4" role="listitem">
-        <div className="max-w-sm sm:max-w-lg lg:max-w-xl w-full">
+      <div className="flex items-start gap-2.5 mb-5" role="listitem">
+        <div
+          className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold"
+          style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)' }}
+        >
+          W
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1" style={{ color: 'var(--text-tertiary)' }}>WORKA</p>
           <MorningBriefCard message={message.content} alerts={message.alerts} onAction={onAction} />
-          <p className="text-xs text-slate-400 mt-1 px-1">
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
             {relativeTime(message.timestamp)}
           </p>
         </div>
@@ -221,11 +244,16 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
   if (hasDuplicate && message.duplicateJob) {
     const dup = message.duplicateJob
     return (
-      <div className="flex justify-start mb-4" role="listitem">
-        <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
-          <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
-            <MarkdownContent text={message.content} />
-          </div>
+      <div className="flex items-start gap-2.5 mb-5" role="listitem">
+        <div
+          className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold"
+          style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)' }}
+        >
+          W
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1" style={{ color: 'var(--text-tertiary)' }}>WORKA</p>
+          <MarkdownContent text={message.content} />
           {message.stateChanges && message.stateChanges.length > 0 && (
             <StateUpdateCard changes={message.stateChanges} />
           )}
@@ -236,7 +264,7 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
               onCreateAnyway={onCreateAnyway}
             />
           )}
-          <p className="text-xs text-slate-400 mt-1 px-1">
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
             {relativeTime(message.timestamp)}
           </p>
         </div>
@@ -248,18 +276,23 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
   if (hasVariation && message.variation) {
     const v = message.variation
     return (
-      <div className="flex justify-start mb-4" role="listitem">
-        <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
-          <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
-            <MarkdownContent text={message.content} />
-          </div>
+      <div className="flex items-start gap-2.5 mb-5" role="listitem">
+        <div
+          className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold"
+          style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)' }}
+        >
+          W
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1" style={{ color: 'var(--text-tertiary)' }}>WORKA</p>
+          <MarkdownContent text={message.content} />
           <VariationCard
             variation={v}
             onApprove={onVariationApprove ?? (() => {})}
             onReject={onVariationReject ?? (() => {})}
             onViewJob={onOpenJob}
           />
-          <p className="text-xs text-slate-400 mt-1 px-1">
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
             {relativeTime(message.timestamp)}
           </p>
         </div>
@@ -270,16 +303,21 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
   // Assistant message with margin jobs
   if (hasMarginJobs && message.marginJobs) {
     return (
-      <div className="flex justify-start mb-4" role="listitem">
-        <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
-          <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
-            <MarkdownContent text={message.content} />
-          </div>
+      <div className="flex items-start gap-2.5 mb-5" role="listitem">
+        <div
+          className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold"
+          style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)' }}
+        >
+          W
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1" style={{ color: 'var(--text-tertiary)' }}>WORKA</p>
+          <MarkdownContent text={message.content} />
           <MarginCard
             jobs={message.marginJobs}
             onOpenJob={onOpenMarginJob ?? onOpenJob}
           />
-          <p className="text-xs text-slate-400 mt-1 px-1">
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
             {relativeTime(message.timestamp)}
           </p>
         </div>
@@ -287,13 +325,18 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
     )
   }
 
-  // Assistant message without alerts → plain bubble (+ optional job/worker list)
+  // Assistant message without alerts → plain text (+ optional job/worker list)
   return (
-    <div className="flex justify-start mb-4" role="listitem">
-      <div className="max-w-xs sm:max-w-md lg:max-w-lg w-full">
-        <div className="rounded-2xl rounded-tl-sm px-4 py-2.5 bg-white border border-slate-200 shadow-sm">
-          <MarkdownContent text={message.content} />
-        </div>
+    <div className="flex items-start gap-2.5 mb-5" role="listitem">
+      <div
+        className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold"
+        style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)' }}
+      >
+        W
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1" style={{ color: 'var(--text-tertiary)' }}>WORKA</p>
+        <MarkdownContent text={message.content} />
         {message.jobList && message.jobList.length > 0 && onOpenJobFromList && (
           <JobListCard jobs={message.jobList} onOpenJob={onOpenJobFromList} />
         )}
@@ -307,7 +350,7 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
         {message.stateChanges && message.stateChanges.length > 0 && (
           <StateUpdateCard changes={message.stateChanges} />
         )}
-        <p className="text-xs text-slate-400 mt-1 px-1">
+        <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
           {relativeTime(message.timestamp)}
         </p>
       </div>

@@ -209,17 +209,18 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
   return (
     <div
       ref={dragContainerRef}
-      className="h-screen flex overflow-hidden bg-white relative"
+      className="h-screen flex overflow-hidden relative"
+      style={{ backgroundColor: 'var(--bg-shell)' }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       {/* ── Drag overlay ──────────────────────────────────────────────────── */}
       {globalDragOver && (
-        <div className="absolute inset-0 z-50 bg-brand-500/10 border-4 border-brand-500 border-dashed rounded-lg flex items-center justify-center pointer-events-none">
-          <div className="bg-white rounded-2xl px-8 py-6 shadow-2xl text-center">
-            <p className="text-xl font-bold text-brand-600">Drop files here</p>
-            <p className="text-sm text-slate-500 mt-1">Plans, receipts, drawings — anything</p>
+        <div className="absolute inset-0 z-50 border-4 border-dashed flex items-center justify-center pointer-events-none" style={{ backgroundColor: 'rgba(255,107,43,0.07)', borderColor: 'var(--orange-primary)' }}>
+          <div className="rounded-[6px] px-8 py-6 text-center" style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)' }}>
+            <p className="text-xl font-bold" style={{ color: 'var(--orange-primary)' }}>Drop files here</p>
+            <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>Plans, receipts, drawings — anything</p>
           </div>
         </div>
       )}
@@ -255,10 +256,11 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
       <div
         className={`
           hidden md:flex md:flex-col
-          w-[420px] border-l border-slate-200 bg-slate-50
+          w-[280px] flex-shrink-0
           transition-all duration-300 ease-in-out
           ${panelVisible ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}
         `}
+        style={{ backgroundColor: 'var(--bg-shell)', borderLeft: '0.5px solid var(--bg-border)' }}
       >
         <JobSnapshotPanel
           job={activeJob}
