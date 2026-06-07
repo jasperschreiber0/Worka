@@ -209,9 +209,9 @@ function SignOutButton({ isDemo }: { isDemo: boolean }) {
     <button
       type="button"
       onClick={handleSignOut}
-      className="w-full px-3 py-2 text-sm text-left text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors flex items-center gap-2"
+      className="w-full px-3 py-2 text-sm text-left text-[#999999] hover:bg-[#2a2a2a] hover:text-[#e0e0e0] transition-colors flex items-center gap-2"
     >
-      <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+      <svg className="w-4 h-4 text-[#555555]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
         <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15M12 9l-3 3m0 0 3 3m-3-3h12.75" />
       </svg>
       Sign out
@@ -236,24 +236,24 @@ function DroppedFileBar({ files, jobs, jobQuery, onJobQueryChange, onSelectJob, 
     .slice(0, 5)
 
   return (
-    <div className="mb-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2">
+    <div className="mb-2 bg-[#222222] border border-[#2e2e2e] rounded-[4px] p-2">
       {/* File chips */}
       <div className="flex flex-wrap gap-1.5 mb-2">
         {files.map((f, i) => (
-          <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-brand-200 text-xs text-slate-700">
-            <span className="font-medium text-brand-600">{f.label}</span>
-            <span className="text-slate-400 truncate max-w-[120px]">{f.file.name}</span>
+          <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[3px] bg-[#2a2a2a] border border-[#2e2e2e] text-xs text-[#999999]">
+            <span className="font-medium text-[#ff6b2b]">{f.label}</span>
+            <span className="text-[#555555] truncate max-w-[120px]">{f.file.name}</span>
           </span>
         ))}
       </div>
       {/* Job search */}
-      <p className="text-xs text-slate-500 mb-1">Which job are these for?</p>
+      <p className="text-xs text-[#999999] mb-1">Which job are these for?</p>
       <input
         type="text"
         value={jobQuery}
         onChange={e => onJobQueryChange(e.target.value)}
         placeholder="Search by address…"
-        className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent mb-1.5"
+        className="w-full bg-[#2a2a2a] border border-[#2e2e2e] rounded-[4px] px-2.5 py-1.5 text-sm text-[#e0e0e0] placeholder:text-[#333333] focus:outline-none focus:border-[#ff6b2b]/50 mb-1.5"
       />
       {filteredJobs.length > 0 && (
         <div className="flex flex-col gap-0.5">
@@ -262,10 +262,10 @@ function DroppedFileBar({ files, jobs, jobQuery, onJobQueryChange, onSelectJob, 
               key={job.id}
               type="button"
               onClick={() => onSelectJob(job)}
-              className="text-left px-2.5 py-1.5 rounded-lg text-sm text-slate-700 hover:bg-brand-100 hover:text-brand-800 transition-colors"
+              className="text-left bg-[#2a2a2a] border border-[#2e2e2e] rounded-[4px] px-2 py-1 text-sm text-[#e0e0e0] hover:border-[#ff6b2b]/40 transition-colors"
             >
               {job.address}
-              <span className="ml-2 text-xs text-slate-400">{job.status}</span>
+              <span className="ml-2 text-xs text-[#555555]">{job.status}</span>
             </button>
           ))}
         </div>
@@ -273,7 +273,7 @@ function DroppedFileBar({ files, jobs, jobQuery, onJobQueryChange, onSelectJob, 
       <button
         type="button"
         onClick={onDismiss}
-        className="mt-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors"
+        className="mt-1.5 text-xs text-[#555555] hover:text-[#999999] transition-colors"
       >
         Dismiss
       </button>
@@ -1149,9 +1149,9 @@ export default function ChatInterface({
   return (
     <div className="flex flex-col h-full relative">
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-white flex-shrink-0">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-[#2e2e2e] bg-[#1a1a1a] flex-shrink-0">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-md bg-brand-500 flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 rounded-md bg-[#ff6b2b] flex items-center justify-center flex-shrink-0">
             <svg
               className="w-4.5 h-4.5 text-white w-[18px] h-[18px]"
               fill="none"
@@ -1167,9 +1167,9 @@ export default function ChatInterface({
               />
             </svg>
           </div>
-          <span className="text-lg font-bold text-slate-900 tracking-tight">WorkA</span>
+          <span className="text-lg font-bold text-[#e0e0e0] tracking-tight">WorkA</span>
           <span
-            className="hidden sm:inline-block text-[10px] font-mono text-slate-400 leading-none mt-0.5"
+            className="hidden sm:inline-block text-[10px] font-mono text-[#555555] leading-none mt-0.5"
             title={`v${process.env.NEXT_PUBLIC_APP_VERSION} · ${process.env.NEXT_PUBLIC_COMMIT_SHA}`}
           >
             v{process.env.NEXT_PUBLIC_APP_VERSION}·{process.env.NEXT_PUBLIC_COMMIT_SHA}
@@ -1179,29 +1179,29 @@ export default function ChatInterface({
         <div className="flex items-center gap-2">
           <Link
             href="/settings/rates"
-            className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
+            className="text-sm font-medium text-[#999999] hover:text-[#e0e0e0] px-2.5 py-1 rounded-[4px] hover:bg-[#2a2a2a] transition-colors"
           >
             Data
           </Link>
           {isDemo && (
-            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-[3px] text-xs font-semibold bg-[rgba(255,152,0,0.15)] text-[#ff9800] border border-[rgba(255,152,0,0.3)]">
               Demo
             </span>
           )}
-          <span className="text-sm text-slate-600 font-medium hidden sm:block">{userName}</span>
+          <span className="text-sm text-[#999999] font-medium hidden sm:block">{userName}</span>
           <div className="relative group">
             <button
               type="button"
-              className="w-8 h-8 rounded-full bg-brand-100 border border-brand-200 flex items-center justify-center flex-shrink-0 hover:bg-brand-200 transition-colors"
+              className="w-8 h-8 rounded-full bg-[#2a2a2a] border border-[#2e2e2e] flex items-center justify-center flex-shrink-0 hover:border-[#ff6b2b]/40 transition-colors"
               aria-label="Account menu"
             >
-              <span className="text-xs font-semibold text-brand-700">{userInitials}</span>
+              <span className="text-xs font-semibold text-[#ff6b2b]">{userInitials}</span>
             </button>
             {/* Dropdown */}
-            <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-xl shadow-lg py-1 hidden group-focus-within:block z-50">
-              <div className="px-3 py-2 border-b border-slate-100">
-                <p className="text-xs font-semibold text-slate-900 truncate">{userName}</p>
-                {isDemo && <p className="text-xs text-amber-600">Demo mode</p>}
+            <div className="absolute right-0 top-full mt-1 w-44 bg-[#222222] border border-[#2e2e2e] rounded-[6px] py-1 hidden group-focus-within:block z-50">
+              <div className="px-3 py-2 border-b border-[#2e2e2e]">
+                <p className="text-xs font-semibold text-[#e0e0e0] truncate">{userName}</p>
+                {isDemo && <p className="text-xs text-[#ff9800]">Demo mode</p>}
               </div>
               <SignOutButton isDemo={isDemo} />
             </div>
@@ -1237,13 +1237,13 @@ export default function ChatInterface({
         {/* Loading indicator */}
         {loading && (
           <div className="flex justify-start mb-4" role="status" aria-label="WorkA is thinking">
-            <div className="bg-white border border-slate-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3">
+            <div className="bg-[#222222] border border-[#2e2e2e] rounded-[6px] px-4 py-3">
               <div className="flex items-center gap-2">
-                <span className="text-sm text-slate-500">WorkA is thinking</span>
+                <span className="text-sm text-[#555555]">WorkA is thinking</span>
                 <span className="flex items-center gap-0.5" aria-hidden="true">
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce [animation-delay:0ms]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce [animation-delay:150ms]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce [animation-delay:300ms]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#555555] animate-bounce [animation-delay:0ms]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#555555] animate-bounce [animation-delay:150ms]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#555555] animate-bounce [animation-delay:300ms]" />
                 </span>
               </div>
             </div>
@@ -1368,7 +1368,7 @@ export default function ChatInterface({
       )}
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 pt-2 pb-3 pb-safe">
+      <div className="flex-shrink-0 border-t border-[#2e2e2e] bg-[#1a1a1a] px-4 pt-2 pb-3 pb-safe">
         {/* Dropped file bar — shown when files have been drag-dropped */}
         {pendingDropFiles.length > 0 && (
           <DroppedFileBar
@@ -1402,8 +1402,8 @@ export default function ChatInterface({
         {/* Job picker — shown when a task needs a job assigned */}
         {pendingTask ? (
           <div className="mb-2">
-            <p className="text-xs text-slate-500 mb-1.5">
-              Adding: <span className="font-medium text-slate-700">&ldquo;{pendingTask.description}&rdquo;</span> — pick a job:
+            <p className="text-[11px] text-[#555555] mb-1.5">
+              Adding: <span className="font-medium text-[#e0e0e0]">&ldquo;{pendingTask.description}&rdquo;</span> — pick a job:
             </p>
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
               {pendingTask.jobs.map((job) => {
@@ -1433,7 +1433,7 @@ export default function ChatInterface({
                       } catch { /* best-effort */ }
                       setMessages((prev) => [...prev, confirmMsg])
                     }}
-                    className="flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-full bg-brand-50 border border-brand-200 text-brand-700 hover:bg-brand-100 active:bg-brand-200 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] bg-[#2a2a2a] border border-[#2e2e2e] text-[#e0e0e0] hover:border-[#ff6b2b]/40 transition-colors disabled:opacity-40 whitespace-nowrap"
                   >
                     {shortAddr}
                   </button>
@@ -1442,7 +1442,7 @@ export default function ChatInterface({
               <button
                 type="button"
                 onClick={() => setPendingTask(null)}
-                className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors whitespace-nowrap"
+                className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] bg-[#2a2a2a] border border-[#2e2e2e] text-[#555555] hover:text-[#999999] transition-colors whitespace-nowrap"
               >
                 Cancel
               </button>
@@ -1470,7 +1470,7 @@ export default function ChatInterface({
                   sendMessage(msg)
                 }
               }}
-              className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 text-slate-700 hover:bg-brand-50 hover:text-brand-700 active:bg-brand-100 transition-colors disabled:opacity-40 whitespace-nowrap"
+              className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] bg-[#2a2a2a] border border-[#2e2e2e] text-[#999999] hover:border-[#ff6b2b]/30 hover:text-[#e0e0e0] transition-colors disabled:opacity-40 whitespace-nowrap"
             >
               {label}
             </button>
@@ -1488,10 +1488,10 @@ export default function ChatInterface({
             onClick={toggleVoice}
             disabled={loading}
             aria-label={isListening ? 'Stop recording' : 'Start voice input'}
-            className={`flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-colors disabled:opacity-40 ${
+            className={`flex-shrink-0 w-10 h-10 rounded-[6px] flex items-center justify-center transition-colors disabled:opacity-40 ${
               isListening
-                ? 'bg-red-100 text-red-600 animate-pulse'
-                : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+                ? 'bg-[rgba(244,67,54,0.15)] text-[#f44336] animate-pulse'
+                : 'bg-[#2a2a2a] text-[#555555] hover:text-[#999999] border border-[#2e2e2e]'
             }`}
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
@@ -1507,22 +1507,22 @@ export default function ChatInterface({
             placeholder={isListening ? 'Listening…' : 'Ask something or tap a button above'}
             rows={1}
             disabled={loading}
-            className="flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent transition-shadow duration-150 disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
+            className="flex-1 resize-none bg-[#2a2a2a] border border-[#2e2e2e] rounded-[6px] px-3 py-2 text-[13px] text-[#e0e0e0] placeholder:text-[#333333] focus:outline-none focus:border-[#ff6b2b]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
             style={{ minHeight: '40px', maxHeight: '120px' }}
           />
           <button
             type="submit"
             disabled={loading || !input.trim()}
-            className="flex-shrink-0 btn-primary px-4 min-h-[44px] text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-shrink-0 bg-[#ff6b2b] text-white text-[12px] font-semibold px-3 py-1.5 rounded-[4px] min-h-[40px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[#e55a1f] transition-colors"
             aria-label="Send message"
           >
             Send
           </button>
         </form>
-        <p className="mt-1.5 text-xs text-slate-400 hidden sm:block">
-          Press <kbd className="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1">Enter</kbd> to send
+        <p className="mt-1.5 text-xs text-[#555555] hidden sm:block">
+          Press <kbd className="font-mono text-xs bg-[#2a2a2a] border border-[#2e2e2e] rounded px-1">Enter</kbd> to send
           &nbsp;&middot;&nbsp;
-          <kbd className="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1">Shift+Enter</kbd> for new line
+          <kbd className="font-mono text-xs bg-[#2a2a2a] border border-[#2e2e2e] rounded px-1">Shift+Enter</kbd> for new line
         </p>
       </div>
     </div>

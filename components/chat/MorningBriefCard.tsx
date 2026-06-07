@@ -47,9 +47,15 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
   // cards below already convey that ordered list.
   const summaryText = message.split(/\n+suggested order[:\s]/i)[0].trim()
 
+  const badgeClass = {
+    high: 'bg-[rgba(244,67,54,0.15)] text-[#f44336] text-[10px] font-medium uppercase px-1.5 py-0.5 rounded-[3px]',
+    medium: 'bg-[rgba(255,152,0,0.15)] text-[#ff9800] text-[10px] font-medium uppercase px-1.5 py-0.5 rounded-[3px]',
+    low: 'bg-[#2a2a2a] text-[#555555] text-[10px] font-medium uppercase px-1.5 py-0.5 rounded-[3px]',
+  }
+
   return (
-    <div className="rounded-lg border border-brand-200 bg-brand-50 p-4 max-w-full">
-      <p className="text-sm text-slate-700 leading-relaxed mb-3">{summaryText}</p>
+    <div className="max-w-full">
+      <p className="text-[#999999] text-[13px] leading-relaxed mb-3">{summaryText}</p>
 
       {sorted.length > 0 && (
         <div className="space-y-2">
@@ -62,9 +68,9 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                 role={isClickable ? 'button' : undefined}
                 tabIndex={isClickable ? 0 : undefined}
                 aria-label={isClickable ? alert.action : undefined}
-                className={`bg-white rounded-md border border-slate-100 px-3 py-2.5 transition-colors ${
+                className={`bg-[#222222] border border-[#2e2e2e] rounded-[4px] px-3 py-2.5 transition-colors ${
                   isClickable
-                    ? 'cursor-pointer hover:border-brand-200 hover:bg-brand-50 focus:outline-none focus:ring-1 focus:ring-brand-400'
+                    ? 'cursor-pointer hover:border-[#ff6b2b]/30 focus:outline-none'
                     : ''
                 }`}
                 onClick={() => {
@@ -78,18 +84,18 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                 }}
               >
                 <div className="flex items-start gap-2">
-                  <span className={`${config.badge} flex-shrink-0 mt-0.5`}>{config.label}</span>
+                  <span className={`${badgeClass[alert.priority]} flex-shrink-0 mt-0.5`}>{config.label}</span>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-700 leading-snug">{alert.message}</p>
+                    <p className="text-[#e0e0e0] text-[13px] leading-snug">{alert.message}</p>
                     {alert.action && (
-                      <p className="mt-1 text-xs font-medium text-brand-600">
+                      <p className="mt-1 text-[#ff6b2b] text-[12px]">
                         {alert.action} →
                       </p>
                     )}
                   </div>
                   {isClickable && (
                     <svg
-                      className="w-3.5 h-3.5 flex-shrink-0 text-slate-300 mt-0.5"
+                      className="w-3.5 h-3.5 flex-shrink-0 text-[#555555] mt-0.5"
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"

@@ -38,25 +38,14 @@ function formatAUD(amount: number): string {
 function statusBadgeClass(status: string): string {
   switch (status) {
     case 'approved':
-      return 'bg-green-100 text-green-700 border-green-200'
+      return 'bg-[rgba(76,175,80,0.15)] border border-[rgba(76,175,80,0.3)] text-[#4caf50]'
     case 'rejected':
-      return 'bg-slate-100 text-slate-600 border-slate-200'
+      return 'bg-[#2a2a2a] border border-[#2e2e2e] text-[#555555]'
     case 'draft':
-      return 'bg-slate-100 text-slate-600 border-slate-200'
+      return 'bg-[#2a2a2a] border border-[#2e2e2e] text-[#555555]'
     case 'pending':
     default:
-      return 'bg-amber-100 text-amber-700 border-amber-200'
-  }
-}
-
-function cardClass(status: string): string {
-  switch (status) {
-    case 'approved':
-      return 'bg-green-50 border border-green-200'
-    case 'rejected':
-      return 'bg-slate-100 border border-slate-200'
-    default:
-      return 'bg-amber-50 border border-amber-200'
+      return 'bg-[rgba(255,152,0,0.15)] border border-[rgba(255,152,0,0.3)] text-[#ff9800]'
   }
 }
 
@@ -97,78 +86,75 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
 
   return (
     <div
-      className={`rounded-xl p-4 mt-2 w-full max-w-sm ${cardClass(localStatus)}`}
+      className="bg-[#222222] border border-[#2e2e2e] rounded-[6px] p-4 mt-2 w-full max-w-sm"
       role="region"
       aria-label={`Variation: ${variation.title}`}
     >
       {/* Header row */}
-      <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-            Variation
-          </span>
-          {variation.variation_ref && (
-            <span className="text-xs font-mono font-semibold text-brand-600 bg-brand-50 px-1.5 py-0.5 rounded">
-              {variation.variation_ref}
-            </span>
-          )}
-        </div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[#555555] text-[11px]">
+          {variation.variation_ref && `${variation.variation_ref} · `}Logged {variation.created_display}
+        </span>
         <span
-          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${statusBadgeClass(localStatus)}`}
+          className={`inline-flex items-center px-2 py-0.5 rounded-[3px] text-[11px] font-medium ${statusBadgeClass(localStatus)}`}
         >
           {statusLabel(localStatus)}
         </span>
       </div>
 
-      {/* Address + age */}
-      <p className="text-xs text-slate-500 mb-2">
-        {variation.job_address} &middot; {variation.created_display}
-      </p>
-
-      {/* Submitted by */}
-      {variation.submitted_by && (
-        <p className="text-xs text-slate-400 mb-1.5">Submitted by {variation.submitted_by}</p>
-      )}
-
       {/* Title */}
-      <p className="text-sm font-semibold text-slate-900 leading-snug mb-1">
+      <p className="text-[#e0e0e0] text-[14px] font-semibold mt-2 leading-snug">
         {variation.title}
       </p>
 
-      {/* Amount + breakdown */}
-      <div className="mb-3">
-        <p className="text-lg font-bold text-slate-900">{formatAUD(variation.amount)}</p>
-        {(variation.labour_cost !== undefined || variation.materials_cost !== undefined) && (
-          <div className="flex gap-3 mt-1">
-            {variation.labour_cost !== undefined && (
-              <span className="text-xs text-slate-500">
-                Labour: <span className="font-medium text-slate-700">{formatAUD(variation.labour_cost)}</span>
-              </span>
-            )}
-            {variation.materials_cost !== undefined && (
-              <span className="text-xs text-slate-500">
-                Materials: <span className="font-medium text-slate-700">{formatAUD(variation.materials_cost)}</span>
-              </span>
-            )}
-          </div>
-        )}
+      {/* Description (job address) */}
+      <p className="text-[#999999] text-[12px] leading-[1.5] mt-1">
+        {variation.job_address}
+      </p>
+
+      {/* Amount */}
+      <p className="text-[#e0e0e0] text-[20px] font-bold mt-3">{formatAUD(variation.amount)}</p>
+
+      {/* Sub-line */}
+      {(variation.labour_cost !== undefined || variation.materials_cost !== undefined) && (
+        <p className="text-[#555555] text-[11px] mt-0.5">
+          inc. GST
+          {variation.labour_cost !== undefined && ` · Labour ${formatAUD(variation.labour_cost)}`}
+          {variation.materials_cost !== undefined && ` · Materials ${formatAUD(variation.materials_cost)}`}
+        </p>
+      )}
+
+      {/* Footer row */}
+      <div className="border-t border-[#2e2e2e] mt-3.5 pt-2.5 grid grid-cols-3 gap-2">
+        <div>
+          <p className="text-[#555555] text-[10px] uppercase tracking-[0.06em]">Submitted by</p>
+          <p className="text-[#999999] text-[12px] font-medium">{variation.submitted_by ?? '—'}</p>
+        </div>
+        <div>
+          <p className="text-[#555555] text-[10px] uppercase tracking-[0.06em]">Days pending</p>
+          <p className="text-[#ff6b2b] text-[12px] font-medium">{variation.days_pending ?? '—'}</p>
+        </div>
+        <div>
+          <p className="text-[#555555] text-[10px] uppercase tracking-[0.06em]">Contract impact</p>
+          <p className="text-[#e0e0e0] text-[12px] font-medium">{formatAUD(variation.amount)}</p>
+        </div>
       </div>
 
       {/* Actions */}
       {isPending && hasPermission(userRole ?? 'owner', 'site_manager') ? (
-        <div className="space-y-2">
+        <div className="space-y-2 mt-3">
           {confirming === 'approve' && (
-            <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
-              <p className="flex-1 text-xs font-medium text-green-800">Confirm approve {formatAUD(variation.amount)}?</p>
-              <button type="button" onClick={handleApprove} className="text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded px-2 py-1 transition-colors">Yes</button>
-              <button type="button" onClick={() => setConfirming(null)} className="text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+            <div className="flex items-center gap-2 bg-[rgba(76,175,80,0.1)] border border-[rgba(76,175,80,0.3)] rounded-[4px] px-3 py-2">
+              <p className="flex-1 text-[12px] font-medium text-[#4caf50]">Confirm approve {formatAUD(variation.amount)}?</p>
+              <button type="button" onClick={handleApprove} className="text-[12px] font-semibold text-[#4caf50] bg-[rgba(76,175,80,0.2)] border border-[rgba(76,175,80,0.3)] rounded-[4px] px-2 py-1">Yes</button>
+              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium text-[#999999]">Cancel</button>
             </div>
           )}
           {confirming === 'reject' && (
-            <div className="flex items-center gap-2 bg-slate-100 border border-slate-300 rounded-lg px-3 py-2">
-              <p className="flex-1 text-xs font-medium text-slate-700">Confirm reject?</p>
-              <button type="button" onClick={handleReject} className="text-xs font-semibold text-white bg-slate-600 hover:bg-slate-700 rounded px-2 py-1 transition-colors">Yes</button>
-              <button type="button" onClick={() => setConfirming(null)} className="text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors">Cancel</button>
+            <div className="flex items-center gap-2 bg-[#2a2a2a] border border-[#2e2e2e] rounded-[4px] px-3 py-2">
+              <p className="flex-1 text-[12px] font-medium text-[#999999]">Confirm reject?</p>
+              <button type="button" onClick={handleReject} className="text-[12px] font-semibold text-[#999999] bg-[#2a2a2a] border border-[#2e2e2e] rounded-[4px] px-2 py-1">Yes</button>
+              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium text-[#555555]">Cancel</button>
             </div>
           )}
           {!confirming && (
@@ -176,14 +162,14 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
               <button
                 type="button"
                 onClick={handleApprove}
-                className="flex-1 px-3 py-2.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
+                className="flex-1 bg-[rgba(76,175,80,0.2)] text-[#4caf50] border border-[rgba(76,175,80,0.3)] text-[12px] font-semibold px-3 py-2 rounded-[4px]"
               >
                 Approve {formatAUD(variation.amount)}
               </button>
               <button
                 type="button"
                 onClick={handleReject}
-                className="px-3 py-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
+                className="bg-[#2a2a2a] text-[#999999] border border-[#2e2e2e] text-[12px] px-3 py-2 rounded-[4px]"
               >
                 Reject
               </button>
@@ -191,7 +177,7 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
                 <button
                   type="button"
                   onClick={() => onViewJob(variation.job_id!)}
-                  className="px-3 py-2.5 text-xs font-medium text-brand-600 hover:text-brand-700 flex items-center gap-1 whitespace-nowrap"
+                  className="px-3 py-2 text-[12px] font-medium text-[#ff6b2b] flex items-center gap-1 whitespace-nowrap"
                 >
                   Details
                   <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -203,18 +189,18 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
           )}
         </div>
       ) : isPending ? (
-        <p className="text-xs text-slate-400 italic">Approval requires Site Manager access</p>
+        <p className="text-[12px] text-[#555555] italic mt-3">Approval requires Site Manager access</p>
       ) : (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 mt-3">
           {localStatus === 'approved' ? (
-            <span className="flex items-center gap-1.5 text-sm font-semibold text-green-700">
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold text-[#4caf50]">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
               </svg>
               Approved
             </span>
           ) : (
-            <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-500">
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold text-[#555555]">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>

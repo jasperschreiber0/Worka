@@ -158,9 +158,9 @@ export default function IntakeProgress({
   // ── Error state ────────────────────────────────────────────────────────────
   if (hasError) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-5 space-y-2">
+      <div className="rounded-xl border border-[rgba(244,67,54,0.3)] bg-[rgba(244,67,54,0.08)] px-4 py-5 space-y-2">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 rounded-full bg-[rgba(244,67,54,0.15)] flex items-center justify-center flex-shrink-0">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path
                 d="M8 5v3M8 11h.01M14 8A6 6 0 112 8a6 6 0 0112 0z"
@@ -171,9 +171,9 @@ export default function IntakeProgress({
               />
             </svg>
           </div>
-          <p className="text-sm font-semibold text-red-700">Processing failed</p>
+          <p className="text-sm font-semibold text-[#f44336]">Processing failed</p>
         </div>
-        <p className="text-sm text-red-600 pl-10">
+        <p className="text-sm text-[#f44336] pl-10">
           Could not process <span className="font-medium">{filename}</span>. Please try again.
         </p>
       </div>
@@ -182,17 +182,17 @@ export default function IntakeProgress({
 
   // ── Main progress UI ───────────────────────────────────────────────────────
   return (
-    <div className="rounded-xl border border-slate-200 bg-white px-4 py-5 space-y-4">
+    <div className="rounded-xl border border-[#2e2e2e] bg-[#222222] px-4 py-5 space-y-4">
       {/* File name row */}
       <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-md bg-brand-50 border border-brand-100 flex items-center justify-center flex-shrink-0">
+        <div className="w-8 h-8 rounded-md bg-[rgba(255,107,43,0.13)] border border-[rgba(255,107,43,0.2)] flex items-center justify-center flex-shrink-0">
           <svg
             width="14"
             height="14"
             viewBox="0 0 24 24"
             fill="none"
             aria-hidden="true"
-            className="text-brand-500"
+            className="text-[#ff6b2b]"
           >
             <path
               d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
@@ -211,18 +211,18 @@ export default function IntakeProgress({
           </svg>
         </div>
         <div className="min-w-0">
-          <p className="text-sm font-medium text-slate-800 truncate">{filename}</p>
+          <p className="text-[13px] font-medium text-[#e0e0e0] truncate">{filename}</p>
           {additionalFileIds && additionalFileIds.length > 0 && (
-            <p className="text-xs text-slate-400 mt-0.5">+ {additionalFileIds.length} more file{additionalFileIds.length !== 1 ? 's' : ''}</p>
+            <p className="text-[11px] text-[#555555] mt-0.5">+ {additionalFileIds.length} more file{additionalFileIds.length !== 1 ? 's' : ''}</p>
           )}
         </div>
       </div>
 
       {/* Progress bar */}
       <div className="space-y-1.5">
-        <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+        <div className="h-2 w-full rounded-full bg-[#2a2a2a] overflow-hidden">
           <div
-            className="h-full rounded-full bg-brand-500 transition-all duration-500"
+            className="h-full rounded-full bg-[#ff6b2b] transition-all duration-500"
             style={{ width: `${progress.pct}%` }}
             role="progressbar"
             aria-valuenow={progress.pct}
@@ -232,16 +232,16 @@ export default function IntakeProgress({
           />
         </div>
         <div className="flex items-center justify-between">
-          <p className="text-xs text-slate-500 font-medium">{progress.pct}%</p>
+          <p className="text-[11px] text-[#555555] font-medium">{progress.pct}%</p>
         </div>
       </div>
 
       {/* Current stage message */}
       {!isDone ? (
-        <p className="text-sm font-semibold text-brand-600">{progress.message}</p>
+        <p className="text-[13px] font-semibold text-[#ff6b2b]">{progress.message}</p>
       ) : (
         <div className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+          <div className="w-5 h-5 rounded-full bg-[rgba(76,175,80,0.15)] flex items-center justify-center flex-shrink-0">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
               <path
                 d="M1.5 5L3.75 7.5L8.5 2.5"
@@ -252,7 +252,7 @@ export default function IntakeProgress({
               />
             </svg>
           </div>
-          <p className="text-sm font-semibold text-green-700">{progress.message}</p>
+          <p className="text-[13px] font-semibold text-[#4caf50]">{progress.message}</p>
         </div>
       )}
 
@@ -262,7 +262,7 @@ export default function IntakeProgress({
           {completedStages.map((s) => (
             <li
               key={s.stage}
-              className="flex items-center gap-2 text-sm text-slate-500 animate-fade-in"
+              className="flex items-center gap-2 text-[12px] text-[#555555] animate-fade-in"
             >
               <svg
                 width="12"
@@ -286,7 +286,7 @@ export default function IntakeProgress({
 
           {/* Active stage indicator */}
           {!isDone && (
-            <li className="flex items-center gap-2 text-sm font-semibold text-brand-500">
+            <li className="flex items-center gap-2 text-sm font-semibold text-[#ff6b2b]">
               <svg
                 width="12"
                 height="12"
