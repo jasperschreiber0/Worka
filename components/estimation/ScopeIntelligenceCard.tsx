@@ -32,10 +32,10 @@ function confidenceLabel(n: number): string {
   return 'Worth checking'
 }
 
-function confidenceColor(n: number): string {
-  if (n >= 90) return 'text-red-600 bg-red-50'
-  if (n >= 80) return 'text-amber-600 bg-amber-50'
-  return 'text-blue-600 bg-blue-50'
+function confidenceBadgeStyle(n: number): React.CSSProperties {
+  if (n >= 90) return { background: 'rgba(244,67,54,0.1)', color: 'var(--status-red)' }
+  if (n >= 80) return { background: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }
+  return { background: 'rgba(33,150,243,0.1)', color: 'var(--status-blue)' }
 }
 
 export default function ScopeIntelligenceCard({ hints, onAccept, onDismiss }: ScopeIntelligenceCardProps) {
@@ -59,25 +59,50 @@ export default function ScopeIntelligenceCard({ hints, onAccept, onDismiss }: Sc
   const allResolved = visible.length === 0
 
   return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
+    <div
+      className="rounded-lg overflow-hidden"
+      style={{ border: '0.5px solid var(--bg-border)', background: 'var(--bg-elevated)' }}
+    >
       {/* Header */}
-      <div className="px-4 py-3 bg-white border-b border-amber-100">
+      <div
+        className="px-4 py-3 border-b"
+        style={{ background: 'var(--bg-surface)', borderColor: 'var(--bg-border)' }}
+      >
         <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
-            <svg className="w-3.5 h-3.5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <div
+            className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
+            style={{ background: 'rgba(255,152,0,0.1)' }}
+          >
+            <svg
+              className="w-3.5 h-3.5"
+              style={{ color: 'var(--status-amber)' }}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
               <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
             </svg>
           </div>
           <div className="flex-1">
-            <p className="text-sm font-semibold text-slate-800">Scope intelligence</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+              Scope intelligence
+            </p>
+            <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
               {allResolved
                 ? 'All scope items reviewed.'
                 : `${visible.length} likely missing item${visible.length !== 1 ? 's' : ''} detected`}
             </p>
           </div>
           {!allResolved && (
-            <span className="text-xs text-amber-700 bg-amber-100 font-medium px-2 py-0.5 rounded-full">
+            <span
+              className="text-xs font-medium px-2 py-0.5 rounded-full"
+              style={{
+                background: 'var(--pill-awaiting-bg)',
+                border: '0.5px solid var(--pill-awaiting-border)',
+                color: 'var(--pill-awaiting-text)',
+              }}
+            >
               Review before sending
             </span>
           )}
@@ -86,34 +111,55 @@ export default function ScopeIntelligenceCard({ hints, onAccept, onDismiss }: Sc
 
       {/* Hints */}
       {!allResolved && (
-        <div className="divide-y divide-amber-100">
+        <div className="divide-y" style={{ borderColor: 'var(--bg-border)' }}>
           {visible.map((hint) => (
-            <div key={hint.description} className="px-4 py-3 bg-white">
+            <div
+              key={hint.description}
+              className="px-4 py-3"
+              style={{ background: 'var(--bg-surface)' }}
+            >
               <div className="flex items-start gap-3">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap mb-1">
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${confidenceColor(hint.confidence)}`}>
+                    <span
+                      className="text-[10px] font-semibold px-1.5 py-0.5 rounded"
+                      style={confidenceBadgeStyle(hint.confidence)}
+                    >
                       {confidenceLabel(hint.confidence)} · {hint.confidence}%
                     </span>
-                    <span className="text-[10px] text-slate-400">{TRADE_NAMES[hint.trade_category_id]}</span>
+                    <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+                      {TRADE_NAMES[hint.trade_category_id]}
+                    </span>
                     {hint.typical_cost_range && (
-                      <span className="text-[10px] text-slate-500 font-medium">{hint.typical_cost_range}</span>
+                      <span className="text-[10px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                        {hint.typical_cost_range}
+                      </span>
                     )}
                   </div>
-                  <p className="text-sm font-medium text-slate-800">{hint.description}</p>
-                  <p className="text-xs text-slate-500 mt-0.5 leading-snug">{hint.reason}</p>
+                  <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                    {hint.description}
+                  </p>
+                  <p className="text-xs mt-0.5 leading-snug" style={{ color: 'var(--text-tertiary)' }}>
+                    {hint.reason}
+                  </p>
                 </div>
               </div>
               <div className="flex gap-2 mt-2.5">
                 <button
                   onClick={() => handleAccept(hint)}
-                  className="flex-1 py-1.5 text-xs font-semibold rounded bg-brand-500 text-white hover:bg-brand-600 transition-colors"
+                  className="flex-1 py-1.5 text-xs font-semibold rounded transition-colors"
+                  style={{ background: 'var(--orange-primary)', color: '#fff' }}
                 >
                   Add to scope
                 </button>
                 <button
                   onClick={() => handleDismiss(hint)}
-                  className="flex-1 py-1.5 text-xs font-medium rounded border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors"
+                  className="flex-1 py-1.5 text-xs font-medium rounded transition-colors"
+                  style={{
+                    border: '0.5px solid var(--bg-border)',
+                    color: 'var(--text-secondary)',
+                    background: 'transparent',
+                  }}
                 >
                   Not applicable
                 </button>
@@ -125,8 +171,11 @@ export default function ScopeIntelligenceCard({ hints, onAccept, onDismiss }: Sc
 
       {/* Accepted summary */}
       {accepted.size > 0 && (
-        <div className="px-4 py-2.5 bg-green-50 border-t border-amber-100">
-          <p className="text-xs text-green-700 font-medium">
+        <div
+          className="px-4 py-2.5 border-t"
+          style={{ background: 'rgba(76,175,80,0.08)', borderColor: 'var(--bg-border)' }}
+        >
+          <p className="text-xs font-medium" style={{ color: 'var(--status-green)' }}>
             ✓ {accepted.size} item{accepted.size !== 1 ? 's' : ''} added to scope
           </p>
         </div>
