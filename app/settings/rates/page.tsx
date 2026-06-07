@@ -313,13 +313,14 @@ export default function RatesPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen" style={{ background: 'var(--bg-shell)' }}>
       {/* Header */}
-      <header className="bg-white border-b border-slate-200">
+      <header style={{ background: 'var(--bg-surface)', borderBottom: '1px solid var(--bg-border)' }}>
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
           <Link
             href="/settings"
-            className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+            className="flex items-center gap-1.5 text-sm transition-colors"
+            style={{ color: 'var(--text-secondary)' }}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
@@ -331,8 +332,8 @@ export default function RatesPage() {
 
       <main className="max-w-2xl mx-auto px-4 py-8">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-slate-900">Rates &amp; pricing</h1>
-          <p className="mt-1.5 text-slate-600">
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Rates &amp; pricing</h1>
+          <p className="mt-1.5" style={{ color: 'var(--text-secondary)' }}>
             Import your historical rates so WorkA can quote accurately from day one.
           </p>
         </div>
@@ -340,34 +341,36 @@ export default function RatesPage() {
         {/* ── Done state ──────────────────────────────────────────────── */}
         {stage === 'done' && (
           <div className="mb-6">
-            <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-5 flex items-start gap-4">
-              <span className="flex-shrink-0 w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
-                <svg className="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+            <div className="rounded-xl px-5 py-5 flex items-start gap-4" style={{ background: 'rgba(76,175,80,0.15)', border: '1px solid rgba(76,175,80,0.3)' }}>
+              <span className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center" style={{ background: 'rgba(76,175,80,0.2)' }}>
+                <svg className="w-5 h-5" style={{ color: 'var(--status-green)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
               </span>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-green-800">
+                <p className="text-sm font-semibold" style={{ color: 'var(--status-green)' }}>
                   {validCount} rate{validCount !== 1 ? 's' : ''} saved to WorkA
                 </p>
-                <p className="mt-0.5 text-xs text-green-700">
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--status-green)' }}>
                   These rates are now active. WorkA will use them when quoting your next job.
                 </p>
                 {!process.env.NEXT_PUBLIC_SUPABASE_URL && (
-                  <p className="mt-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                  <p className="mt-1.5 text-xs rounded px-2 py-1" style={{ color: 'var(--status-amber)', background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.2)' }}>
                     Demo mode — rates are held in memory and will reset when the server restarts. Connect Supabase to persist them.
                   </p>
                 )}
                 <div className="mt-3 flex gap-2">
                   <button
                     onClick={resetToIdle}
-                    className="text-xs font-medium text-green-700 border border-green-300 rounded-lg px-3 py-1.5 hover:bg-green-100 transition-colors"
+                    className="text-xs font-medium rounded-lg px-3 py-1.5 transition-colors"
+                    style={{ color: 'var(--status-green)', border: '1px solid rgba(76,175,80,0.4)' }}
                   >
                     Import another file
                   </button>
                   <Link
                     href="/chat"
-                    className="text-xs font-medium text-white bg-brand-500 hover:bg-brand-600 rounded-lg px-3 py-1.5 transition-colors"
+                    className="text-xs font-medium rounded-lg px-3 py-1.5 transition-colors"
+                    style={{ color: '#fff', background: 'var(--orange-primary)' }}
                   >
                     Back to chat
                   </Link>
@@ -381,12 +384,13 @@ export default function RatesPage() {
         {(stage === 'idle' || stage === 'preview' || stage === 'extracting') && (
           <section className="mb-6">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>
                 Upload rate sheet
               </h2>
               <button
                 onClick={downloadExampleCSV}
-                className="flex items-center gap-1.5 text-xs text-brand-500 hover:text-brand-600 font-medium transition-colors"
+                className="flex items-center gap-1.5 text-xs font-medium transition-colors"
+                style={{ color: 'var(--orange-primary)' }}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -396,28 +400,35 @@ export default function RatesPage() {
             </div>
 
             {importError && stage === 'idle' && (
-              <p className="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <p className="mb-3 text-xs rounded-lg px-3 py-2" style={{ color: 'var(--status-amber)', background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.2)' }}>
                 {importError}
               </p>
             )}
 
-            <div className="bg-white rounded-xl border border-slate-200 px-5 py-4 mb-3">
+            <div className="rounded-xl px-5 py-4 mb-3" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
               {/* Drop zone */}
               <div
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
                 onClick={() => inputRef.current?.click()}
-                className={`relative border-2 border-dashed rounded-xl cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 py-8 px-4
-                  ${dragOver ? 'border-brand-400 bg-brand-50' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'}`}
+                className="relative border-2 border-dashed rounded-xl cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 py-8 px-4"
+                style={dragOver
+                  ? { borderColor: 'var(--orange-primary)', background: 'rgba(255,107,43,0.08)' }
+                  : { borderColor: 'var(--bg-border)' }
+                }
               >
-                <svg className={`w-8 h-8 ${dragOver ? 'text-brand-400' : 'text-slate-300'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                <svg
+                  className="w-8 h-8"
+                  style={{ color: dragOver ? 'var(--orange-primary)' : 'var(--text-tertiary)' }}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true"
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
                 </svg>
-                <p className="text-sm font-medium text-slate-600">
+                <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
                   {stage === 'preview' ? 'Drop another CSV to replace' : 'Drop your CSV here, or click to browse'}
                 </p>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
                   CSV or PDF — past quotes, invoices, supplier price lists
                 </p>
                 <input
@@ -436,59 +447,62 @@ export default function RatesPage() {
         {stage === 'preview' && rows.length > 0 && (
           <section className="mb-6">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>
                 Preview
               </h2>
-              <span className="text-xs text-slate-500">
-                <span className="text-green-700 font-semibold">{validCount} ready</span>
-                {skippedCount > 0 && <span className="text-amber-600 font-semibold"> · {skippedCount} skipped</span>}
+              <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                <span className="font-semibold" style={{ color: 'var(--status-green)' }}>{validCount} ready</span>
+                {skippedCount > 0 && <span className="font-semibold" style={{ color: 'var(--status-amber)' }}> · {skippedCount} skipped</span>}
               </span>
             </div>
 
-            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="rounded-xl overflow-hidden" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
               <div className="overflow-x-auto max-h-72 overflow-y-auto">
                 <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-slate-50 border-b border-slate-200">
+                  <thead className="sticky top-0" style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
                     <tr>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2.5 w-8"></th>
-                      <th className="text-left text-slate-500 font-medium px-3 py-2.5">Category</th>
-                      <th className="text-left text-slate-500 font-medium px-3 py-2.5">Description</th>
-                      <th className="text-left text-slate-500 font-medium px-3 py-2.5">Unit</th>
-                      <th className="text-right text-slate-500 font-medium px-4 py-2.5">Rate</th>
+                      <th className="text-left font-medium px-4 py-2.5 w-8" style={{ color: 'var(--text-secondary)' }}></th>
+                      <th className="text-left font-medium px-3 py-2.5" style={{ color: 'var(--text-secondary)' }}>Category</th>
+                      <th className="text-left font-medium px-3 py-2.5" style={{ color: 'var(--text-secondary)' }}>Description</th>
+                      <th className="text-left font-medium px-3 py-2.5" style={{ color: 'var(--text-secondary)' }}>Unit</th>
+                      <th className="text-right font-medium px-4 py-2.5" style={{ color: 'var(--text-secondary)' }}>Rate</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody>
                     {rows.map((row, i) => (
                       <tr
                         key={i}
-                        className={row.valid ? 'bg-white' : 'bg-amber-50'}
+                        style={row.valid
+                          ? { borderTop: i > 0 ? '1px solid var(--bg-border)' : undefined }
+                          : { background: 'rgba(255,152,0,0.07)', borderTop: i > 0 ? '1px solid var(--bg-border)' : undefined }
+                        }
                       >
                         <td className="px-4 py-2 text-center">
                           {row.valid ? (
-                            <span className="text-green-500">
+                            <span style={{ color: 'var(--status-green)' }}>
                               <svg className="w-3.5 h-3.5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                               </svg>
                             </span>
                           ) : (
-                            <span className="text-amber-400" title={row.error}>
+                            <span style={{ color: 'var(--status-amber)' }} title={row.error}>
                               <svg className="w-3.5 h-3.5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                               </svg>
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-slate-700 max-w-[140px] truncate">
+                        <td className="px-3 py-2 max-w-[140px] truncate" style={{ color: 'var(--text-primary)' }}>
                           {row.matched_category?.name ?? (
-                            <span className="text-amber-600">{row.raw_category}</span>
+                            <span style={{ color: 'var(--status-amber)' }}>{row.raw_category}</span>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={row.description}>
+                        <td className="px-3 py-2 max-w-[200px] truncate" style={{ color: 'var(--text-primary)' }} title={row.description}>
                           {row.description}
                         </td>
-                        <td className="px-3 py-2 text-slate-500">{row.unit}</td>
-                        <td className="px-4 py-2 text-right text-slate-900 font-medium tabular-nums">
-                          {row.rate !== null ? `$${row.rate.toFixed(2)}` : <span className="text-amber-600">—</span>}
+                        <td className="px-3 py-2" style={{ color: 'var(--text-secondary)' }}>{row.unit}</td>
+                        <td className="px-4 py-2 text-right font-medium tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                          {row.rate !== null ? `$${row.rate.toFixed(2)}` : <span style={{ color: 'var(--status-amber)' }}>—</span>}
                         </td>
                       </tr>
                     ))}
@@ -497,8 +511,8 @@ export default function RatesPage() {
               </div>
 
               {skippedCount > 0 && (
-                <div className="border-t border-amber-100 bg-amber-50 px-4 py-2.5">
-                  <p className="text-xs text-amber-700">
+                <div className="px-4 py-2.5" style={{ borderTop: '1px solid rgba(255,152,0,0.2)', background: 'rgba(255,152,0,0.07)' }}>
+                  <p className="text-xs" style={{ color: 'var(--status-amber)' }}>
                     {skippedCount} row{skippedCount !== 1 ? 's' : ''} skipped — unknown trade category or missing rate. Check the template for valid category names.
                   </p>
                 </div>
@@ -506,45 +520,52 @@ export default function RatesPage() {
             </div>
 
             {/* Supplier name + actions */}
-            <div className="mt-4 bg-white rounded-xl border border-slate-200 px-5 py-4">
-              <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                Label this import <span className="text-slate-400 font-normal">(optional)</span>
+            <div className="mt-4 rounded-xl px-5 py-4" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
+              <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>
+                Label this import <span className="font-normal" style={{ color: 'var(--text-tertiary)' }}>(optional)</span>
               </label>
               <input
                 type="text"
                 value={supplierName}
                 onChange={(e) => setSupplierName(e.target.value)}
                 placeholder="e.g. Harvey Norman Trade, My 2024 rates"
-                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
+                className="w-full text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2"
+                style={{
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--bg-border)',
+                  color: 'var(--text-primary)',
+                }}
               />
             </div>
 
             {importError && (
-              <p className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <p className="mt-3 text-xs rounded-lg px-3 py-2" style={{ color: 'var(--status-amber)', background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.2)' }}>
                 {importError}
               </p>
             )}
 
-            <div id="import-actions" className="mt-4 bg-white border border-brand-200 rounded-xl px-5 py-4 flex items-center justify-between gap-4">
+            <div id="import-actions" className="mt-4 rounded-xl px-5 py-4 flex items-center justify-between gap-4" style={{ background: 'var(--bg-surface)', border: '1px solid rgba(255,107,43,0.3)' }}>
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-slate-900">
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
                   Ready to save {validCount} rate{validCount !== 1 ? 's' : ''}
                 </p>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
                   {skippedCount > 0 ? `${skippedCount} row${skippedCount !== 1 ? 's' : ''} will be skipped — unknown category.` : 'All rows matched successfully.'}
                 </p>
               </div>
               <div className="flex gap-2 flex-shrink-0">
                 <button
                   onClick={resetToIdle}
-                  className="text-sm text-slate-600 border border-slate-200 rounded-xl px-4 py-2 hover:bg-slate-50 transition-colors"
+                  className="text-sm rounded-xl px-4 py-2 transition-colors"
+                  style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)', background: 'transparent' }}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleImport}
                   disabled={validCount === 0}
-                  className="text-sm font-semibold text-white bg-brand-500 hover:bg-brand-600 rounded-xl px-5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="text-sm font-semibold rounded-xl px-5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ color: '#fff', background: 'var(--orange-primary)' }}
                 >
                   Save to WorkA
                 </button>
@@ -555,12 +576,12 @@ export default function RatesPage() {
 
         {/* ── Extracting / Importing spinner ──────────────────────────── */}
         {(stage === 'extracting' || stage === 'importing') && (
-          <div className="mb-6 bg-white rounded-xl border border-slate-200 px-5 py-6 flex items-center gap-4">
-            <svg className="w-5 h-5 text-brand-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+          <div className="mb-6 rounded-xl px-5 py-6 flex items-center gap-4" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
+            <svg className="w-5 h-5 animate-spin flex-shrink-0" style={{ color: 'var(--orange-primary)' }} fill="none" viewBox="0 0 24 24" aria-hidden="true">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
-            <span className="text-sm text-slate-600">
+            <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>
               {stage === 'extracting' ? 'Reading PDF and extracting rates…' : `Importing ${validCount} rates…`}
             </span>
           </div>
@@ -569,25 +590,25 @@ export default function RatesPage() {
         {/* ── Previously imported ──────────────────────────────────────── */}
         {!loadingExisting && existingRates.length > 0 && stage !== 'importing' && stage !== 'extracting' && (
           <section>
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+            <h2 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-tertiary)' }}>
               Previously imported ({existingRates.length})
             </h2>
-            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="rounded-xl overflow-hidden" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
               <div className="overflow-x-auto max-h-56 overflow-y-auto">
                 <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-slate-50 border-b border-slate-200">
+                  <thead className="sticky top-0" style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
                     <tr>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2.5">Source</th>
-                      <th className="text-left text-slate-500 font-medium px-3 py-2.5">Item</th>
-                      <th className="text-right text-slate-500 font-medium px-4 py-2.5">Rate</th>
+                      <th className="text-left font-medium px-4 py-2.5" style={{ color: 'var(--text-secondary)' }}>Source</th>
+                      <th className="text-left font-medium px-3 py-2.5" style={{ color: 'var(--text-secondary)' }}>Item</th>
+                      <th className="text-right font-medium px-4 py-2.5" style={{ color: 'var(--text-secondary)' }}>Rate</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {existingRates.map((r) => (
-                      <tr key={r.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-2 text-slate-500 max-w-[120px] truncate">{r.supplier_name}</td>
-                        <td className="px-3 py-2 text-slate-700 max-w-[220px] truncate">{r.line_item_key ?? r.id}</td>
-                        <td className="px-4 py-2 text-right text-slate-900 tabular-nums">{r.unit} · ${r.rate}</td>
+                  <tbody>
+                    {existingRates.map((r, i) => (
+                      <tr key={r.id} style={{ borderTop: i > 0 ? '1px solid var(--bg-border)' : undefined }}>
+                        <td className="px-4 py-2 max-w-[120px] truncate" style={{ color: 'var(--text-secondary)' }}>{r.supplier_name}</td>
+                        <td className="px-3 py-2 max-w-[220px] truncate" style={{ color: 'var(--text-primary)' }}>{r.line_item_key ?? r.id}</td>
+                        <td className="px-4 py-2 text-right tabular-nums" style={{ color: 'var(--text-primary)' }}>{r.unit} · ${r.rate}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -600,8 +621,8 @@ export default function RatesPage() {
         {/* ── How it works ─────────────────────────────────────────────── */}
         {stage !== 'preview' && stage !== 'importing' && stage !== 'extracting' && (
           <section className="mt-6">
-            <div className="bg-slate-100 rounded-xl px-5 py-4">
-              <p className="text-xs font-semibold text-slate-600 mb-2">How WorkA uses your rates</p>
+            <div className="rounded-xl px-5 py-4" style={{ background: 'var(--bg-elevated)' }}>
+              <p className="text-xs font-semibold mb-2" style={{ color: 'var(--text-secondary)' }}>How WorkA uses your rates</p>
               <ul className="space-y-1.5">
                 {[
                   'Your imported rates are the first thing checked when pricing a new quote.',
@@ -609,8 +630,8 @@ export default function RatesPage() {
                   'Where no match exists, WorkA falls back to Victorian state averages.',
                   'Rates learned from your approved quotes take priority over imports.',
                 ].map((item) => (
-                  <li key={item} className="flex items-start gap-2 text-xs text-slate-500">
-                    <span className="flex-shrink-0 w-1 h-1 rounded-full bg-slate-400 mt-1.5" aria-hidden="true" />
+                  <li key={item} className="flex items-start gap-2 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    <span className="flex-shrink-0 w-1 h-1 rounded-full mt-1.5" style={{ background: 'var(--text-tertiary)' }} aria-hidden="true" />
                     {item}
                   </li>
                 ))}

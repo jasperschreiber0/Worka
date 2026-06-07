@@ -49,9 +49,10 @@ function MobileJobSheetInner({ job, onClose, onViewQuote, onAddTask }: MobileJob
     <>
       {/* Backdrop — hidden on md+ (side panel is used there instead) */}
       <div
-        className={`md:hidden fixed inset-0 bg-black/30 z-30 transition-opacity duration-300 ${
+        className={`md:hidden fixed inset-0 z-30 transition-opacity duration-300 ${
           visible ? 'opacity-100' : 'opacity-0'
         }`}
+        style={{ background: 'rgba(0,0,0,0.5)' }}
         onClick={handleClose}
         aria-hidden="true"
       />
@@ -62,13 +63,12 @@ function MobileJobSheetInner({ job, onClose, onViewQuote, onAddTask }: MobileJob
         role="dialog"
         aria-modal="true"
         aria-label={`Job snapshot: ${job.address}`}
-        className={`md:hidden fixed inset-x-0 bottom-0 z-40 bg-white rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col transition-transform duration-300 ease-in-out ${
-          visible ? 'translate-y-0' : 'translate-y-full'
-        }`}
+        className={`md:hidden fixed inset-x-0 bottom-0 z-40 rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col transition-transform duration-300 ease-in-out ${visible ? 'translate-y-0' : 'translate-y-full'}`}
+        style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)' }}
       >
         {/* Drag handle */}
         <div className="flex-shrink-0 flex justify-center pt-3 pb-1">
-          <div className="w-12 h-1.5 bg-slate-300 rounded-full" aria-hidden="true" />
+          <div className="w-12 h-1.5 rounded-full" style={{ backgroundColor: 'var(--bg-border)' }} aria-hidden="true" />
         </div>
 
         {/* Content — reuse JobSnapshotPanel */}

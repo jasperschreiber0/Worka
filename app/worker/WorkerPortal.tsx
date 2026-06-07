@@ -5,7 +5,7 @@ import type { DemoWorker, DemoWorkerJob } from '@/lib/worker-demo'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function urgencyStyle(urgency: DemoWorkerJob['milestone_due_urgency']): React.CSSProperties {
+function urgencyStyle(urgency: DemoWorkerJob['milestone_due_urgency']): Record<string, string> {
   switch (urgency) {
     case 'overdue': return { color: 'var(--status-red)', backgroundColor: 'rgba(244,67,54,0.1)', border: '1px solid rgba(244,67,54,0.25)' }
     case 'soon':    return { color: 'var(--status-amber)', backgroundColor: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.25)' }
