@@ -245,7 +245,7 @@ export default function IntakeProgress({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
               <path
                 d="M1.5 5L3.75 7.5L8.5 2.5"
-                stroke="#16a34a"
+                stroke="#4caf50"
                 strokeWidth="1.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -274,7 +274,7 @@ export default function IntakeProgress({
               >
                 <path
                   d="M2 6l2.5 2.5L10 3"
-                  stroke="#6366f1"
+                  stroke="#4caf50"
                   strokeWidth="1.5"
                   strokeLinecap="round"
                   strokeLinejoin="round"
