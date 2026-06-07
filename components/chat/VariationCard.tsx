@@ -36,34 +36,6 @@ function formatAUD(amount: number): string {
   return `$${amount.toLocaleString('en-AU')}`
 }
 
-function statusBadgeClass(status: string): string {
-  switch (status) {
-    case 'approved':
-      return 'bg-[rgba(76,175,80,0.15)] border border-[rgba(76,175,80,0.3)] text-[#4caf50]'
-    case 'rejected':
-      return 'bg-[#2a2a2a] border border-[#2e2e2e] text-[#555555]'
-    case 'draft':
-      return 'bg-[#2a2a2a] border border-[#2e2e2e] text-[#555555]'
-    case 'pending':
-    default:
-      return 'bg-[rgba(255,152,0,0.15)] border border-[rgba(255,152,0,0.3)] text-[#ff9800]'
-  }
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'approved':
-      return 'Approved'
-    case 'rejected':
-      return 'Rejected'
-    case 'draft':
-      return 'Draft'
-    case 'pending':
-    default:
-      return 'Pending'
-  }
-}
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function VariationCard({ variation, onApprove, onReject, onViewJob, userRole = 'owner' }: VariationCardProps) {
@@ -85,71 +57,85 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
     onReject(variation.id)
   }
 
+  // Status pill style
+  const pillStyle: React.CSSProperties = localStatus === 'approved'
+    ? { backgroundColor: 'rgba(76,175,80,0.15)', border: '0.5px solid rgba(76,175,80,0.3)', color: 'var(--status-green)' }
+    : localStatus === 'rejected'
+    ? { backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', color: 'var(--text-tertiary)' }
+    : { backgroundColor: 'var(--pill-awaiting-bg)', border: '0.5px solid var(--pill-awaiting-border)', color: 'var(--pill-awaiting-text)' }
+
+  const pillLabel = localStatus === 'approved' ? 'Approved' : localStatus === 'rejected' ? 'Rejected' : 'Awaiting approval'
+
   return (
     <div
-      className="bg-[#222222] border border-[#2e2e2e] rounded-[6px] p-4 mt-2 w-full max-w-sm"
+      className="rounded-[6px] mt-2 w-full max-w-sm"
       role="region"
       aria-label={`Variation: ${variation.title}`}
+      style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)', padding: '14px 16px' }}
     >
       {/* Header row */}
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[#555555] text-[11px]">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
           {variation.variation_ref && `${variation.variation_ref} · `}Logged {variation.created_display}
         </span>
         <span
-          className={`inline-flex items-center px-2 py-0.5 rounded-[3px] text-[11px] font-medium ${statusBadgeClass(localStatus)}`}
+          className="text-[11px] font-medium px-2 py-0.5 rounded-[3px]"
+          style={pillStyle}
         >
-          {statusLabel(localStatus)}
+          {pillLabel}
         </span>
       </div>
 
       {/* Title */}
-      <p className="text-[#e0e0e0] text-[14px] font-semibold mt-2 leading-snug">
+      <p className="text-[14px] font-semibold mt-2 leading-snug" style={{ color: 'var(--text-primary)' }}>
         {variation.title}
       </p>
 
       {/* Description (job address) */}
-      <p className="text-[#999999] text-[12px] leading-[1.5] mt-1">
+      <p className="text-[12px] leading-[1.5] mt-1" style={{ color: 'var(--text-secondary)' }}>
         {variation.job_address}
       </p>
 
-      {/* Amount */}
-      <p className="text-[#e0e0e0] text-[20px] font-bold mt-3">{formatAUD(variation.amount)}</p>
+      {/* Dollar amount — largest number on the card */}
+      <p className="text-[20px] font-bold mt-3" style={{ color: 'var(--text-primary)' }}>
+        {formatAUD(variation.amount)}
+      </p>
 
       {/* Sub-line */}
       {(variation.labour_cost !== undefined || variation.materials_cost !== undefined) && (
-        <p className="text-[#555555] text-[11px] mt-0.5">
+        <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
           inc. GST
           {variation.labour_cost !== undefined && ` · Labour ${formatAUD(variation.labour_cost)}`}
           {variation.materials_cost !== undefined && ` · Materials ${formatAUD(variation.materials_cost)}`}
         </p>
       )}
 
-      {/* Footer row */}
-      <div className="border-t border-[#2e2e2e] mt-3.5 pt-2.5 grid grid-cols-3 gap-2">
+      {/* Footer metadata — three columns */}
+      <div className="grid grid-cols-3 gap-2 mt-[14px] pt-[10px]" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
         <div>
-          <p className="text-[#555555] text-[10px] uppercase tracking-[0.06em]">Submitted by</p>
-          <p className="text-[#999999] text-[12px] font-medium">{variation.submitted_by ?? '—'}</p>
+          <p className="text-[10px] uppercase tracking-[0.06em]" style={{ color: 'var(--text-tertiary)' }}>Submitted by</p>
+          <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--text-secondary)' }}>{variation.submitted_by ?? '—'}</p>
         </div>
         <div>
-          <p className="text-[#555555] text-[10px] uppercase tracking-[0.06em]">Days pending</p>
-          <p className="text-[#ff6b2b] text-[12px] font-medium">{variation.days_pending ?? '—'}</p>
+          <p className="text-[10px] uppercase tracking-[0.06em]" style={{ color: 'var(--text-tertiary)' }}>Days pending</p>
+          <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--orange-primary)' }}>{variation.days_pending ?? '—'}</p>
         </div>
         <div>
-          <p className="text-[#555555] text-[10px] uppercase tracking-[0.06em]">Contract impact</p>
-          <p className="text-[#e0e0e0] text-[12px] font-medium">{formatAUD(variation.amount)}</p>
+          <p className="text-[10px] uppercase tracking-[0.06em]" style={{ color: 'var(--text-tertiary)' }}>Contract impact</p>
+          <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--text-primary)' }}>+{formatAUD(variation.amount)}</p>
         </div>
       </div>
-      {/* Blocks next stage — red-tinted row when true */}
+
+      {/* Blocks next stage — red-tinted container */}
       {variation.blocks_next_stage && (
         <div
           className="mt-2 px-2.5 py-2 rounded-[4px] flex items-center gap-2"
           style={{ backgroundColor: 'rgba(244,67,54,0.08)', border: '0.5px solid rgba(244,67,54,0.3)' }}
         >
-          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ color: '#f44336' }} aria-hidden="true">
+          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ color: 'var(--status-red)' }} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
           </svg>
-          <p className="text-[12px] font-semibold" style={{ color: '#f44336' }}>Blocks next stage: YES</p>
+          <p className="text-[12px] font-semibold" style={{ color: 'var(--status-red)' }}>Blocks next stage: YES</p>
         </div>
       )}
 
@@ -157,17 +143,17 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
       {isPending && hasPermission(userRole ?? 'owner', 'site_manager') ? (
         <div className="space-y-2 mt-3">
           {confirming === 'approve' && (
-            <div className="flex items-center gap-2 bg-[rgba(76,175,80,0.1)] border border-[rgba(76,175,80,0.3)] rounded-[4px] px-3 py-2">
-              <p className="flex-1 text-[12px] font-medium text-[#4caf50]">Confirm approve {formatAUD(variation.amount)}?</p>
-              <button type="button" onClick={handleApprove} className="text-[12px] font-semibold text-[#4caf50] bg-[rgba(76,175,80,0.2)] border border-[rgba(76,175,80,0.3)] rounded-[4px] px-2 py-1">Yes</button>
-              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium text-[#999999]">Cancel</button>
+            <div className="flex items-center gap-2 rounded-[4px] px-3 py-2" style={{ backgroundColor: 'rgba(76,175,80,0.1)', border: '0.5px solid rgba(76,175,80,0.3)' }}>
+              <p className="flex-1 text-[12px] font-medium" style={{ color: 'var(--status-green)' }}>Confirm approve {formatAUD(variation.amount)}?</p>
+              <button type="button" onClick={handleApprove} className="text-[12px] font-semibold rounded-[4px] px-2 py-1" style={{ color: 'var(--status-green)', backgroundColor: 'rgba(76,175,80,0.2)', border: '0.5px solid rgba(76,175,80,0.3)' }}>Yes</button>
+              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>Cancel</button>
             </div>
           )}
           {confirming === 'reject' && (
-            <div className="flex items-center gap-2 bg-[#2a2a2a] border border-[#2e2e2e] rounded-[4px] px-3 py-2">
-              <p className="flex-1 text-[12px] font-medium text-[#999999]">Confirm reject?</p>
-              <button type="button" onClick={handleReject} className="text-[12px] font-semibold text-[#999999] bg-[#2a2a2a] border border-[#2e2e2e] rounded-[4px] px-2 py-1">Yes</button>
-              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium text-[#555555]">Cancel</button>
+            <div className="flex items-center gap-2 rounded-[4px] px-3 py-2" style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>
+              <p className="flex-1 text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>Confirm reject?</p>
+              <button type="button" onClick={handleReject} className="text-[12px] font-semibold rounded-[4px] px-2 py-1" style={{ color: 'var(--text-secondary)', backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>Yes</button>
+              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium" style={{ color: 'var(--text-tertiary)' }}>Cancel</button>
             </div>
           )}
           {!confirming && (
@@ -175,14 +161,16 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
               <button
                 type="button"
                 onClick={handleApprove}
-                className="flex-1 bg-[rgba(76,175,80,0.2)] text-[#4caf50] border border-[rgba(76,175,80,0.3)] text-[12px] font-semibold px-3 py-2 rounded-[4px]"
+                className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-[4px]"
+                style={{ backgroundColor: 'rgba(76,175,80,0.2)', color: 'var(--status-green)', border: '0.5px solid rgba(76,175,80,0.3)' }}
               >
                 Approve {formatAUD(variation.amount)}
               </button>
               <button
                 type="button"
                 onClick={handleReject}
-                className="bg-[#2a2a2a] text-[#999999] border border-[#2e2e2e] text-[12px] px-3 py-2 rounded-[4px]"
+                className="text-[12px] px-3 py-2 rounded-[4px]"
+                style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}
               >
                 Reject
               </button>
@@ -190,30 +178,28 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
                 <button
                   type="button"
                   onClick={() => onViewJob(variation.job_id!)}
-                  className="px-3 py-2 text-[12px] font-medium text-[#ff6b2b] flex items-center gap-1 whitespace-nowrap"
+                  className="px-3 py-2 text-[12px] font-medium flex items-center gap-1 whitespace-nowrap"
+                  style={{ color: 'var(--orange-primary)' }}
                 >
-                  Details
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-                  </svg>
+                  Details →
                 </button>
               )}
             </div>
           )}
         </div>
       ) : isPending ? (
-        <p className="text-[12px] text-[#555555] italic mt-3">Approval requires Site Manager access</p>
+        <p className="text-[12px] italic mt-3" style={{ color: 'var(--text-tertiary)' }}>Approval requires Site Manager access</p>
       ) : (
         <div className="flex items-center gap-2 mt-3">
           {localStatus === 'approved' ? (
-            <span className="flex items-center gap-1.5 text-[13px] font-semibold text-[#4caf50]">
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold" style={{ color: 'var(--status-green)' }}>
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
               </svg>
               Approved
             </span>
           ) : (
-            <span className="flex items-center gap-1.5 text-[13px] font-semibold text-[#555555]">
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold" style={{ color: 'var(--text-tertiary)' }}>
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>

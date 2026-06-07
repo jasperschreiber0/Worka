@@ -1170,59 +1170,49 @@ export default function ChatInterface({
   return (
     <div className="flex flex-col h-full relative">
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#2e2e2e] bg-[#1a1a1a] flex-shrink-0">
+      <header
+        className="flex items-center justify-between px-4 flex-shrink-0"
+        style={{ height: '48px', borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-shell)' }}
+      >
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-md bg-[#ff6b2b] flex items-center justify-center flex-shrink-0">
-            <svg
-              className="w-4.5 h-4.5 text-white w-[18px] h-[18px]"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21"
-              />
+          <div className="w-8 h-8 rounded-[6px] flex items-center justify-center flex-shrink-0" style={{ backgroundColor: 'var(--orange-primary)' }}>
+            <svg className="w-[18px] h-[18px] text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" />
             </svg>
           </div>
-          <span className="text-lg font-bold text-[#e0e0e0] tracking-tight">WorkA</span>
+          <span className="text-[16px] font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>WorkA</span>
           <span
-            className="hidden sm:inline-block text-[10px] font-mono text-[#555555] leading-none mt-0.5"
+            className="hidden sm:inline-block text-[10px] font-mono leading-none mt-0.5"
+            style={{ color: 'var(--text-tertiary)' }}
             title={`v${process.env.NEXT_PUBLIC_APP_VERSION} · ${process.env.NEXT_PUBLIC_COMMIT_SHA}`}
           >
-            v{process.env.NEXT_PUBLIC_APP_VERSION}·{process.env.NEXT_PUBLIC_COMMIT_SHA}
+            v{process.env.NEXT_PUBLIC_APP_VERSION}
           </span>
         </div>
 
         <div className="flex items-center gap-2">
-          <Link
-            href="/settings/rates"
-            className="text-sm font-medium text-[#999999] hover:text-[#e0e0e0] px-2.5 py-1 rounded-[4px] hover:bg-[#2a2a2a] transition-colors"
-          >
+          <Link href="/settings/rates" className="text-[13px] font-medium px-2.5 py-1 rounded-[4px] transition-colors" style={{ color: 'var(--text-secondary)' }}>
             Data
           </Link>
           {isDemo && (
-            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-[3px] text-xs font-semibold bg-[rgba(255,152,0,0.15)] text-[#ff9800] border border-[rgba(255,152,0,0.3)]">
+            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-[3px] text-[11px] font-semibold" style={{ backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)', border: '0.5px solid var(--pill-awaiting-border)' }}>
               Demo
             </span>
           )}
-          <span className="text-sm text-[#999999] font-medium hidden sm:block">{userName}</span>
+          <span className="text-[13px] font-medium hidden sm:block" style={{ color: 'var(--text-secondary)' }}>{userName}</span>
           <div className="relative group">
             <button
               type="button"
-              className="w-8 h-8 rounded-full bg-[#2a2a2a] border border-[#2e2e2e] flex items-center justify-center flex-shrink-0 hover:border-[#ff6b2b]/40 transition-colors"
+              className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
+              style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}
               aria-label="Account menu"
             >
-              <span className="text-xs font-semibold text-[#ff6b2b]">{userInitials}</span>
+              <span className="text-[12px] font-semibold" style={{ color: 'var(--orange-primary)' }}>{userInitials}</span>
             </button>
-            {/* Dropdown */}
-            <div className="absolute right-0 top-full mt-1 w-44 bg-[#222222] border border-[#2e2e2e] rounded-[6px] py-1 hidden group-focus-within:block z-50">
-              <div className="px-3 py-2 border-b border-[#2e2e2e]">
-                <p className="text-xs font-semibold text-[#e0e0e0] truncate">{userName}</p>
-                {isDemo && <p className="text-xs text-[#ff9800]">Demo mode</p>}
+            <div className="absolute right-0 top-full mt-1 w-44 rounded-[6px] py-1 hidden group-focus-within:block z-50" style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)' }}>
+              <div className="px-3 py-2" style={{ borderBottom: '0.5px solid var(--bg-border)' }}>
+                <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{userName}</p>
+                {isDemo && <p className="text-[11px]" style={{ color: 'var(--pill-awaiting-text)' }}>Demo</p>}
               </div>
               <SignOutButton isDemo={isDemo} />
             </div>
@@ -1257,18 +1247,15 @@ export default function ChatInterface({
           />
         ))}
 
-        {/* Loading indicator */}
+        {/* Loading indicator — pulsing WorkA avatar, no text */}
         {loading && (
-          <div className="flex justify-start mb-4" role="status" aria-label="WorkA is thinking">
-            <div className="bg-[#222222] border border-[#2e2e2e] rounded-[6px] px-4 py-3">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-[#555555]">WorkA is thinking</span>
-                <span className="flex items-center gap-0.5" aria-hidden="true">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#555555] animate-bounce [animation-delay:0ms]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#555555] animate-bounce [animation-delay:150ms]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#555555] animate-bounce [animation-delay:300ms]" />
-                </span>
-              </div>
+          <div className="flex items-start gap-2.5 mb-5" role="status" aria-label="WorkA is responding">
+            <div
+              className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold animate-pulse"
+              style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)', animationDuration: '800ms' }}
+              aria-hidden="true"
+            >
+              W
             </div>
           </div>
         )}
@@ -1391,7 +1378,7 @@ export default function ChatInterface({
       )}
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-t border-[#2e2e2e] bg-[#1a1a1a] px-4 pt-2 pb-3 pb-safe">
+      <div className="flex-shrink-0 px-4 pt-2 pb-3 pb-safe" style={{ borderTop: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-shell)' }}>
         {/* Dropped file bar — shown when files have been drag-dropped */}
         {pendingDropFiles.length > 0 && (
           <DroppedFileBar
@@ -1518,11 +1505,16 @@ export default function ChatInterface({
                     if (fill) { setInput(fill); inputRef.current?.focus() }
                     else if (msg) sendMessage(msg)
                   }}
-                  className={`flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] transition-colors disabled:opacity-40 whitespace-nowrap ${
-                    idx === 0
-                      ? 'bg-[rgba(255,107,43,0.15)] border border-[rgba(255,107,43,0.3)] text-[#ff6b2b] hover:bg-[rgba(255,107,43,0.25)]'
-                      : 'bg-[#2a2a2a] border border-[#2e2e2e] text-[#999999] hover:border-[#ff6b2b]/30 hover:text-[#e0e0e0]'
-                  }`}
+                  className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] transition-colors disabled:opacity-40 whitespace-nowrap"
+                  style={idx === 0 ? {
+                    backgroundColor: 'var(--orange-subtle)',
+                    border: '0.5px solid rgba(255,107,43,0.3)',
+                    color: 'var(--orange-primary)',
+                  } : {
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '0.5px solid var(--bg-border)',
+                    color: 'var(--text-secondary)',
+                  }}
                 >
                   {label}
                 </button>
@@ -1542,11 +1534,15 @@ export default function ChatInterface({
             onClick={toggleVoice}
             disabled={loading}
             aria-label={isListening ? 'Stop recording' : 'Start voice input'}
-            className={`flex-shrink-0 w-10 h-10 rounded-[6px] flex items-center justify-center transition-colors disabled:opacity-40 ${
-              isListening
-                ? 'bg-[rgba(244,67,54,0.15)] text-[#f44336] animate-pulse'
-                : 'bg-[#2a2a2a] text-[#555555] hover:text-[#999999] border border-[#2e2e2e]'
-            }`}
+            className={`flex-shrink-0 w-10 h-10 rounded-[6px] flex items-center justify-center transition-colors disabled:opacity-40${isListening ? ' animate-pulse' : ''}`}
+            style={isListening ? {
+              backgroundColor: 'rgba(244,67,54,0.15)',
+              color: 'var(--status-red)',
+            } : {
+              backgroundColor: 'var(--bg-elevated)',
+              border: '0.5px solid var(--bg-border)',
+              color: 'var(--text-tertiary)',
+            }}
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
@@ -1558,25 +1554,27 @@ export default function ChatInterface({
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder={isListening ? 'Listening…' : 'Ask something or tap a button above'}
+            placeholder={isListening ? 'Listening…' : 'Reply to WorkA…'}
             rows={1}
             disabled={loading}
-            className="flex-1 resize-none bg-[#2a2a2a] border border-[#2e2e2e] rounded-[6px] px-3 py-2 text-[13px] text-[#e0e0e0] placeholder:text-[#333333] focus:outline-none focus:border-[#ff6b2b]/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
+            className="flex-1 resize-none rounded-[6px] px-3 py-2 text-[13px] focus:outline-none transition-colors disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
+            style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', color: 'var(--text-primary)', outlineColor: 'var(--orange-primary)' }}
             style={{ minHeight: '40px', maxHeight: '120px' }}
           />
           <button
             type="submit"
             disabled={loading || !input.trim()}
-            className="flex-shrink-0 bg-[#ff6b2b] text-white text-[12px] font-semibold px-3 py-1.5 rounded-[4px] min-h-[40px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[#e55a1f] transition-colors"
+            className="flex-shrink-0 text-white text-[12px] font-semibold px-3 py-1.5 rounded-[4px] min-h-[40px] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            style={{ backgroundColor: 'var(--orange-primary)' }}
             aria-label="Send message"
           >
             Send
           </button>
         </form>
-        <p className="mt-1.5 text-xs text-[#555555] hidden sm:block">
-          Press <kbd className="font-mono text-xs bg-[#2a2a2a] border border-[#2e2e2e] rounded px-1">Enter</kbd> to send
+        <p className="mt-1.5 text-xs hidden sm:block" style={{ color: 'var(--text-tertiary)' }}>
+          Press <kbd className="font-mono text-xs rounded px-1" style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>Enter</kbd> to send
           &nbsp;&middot;&nbsp;
-          <kbd className="font-mono text-xs bg-[#2a2a2a] border border-[#2e2e2e] rounded px-1">Shift+Enter</kbd> for new line
+          <kbd className="font-mono text-xs rounded px-1" style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>Shift+Enter</kbd> for new line
         </p>
       </div>
     </div>
