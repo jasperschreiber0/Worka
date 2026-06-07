@@ -47,12 +47,12 @@ export default function ScopeIntelligenceCard({ hints, onAccept, onDismiss }: Sc
   if (hints.length === 0) return null
 
   const handleAccept = (hint: ScopeHint) => {
-    setAccepted(prev => new Set([...prev, hint.description]))
+    setAccepted(prev => new Set(Array.from(prev).concat(hint.description)))
     onAccept(hint)
   }
 
   const handleDismiss = (hint: ScopeHint) => {
-    setDismissed(prev => new Set([...prev, hint.description]))
+    setDismissed(prev => new Set(Array.from(prev).concat(hint.description)))
     onDismiss(hint)
   }
 
