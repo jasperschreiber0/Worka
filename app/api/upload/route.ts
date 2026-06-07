@@ -72,6 +72,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ error: 'Failed to create upload URL' }, { status: 500 })
       }
 
+      // Ensure builder row exists (no-op if already present — satisfies FK)
+      await supabase.from('builders').upsert({ id: builder_id }, { onConflict: 'id', ignoreDuplicates: true })
+
       // Insert file record (status 'uploaded' — intake triggered after client PUT)
       const { data: fileRow, error: dbError } = await supabase
         .from('files')
@@ -88,7 +91,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .single()
 
       if (dbError || !fileRow) {
-        console.error('DB insert error:', dbError)
+        console.error('DB insert error:', JSON.stringify(dbError))
         return NextResponse.json({ error: 'Failed to create file record' }, { status: 500 })
       }
 

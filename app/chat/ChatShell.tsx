@@ -7,6 +7,19 @@ import JobSnapshotPanel from '@/components/job/JobSnapshotPanel'
 import MobileJobSheet from '@/components/job/MobileJobSheet'
 import type { ActiveJob } from '@/components/job/JobSnapshotPanel'
 
+// ─── Document type labels (mirrors classify-document API) ─────────────────────
+
+const TYPE_LABELS: Record<string, string> = {
+  plan: 'Plans',
+  receipt: 'Receipt',
+  supplier_quote: 'Supplier Quote',
+  variation_request: 'Variation Request',
+  certificate: 'Certificate',
+  contract: 'Contract',
+  photo: 'Site Photo',
+  unknown: 'Document',
+}
+
 // ─── Action → message map ─────────────────────────────────────────────────────
 
 const ACTION_MESSAGES: Record<string, string> = {
@@ -49,6 +62,10 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
   const [pendingFillInput, setPendingFillInput] = useState<string | null>(null)
   const [pendingFiles, setPendingFiles] = useState<File[] | null>(null)
   const consumedRef = useRef(false)
+
+  const [globalDragOver, setGlobalDragOver] = useState(false)
+  const [droppedFiles, setDroppedFiles] = useState<Array<{ file: File; type: string; label: string }>>([])
+  const dragContainerRef = useRef<HTMLDivElement>(null)
 
   // Decode base64 files staged in sessionStorage by HeroUploadZone
   function popStagedFiles(): File[] {
@@ -150,8 +167,63 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
     setPendingFillInput(`add task at ${jobAddress}: `)
   }, [])
 
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setGlobalDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    const container = dragContainerRef.current
+    if (!e.relatedTarget || (container && !container.contains(e.relatedTarget as Node))) {
+      setGlobalDragOver(false)
+    }
+  }, [])
+
+  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setGlobalDragOver(false)
+    const files = Array.from(e.dataTransfer.files)
+    if (files.length === 0) return
+
+    const results = await Promise.all(
+      files.map(async (file) => {
+        try {
+          const fd = new FormData()
+          fd.append('file', file)
+          const res = await fetch('/api/classify-document', { method: 'POST', body: fd })
+          if (!res.ok) throw new Error('classify failed')
+          const result = await res.json() as { type: string; summary?: string }
+          return { file, type: result.type, label: result.summary ?? TYPE_LABELS[result.type] ?? 'Document' }
+        } catch {
+          return { file, type: 'unknown', label: TYPE_LABELS['unknown'] }
+        }
+      })
+    )
+    setDroppedFiles(results)
+  }, [])
+
+  const handleDroppedFilesConsumed = useCallback(() => {
+    setDroppedFiles([])
+  }, [])
+
   return (
-    <div className="h-screen flex overflow-hidden bg-white">
+    <div
+      ref={dragContainerRef}
+      className="h-screen flex overflow-hidden bg-white relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* ── Drag overlay ──────────────────────────────────────────────────── */}
+      {globalDragOver && (
+        <div className="absolute inset-0 z-50 bg-brand-500/10 border-4 border-brand-500 border-dashed rounded-lg flex items-center justify-center pointer-events-none">
+          <div className="bg-white rounded-2xl px-8 py-6 shadow-2xl text-center">
+            <p className="text-xl font-bold text-brand-600">Drop files here</p>
+            <p className="text-sm text-slate-500 mt-1">Plans, receipts, drawings — anything</p>
+          </div>
+        </div>
+      )}
+
       {/* ── Left: chat ────────────────────────────────────────────────────── */}
       <div className="flex-1 min-w-0 flex flex-col h-full">
         <ChatInterface
@@ -174,6 +246,8 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           activeJobAddress={activeJob?.address ?? null}
           pendingFiles={pendingFiles}
           onPendingFilesConsumed={() => setPendingFiles(null)}
+          droppedFiles={droppedFiles}
+          onDroppedFilesConsumed={handleDroppedFilesConsumed}
         />
       </div>
 

@@ -4,7 +4,7 @@ import type { NextRequest } from 'next/server'
 import type { Database } from '@/lib/types/database.types'
 
 // Protected routes that require an authenticated session
-const PROTECTED = ['/chat', '/settings', '/dashboard']
+const PROTECTED = ['/chat', '/settings']
 
 export async function middleware(req: NextRequest) {
   const res = NextResponse.next()
@@ -34,5 +34,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/chat', '/chat/:path*', '/settings', '/settings/:path*', '/dashboard', '/dashboard/:path*'],
+  matcher: ['/chat', '/chat/:path*', '/settings', '/settings/:path*'],
 }

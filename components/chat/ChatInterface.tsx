@@ -180,6 +180,8 @@ interface ChatInterfaceProps {
   activeJobAddress?: string | null
   pendingFiles?: File[] | null
   onPendingFilesConsumed?: () => void
+  droppedFiles?: Array<{ file: File; type: string; label: string }>
+  onDroppedFilesConsumed?: () => void
 }
 
 // ─── Sign-out button ──────────────────────────────────────────────────────────
@@ -217,6 +219,68 @@ function SignOutButton({ isDemo }: { isDemo: boolean }) {
   )
 }
 
+// ─── DroppedFileBar ──────────────────────────────────────────────────────────
+
+interface DroppedFileBarProps {
+  files: Array<{ file: File; type: string; label: string }>
+  jobs: Array<{ id: string; address: string; status: string }>
+  jobQuery: string
+  onJobQueryChange: (q: string) => void
+  onSelectJob: (job: { id: string; address: string; status: string }) => void
+  onDismiss: () => void
+}
+
+function DroppedFileBar({ files, jobs, jobQuery, onJobQueryChange, onSelectJob, onDismiss }: DroppedFileBarProps) {
+  const filteredJobs = jobs
+    .filter(j => jobQuery === '' || j.address.toLowerCase().includes(jobQuery.toLowerCase()))
+    .slice(0, 5)
+
+  return (
+    <div className="mb-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2">
+      {/* File chips */}
+      <div className="flex flex-wrap gap-1.5 mb-2">
+        {files.map((f, i) => (
+          <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-brand-200 text-xs text-slate-700">
+            <span className="font-medium text-brand-600">{f.label}</span>
+            <span className="text-slate-400 truncate max-w-[120px]">{f.file.name}</span>
+          </span>
+        ))}
+      </div>
+      {/* Job search */}
+      <p className="text-xs text-slate-500 mb-1">Which job are these for?</p>
+      <input
+        type="text"
+        value={jobQuery}
+        onChange={e => onJobQueryChange(e.target.value)}
+        placeholder="Search by address…"
+        className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent mb-1.5"
+      />
+      {filteredJobs.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          {filteredJobs.map(job => (
+            <button
+              key={job.id}
+              type="button"
+              onClick={() => onSelectJob(job)}
+              className="text-left px-2.5 py-1.5 rounded-lg text-sm text-slate-700 hover:bg-brand-100 hover:text-brand-800 transition-colors"
+            >
+              {job.address}
+              <span className="ml-2 text-xs text-slate-400">{job.status}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="mt-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors"
+      >
+        Dismiss
+      </button>
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
@@ -241,6 +305,8 @@ export default function ChatInterface({
   activeJobAddress,
   pendingFiles,
   onPendingFilesConsumed,
+  droppedFiles,
+  onDroppedFilesConsumed,
 }: ChatInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -279,6 +345,25 @@ export default function ChatInterface({
   const [isListening, setIsListening] = useState(false)
   const recognitionRef = useRef<{ stop: () => void } | null>(null)
   const [pendingFilesForUpload, setPendingFilesForUpload] = useState<File[] | null>(null)
+
+  const [pendingDropFiles, setPendingDropFiles] = useState<Array<{ file: File; type: string; label: string }>>([])
+  const [dropJobQuery, setDropJobQuery] = useState<string>('')
+  const [dropJobs, setDropJobs] = useState<Array<{ id: string; address: string; status: string }>>([])
+
+  // When droppedFiles arrives from parent, consume and fetch jobs for quick-pick
+  useEffect(() => {
+    if (droppedFiles && droppedFiles.length > 0) {
+      setPendingDropFiles(droppedFiles)
+      onDroppedFilesConsumed?.()
+      fetch('/api/jobs')
+        .then(r => r.json())
+        .then((data: { jobs?: Array<{ id: string; address: string; status: string }> }) => {
+          setDropJobs(data.jobs ?? [])
+        })
+        .catch(() => setDropJobs([]))
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [droppedFiles])
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -1103,12 +1188,6 @@ export default function ChatInterface({
 
         <div className="flex items-center gap-2">
           <Link
-            href="/dashboard"
-            className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
-          >
-            Dashboard
-          </Link>
-          <Link
             href="/settings/rates"
             className="text-sm font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
           >
@@ -1300,6 +1379,36 @@ export default function ChatInterface({
 
       {/* ── Input ──────────────────────────────────────────────────────────── */}
       <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 pt-2 pb-3 pb-safe">
+        {/* Dropped file bar — shown when files have been drag-dropped */}
+        {pendingDropFiles.length > 0 && (
+          <DroppedFileBar
+            files={pendingDropFiles}
+            jobs={dropJobs}
+            jobQuery={dropJobQuery}
+            onJobQueryChange={setDropJobQuery}
+            onSelectJob={(job) => {
+              const planFiles = pendingDropFiles.filter(f => f.type === 'plan' || f.type === 'unknown')
+              const otherFiles = pendingDropFiles.filter(f => f.type !== 'plan' && f.type !== 'unknown')
+
+              if (planFiles.length > 0) {
+                setPendingDropFiles([])
+                setDropJobQuery('')
+                onJobMention?.({ id: job.id, address: job.address, status: job.status })
+                // Queue plan files into the upload panel via pendingFilesForUpload
+                setPendingFilesForUpload(planFiles.map(f => f.file))
+                setUploadPanel({ isOpen: true, job: { id: job.id, address: job.address, status: job.status, quote_id: null, client_name: null, builder_id: builderId, created_at: new Date().toISOString() } })
+              }
+
+              if (otherFiles.length > 0) {
+                const desc = otherFiles.map(f => `${f.label}: ${f.file.name}`).join(', ')
+                sendMessage(`Uploading to ${job.address}: ${desc}`)
+                setPendingDropFiles([])
+                setDropJobQuery('')
+              }
+            }}
+            onDismiss={() => { setPendingDropFiles([]); setDropJobQuery('') }}
+          />
+        )}
         {/* Job picker — shown when a task needs a job assigned */}
         {pendingTask ? (
           <div className="mb-2">
