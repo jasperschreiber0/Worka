@@ -116,7 +116,4 @@ Return ONLY valid JSON:
   }
 }
 
-// Increase body size limit for PDF uploads
-export const config = {
-  api: { bodyParser: false },
-}
+export const maxDuration = 60
