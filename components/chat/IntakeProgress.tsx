@@ -9,6 +9,7 @@ export interface IntakeProgressProps {
   jobId: string
   builderId: string
   filename: string
+  additionalFileIds?: string[]
   onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
   onError: () => void
 }
@@ -48,6 +49,7 @@ export default function IntakeProgress({
   jobId,
   builderId,
   filename,
+  additionalFileIds,
   onComplete,
   onError,
 }: IntakeProgressProps) {
@@ -64,7 +66,10 @@ export default function IntakeProgress({
   const prevStageRef = useRef<string | null>(null)
 
   useEffect(() => {
-    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}`
+    const siblings = additionalFileIds && additionalFileIds.length > 0
+      ? `&siblings=${encodeURIComponent(additionalFileIds.join(','))}`
+      : ''
+    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}`
     const es = new EventSource(url)
     eventSourceRef.current = es
 
@@ -205,7 +210,12 @@ export default function IntakeProgress({
             />
           </svg>
         </div>
-        <p className="text-sm font-medium text-slate-800 truncate min-w-0">{filename}</p>
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-slate-800 truncate">{filename}</p>
+          {additionalFileIds && additionalFileIds.length > 0 && (
+            <p className="text-xs text-slate-400 mt-0.5">+ {additionalFileIds.length} more file{additionalFileIds.length !== 1 ? 's' : ''}</p>
+          )}
+        </div>
       </div>
 
       {/* Progress bar */}

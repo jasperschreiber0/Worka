@@ -69,7 +69,8 @@ const METADATA_PROMPT = `Analyse these building plans and extract the following 
 function buildExtractionPrompt(
   similarProjects: SimilarProject[],
   builderProfile: BuilderEstimationProfile | null,
-  projectSummary: string
+  projectSummary: string,
+  documentCount = 1
 ): string {
   const tradeCategories = [
     { id: 1,  name: 'Earthworks & Site Prep' },
@@ -104,12 +105,18 @@ ${similarProjects.map(p =>
 • Quote accuracy: ${builderProfile.avg_quote_accuracy_pct ? builderProfile.avg_quote_accuracy_pct + '%' : 'insufficient data'}`
   }
 
+  const docNote = documentCount > 1
+    ? `You have been provided ${documentCount} documents (plans, drawings, schedules). Cross-reference all of them together to produce the most complete and accurate takeoff.`
+    : 'You have been provided one document.'
+
   return `You are a quantity surveyor AI for Australian residential construction.
 
 PROJECT:
 ${projectSummary}
 ${historicalContext}
 ${profileContext}
+
+${docNote}
 
 Analyse the provided building plans and extract quantities for each of the 13 trade categories below.
 
@@ -212,6 +219,8 @@ export async function GET(
   const { searchParams } = new URL(req.url)
   const job_id = searchParams.get('job_id') ?? ''
   const builder_id = searchParams.get('builder_id') ?? '00000000-0000-0000-0000-000000000001'
+  const siblingsParam = searchParams.get('siblings') ?? ''
+  const siblingFileIds = siblingsParam ? siblingsParam.split(',').filter(Boolean) : []
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -317,6 +326,32 @@ export async function GET(
           ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Data } }
           : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } }
 
+        // Load sibling files (additional documents from the same upload batch)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const siblingBlocks: any[] = []
+        for (const sibId of siblingFileIds.slice(0, 4)) { // cap at 4 siblings
+          try {
+            const { data: sibRow } = await supabase.from('files').select('*').eq('id', sibId).single()
+            if (!sibRow) continue
+            const { data: sibData } = await supabase.storage.from('plans').download(sibRow.storage_path)
+            if (!sibData) continue
+            const sibBuffer = await sibData.arrayBuffer()
+            const sibBase64 = Buffer.from(sibBuffer).toString('base64')
+            const sibIsPdf = sibRow.file_type === 'pdf'
+            siblingBlocks.push(
+              sibIsPdf
+                ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibBase64 } }
+                : { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: sibBase64 } }
+            )
+          } catch {
+            // Non-fatal — skip unreadable siblings
+          }
+        }
+
+        // All document blocks for Claude calls (primary first, then siblings)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const allDocBlocks: any[] = [docBlock, ...siblingBlocks]
+
         // ── Step 1: Extract project metadata ─────────────────────────────────
         let projectMetadata: ProjectMetadata = {
           job_type: null, renovation_type: null, project_summary: 'Residential construction project',
@@ -329,7 +364,7 @@ export async function GET(
           const metaResponse = await (client.messages.create as any)({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 512,
-            messages: [{ role: 'user', content: [docBlock, { type: 'text', text: METADATA_PROMPT }] }],
+            messages: [{ role: 'user', content: [...allDocBlocks, { type: 'text', text: METADATA_PROMPT }] }],
           })
           const metaText = metaResponse.content[0]?.type === 'text' ? metaResponse.content[0].text : ''
           const metaMatch = metaText.match(/\{[\s\S]*\}/)
@@ -397,7 +432,7 @@ export async function GET(
         }
 
         // ── Step 4: Memory-enhanced quantity extraction ────────────────────
-        const extractionPrompt = buildExtractionPrompt(similarProjects, builderProfile, projectMetadata.project_summary)
+        const extractionPrompt = buildExtractionPrompt(similarProjects, builderProfile, projectMetadata.project_summary, allDocBlocks.length)
 
         const stageIndices = [4, 5, 6, 7, 8]
         let stageIdx = 0
@@ -414,7 +449,7 @@ export async function GET(
           const response = await (client.messages.create as any)({
             model: 'claude-sonnet-4-20250514',
             max_tokens: 4096,
-            messages: [{ role: 'user', content: [docBlock, { type: 'text', text: extractionPrompt }] }],
+            messages: [{ role: 'user', content: [...allDocBlocks, { type: 'text', text: extractionPrompt }] }],
           })
           anthropicResponse = response.content[0]?.type === 'text' ? response.content[0].text : ''
         } finally {

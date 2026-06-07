@@ -69,6 +69,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [uploadedFile, setUploadedFile] = useState<DBFile | null>(null)
+  const [siblingFileIds, setSiblingFileIds] = useState<string[]>([])
   const [intakeStarted, setIntakeStarted] = useState(false)
 
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -90,6 +91,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         setUploading(false)
         setUploadError(null)
         setUploadedFile(null)
+        setSiblingFileIds([])
         setIntakeStarted(false)
       }, 300)
       return () => clearTimeout(id)
@@ -208,49 +210,56 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   //           (2) PUT file bytes directly to Supabase Storage.
   // This bypasses Vercel's 4.5 MB request body limit for large plan files.
 
+  const uploadSingleFile = useCallback(async (sf: SelectedFile): Promise<DBFile> => {
+    const metaRes = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        job_id: job.id,
+        builder_id: builderId,
+        filename: sf.file.name,
+        content_type: sf.file.type || 'application/octet-stream',
+        size: sf.file.size,
+      }),
+    })
+
+    if (!metaRes.ok) {
+      const body = await metaRes.json().catch(() => ({ error: 'Upload failed' }))
+      throw new Error((body as { error?: string }).error ?? `Failed to upload ${sf.file.name}`)
+    }
+
+    const { file: dbFile, upload_url } = await metaRes.json() as { file: DBFile; upload_url: string }
+
+    if (upload_url && !upload_url.startsWith('demo://')) {
+      const putRes = await fetch(upload_url, {
+        method: 'PUT',
+        body: sf.file,
+        headers: { 'Content-Type': sf.file.type || 'application/octet-stream' },
+      })
+      if (!putRes.ok) throw new Error(`Storage transfer failed for ${sf.file.name}`)
+    }
+
+    return dbFile
+  }, [job.id, builderId])
+
   const handleUpload = useCallback(async () => {
     if (files.length === 0 || uploading) return
-
-    const selectedFile = files[0]
 
     setUploading(true)
     setUploadError(null)
 
     try {
-      // Step 1: register file and get presigned upload URL
-      const metaRes = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          job_id: job.id,
-          builder_id: builderId,
-          filename: selectedFile.file.name,
-          content_type: selectedFile.file.type || 'application/octet-stream',
-          size: selectedFile.file.size,
-        }),
-      })
-
-      if (!metaRes.ok) {
-        const body = await metaRes.json().catch(() => ({ error: 'Upload failed' }))
-        throw new Error((body as { error?: string }).error ?? 'Upload failed')
+      // Upload all files sequentially, collecting DB records
+      const uploaded: DBFile[] = []
+      for (const sf of files) {
+        const dbFile = await uploadSingleFile(sf)
+        uploaded.push(dbFile)
       }
 
-      const { file: dbFile, upload_url } = await metaRes.json() as { file: DBFile; upload_url: string }
-
-      // Step 2: PUT file directly to Supabase Storage (skipped in demo mode)
-      if (upload_url && !upload_url.startsWith('demo://')) {
-        const putRes = await fetch(upload_url, {
-          method: 'PUT',
-          body: selectedFile.file,
-          headers: { 'Content-Type': selectedFile.file.type || 'application/octet-stream' },
-        })
-
-        if (!putRes.ok) {
-          throw new Error('File transfer to storage failed — please try again.')
-        }
-      }
-
-      setUploadedFile(dbFile)
+      // Primary file drives the intake pipeline; the rest are siblings
+      const [primary, ...siblings] = uploaded
+      setSiblingFileIds(siblings.map(f => f.id))
+      setUploadedFile(primary)
       setIntakeStarted(true)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed — please try again.'
@@ -258,7 +267,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
     } finally {
       setUploading(false)
     }
-  }, [files, uploading, job.id, builderId])
+  }, [files, uploading, uploadSingleFile])
 
   // ── Intake complete handler ────────────────────────────────────────────────
 
@@ -361,6 +370,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
               jobId={job.id}
               builderId={builderId}
               filename={uploadedFile.filename}
+              additionalFileIds={siblingFileIds}
               onComplete={handleIntakeComplete}
               onError={handleIntakeError}
             />
@@ -580,8 +590,10 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
                       d="M4 12a8 8 0 018-8v8H4z"
                     />
                   </svg>
-                  Uploading...
+                  Uploading {files.length > 1 ? `${files.length} files` : 'file'}...
                 </span>
+              ) : files.length > 1 ? (
+                `Upload ${files.length} files`
               ) : (
                 'Upload plans'
               )}
