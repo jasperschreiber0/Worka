@@ -1558,8 +1558,7 @@ export default function ChatInterface({
             rows={1}
             disabled={loading}
             className="flex-1 resize-none rounded-[6px] px-3 py-2 text-[13px] focus:outline-none transition-colors disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
-            style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', color: 'var(--text-primary)', outlineColor: 'var(--orange-primary)' }}
-            style={{ minHeight: '40px', maxHeight: '120px' }}
+            style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', color: 'var(--text-primary)', outlineColor: 'var(--orange-primary)', minHeight: '40px', maxHeight: '120px' }}
           />
           <button
             type="submit"
