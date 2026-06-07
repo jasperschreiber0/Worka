@@ -3,6 +3,8 @@
 // the GET handler and any future mutation routes without exporting from a
 // Next.js route file.
 
+export type DemoPricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
+
 export interface DemoQuoteLineItem {
   id: string
   quote_id: string
@@ -17,6 +19,13 @@ export interface DemoQuoteLineItem {
   dimensions_string: string | null
   is_assumption: boolean
   assumption_status: 'unresolved' | 'accepted' | 'adjusted' | 'excluded' | null
+    pricing_type: DemoPricingType
+    source_ref: string | null
+    margin_pct: number
+    labour_cost: number | null
+    material_cost: number | null
+    subcontract_cost: number | null
+    plant_cost: number | null
 }
 
 export interface DemoQuote {
@@ -26,7 +35,7 @@ export interface DemoQuote {
   builder_id: string
   status: 'draft' | 'pending_review' | 'sent' | 'approved' | 'rejected'
   total_cost: number
-  margin_pct: number
+    margin_pct: number
   confidence_score: number // weighted toward lowest line item
   version: number
   created_at: string
@@ -42,7 +51,7 @@ export const DEMO_QUOTE: DemoQuote = {
   builder_id: '00000000-0000-0000-0000-000000000001',
   status: 'pending_review',
   total_cost: 127500,
-  margin_pct: 18,
+    margin_pct: 18,
   // Confidence is weighted toward the LOWEST line item — one bad extraction
   // cannot be hidden. The feature wall plasterboard at 45% drives the score.
   confidence_score: 45,
@@ -70,6 +79,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: '9m × 5m × 1m avg',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-01-02',
@@ -85,6 +101,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: '9m × 8m',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 2. Framing ────────────────────────────────────────────────────────────
@@ -102,6 +125,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'perimeter + internal walls',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-02-02',
@@ -117,6 +147,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: '9m × 8m hip',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 3. Roofing ────────────────────────────────────────────────────────────
@@ -134,6 +171,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: '9m × 8m + 15% waste',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 4. External Cladding ──────────────────────────────────────────────────
@@ -151,6 +195,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'perimeter walls',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 5. Insulation ─────────────────────────────────────────────────────────
@@ -168,6 +219,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'wall area',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-05-02',
@@ -183,6 +241,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'ceiling area',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 6. Internal Linings ───────────────────────────────────────────────────
@@ -200,6 +265,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'wall+ceiling calc',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-06-02',
@@ -216,6 +288,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: true,
     assumption_status: 'unresolved',
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 7. Fit-out Carpentry ──────────────────────────────────────────────────
@@ -233,6 +312,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'door schedule',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-07-02',
@@ -248,6 +334,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'perimeter rooms',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 8. Cabinetry ──────────────────────────────────────────────────────────
@@ -265,6 +358,57 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null, // no detailed schedule
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: 'A4.2',
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
+  },
+  {
+    id: 'li-08-02',
+    quote_id: 'demo-quote-id',
+    trade_category_id: 8,
+    trade_category_name: 'Cabinetry',
+    description: 'Kitchen appliances — PC allowance',
+    quantity: 1,
+    unit: 'lot',
+    rate: 8000,
+    total: 8000,
+    confidence: 80,
+    dimensions_string: null,
+    is_assumption: false,
+    assumption_status: null,
+    pricing_type: 'pc_allowance',
+    source_ref: 'A4.2',
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: 8000,
+    subcontract_cost: null,
+    plant_cost: null,
+  },
+  {
+    id: 'li-08-03',
+    quote_id: 'demo-quote-id',
+    trade_category_id: 8,
+    trade_category_name: 'Cabinetry',
+    description: 'Stone benchtops — provisional sum',
+    quantity: 1,
+    unit: 'lot',
+    rate: 6500,
+    total: 6500,
+    confidence: 70,
+    dimensions_string: null,
+    is_assumption: false,
+    assumption_status: null,
+    pricing_type: 'provisional_sum',
+    source_ref: 'SK-02',
+    margin_pct: 0,
+    labour_cost: null,
+    material_cost: 6500,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 9. Paint ──────────────────────────────────────────────────────────────
@@ -282,6 +426,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'wall+ceiling',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 10. Flooring ──────────────────────────────────────────────────────────
@@ -299,6 +450,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'bathroom+laundry',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-10-02',
@@ -314,6 +472,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: 'living+beds',
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 11. Fixtures & Tapware ────────────────────────────────────────────────
@@ -331,6 +496,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 12. Electrical ────────────────────────────────────────────────────────
@@ -349,6 +521,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: true,
     assumption_status: 'unresolved',
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-12-02',
@@ -364,6 +543,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 
   // ── 13. Preliminaries ─────────────────────────────────────────────────────
@@ -381,6 +567,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-13-02',
@@ -397,6 +590,13 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: true,
     assumption_status: 'excluded',
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
   {
     id: 'li-13-03',
@@ -412,5 +612,12 @@ export const DEMO_LINE_ITEMS: DemoQuoteLineItem[] = [
     dimensions_string: null,
     is_assumption: false,
     assumption_status: null,
+    pricing_type: 'measured',
+    source_ref: null,
+    margin_pct: 0.15,
+    labour_cost: null,
+    material_cost: null,
+    subcontract_cost: null,
+    plant_cost: null,
   },
 ]

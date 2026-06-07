@@ -462,6 +462,13 @@ export async function GET(
       rate: li.rate, total: li.total, is_assumption: li.is_assumption,
       assumption_status: li.assumption_status as DemoQuoteLineItem['assumption_status'],
       confidence: 100,
+      pricing_type: 'measured' as const,
+      source_ref: null,
+      margin_pct: 0.15,
+      labour_cost: null,
+      material_cost: null,
+      subcontract_cost: null,
+      plant_cost: null,
     }))
   }
 

@@ -175,6 +175,26 @@ function SkeletonCategory() {
   )
 }
 
+// ─── Pricing type tag ─────────────────────────────────────────────────────────
+
+function PricingTypeTag({ type }: { type: DemoQuoteLineItem['pricing_type'] }) {
+  if (type === 'pc_allowance') {
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 uppercase tracking-wide">
+        PC
+      </span>
+    )
+  }
+  if (type === 'provisional_sum') {
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 uppercase tracking-wide">
+        PS
+      </span>
+    )
+  }
+  return null
+}
+
 // ─── Line item row ────────────────────────────────────────────────────────────
 
 interface LineItemRowProps {
@@ -184,6 +204,7 @@ interface LineItemRowProps {
 function LineItemRow({ item }: LineItemRowProps) {
   const isExcluded = item.assumption_status === 'excluded'
   const isUnresolved = item.is_assumption && item.assumption_status === 'unresolved'
+  const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
 
   const rowClass = [
     'flex items-start gap-2 px-3 py-2.5 border-b border-slate-100 last:border-0',
@@ -195,44 +216,63 @@ function LineItemRow({ item }: LineItemRowProps) {
 
   const textClass = isExcluded ? 'line-through text-slate-400' : 'text-slate-800'
 
+  const sellTotal = item.total !== null ? Math.round(item.total * (1 + item.margin_pct)) : null
+
   return (
     <div className={rowClass} role="row">
       {/* Description — takes most space */}
       <div className="flex-1 min-w-0">
-        <span className={`text-sm leading-tight block truncate ${textClass}`}>
-          {item.description}
-        </span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className={`text-sm leading-tight ${textClass}`}>
+            {item.description}
+          </span>
+          <PricingTypeTag type={item.pricing_type} />
+        </div>
         {item.dimensions_string && !isExcluded && (
           <span className="text-xs text-slate-400 block truncate mt-0.5">
             {item.dimensions_string}
           </span>
         )}
+        {item.source_ref && !isExcluded && (
+          <span className="text-xs text-slate-400 block mt-0.5">
+            {item.source_ref}
+          </span>
+        )}
       </div>
 
-      {/* Qty + unit */}
-      <div className="flex-shrink-0 text-right w-14 sm:w-20">
-        <span className={`text-sm tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
-          {formatQuantity(item.quantity)}
-          {item.unit ? (
-            <span className="text-xs text-slate-500 ml-0.5">{item.unit}</span>
-          ) : (
-            <span className="text-xs text-red-500 ml-0.5">[?]</span>
-          )}
-        </span>
-      </div>
+      {/* Qty + unit — hidden for allowances */}
+      {!isAllowance && (
+        <div className="flex-shrink-0 text-right w-14 sm:w-20">
+          <span className={`text-sm tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
+            {formatQuantity(item.quantity)}
+            {item.unit ? (
+              <span className="text-xs text-slate-500 ml-0.5">{item.unit}</span>
+            ) : (
+              <span className="text-xs text-red-500 ml-0.5">[?]</span>
+            )}
+          </span>
+        </div>
+      )}
+      {isAllowance && <div className="flex-shrink-0 w-14 sm:w-20" />}
 
       {/* Rate */}
       <div className="flex-shrink-0 text-right w-16 sm:w-20 hidden sm:block">
         <span className={`text-sm tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-600'}`}>
-          {formatRate(item.rate)}
+          {isAllowance ? 'Allowance' : formatRate(item.rate)}
         </span>
       </div>
 
-      {/* Total */}
+      {/* Sell total (cost + margin) */}
       <div className="flex-shrink-0 text-right w-16 sm:w-24">
         <span className={`text-sm font-medium tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
-          {isExcluded ? 'Excluded' : formatTotal(item.total)}
+          {isExcluded ? 'Excluded' : (sellTotal !== null ? formatCurrency(sellTotal) : formatTotal(item.total))}
         </span>
+        {!isExcluded && item.margin_pct > 0 && item.total !== null && (
+          <span className="text-[10px] text-slate-400 block">{Math.round(item.margin_pct * 100)}% margin</span>
+        )}
+        {!isExcluded && item.pricing_type === 'provisional_sum' && (
+          <span className="text-[10px] text-amber-600 block">0% margin</span>
+        )}
       </div>
 
       {/* Confidence indicator */}
@@ -243,6 +283,75 @@ function LineItemRow({ item }: LineItemRowProps) {
           assumptionStatus={item.assumption_status}
         />
       </div>
+    </div>
+  )
+}
+
+// ─── PC/PS Register ───────────────────────────────────────────────────────────
+
+interface PcPsRegisterProps {
+  items: DemoQuoteLineItem[]
+}
+
+function PcPsRegister({ items }: PcPsRegisterProps) {
+  const pcItems = items.filter(i => i.pricing_type === 'pc_allowance')
+  const psItems = items.filter(i => i.pricing_type === 'provisional_sum')
+
+  if (pcItems.length === 0 && psItems.length === 0) return null
+
+  const pcTotal = pcItems.reduce((s, i) => s + (i.total ?? 0), 0)
+  const psTotal = psItems.reduce((s, i) => s + (i.total ?? 0), 0)
+
+  return (
+    <div className="mx-4 mb-4 border border-amber-200 rounded-xl overflow-hidden">
+      <div className="bg-amber-50 px-4 py-2 border-b border-amber-200">
+        <h3 className="text-xs font-semibold text-amber-800 uppercase tracking-wide">
+          PC &amp; Provisional Sum Register
+        </h3>
+        <p className="text-xs text-amber-700 mt-0.5">
+          These amounts are estimates. Final costs depend on client selections (PC) or actual scope (PS).
+        </p>
+      </div>
+      {pcItems.length > 0 && (
+        <div className="border-b border-amber-100 last:border-0">
+          <div className="px-4 py-1.5 bg-white">
+            <span className="text-[10px] font-semibold text-amber-700 uppercase tracking-wide">Prime Cost Allowances</span>
+          </div>
+          {pcItems.map(item => (
+            <div key={item.id} className="flex items-center justify-between px-4 py-2 border-t border-amber-50 bg-white">
+              <div>
+                <span className="text-sm text-slate-800">{item.description}</span>
+                {item.source_ref && <span className="text-xs text-slate-400 ml-2">{item.source_ref}</span>}
+              </div>
+              <span className="text-sm font-medium tabular-nums text-slate-900">{formatCurrency(item.total ?? 0)}</span>
+            </div>
+          ))}
+          <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-t border-amber-100">
+            <span className="text-xs font-semibold text-amber-800">PC Total</span>
+            <span className="text-sm font-bold tabular-nums text-amber-900">{formatCurrency(pcTotal)}</span>
+          </div>
+        </div>
+      )}
+      {psItems.length > 0 && (
+        <div>
+          <div className="px-4 py-1.5 bg-white">
+            <span className="text-[10px] font-semibold text-amber-700 uppercase tracking-wide">Provisional Sums</span>
+          </div>
+          {psItems.map(item => (
+            <div key={item.id} className="flex items-center justify-between px-4 py-2 border-t border-amber-50 bg-white">
+              <div>
+                <span className="text-sm text-slate-800">{item.description}</span>
+                {item.source_ref && <span className="text-xs text-slate-400 ml-2">{item.source_ref}</span>}
+              </div>
+              <span className="text-sm font-medium tabular-nums text-slate-900">{formatCurrency(item.total ?? 0)}</span>
+            </div>
+          ))}
+          <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-t border-amber-100">
+            <span className="text-xs font-semibold text-amber-800">PS Total (0% margin)</span>
+            <span className="text-sm font-bold tabular-nums text-amber-900">{formatCurrency(psTotal)}</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -258,6 +367,9 @@ interface CategorySectionProps {
 function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) {
   const hasUnresolved = group.items.some(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
+  )
+  const onlyAllowances = group.items.length > 0 && group.items.every(
+    (i) => i.pricing_type === 'pc_allowance' || i.pricing_type === 'provisional_sum'
   )
 
   return (
@@ -292,6 +404,14 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
               title="Has unresolved assumptions"
             >
               ⚠
+            </span>
+          )}
+          {!hasUnresolved && onlyAllowances && (
+            <span
+              className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 ml-1"
+              title="All items in this category are PC allowances or provisional sums"
+            >
+              PC/PS
             </span>
           )}
         </div>
@@ -783,6 +903,12 @@ function QuoteViewInner({
             <div className="pt-4 pb-2">
               {/* Summary card */}
               <SummaryCard summary={data.summary} />
+
+              {/* PC/PS register */}
+              {(() => {
+                const allItems = data.line_items_by_category.flatMap(g => g.items)
+                return <PcPsRegister items={allItems} />
+              })()}
 
               {/* Category sections */}
               {data.line_items_by_category.map((group) => (

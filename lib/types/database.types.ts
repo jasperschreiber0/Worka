@@ -109,6 +109,8 @@ export interface Quote {
   approved_at: string | null
 }
 
+export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
+
 export interface QuoteLineItem {
   id: string
   quote_id: string
@@ -125,6 +127,17 @@ export interface QuoteLineItem {
   is_assumption: boolean
   assumption_status: AssumptionStatus | null
   created_at: string
+  /** Cost split columns */
+  labour_cost: number | null
+  material_cost: number | null
+  subcontract_cost: number | null
+  plant_cost: number | null
+  /** measured | pc_allowance | provisional_sum */
+  pricing_type: PricingType
+  /** Drawing reference e.g. "A3.1", "SK-04" */
+  source_ref: string | null
+  /** Per-line margin rate (0–1). PS items always 0. */
+  margin_pct: number
 }
 
 export interface CostRate {

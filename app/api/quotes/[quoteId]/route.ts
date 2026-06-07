@@ -159,6 +159,13 @@ export async function GET(
         dimensions_string,
         is_assumption,
         assumption_status,
+        pricing_type,
+        source_ref,
+        margin_pct,
+        labour_cost,
+        material_cost,
+        subcontract_cost,
+        plant_cost,
         trade_categories (
           id,
           name
@@ -202,6 +209,13 @@ export async function GET(
         dimensions_string: row.dimensions_string ?? null,
         is_assumption: row.is_assumption ?? false,
         assumption_status: (row.assumption_status ?? null) as DemoQuoteLineItem['assumption_status'],
+        pricing_type: ((row as Record<string, unknown>).pricing_type ?? 'measured') as DemoQuoteLineItem['pricing_type'],
+        source_ref: ((row as Record<string, unknown>).source_ref ?? null) as string | null,
+        margin_pct: ((row as Record<string, unknown>).margin_pct ?? 0.15) as number,
+        labour_cost: ((row as Record<string, unknown>).labour_cost ?? null) as number | null,
+        material_cost: ((row as Record<string, unknown>).material_cost ?? null) as number | null,
+        subcontract_cost: ((row as Record<string, unknown>).subcontract_cost ?? null) as number | null,
+        plant_cost: ((row as Record<string, unknown>).plant_cost ?? null) as number | null,
       }
     })
 

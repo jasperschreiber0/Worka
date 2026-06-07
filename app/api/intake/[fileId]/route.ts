@@ -121,6 +121,12 @@ For each line item provide:
 - dimensions_string (e.g. "12.5m × 8.4m" — or null)
 - confidence (0–100: 100=exact from plans, 50=estimated, 0=not determinable)
 - subcategory_code (e.g. "ELEC-POWER", "TILE-FLOOR" — from the subcategory list)
+- pricing_type: "measured" for normal lump-sum or rate × qty items; "pc_allowance" for prime cost allowances (client selects product, builder installs); "provisional_sum" for contingency or undefined-scope sums
+- source_ref: drawing or schedule reference where this item appears (e.g. "A3.1", "SK-04", "Door Schedule") — null if not traceable
+- labour_cost: estimated labour component of total (numeric or null)
+- material_cost: estimated material component of total (numeric or null)
+- subcontract_cost: estimated subcontractor component of total (numeric or null)
+- plant_cost: estimated plant/equipment component of total (numeric or null)
 
 Trade categories:
 ${tradeCategories.map(c => `${c.id}. ${c.name}`).join('\n')}
@@ -137,7 +143,13 @@ Return ONLY valid JSON:
       "unit": string | null,
       "dimensions_string": string | null,
       "confidence": number,
-      "subcategory_code": string | null
+      "subcategory_code": string | null,
+      "pricing_type": "measured" | "pc_allowance" | "provisional_sum",
+      "source_ref": string | null,
+      "labour_cost": number | null,
+      "material_cost": number | null,
+      "subcontract_cost": number | null,
+      "plant_cost": number | null
     }
   ],
   "confidence_summary": "1 sentence overall confidence assessment"
@@ -442,6 +454,12 @@ export async function GET(
           dimensions_string: string | null
           confidence: number
           subcategory_code: string | null
+          pricing_type?: 'measured' | 'pc_allowance' | 'provisional_sum'
+          source_ref?: string | null
+          labour_cost?: number | null
+          material_cost?: number | null
+          subcontract_cost?: number | null
+          plant_cost?: number | null
         }> = []
 
         let confidenceSummary = ''
@@ -465,11 +483,13 @@ export async function GET(
           let assumptionMessage: string | null = null
           let assumptionStatus: 'unresolved' | 'excluded' = 'unresolved'
 
-          if (!item.unit) {
+          const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
+
+          if (!item.unit && !isAllowance) {
             isAssumption = true
             assumptionMessage = `Quantity unit not specified — confirm unit for ${item.description}`
             assumptions.push({ description: item.description, gate: 1, message: assumptionMessage })
-          } else if (item.quantity !== null && !item.dimensions_string) {
+          } else if (item.quantity !== null && !item.dimensions_string && !isAllowance) {
             isAssumption = true
             assumptionMessage = `Quantity unverified from plans — confirm ${item.quantity} ${item.unit} for ${item.description}`
             assumptions.push({ description: item.description, gate: 2, message: assumptionMessage })
@@ -525,6 +545,13 @@ export async function GET(
               dimensions_string: item.dimensions_string,
               is_assumption: item.is_assumption,
               assumption_status: item.assumption_status ?? null,
+              pricing_type: item.pricing_type ?? 'measured',
+              source_ref: item.source_ref ?? null,
+              margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
+              labour_cost: item.labour_cost ?? null,
+              material_cost: item.material_cost ?? null,
+              subcontract_cost: item.subcontract_cost ?? null,
+              plant_cost: item.plant_cost ?? null,
             }))
 
           const { data: insertedItems } = await supabase
