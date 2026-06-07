@@ -453,7 +453,7 @@ async function getLiveMorningBrief(
   builderId: string,
   supabaseUrl: string,
   serviceRoleKey: string
-): Promise<{ message: string; alerts: Alert[] }> {
+): Promise<{ message: string; alerts: Alert[]; follow_up?: string }> {
   const supabase = createClient(supabaseUrl, serviceRoleKey)
 
   // Zero-jobs early return — new builder who hasn't set anything up yet
