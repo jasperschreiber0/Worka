@@ -157,9 +157,10 @@ create table if not exists public.project_memory (
   completed_at       timestamptz
 );
 
-create index if not exists project_memory_builder_idx on public.project_memory(builder_id);
-create index if not exists project_memory_job_type_idx on public.project_memory(job_type);
-create index if not exists project_memory_region_idx   on public.project_memory(region);
+create unique index if not exists project_memory_job_id_idx on public.project_memory(job_id) where job_id is not null;
+create index if not exists project_memory_builder_idx   on public.project_memory(builder_id);
+create index if not exists project_memory_job_type_idx  on public.project_memory(job_type);
+create index if not exists project_memory_region_idx    on public.project_memory(region);
 
 -- ─── Cost reconciliation (estimated vs actual per trade per project) ──────────
 

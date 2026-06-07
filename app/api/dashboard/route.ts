@@ -205,6 +205,57 @@ export async function GET() {
       timestamp: job.updated_at,
     }))
 
+    // Build recommendations from actual job data
+    const recommendations: DashboardRecommendation[] = []
+
+    if (overdueInvoices.length > 0) {
+      const totalOverdue = overdueInvoices.reduce((s, i) => s + Number(i.amount ?? 0), 0)
+      recommendations.push({
+        id: 'rec-overdue',
+        type: 'opportunity',
+        message: `$${totalOverdue.toLocaleString()} in overdue invoices — send payment chasers now`,
+        detail: `${overdueInvoices.length} invoice${overdueInvoices.length !== 1 ? 's' : ''} past due date. Cash flow impact increases daily — send reminders this morning.`,
+      })
+    }
+
+    if (pendingVariations.length > 0) {
+      const totalVarValue = pendingVariations.reduce((s, v) => s + Number(v.amount ?? 0), 0)
+      recommendations.push({
+        id: 'rec-variations',
+        type: 'opportunity',
+        message: `$${totalVarValue.toLocaleString()} in variations awaiting approval`,
+        detail: `${pendingVariations.length} variation${pendingVariations.length !== 1 ? 's' : ''} are pending client sign-off. Revenue cannot be claimed until approved.`,
+      })
+    }
+
+    const stalledQuotes = (jobs ?? []).filter(j => {
+      if (j.status !== 'quoted') return false
+      const daysSince = (Date.now() - new Date(j.updated_at).getTime()) / (1000 * 60 * 60 * 24)
+      return daysSince > 5
+    })
+    for (const job of stalledQuotes.slice(0, 2)) {
+      const days = Math.floor((Date.now() - new Date(job.updated_at).getTime()) / (1000 * 60 * 60 * 24))
+      recommendations.push({
+        id: `rec-stalled-${job.id}`,
+        type: 'opportunity',
+        message: `Quote for ${job.address?.split(',')[0]} has had no response for ${days} days`,
+        detail: `Follow up with the client — quotes older than 7 days have a significantly lower acceptance rate.`,
+      })
+    }
+
+    const longQuotingJobs = quotingJobs.filter(j => {
+      const daysSince = (Date.now() - new Date(j.updated_at).getTime()) / (1000 * 60 * 60 * 24)
+      return daysSince > 14
+    })
+    if (longQuotingJobs.length > 0) {
+      recommendations.push({
+        id: 'rec-quoting-stalled',
+        type: 'margin',
+        message: `${longQuotingJobs.length} job${longQuotingJobs.length !== 1 ? 's' : ''} in quoting for over 2 weeks`,
+        detail: 'Material costs can shift significantly over 2+ weeks. Review rates before sending quotes.',
+      })
+    }
+
     return NextResponse.json({
       stats: {
         active_jobs: activeJobs.length,
@@ -212,7 +263,7 @@ export async function GET() {
         overdue_invoices: overdueInvoices.length,
       },
       alerts,
-      recommendations: DEMO_DATA.recommendations,
+      recommendations,
       activity,
     } satisfies DashboardData)
   } catch (err) {
