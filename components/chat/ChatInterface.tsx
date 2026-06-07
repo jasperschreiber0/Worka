@@ -1228,10 +1228,12 @@ export default function ChatInterface({
           .then((data: { jobs?: unknown[] }) => {
             if (!data.jobs || data.jobs.length === 0) {
               const firstName = userName.split(' ')[0]
+              const hour = new Date().getHours()
+              const greeting = hour < 12 ? 'Morning' : hour < 17 ? 'Afternoon' : 'Evening'
               setMessages([{
                 id: 'welcome-msg',
                 role: 'assistant',
-                content: `Morning ${firstName}. Let's get WorkA set up — it takes about 5 minutes.\n\nTell me your active jobs. You can list them all at once:\n\n"I've got 3 jobs on: 14 Smith St Fitzroy for the Hendersons, 8 Brown Rd Toorak for Caruso, 22 Jones Ave Collingwood"\n\nOr one at a time: "New job at 14 Smith St Fitzroy for the Hendersons"\n\nOnce your first job is in, upload the plans and I'll start building your quote automatically.\n\nYou can also add your crew: "My crew: Jack (carpenter), Mick (plumber), Sarah (tiler)"`,
+                content: `${greeting} ${firstName}. I'm WorkA — let's get your jobs set up. Takes about 5 minutes.\n\n**Step 1 — Tell me your active jobs.** You can list them all at once:\n\n"I've got 3 jobs on: 14 Smith St Fitzroy for the Hendersons, 8 Brown Rd Toorak for Caruso, 22 Jones Ave Collingwood"\n\nOr one at a time: "New job at 14 Smith St Fitzroy for the Hendersons"\n\n**Step 2 — Upload plans** and I'll build your quote automatically.\n\n**Step 3 — Add your crew:** "My crew: Jack (carpenter), Mick (plumber), Sarah (tiler)"\n\nWhat's your first job?`,
                 timestamp: new Date(),
               }])
             } else {
