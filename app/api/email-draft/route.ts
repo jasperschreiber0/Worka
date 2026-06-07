@@ -208,13 +208,16 @@ ${contextBlock}
 Email purpose: ${intentContext[intentHint]}
 ${contextMessage ? `Additional context from builder: ${contextMessage}` : ''}
 
-Write a brief, professional email that:
-- Sounds like a tradie builder — professional but not overly corporate
-- References the specific job address and client name if known
-- Gets to the point quickly
-- Uses Australian English
-- Includes a subject line
-- Signs off with: ${builderName}\n${businessName}
+Write a professional, clear email that:
+- Is courteous and professional — never use slang, colloquialisms, or casual greetings like "G'day", "Mate", "Hey", "Hi there"
+- Opens with "Dear [Client Name]," or "Hi [First Name]," — never with informal greetings
+- References the specific job address and client name from the context
+- States the purpose clearly in the first sentence
+- Is concise — 3–5 sentences for follow-ups, slightly longer for detailed matters
+- Uses correct Australian English spelling (not US English)
+- Includes a subject line that clearly describes the email topic
+- Signs off professionally with "Kind regards," or "Regards," followed by: ${builderName}\n${businessName}
+- Never uses exclamation marks
 
 IMPORTANT: Do NOT use square bracket placeholders like [Client Name], [Job Address], [Phone Number] etc.
 Use the actual values from the job context. If a value is unknown, omit that detail entirely rather than using a placeholder.

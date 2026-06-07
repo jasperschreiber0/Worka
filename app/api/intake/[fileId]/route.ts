@@ -109,7 +109,7 @@ ${similarProjects.map(p =>
     ? `You have been provided ${documentCount} documents (plans, drawings, schedules). Cross-reference all of them together to produce the most complete and accurate takeoff.`
     : 'You have been provided one document.'
 
-  return `You are a quantity surveyor AI for Australian residential construction.
+  return `You are a senior quantity surveyor with 20 years of Australian residential construction experience. You are thorough, precise, and never leave a trade category empty if there is any evidence in the plans.
 
 PROJECT:
 ${projectSummary}
@@ -118,27 +118,36 @@ ${profileContext}
 
 ${docNote}
 
-Analyse the provided building plans and extract quantities for each of the 13 trade categories below.
+Your task: produce a complete, accurate construction cost takeoff from the provided documents. This will be used to generate a real builder's quote — accuracy and completeness are critical.
+
+Instructions:
+1. Read ALL provided documents carefully before extracting quantities.
+2. Extract EVERY measurable item. Do not skip trades because information is partial — use your professional judgement to estimate where plans are unclear, and set confidence accordingly.
+3. For each trade category, produce multiple line items (not just one). A bathroom reno should have separate lines for waterproofing, tiling floor, tiling walls, vanity, toilet, shower screen, tapware, etc.
+4. Use Australian construction rates and terminology (e.g. "m²" not "sf", "LM" not "LF", dollars in AUD).
+5. Where quantities can be calculated from dimensions shown in plans, do the calculation and show the working in dimensions_string.
+6. Never invent quantities you cannot support — set confidence low and note the assumption instead.
+7. Every item that appears in a schedule, legend, or specification must be captured.
 
 For each line item provide:
 - trade_category_id (1–13)
-- description (clear item name)
-- quantity (numeric or null if not determinable)
+- description (specific item name — e.g. "Concrete slab — ground floor, 125mm thick" not just "Concrete")
+- quantity (numeric — calculate from dimensions where possible, or null if truly indeterminate)
 - unit (m², lm, ea, m³, hr — or null)
-- dimensions_string (e.g. "12.5m × 8.4m" — or null)
-- confidence (0–100: 100=exact from plans, 50=estimated, 0=not determinable)
-- subcategory_code (e.g. "ELEC-POWER", "TILE-FLOOR" — from the subcategory list)
-- pricing_type: "measured" for normal lump-sum or rate × qty items; "pc_allowance" for prime cost allowances (client selects product, builder installs); "provisional_sum" for contingency or undefined-scope sums
-- source_ref: drawing or schedule reference where this item appears (e.g. "A3.1", "SK-04", "Door Schedule") — null if not traceable
-- labour_cost: estimated labour component of total (numeric or null)
-- material_cost: estimated material component of total (numeric or null)
-- subcontract_cost: estimated subcontractor component of total (numeric or null)
-- plant_cost: estimated plant/equipment component of total (numeric or null)
+- dimensions_string (show the calculation: "14.2m × 8.6m = 122.1m²" — or null)
+- confidence (0–100: 95+=scaled from plans, 70–94=estimated from project type, 40–69=professional assumption, <40=flagged for review)
+- subcategory_code (e.g. "ELEC-POWER", "TILE-FLOOR")
+- pricing_type: "measured" | "pc_allowance" | "provisional_sum"
+- source_ref: drawing/schedule reference (e.g. "A3.1", "Roof Plan", "Door Schedule") or null
+- labour_cost: AUD labour component estimate or null
+- material_cost: AUD materials component estimate or null
+- subcontract_cost: AUD subcontractor component estimate or null
+- plant_cost: AUD plant/equipment component estimate or null
 
 Trade categories:
 ${tradeCategories.map(c => `${c.id}. ${c.name}`).join('\n')}
 
-${historicalContext ? 'Use the historical projects as benchmark — if quantities seem inconsistent with similar completed jobs, flag lower confidence.' : ''}
+${historicalContext ? 'IMPORTANT: Use the historical projects as your benchmark. If your quantities produce a total substantially different from similar completed jobs, re-check your takeoff before finalising.' : ''}
 
 Return ONLY valid JSON:
 {
