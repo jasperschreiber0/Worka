@@ -7,6 +7,7 @@ import MarginCard, { type MarginJob } from './MarginCard'
 import StateUpdateCard from './StateUpdateCard'
 import JobListCard from './JobListCard'
 import WorkerListCard, { type WorkerListItem } from './WorkerListCard'
+import EmailDraftCard, { type EmailDraftData } from './EmailDraftCard'
 import type { StateChange, JobListItem } from '@/app/api/chat/route'
 
 // ─── Lightweight markdown renderer ───────────────────────────────────────────
@@ -139,6 +140,7 @@ export interface Message {
   jobList?: JobListItem[]
   workerList?: WorkerListItem[]
   stateChanges?: StateChange[]
+  emailDraft?: EmailDraftData
   timestamp: Date
 }
 
@@ -153,6 +155,8 @@ interface ChatMessageProps {
   onVariationReject?: (variationId: string) => void
   onOpenMarginJob?: (jobId: string) => void
   onAssignWorkerTask?: (workerName: string) => void
+  onEmailSent?: (commId: string, recipientName: string, jobAddress: string | null) => void
+  onEmailRevise?: () => void
 }
 
 // ─── Relative time helper ─────────────────────────────────────────────────────
@@ -179,7 +183,7 @@ function relativeTime(date: Date): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatMessage({ message, builderId = '00000000-0000-0000-0000-000000000001', onOpenJob, onOpenJobFromList, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob, onAssignWorkerTask }: ChatMessageProps) {
+export default function ChatMessage({ message, builderId = '00000000-0000-0000-0000-000000000001', onOpenJob, onOpenJobFromList, onCreateAnyway, onAction, onVariationApprove, onVariationReject, onOpenMarginJob, onAssignWorkerTask, onEmailSent, onEmailRevise }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const hasAlerts = message.alerts && message.alerts.length > 0
   const hasDuplicate = !!message.duplicateJob
@@ -345,6 +349,14 @@ export default function ChatMessage({ message, builderId = '00000000-0000-0000-0
             workers={message.workerList}
             builderId={builderId}
             onAssignTask={onAssignWorkerTask}
+          />
+        )}
+        {message.emailDraft && (
+          <EmailDraftCard
+            draft={message.emailDraft}
+            builderId={builderId}
+            onSent={onEmailSent}
+            onRevise={onEmailRevise}
           />
         )}
         {message.stateChanges && message.stateChanges.length > 0 && (

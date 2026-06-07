@@ -345,6 +345,7 @@ export default function ChatInterface({
   const [isListening, setIsListening] = useState(false)
   const recognitionRef = useRef<{ stop: () => void } | null>(null)
   const [pendingFilesForUpload, setPendingFilesForUpload] = useState<File[] | null>(null)
+  const [lastResponseType, setLastResponseType] = useState<string | null>(null)
 
   const [pendingDropFiles, setPendingDropFiles] = useState<Array<{ file: File; type: string; label: string }>>([])
   const [dropJobQuery, setDropJobQuery] = useState<string>('')
@@ -386,18 +387,16 @@ export default function ChatInterface({
   }, [initialQuoteId])
 
   // When a pending email draft is passed from the snapshot panel's "Compose email" button,
-  // open EmailDraftModal immediately and notify the parent that we consumed it.
+  // inject it inline into the chat thread.
   useEffect(() => {
     if (pendingEmailDraft) {
-      setEmailDraftModal({
-        isOpen: true,
-        jobId: pendingEmailDraft.jobId,
-        recipientName: pendingEmailDraft.recipientName,
-        intentHint: pendingEmailDraft.intentHint,
-      })
       onPendingEmailDraftConsumed?.()
+      void fetchAndInjectEmailDraft(
+        pendingEmailDraft.jobId,
+        pendingEmailDraft.recipientName ?? null,
+        pendingEmailDraft.intentHint,
+      )
     }
-  // We only want to react when pendingEmailDraft changes (not on every render)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingEmailDraft])
 
@@ -532,22 +531,12 @@ export default function ChatInterface({
       }
       // 'Chase payment' from morning brief (overdue invoice on Fitzroy job)
       if (action === 'Chase payment') {
-        setEmailDraftModal({
-          isOpen: true,
-          jobId: '00000000-0000-0000-0000-000000000010',
-          recipientName: 'the Hendersons',
-          intentHint: 'invoice',
-        })
+        void fetchAndInjectEmailDraft('00000000-0000-0000-0000-000000000010', 'the Hendersons', 'invoice')
         return
       }
       // 'Follow up' from morning brief (Toorak quote stale)
       if (action === 'Follow up') {
-        setEmailDraftModal({
-          isOpen: true,
-          jobId: '00000000-0000-0000-0000-000000000020',
-          recipientName: 'Tom Caruso',
-          intentHint: 'quote_followup',
-        })
+        void fetchAndInjectEmailDraft('00000000-0000-0000-0000-000000000020', 'Tom Caruso', 'quote_followup')
         return
       }
       // 'Activate job' from chat suggest_job_activation message
@@ -563,12 +552,7 @@ export default function ChatInterface({
       }
       // 'Draft email' from suggest_email_draft chat message
       if (action === 'Draft email') {
-        // entityId is the job_id passed through the alert
-        setEmailDraftModal({
-          isOpen: true,
-          jobId: entityId ?? null,
-          intentHint: (entityType as EmailIntentHint | undefined) ?? 'general',
-        })
+        void fetchAndInjectEmailDraft(entityId ?? null, null, (entityType as string | undefined) ?? 'general')
         return
       }
       // 'Review quote' — open job snapshot panel to the quote tab
@@ -786,6 +770,7 @@ export default function ChatInterface({
       if (data.message?.trim()) {
         setMessages((prev) => [...prev, assistantMessage])
       }
+      setLastResponseType(data.intent ?? null)
 
       // Handle Layer 3 events
       // Dispatch all Layer 3 events — handles both events[] (multi-action) and
@@ -818,12 +803,7 @@ export default function ChatInterface({
 
         if (evt.type === 'open_email_draft') {
           const e = evt as OpenEmailDraftEvent
-          setEmailDraftModal({
-            isOpen: true,
-            jobId: e.job_id,
-            recipientName: e.recipient_name ?? undefined,
-            intentHint: e.intent_hint as EmailIntentHint,
-          })
+          void fetchAndInjectEmailDraft(e.job_id, e.recipient_name, e.intent_hint)
         }
 
         if (evt.type === 'suggest_email_draft') {
@@ -973,10 +953,9 @@ export default function ChatInterface({
     setMessages((prev) => [...prev, confirmMessage])
   }, [])
 
-  // Handler: email draft sent — close modal, append confirmation message
+  // Handler: email draft sent — append confirmation message
   const handleEmailDraftSent = useCallback(
     (commId: string, recipientEmail: string, jobAddress: string | null) => {
-      setEmailDraftModal(null)
       const addressDisplay = jobAddress ? ` and logged to the ${jobAddress} communication history` : ' and logged to the job communication history'
       const confirmMessage: Message = {
         id: generateId(),
@@ -984,7 +963,7 @@ export default function ChatInterface({
         content: `Email sent to ${recipientEmail}${addressDisplay}.`,
         timestamp: new Date(),
       }
-      void commId // commId logged server-side; available here for future use
+      void commId
       setMessages((prev) => [...prev, confirmMessage])
     },
     []
@@ -1050,6 +1029,48 @@ export default function ChatInterface({
   const handleCreateAnyway = useCallback((address: string) => {
     sendMessage(`new job at ${address}`, true)
   }, [sendMessage])
+
+  // Handler: fetch email draft from API and inject inline as a chat message
+  const fetchAndInjectEmailDraft = useCallback(async (
+    jobId: string | null,
+    recipientName: string | null,
+    intentHint: string,
+    contextMessage?: string
+  ) => {
+    const loadingId = generateId()
+    setMessages((prev) => [...prev, {
+      id: loadingId,
+      role: 'assistant' as const,
+      content: 'Drafting your email…',
+      timestamp: new Date(),
+    }])
+    try {
+      const res = await fetch('/api/email-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          builder_id: builderId,
+          job_id: jobId,
+          recipient_name: recipientName,
+          intent_hint: intentHint,
+          context: contextMessage,
+        }),
+      })
+      if (!res.ok) throw new Error('draft failed')
+      const data = await res.json() as { draft: import('./EmailDraftCard').EmailDraftData }
+      setMessages((prev) => prev.map((m) =>
+        m.id === loadingId
+          ? { ...m, content: "Here's your draft — review and send when ready.", emailDraft: data.draft }
+          : m
+      ))
+    } catch {
+      setMessages((prev) => prev.map((m) =>
+        m.id === loadingId
+          ? { ...m, content: 'Something went wrong generating the draft. Try again.' }
+          : m
+      ))
+    }
+  }, [builderId])
 
   // Fire any pending action that needed sendMessage (e.g. "Review variations" from MorningBriefCard)
   useEffect(() => {
@@ -1231,6 +1252,8 @@ export default function ChatInterface({
             onVariationReject={handleVariationReject}
             onOpenMarginJob={handleOpenMarginJob}
             onAssignWorkerTask={handleAssignWorkerTask}
+            onEmailSent={handleEmailDraftSent}
+            onEmailRevise={() => void fetchAndInjectEmailDraft(null, null, 'general')}
           />
         ))}
 
@@ -1449,33 +1472,64 @@ export default function ChatInterface({
             </div>
           </div>
         ) : (
-        /* Quick actions */
-        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none" aria-label="Quick actions">
-          {([
-            { label: "What's on", msg: 'whats on today' },
-            { label: 'New job', fill: 'New job at ' },
-            { label: 'Show jobs', msg: 'show my jobs' },
-            { label: 'Add task', fill: 'task for ' },
-            { label: 'My team', msg: 'show my team' },
-          ] as Array<{ label: string; msg?: string; fill?: string }>).map(({ label, msg, fill }) => (
-            <button
-              key={label}
-              type="button"
-              disabled={loading}
-              onClick={() => {
-                if (fill) {
-                  setInput(fill)
-                  inputRef.current?.focus()
-                } else if (msg) {
-                  sendMessage(msg)
-                }
-              }}
-              className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] bg-[#2a2a2a] border border-[#2e2e2e] text-[#999999] hover:border-[#ff6b2b]/30 hover:text-[#e0e0e0] transition-colors disabled:opacity-40 whitespace-nowrap"
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        /* Contextual quick actions — max 3, first chip is primary (orange) */
+        (() => {
+          type Chip = { label: string; msg?: string; fill?: string }
+          let chips: Chip[]
+          if (lastResponseType?.includes('morning_brief')) {
+            chips = [
+              { label: 'Show variations', msg: 'show my variations' },
+              { label: 'My jobs', msg: 'show my jobs' },
+              { label: 'Add task', fill: 'task for ' },
+            ]
+          } else if (lastResponseType?.includes('show_variation') || lastResponseType?.includes('variation')) {
+            chips = [
+              { label: 'Draft follow-up', msg: 'draft a follow-up to the client' },
+              { label: 'My jobs', msg: 'show my jobs' },
+              { label: "What's on", msg: 'whats on today' },
+            ]
+          } else if (lastResponseType?.includes('job_list') || lastResponseType?.includes('show_jobs') || lastResponseType?.includes('margin')) {
+            chips = [
+              { label: 'New job', fill: 'New job at ' },
+              { label: 'Show variations', msg: 'show my variations' },
+              { label: "What's on", msg: 'whats on today' },
+            ]
+          } else if (lastResponseType?.includes('email') || lastResponseType?.includes('comms')) {
+            chips = [
+              { label: "What's on", msg: 'whats on today' },
+              { label: 'My jobs', msg: 'show my jobs' },
+              { label: 'Add task', fill: 'task for ' },
+            ]
+          } else {
+            chips = [
+              { label: "What's on", msg: 'whats on today' },
+              { label: 'New job', fill: 'New job at ' },
+              { label: 'My team', msg: 'show my team' },
+            ]
+          }
+          return (
+            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none" aria-label="Quick actions">
+              {chips.map(({ label, msg, fill }, idx) => (
+                <button
+                  key={label}
+                  type="button"
+                  disabled={loading}
+                  onClick={() => {
+                    if (fill) { setInput(fill); inputRef.current?.focus() }
+                    else if (msg) sendMessage(msg)
+                  }}
+                  className={`flex-shrink-0 px-3 py-1.5 text-[12px] font-medium rounded-[4px] transition-colors disabled:opacity-40 whitespace-nowrap ${
+                    idx === 0
+                      ? 'bg-[rgba(255,107,43,0.15)] border border-[rgba(255,107,43,0.3)] text-[#ff6b2b] hover:bg-[rgba(255,107,43,0.25)]'
+                      : 'bg-[#2a2a2a] border border-[#2e2e2e] text-[#999999] hover:border-[#ff6b2b]/30 hover:text-[#e0e0e0]'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )
+        })()
         )}
 
         <form onSubmit={handleSubmit} className="flex items-end gap-2">
