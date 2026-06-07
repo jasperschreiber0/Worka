@@ -64,16 +64,29 @@ export default function InboundEmailAlert({
   const hasReplyDraft = suggested_action?.type === 'draft_reply' && suggested_action.draft
 
   return (
-    <div className="my-3 rounded-xl border border-blue-200 bg-blue-50 overflow-hidden">
+    <div
+      className="my-3 rounded-xl overflow-hidden"
+      style={{
+        border: '0.5px solid var(--bg-border)',
+        background: 'var(--bg-elevated)',
+      }}
+    >
       {/* ── Header ─────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2.5 px-4 py-2.5 bg-blue-100 border-b border-blue-200">
+      <div
+        className="flex items-center gap-2.5 px-4 py-2.5"
+        style={{
+          background: 'rgba(76,110,245,0.08)',
+          borderBottom: '0.5px solid var(--bg-border)',
+        }}
+      >
         <svg
-          className="w-4 h-4 text-blue-600 flex-shrink-0"
+          className="w-4 h-4 flex-shrink-0"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
           strokeWidth={2}
           aria-hidden="true"
+          style={{ color: 'var(--status-blue)' }}
         >
           <path
             strokeLinecap="round"
@@ -81,7 +94,7 @@ export default function InboundEmailAlert({
             d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
           />
         </svg>
-        <span className="text-sm font-semibold text-blue-800">
+        <span className="text-sm font-semibold" style={{ color: 'var(--status-blue)' }}>
           New email matched to {suburb} job
         </span>
       </div>
@@ -89,30 +102,36 @@ export default function InboundEmailAlert({
       {/* ── Email details ───────────────────────────────────────────── */}
       <div className="px-4 py-3 space-y-1.5">
         <div className="grid grid-cols-[4rem,1fr] gap-x-2 text-sm">
-          <span className="text-slate-400 font-medium">From</span>
-          <span className="text-slate-700 truncate">{email.from}</span>
+          <span className="font-medium" style={{ color: 'var(--text-tertiary)' }}>From</span>
+          <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{email.from}</span>
         </div>
         <div className="grid grid-cols-[4rem,1fr] gap-x-2 text-sm">
-          <span className="text-slate-400 font-medium">Subject</span>
-          <span className="text-slate-700 truncate">{email.subject}</span>
+          <span className="font-medium" style={{ color: 'var(--text-tertiary)' }}>Subject</span>
+          <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{email.subject}</span>
         </div>
         <div className="grid grid-cols-[4rem,1fr] gap-x-2 text-sm">
-          <span className="text-slate-400 font-medium">Intent</span>
-          <span className="text-slate-700 font-medium">{intentLabel}</span>
+          <span className="font-medium" style={{ color: 'var(--text-tertiary)' }}>Intent</span>
+          <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{intentLabel}</span>
         </div>
       </div>
 
       {/* ── Preview ─────────────────────────────────────────────────── */}
-      <div className="mx-4 mb-3 px-3 py-2 bg-white rounded-lg border border-blue-100">
-        <p className="text-sm text-slate-500 italic leading-relaxed">
+      <div
+        className="mx-4 mb-3 px-3 py-2 rounded-lg"
+        style={{
+          background: 'var(--bg-surface)',
+          border: '0.5px solid var(--bg-border)',
+        }}
+      >
+        <p className="text-sm italic leading-relaxed" style={{ color: 'var(--text-tertiary)' }}>
           &ldquo;{email.preview.length > 80 ? `${email.preview.slice(0, 80)}…` : email.preview}&rdquo;
         </p>
-        <p className="text-xs text-slate-400 mt-1">{email.received_display}</p>
+        <p className="text-xs mt-1" style={{ color: 'var(--text-tertiary)' }}>{email.received_display}</p>
       </div>
 
       {/* ── Logged notice + suggested action ─────────────────────── */}
       <div className="px-4 pb-3">
-        <p className="text-xs text-blue-700 mb-2.5">
+        <p className="text-xs mb-2.5" style={{ color: 'var(--status-blue)' }}>
           WorkA has logged this email.
           {suggested_action
             ? ` Suggested: ${suggested_action.description}`
@@ -124,7 +143,8 @@ export default function InboundEmailAlert({
           {hasReplyDraft && (
             <button
               onClick={onReply}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+              style={{ background: 'var(--status-blue)', color: '#fff' }}
             >
               Reply
               <svg
@@ -141,7 +161,12 @@ export default function InboundEmailAlert({
           )}
           <button
             onClick={onDismiss}
-            className="px-3 py-1.5 rounded-lg bg-white border border-blue-200 text-blue-600 text-xs font-medium hover:bg-blue-50 transition-colors"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+            style={{
+              background: 'var(--bg-surface)',
+              border: '0.5px solid var(--bg-border)',
+              color: 'var(--status-blue)',
+            }}
           >
             Dismiss
           </button>
