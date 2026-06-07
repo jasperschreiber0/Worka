@@ -82,7 +82,7 @@ insert into public.trade_subcategories (trade_category_id, code, name, typical_u
   (9, 'JOIN-LAUNDRY',     'Laundry cabinet',                  'ea',  30),
   (9, 'JOIN-ROBE',        'Built-in wardrobes',               'lm',  40),
   (9, 'JOIN-LINEN',       'Linen press',                      'ea',  50),
-  (9, 'JOIN-PANTRY',      'Pantry & butler\'s',               'ea',  60),
+  (9, 'JOIN-PANTRY',      'Pantry & butler''s',               'ea',  60),
   -- 10 Painting
   (10, 'PAINT-INT-WALL',  'Interior walls',                   'm²',  10),
   (10, 'PAINT-INT-CEIL',  'Interior ceilings',                'm²',  20),
