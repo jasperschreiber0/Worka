@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { hasPermission } from '@/lib/auth/role-guard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -41,7 +41,31 @@ function formatAUD(amount: number): string {
 export default function VariationCard({ variation, onApprove, onReject, onViewJob, userRole = 'owner' }: VariationCardProps) {
   const [localStatus, setLocalStatus] = useState(variation.status)
   const [confirming, setConfirming] = useState<'approve' | 'reject' | null>(null)
+  const [shareLink, setShareLink] = useState<string | null>(null)
+  const [shareCopied, setShareCopied] = useState(false)
+  const [shareLoading, setShareLoading] = useState(false)
   const isPending = localStatus === 'pending'
+
+  const handleSendToClient = useCallback(async () => {
+    if (shareLink) {
+      await navigator.clipboard.writeText(shareLink).catch(() => {})
+      setShareCopied(true)
+      setTimeout(() => setShareCopied(false), 2000)
+      return
+    }
+    setShareLoading(true)
+    try {
+      const res = await fetch(`/api/variations/${variation.id}/share`, { method: 'POST' })
+      const data = await res.json() as { link?: string }
+      if (data.link) {
+        setShareLink(data.link)
+        await navigator.clipboard.writeText(data.link).catch(() => {})
+        setShareCopied(true)
+        setTimeout(() => setShareCopied(false), 2000)
+      }
+    } catch { /* ignore */ }
+    finally { setShareLoading(false) }
+  }, [shareLink, variation.id])
 
   function handleApprove() {
     if (confirming !== 'approve') { setConfirming('approve'); return }
@@ -157,34 +181,48 @@ export default function VariationCard({ variation, onApprove, onReject, onViewJo
             </div>
           )}
           {!confirming && (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleApprove}
-                className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-[4px]"
-                style={{ backgroundColor: 'rgba(76,175,80,0.2)', color: 'var(--status-green)', border: '0.5px solid rgba(76,175,80,0.3)' }}
-              >
-                Approve {formatAUD(variation.amount)}
-              </button>
-              <button
-                type="button"
-                onClick={handleReject}
-                className="text-[12px] px-3 py-2 rounded-[4px]"
-                style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}
-              >
-                Reject
-              </button>
-              {onViewJob && variation.job_id && (
+            <>
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => onViewJob(variation.job_id!)}
-                  className="px-3 py-2 text-[12px] font-medium flex items-center gap-1 whitespace-nowrap"
-                  style={{ color: 'var(--orange-primary)' }}
+                  onClick={handleApprove}
+                  className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-[4px]"
+                  style={{ backgroundColor: 'rgba(76,175,80,0.2)', color: 'var(--status-green)', border: '0.5px solid rgba(76,175,80,0.3)' }}
                 >
-                  Details →
+                  Approve {formatAUD(variation.amount)}
                 </button>
+                <button
+                  type="button"
+                  onClick={handleReject}
+                  className="text-[12px] px-3 py-2 rounded-[4px]"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}
+                >
+                  Reject
+                </button>
+                {onViewJob && variation.job_id && (
+                  <button
+                    type="button"
+                    onClick={() => onViewJob(variation.job_id!)}
+                    className="px-3 py-2 text-[12px] font-medium flex items-center gap-1 whitespace-nowrap"
+                    style={{ color: 'var(--orange-primary)' }}
+                  >
+                    Details →
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleSendToClient()}
+                disabled={shareLoading}
+                className="w-full text-[12px] font-medium px-3 py-2 rounded-[4px] flex items-center justify-center gap-1.5"
+                style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}
+              >
+                {shareLoading ? 'Generating link…' : shareCopied ? '✓ Link copied!' : shareLink ? 'Copy approval link' : 'Send to client →'}
+              </button>
+              {shareLink && (
+                <p className="text-[10px] break-all mt-0.5" style={{ color: 'var(--text-tertiary)' }}>{shareLink}</p>
               )}
-            </div>
+            </>
           )}
         </div>
       ) : isPending ? (

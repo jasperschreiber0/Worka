@@ -26,6 +26,7 @@ interface Alert {
   priority: 'high' | 'medium' | 'low'
   message: string
   action?: string
+  quick_action?: string
   entity_id?: string
   entity_type?: 'job' | 'invoice' | 'variation' | 'quote'
 }
