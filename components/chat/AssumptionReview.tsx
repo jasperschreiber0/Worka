@@ -3,6 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { AssumptionItem } from '@/lib/assumptions-demo'
+import type { SimilarProject, ScopeHint } from '@/lib/types/estimation.types'
+import SimilarJobsCard from '@/components/estimation/SimilarJobsCard'
+import ScopeIntelligenceCard from '@/components/estimation/ScopeIntelligenceCard'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -13,6 +16,9 @@ export interface AssumptionReviewProps {
   onComplete: (allResolved: boolean) => void
   onDismiss: () => void
   onViewQuote?: (quoteId: string) => void
+  similarProjects?: SimilarProject[]
+  scopeHints?: ScopeHint[]
+  totalInMemory?: number
 }
 
 // ─── Unit options ─────────────────────────────────────────────────────────────
@@ -500,6 +506,9 @@ function AssumptionReviewInner({
   onComplete,
   onDismiss,
   onViewQuote,
+  similarProjects = [],
+  scopeHints = [],
+  totalInMemory = 0,
 }: AssumptionReviewProps) {
   const [assumptions, setAssumptions] = useState<AssumptionItem[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -715,6 +724,22 @@ function AssumptionReviewInner({
 
         {/* ── Body ────────────────────────────────────────────────── */}
         <div className="px-5 py-4">
+          {/* Memory engine context — similar projects & scope intelligence */}
+          {!isLoading && (similarProjects.length > 0 || scopeHints.length > 0) && (
+            <div className="mb-4 space-y-3">
+              {similarProjects.length > 0 && (
+                <SimilarJobsCard similarProjects={similarProjects} totalInMemory={totalInMemory} />
+              )}
+              {scopeHints.length > 0 && (
+                <ScopeIntelligenceCard
+                  hints={scopeHints}
+                  onAccept={(hint) => { void hint }} // TODO: add to quote line items
+                  onDismiss={(hint) => { void hint }}
+                />
+              )}
+            </div>
+          )}
+
           {isLoading && (
             <div className="flex items-center justify-center py-12">
               <span className="text-sm text-slate-400">Loading assumptions…</span>

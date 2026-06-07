@@ -18,7 +18,7 @@ export interface UploadPanelProps {
   onClose: () => void
   job: UploadPanelJob
   builderId: string
-  onIntakeComplete?: (quoteId: string, assumptionCount: number) => void
+  onIntakeComplete?: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
   preloadedFiles?: File[]
 }
 
@@ -263,9 +263,9 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   // ── Intake complete handler ────────────────────────────────────────────────
 
   const handleIntakeComplete = useCallback(
-    (quoteId: string, assumptionCount: number) => {
+    (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => {
       if (onIntakeComplete) {
-        onIntakeComplete(quoteId, assumptionCount)
+        onIntakeComplete(quoteId, assumptionCount, memoryData)
       }
       onClose()
     },

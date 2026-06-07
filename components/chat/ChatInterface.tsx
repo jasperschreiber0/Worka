@@ -127,7 +127,13 @@ interface UploadPanelState {
 
 // ─── Assumption review state ──────────────────────────────────────────────────
 
-type AssumptionReviewStateOrNull = { quoteId: string; jobAddress: string } | null
+type AssumptionReviewStateOrNull = {
+  quoteId: string
+  jobAddress: string
+  similarProjects?: import('@/lib/types/estimation.types').SimilarProject[]
+  scopeHints?: import('@/lib/types/estimation.types').ScopeHint[]
+  totalInMemory?: number
+} | null
 
 // ─── Quote view state ─────────────────────────────────────────────────────────
 
@@ -380,14 +386,19 @@ export default function ChatInterface({
   }, [])
 
   const handleIntakeComplete = useCallback(
-    (quoteId: string, assumptionCount: number) => {
+    (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => {
       setUploadPanel((prev) => ({ ...prev, isOpen: false }))
 
       const jobAddress = uploadPanel.job?.address ?? 'this job'
+
+      const memoryContext = memoryData?.similar_projects?.length
+        ? ` Estimate informed by ${memoryData.similar_projects.length} similar historical project${memoryData.similar_projects.length !== 1 ? 's' : ''}.`
+        : ''
+
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
-        content: `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.`,
+        content: `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.${memoryContext}`,
         alerts: [
           {
             priority: 'high',
@@ -400,6 +411,15 @@ export default function ChatInterface({
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])
+
+      // Open assumption review immediately with memory context
+      setReviewingAssumptions({
+        quoteId,
+        jobAddress,
+        similarProjects: memoryData?.similar_projects as import('@/lib/types/estimation.types').SimilarProject[] | undefined,
+        scopeHints: memoryData?.scope_hints as import('@/lib/types/estimation.types').ScopeHint[] | undefined,
+        totalInMemory: memoryData?.total_in_memory,
+      })
     },
     [uploadPanel.job]
   )
@@ -1200,6 +1220,9 @@ export default function ChatInterface({
           onComplete={handleAssumptionComplete}
           onDismiss={handleAssumptionDismiss}
           onViewQuote={(quoteId) => setViewingQuote({ quoteId })}
+          similarProjects={reviewingAssumptions.similarProjects}
+          scopeHints={reviewingAssumptions.scopeHints}
+          totalInMemory={reviewingAssumptions.totalInMemory}
         />
       )}
 

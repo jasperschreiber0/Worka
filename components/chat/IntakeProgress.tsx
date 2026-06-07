@@ -9,7 +9,7 @@ export interface IntakeProgressProps {
   jobId: string
   builderId: string
   filename: string
-  onComplete: (quoteId: string, assumptionCount: number) => void
+  onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
   onError: () => void
 }
 
@@ -30,11 +30,13 @@ const STAGE_LABELS: Record<string, string> = {
   uploading: 'Uploading plans',
   reading: 'Reading file',
   analysing: 'Analysing with AI',
+  retrieving_memory: 'Searching historical projects',
   extracting_site: 'Site works & concrete',
   extracting_framing: 'Framing quantities',
   extracting_roofing: 'Roofing',
   extracting_fitout: 'Fit-out & finishes',
-  extracting_electrical: 'Electrical & prelims',
+  extracting_elec: 'Electrical & prelims',
+  scope_intelligence: 'Scope intelligence',
   validating: 'Quantity validation',
   building_quote: 'Building draft quote',
 }
@@ -96,6 +98,9 @@ export default function IntakeProgress({
           pct: number
           quote_id: string
           assumption_count: number
+          similar_projects?: unknown[]
+          scope_hints?: unknown[]
+          total_in_memory?: number
         }
 
         // Move last active stage to completed
@@ -114,7 +119,11 @@ export default function IntakeProgress({
         es.close()
 
         setTimeout(() => {
-          onComplete(data.quote_id, data.assumption_count)
+          onComplete(data.quote_id, data.assumption_count, {
+            similar_projects: data.similar_projects,
+            scope_hints: data.scope_hints,
+            total_in_memory: data.total_in_memory,
+          })
         }, 1000)
       } catch {
         setHasError(true)
