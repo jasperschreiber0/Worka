@@ -95,6 +95,15 @@ function SkeletonPanel() {
   )
 }
 
+// ─── Aggregate pulse (no-job state) ──────────────────────────────────────────
+
+interface AggregatePulse {
+  active_jobs: number
+  pipeline_value: number
+  overdue_invoice_total: number
+  pending_variations: number
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function JobSnapshotPanel({
@@ -110,6 +119,26 @@ export default function JobSnapshotPanel({
   const [loading, setLoading] = useState(false)
   const [activationModal, setActivationModal] = useState<ActivationModalState>({ isOpen: false, quote: null })
   const [activatedJobStatus, setActivatedJobStatus] = useState<string | null>(null)
+  const [pulse, setPulse] = useState<AggregatePulse | null>(null)
+
+  // Fetch aggregate pulse once for the no-job empty state
+  useEffect(() => {
+    if (pulse) return
+    fetch('/api/dashboard')
+      .then(r => r.json())
+      .then((data: { stats?: { active_jobs?: number; pipeline_value?: number; overdue_invoice_total?: number; pending_variations?: number } }) => {
+        if (data.stats) {
+          setPulse({
+            active_jobs: data.stats.active_jobs ?? 0,
+            pipeline_value: data.stats.pipeline_value ?? 0,
+            overdue_invoice_total: data.stats.overdue_invoice_total ?? 0,
+            pending_variations: data.stats.pending_variations ?? 0,
+          })
+        }
+      })
+      .catch(() => {/* silent */})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     if (!job) {
@@ -283,8 +312,45 @@ export default function JobSnapshotPanel({
       {/* ── SCROLLABLE BODY ─────────────────────────────────────────────────── */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px', paddingBottom: 0 }}>
         {!job ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', padding: '48px 16px', color: 'var(--text-tertiary)', fontSize: 13 }}>
-            Ask about a specific job to see its details here.
+          <div style={{ padding: '8px 0' }}>
+            {/* Aggregate pulse — shown when no job is in context */}
+            <div style={SECTION_LABEL_STYLE}>Today&apos;s Pulse</div>
+            {pulse ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 24 }}>
+                {[
+                  { label: 'Active jobs', value: String(pulse.active_jobs), color: 'var(--text-primary)' },
+                  {
+                    label: 'Pipeline',
+                    value: pulse.pipeline_value >= 1000
+                      ? `$${Math.round(pulse.pipeline_value / 1000)}k`
+                      : formatAUD(pulse.pipeline_value),
+                    color: 'var(--text-primary)',
+                  },
+                  {
+                    label: 'Overdue',
+                    value: pulse.overdue_invoice_total > 0
+                      ? `$${Math.round(pulse.overdue_invoice_total / 1000)}k`
+                      : '—',
+                    color: pulse.overdue_invoice_total > 0 ? 'var(--status-red)' : 'var(--text-tertiary)',
+                  },
+                  {
+                    label: 'Variations',
+                    value: pulse.pending_variations > 0 ? String(pulse.pending_variations) : '—',
+                    color: pulse.pending_variations > 0 ? 'var(--status-amber)' : 'var(--text-tertiary)',
+                  },
+                ].map(stat => (
+                  <div key={stat.label} style={{ ...CARD_STYLE, textAlign: 'center', padding: '12px 8px' }}>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: stat.color, lineHeight: 1 }}>{stat.value}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{stat.label}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ ...CARD_STYLE, height: 80, marginBottom: 24 }} className="animate-pulse" />
+            )}
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', textAlign: 'center', lineHeight: 1.6 }}>
+              Ask WorkA about a job to see its details here — or tap any job in chat.
+            </div>
           </div>
         ) : loading ? (
           <SkeletonPanel />

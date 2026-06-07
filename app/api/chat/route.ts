@@ -428,8 +428,8 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[]; follow_up?: 
     },
     {
       priority: 'low',
-      message: '52 Bendigo St (Brunswick) is in quoting — no quote sent yet. Client is waiting on CLIENT.',
-      action: 'Open job',
+      message: '52 Bendigo St (Brunswick) — 11 days in quoting, no quote sent yet. Client is waiting on CLIENT.',
+      action: 'Draft quote',
       entity_id: '00000000-0000-0000-0000-000000000030',
       entity_type: 'job',
     },
@@ -482,7 +482,7 @@ async function getLiveMorningBrief(
       const dueRelative = inv.due_date ? relativeDate(inv.due_date) : 'recently'
       alerts.push({
         priority: 'high',
-        message: `Invoice for ${formatAUD(inv.amount)} on ${address} was due ${dueRelative} and has not been paid.`,
+        message: `${formatAUD(inv.amount)} invoice on ${address} was due ${dueRelative} — not paid. Every day costs you cashflow. Draft a payment chaser now.`,
         action: 'Chase payment',
         entity_id: inv.id,
         entity_type: 'invoice',
@@ -521,8 +521,8 @@ async function getLiveMorningBrief(
         priority,
         message:
           count === 1
-            ? `1 variation on ${address} is waiting for approval — ${vars[0].title} (${formatAUD(vars[0].amount ?? 0)}).`
-            : `${count} variations on ${address} are waiting for approval, totalling ${formatAUD(totalAmount)}.`,
+            ? `${address} — variation for ${formatAUD(vars[0].amount ?? 0)} (${vars[0].title}) waiting for your sign-off. Trade is invoicing regardless.`
+            : `${address} — ${count} variations totalling ${formatAUD(totalAmount)} waiting on your sign-off. Trades are invoicing regardless.`,
         action: 'Review variations',
         entity_id: jobId,
         entity_type: 'job',
@@ -547,8 +547,8 @@ async function getLiveMorningBrief(
       const urgency = hoursLeft < 0 ? 'OVERDUE' : hoursLeft < 24 ? `${Math.round(hoursLeft)}h left` : `${Math.round(hoursLeft / 24)} day(s)`
       alerts.push({
         priority: hoursLeft < 24 ? 'high' : 'medium',
-        message: `Quote deadline for ${job.address} — ${urgency}.`,
-        action: hoursLeft < 0 ? 'Check quote status' : 'Review quote',
+        message: `Quote deadline for ${job.address} — ${urgency}. Send the quote now or call the client.`,
+        action: hoursLeft < 0 ? 'Draft quote' : 'Review quote',
         entity_id: job.id,
         entity_type: 'job',
       })
@@ -576,8 +576,8 @@ async function getLiveMorningBrief(
 
       alerts.push({
         priority: 'medium',
-        message: `Quote for ${formatAUD(quote.total_cost ?? 0)} on ${address} was sent ${sentRelative} with no response yet.`,
-        action: 'Follow up',
+        message: `${address} — quote for ${formatAUD(quote.total_cost ?? 0)} sent ${sentRelative} with no response. Client is waiting on CLIENT. Quotes older than 7 days have a 40% lower acceptance rate.`,
+        action: 'Follow up client',
         entity_id: quote.id,
         entity_type: 'quote',
       })
@@ -604,11 +604,17 @@ async function getLiveMorningBrief(
     // One alert per quoting job — builder needs to know WHICH jobs need action
     for (const job of quotingJobs.filter((j) => !deadlineJobIds.has((j as Job & { id: string }).id)).slice(0, 3)) {
       const shortAddr = (job as Job & { address: string }).address?.split(',')[0] ?? 'a job'
+      const jobWithDate = job as Job & { address: string; id: string; created_at?: string; updated_at?: string }
+      const createdDate = jobWithDate.created_at ?? jobWithDate.updated_at
+      const daysInQuoting = createdDate
+        ? Math.floor((Date.now() - new Date(createdDate).getTime()) / (1000 * 60 * 60 * 24))
+        : null
+      const daysLabel = daysInQuoting != null && daysInQuoting > 0 ? `${daysInQuoting} day${daysInQuoting !== 1 ? 's' : ''}` : null
       alerts.push({
-        priority: 'low',
-        message: `${shortAddr} — in quoting, no quote sent yet`,
-        action: 'Open job',
-        entity_id: (job as Job & { id: string }).id,
+        priority: daysInQuoting != null && daysInQuoting > 14 ? 'medium' : 'low',
+        message: `${shortAddr} — ${daysLabel ? `${daysLabel} in quoting, ` : ''}no quote sent yet. Client is waiting on CLIENT.`,
+        action: 'Draft quote',
+        entity_id: jobWithDate.id,
         entity_type: 'job',
       })
     }
@@ -621,8 +627,8 @@ async function getLiveMorningBrief(
       const shortAddr = (job as Job & { address: string }).address?.split(',')[0] ?? 'a job'
       alerts.push({
         priority: 'low',
-        message: `${shortAddr} — quote sent, waiting on client`,
-        action: 'Open job',
+        message: `${shortAddr} — quote sent, waiting on client reply. No response yet.`,
+        action: 'Follow up client',
         entity_id: (job as Job & { id: string }).id,
         entity_type: 'job',
       })

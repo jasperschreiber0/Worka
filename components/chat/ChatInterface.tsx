@@ -545,6 +545,22 @@ export default function ChatInterface({
         setPendingAction('show me the variations')
         return
       }
+      // 'Draft quote' — open job snapshot so builder can upload plans / start quote
+      if (action === 'Draft quote' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoting' })
+        void sendMessage(`start quote for job ${entityId}`)
+        return
+      }
+      // 'Review quote' — open the snapshot panel for the job
+      if (action === 'Review quote' && entityId) {
+        onJobMention?.({ id: entityId, address: '', status: 'quoted' })
+        return
+      }
+      // 'Follow up client' — draft a follow-up email
+      if (action === 'Follow up client' && entityId) {
+        void fetchAndInjectEmailDraft(entityId, null, 'quote_followup')
+        return
+      }
       // Generic 'Open job' — entityId is the job_id from the alert
       if (action === 'Open job' && entityId) {
         onJobMention?.({ id: entityId, address: '', status: '' })

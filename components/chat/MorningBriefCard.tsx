@@ -20,6 +20,26 @@ interface MorningBriefCardProps {
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 }
 
+// ─── Blocker detection ────────────────────────────────────────────────────────
+
+type BlockerType = 'CLIENT' | 'TRADE' | 'COUNCIL' | 'SUPPLIER' | null
+
+function detectBlocker(message: string): BlockerType {
+  const lower = message.toLowerCase()
+  if (lower.includes('waiting on client') || lower.includes('client approval') || lower.includes('no response') || lower.includes('no reply')) return 'CLIENT'
+  if (lower.includes('waiting on trade') || lower.includes('subcontractor') || lower.includes('trade invoice')) return 'TRADE'
+  if (lower.includes('council') || lower.includes('permit') || lower.includes('approval')) return 'COUNCIL'
+  if (lower.includes('waiting on supplier') || lower.includes('supplier')) return 'SUPPLIER'
+  return null
+}
+
+const BLOCKER_STYLE: Record<NonNullable<BlockerType>, React.CSSProperties> = {
+  CLIENT:   { backgroundColor: 'rgba(33,150,243,0.12)', color: 'var(--status-blue)' },
+  TRADE:    { backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' },
+  COUNCIL:  { backgroundColor: 'rgba(156,39,176,0.12)', color: '#ce93d8' },
+  SUPPLIER: { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-tertiary)' },
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function MorningBriefCard({ message, alerts, onAction }: MorningBriefCardProps) {
@@ -48,6 +68,7 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
             const badgeLabel = alert.priority === 'high' ? 'HIGH' : alert.priority === 'medium' ? 'MED' : 'LOW'
 
             const isHigh = alert.priority === 'high'
+            const blocker = detectBlocker(alert.message)
 
             return (
               <div
@@ -80,6 +101,16 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                     {badgeLabel}
                   </span>
                   <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      {blocker && (
+                        <span
+                          className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-[3px] flex-shrink-0"
+                          style={BLOCKER_STYLE[blocker]}
+                        >
+                          Waiting · {blocker}
+                        </span>
+                      )}
+                    </div>
                     <p
                       style={{
                         fontSize: isHigh ? 14 : 13,
