@@ -67,19 +67,19 @@ function SkeletonSection() {
   return (
     <div className="p-4 space-y-4">
       {/* Header skeleton */}
-      <div className="h-6 w-32 bg-slate-200 rounded animate-pulse" />
+      <div className="h-6 w-32 rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
       {/* Content skeletons */}
       <div className="space-y-3">
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-4/5 bg-slate-200 rounded animate-pulse" />
+        <div className="h-4 w-full rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+        <div className="h-4 w-full rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+        <div className="h-4 w-4/5 rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
       </div>
       {/* Second block */}
-      <div className="h-6 w-24 bg-slate-200 rounded animate-pulse mt-6" />
+      <div className="h-6 w-24 rounded animate-pulse mt-6" style={{ backgroundColor: 'var(--bg-elevated)' }} />
       <div className="space-y-3">
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-3/4 bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
+        <div className="h-4 w-full rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+        <div className="h-4 w-3/4 rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+        <div className="h-4 w-full rounded animate-pulse" style={{ backgroundColor: 'var(--bg-elevated)' }} />
       </div>
     </div>
   )
@@ -156,7 +156,7 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
     if (loading) return <SkeletonSection />
     if (!snapshot) {
       return (
-        <div className="p-6 text-center text-slate-400 text-sm">
+        <div className="p-6 text-center text-[13px]" style={{ color: 'var(--text-tertiary)' }}>
           <p>Job details not available yet.</p>
           <p className="mt-1">Plans are still being processed.</p>
         </div>
@@ -226,28 +226,24 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
   return (
     <div className="flex flex-col h-full">
       {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 px-4 pt-4 pb-3 border-b border-slate-200 bg-white">
+      <div className="flex-shrink-0 px-4 pt-4 pb-3" style={{ borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-shell)' }}>
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-slate-900 truncate">
+            <h2 className="text-[14px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
               {job?.address ?? 'No job selected'}
             </h2>
-            <p className="text-sm text-slate-500 mt-0.5">
+            <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
               {job ? (
                 <>
                   {(() => {
                     const displayStatus = activatedJobStatus ?? job.status
                     return (
                       <span
-                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium mr-1.5 ${
-                          displayStatus === 'active'
-                            ? 'bg-green-100 text-green-700'
-                            : displayStatus === 'quoted'
-                              ? 'bg-blue-100 text-blue-700'
-                              : displayStatus === 'quoting'
-                                ? 'bg-amber-100 text-amber-700'
-                                : 'bg-slate-100 text-slate-600'
-                        }`}
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium mr-1.5"
+                        style={{
+                          backgroundColor: displayStatus === 'active' ? 'rgba(76,175,80,0.15)' : displayStatus === 'quoted' ? 'rgba(33,150,243,0.15)' : displayStatus === 'quoting' ? 'rgba(255,152,0,0.15)' : 'var(--bg-elevated)',
+                          color: displayStatus === 'active' ? 'var(--status-green)' : displayStatus === 'quoted' ? 'var(--status-blue)' : displayStatus === 'quoting' ? 'var(--status-amber)' : 'var(--text-secondary)',
+                        }}
                       >
                         {capitalise(displayStatus)}
                       </span>
@@ -263,7 +259,10 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
           <button
             type="button"
             onClick={onClose}
-            className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+            className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center transition-colors"
+            style={{ color: 'var(--text-tertiary)' }}
+            onMouseOver={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-secondary)'; (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'var(--bg-elevated)' }}
+            onMouseOut={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-tertiary)'; (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent' }}
             aria-label="Close job snapshot"
           >
             <svg
@@ -281,18 +280,18 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-b border-slate-200 bg-white overflow-x-auto scrollbar-none">
+      <div className="flex-shrink-0 overflow-x-auto scrollbar-none" style={{ borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-shell)' }}>
         <div className="flex -mb-px min-w-max">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`min-w-[64px] px-4 min-h-[44px] flex items-center justify-center text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
-                activeTab === tab.id
-                  ? 'border-brand-500 text-brand-600'
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
-              }`}
+              className="min-w-[64px] px-4 min-h-[40px] flex items-center justify-center text-[11px] font-medium border-b-2 transition-colors whitespace-nowrap"
+              style={{
+                borderBottomColor: activeTab === tab.id ? 'var(--orange-primary)' : 'transparent',
+                color: activeTab === tab.id ? 'var(--orange-primary)' : 'var(--text-tertiary)',
+              }}
             >
               {tab.label}
             </button>
@@ -301,14 +300,15 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       </div>
 
       {/* ── Content ─────────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto bg-slate-50 relative">
+      <div className="flex-1 overflow-y-auto relative" style={{ backgroundColor: 'var(--bg-shell)' }}>
         {job ? (
           renderTabContent()
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
-            <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
+            <div className="w-12 h-12 rounded-full flex items-center justify-center mb-3" style={{ backgroundColor: 'var(--bg-elevated)' }}>
               <svg
-                className="w-6 h-6 text-slate-400"
+                className="w-6 h-6"
+                style={{ color: 'var(--text-tertiary)' }}
                 fill="none"
                 viewBox="0 0 24 24"
                 stroke="currentColor"
@@ -322,7 +322,7 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
                 />
               </svg>
             </div>
-            <p className="text-sm text-slate-500">Ask about a specific job to see its details here.</p>
+            <p className="text-[13px]" style={{ color: 'var(--text-tertiary)' }}>Ask about a specific job to see its details here.</p>
           </div>
         )}
       </div>
