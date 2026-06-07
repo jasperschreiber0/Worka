@@ -546,14 +546,31 @@ export default function JobSnapshotPanel({
                   )
                 })}
               </div>
-              {/* Feature 16: Next milestone callout */}
+              {/* Next milestone callout — actionable label with timing */}
               {(['quoting', 'quoted', 'active'] as string[]).includes(displayStatus) && (() => {
-                const nextLabel = displayStatus === 'quoting' ? 'Send quote' : displayStatus === 'quoted' ? 'Client approval' : 'Next invoice milestone'
+                let nextLabel: string
+                let timing: string | null = null
+                if (displayStatus === 'quoting') {
+                  nextLabel = 'Send quote'
+                  const qDeadline = snapshot?.job.quote_deadline
+                  if (qDeadline) {
+                    // quote_deadline is relative string like "in 2 days" or "3 days ago"
+                    timing = qDeadline
+                  }
+                } else if (displayStatus === 'quoted') {
+                  nextLabel = 'Awaiting client approval'
+                  timing = snapshot?.quote?.sent_at ? `Sent ${snapshot.quote.sent_at}` : null
+                } else {
+                  // Active — find next unpaid invoice
+                  const nextInvoice = (snapshot?.invoices ?? []).find(i => i.status === 'sent' || i.status === 'draft')
+                  nextLabel = nextInvoice ? formatAUD(nextInvoice.amount) + ' invoice due' : 'Next invoice milestone'
+                  timing = nextInvoice?.due_date ?? null
+                }
                 return (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px' }}>
                     <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: 'var(--orange-primary)', flexShrink: 0 }} />
-                    <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>{nextLabel}</span>
-                    <span style={{ fontSize: 10, color: 'var(--orange-primary)' }}>→ next</span>
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{nextLabel}</span>
+                    {timing && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{timing}</span>}
                   </div>
                 )
               })()}

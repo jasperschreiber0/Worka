@@ -696,7 +696,26 @@ async function getLiveMorningBrief(
     message = parts.length > 0 ? parts.join(' ') : `${highCount} item${highCount !== 1 ? 's' : ''} need immediate attention.`
   }
 
-  return { message, alerts }
+  // Build a targeted follow-up from the top alert
+  let follow_up: string | undefined
+  const topAlert = [...alerts].sort((a, b) => {
+    const o = { high: 0, medium: 1, low: 2 }; return o[a.priority] - o[b.priority]
+  })[0]
+  if (topAlert) {
+    const addrMatch = topAlert.message.match(/^([^—]+) —/)
+    const addr = addrMatch?.[1]?.trim()
+    if (topAlert.action === 'Chase payment' && addr) {
+      follow_up = `Want me to send the payment chaser for ${addr} now? It takes 30 seconds.`
+    } else if (topAlert.action === 'Review variations' && addr) {
+      follow_up = `Want me to pull up the ${addr} variations for your sign-off?`
+    } else if (topAlert.action === 'Follow up client' && addr) {
+      follow_up = `Want me to draft a follow-up email for the ${addr} quote?`
+    } else if (topAlert.action === 'Draft quote' && addr) {
+      follow_up = `Want me to start the ${addr} quote now?`
+    }
+  }
+
+  return { message, alerts, follow_up }
 }
 
 // ─── Create Worker ────────────────────────────────────────────────────────────
