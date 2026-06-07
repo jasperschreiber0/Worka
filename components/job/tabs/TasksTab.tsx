@@ -180,7 +180,7 @@ export default function TasksTab({
             placeholder="What needs doing?"
             rows={2}
             className="w-full text-[12px] rounded-[4px] px-3 py-2 resize-none"
-            style={{ ...INPUT_STYLE, placeholder: 'color: var(--text-tertiary)' }}
+            style={{ ...INPUT_STYLE }}
           />
 
           <div>
