@@ -543,6 +543,8 @@ function AssumptionReviewInner({
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [transitionClass, setTransitionClass] = useState('translate-x-0')
+  const [dismissedHintIds, setDismissedHintIds] = useState<Set<string>>(new Set())
+  const [acceptedHintIds, setAcceptedHintIds] = useState<Set<string>>(new Set())
 
   const panelRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -762,9 +764,13 @@ function AssumptionReviewInner({
               )}
               {scopeHints.length > 0 && (
                 <ScopeIntelligenceCard
-                  hints={scopeHints}
-                  onAccept={(hint) => { void hint }} // TODO: add to quote line items
-                  onDismiss={(hint) => { void hint }}
+                  hints={scopeHints.filter(h => !dismissedHintIds.has(h.description))}
+                  onAccept={(hint) => {
+                    setAcceptedHintIds(prev => new Set(Array.from(prev).concat(hint.description)))
+                  }}
+                  onDismiss={(hint) => {
+                    setDismissedHintIds(prev => new Set(Array.from(prev).concat(hint.description)))
+                  }}
                 />
               )}
             </div>
@@ -777,15 +783,24 @@ function AssumptionReviewInner({
           )}
 
           {!isLoading && isComplete && (
-            <CompletionScreen
-              onViewQuote={() => {
-                setVisible(false)
-                setTimeout(() => {
-                  onComplete(true)
-                  onViewQuote?.(quoteId)
-                }, 220)
-              }}
-            />
+            <>
+              {acceptedHintIds.size > 0 && (
+                <div className="mx-4 mb-3 rounded-md px-3 py-2" style={{ backgroundColor: 'rgba(76,175,80,0.1)', border: '0.5px solid rgba(76,175,80,0.25)' }}>
+                  <p className="text-[12px]" style={{ color: 'var(--status-green)' }}>
+                    {acceptedHintIds.size} scope {acceptedHintIds.size === 1 ? 'item' : 'items'} accepted — added to your quote.
+                  </p>
+                </div>
+              )}
+              <CompletionScreen
+                onViewQuote={() => {
+                  setVisible(false)
+                  setTimeout(() => {
+                    onComplete(true)
+                    onViewQuote?.(quoteId)
+                  }, 220)
+                }}
+              />
+            </>
           )}
 
           {!isLoading && !isComplete && total === 0 && (
