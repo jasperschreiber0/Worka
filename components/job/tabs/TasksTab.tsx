@@ -3,8 +3,6 @@
 import { useState } from 'react'
 import type { JobTask, JobWorkerRef } from '@/lib/job-snapshot-demo'
 
-// ─── Props ────────────────────────────────────────────────────────────────────
-
 interface TasksTabProps {
   tasks: JobTask[]
   workers: JobWorkerRef[]
@@ -12,9 +10,19 @@ interface TasksTabProps {
   builderId?: string
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+const INPUT_STYLE: React.CSSProperties = {
+  backgroundColor: 'var(--bg-elevated)',
+  border: '0.5px solid var(--bg-border)',
+  color: 'var(--text-primary)',
+  outline: 'none',
+}
 
-export default function TasksTab({ tasks: initialTasks, workers, jobId, builderId = '00000000-0000-0000-0000-000000000001' }: TasksTabProps) {
+export default function TasksTab({
+  tasks: initialTasks,
+  workers,
+  jobId,
+  builderId = '00000000-0000-0000-0000-000000000001',
+}: TasksTabProps) {
   const [tasks, setTasks] = useState<JobTask[]>(initialTasks)
   const [showForm, setShowForm] = useState(false)
   const [description, setDescription] = useState('')
@@ -81,9 +89,7 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'complete', task_id: taskId, builder_id: builderId }),
       })
-    } catch {
-      // optimistic state remains
-    }
+    } catch { /* optimistic */ }
   }
 
   async function handleReopen(taskId: string) {
@@ -94,46 +100,45 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reopen', task_id: taskId, builder_id: builderId }),
       })
-    } catch {
-      // optimistic state remains
-    }
+    } catch { /* optimistic */ }
   }
 
   return (
-    <div className="p-4 space-y-4">
+    <div style={{ padding: '16px' }} className="space-y-4">
 
-      {/* ── Open tasks ──────────────────────────────────────────────────────── */}
+      {/* Open tasks */}
       <div>
-        <p className="text-sm font-medium text-slate-700 mb-2">
+        <p className="text-[12px] font-medium mb-2" style={{ color: 'var(--text-tertiary)' }}>
           {open.length === 0 ? 'No open tasks' : `${open.length} open task${open.length !== 1 ? 's' : ''}`}
         </p>
 
         {open.length > 0 && (
-          <ul className="space-y-2">
+          <ul className="space-y-1.5">
             {open.map((task) => (
-              <li key={task.id} className="flex items-start gap-3 bg-white border border-slate-200 rounded-lg px-3 py-3 shadow-sm">
-                {/* Complete button */}
+              <li key={task.id} className="flex items-start gap-2.5 rounded-[6px]"
+                style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)', padding: '10px 12px' }}>
                 <button
                   type="button"
                   onClick={() => void handleComplete(task.id)}
                   disabled={completing === task.id}
-                  className="flex-shrink-0 mt-0.5 w-5 h-5 rounded-full border-2 border-slate-300 hover:border-brand-500 hover:bg-brand-50 transition-colors"
+                  className="flex-shrink-0 mt-0.5 w-4 h-4 rounded-full border-2 transition-colors"
+                  style={{ borderColor: 'var(--bg-border)' }}
                   aria-label="Mark complete"
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm text-slate-800 leading-snug">{task.description}</p>
+                  <p className="text-[12px] leading-snug" style={{ color: 'var(--text-primary)' }}>{task.description}</p>
                   <div className="flex items-center gap-2 mt-1">
                     {task.assigned_to ? (
-                      <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+                      <span className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
                         <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
                         </svg>
                         {task.assigned_to}
                       </span>
                     ) : (
-                      <span className="text-xs text-slate-400">Unassigned</span>
+                      <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>Unassigned</span>
                     )}
-                    <span className="text-xs text-slate-400">&middot; {task.created_at}</span>
+                    <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>· {task.created_at}</span>
                   </div>
                 </div>
               </li>
@@ -142,29 +147,28 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
         )}
       </div>
 
-      {/* ── Add task button / form ───────────────────────────────────────────── */}
+      {/* Error */}
       {saveError && (
-        <button
-          type="button"
-          onClick={() => { setSaveError(null); setShowForm(true) }}
-          className="w-full text-left px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 hover:bg-red-100 transition-colors"
-        >
+        <button type="button" onClick={() => { setSaveError(null); setShowForm(true) }}
+          className="w-full text-left px-3 py-2 rounded-[4px] text-[11px]"
+          style={{ backgroundColor: 'rgba(244,67,54,0.08)', border: '0.5px solid rgba(244,67,54,0.3)', color: 'var(--status-red)' }}>
           {saveError}
         </button>
       )}
+
+      {/* Add task / form */}
       {!showForm ? (
-        <button
-          type="button"
-          onClick={() => setShowForm(true)}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors"
-        >
+        <button type="button" onClick={() => setShowForm(true)}
+          className="inline-flex items-center gap-1.5 text-[12px] font-medium"
+          style={{ color: 'var(--orange-primary)' }}>
           Add task
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
         </button>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-3 shadow-sm">
+        <div className="space-y-2.5 rounded-[6px]"
+          style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)', padding: '12px' }}>
           <textarea
             autoFocus
             value={description}
@@ -175,76 +179,70 @@ export default function TasksTab({ tasks: initialTasks, workers, jobId, builderI
             }}
             placeholder="What needs doing?"
             rows={2}
-            className="w-full text-sm text-slate-800 placeholder-slate-400 border border-slate-200 rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+            className="w-full text-[12px] rounded-[4px] px-3 py-2 resize-none"
+            style={{ ...INPUT_STYLE, placeholder: 'color: var(--text-tertiary)' }}
           />
 
-          {/* Worker dropdown */}
           <div>
-            <label className="block text-xs font-medium text-slate-500 mb-1">Assign to</label>
+            <label className="block text-[11px] font-medium mb-1" style={{ color: 'var(--text-tertiary)' }}>Assign to</label>
             {workers.length === 0 ? (
-              <p className="text-xs text-slate-400 italic">No crew assigned to this job yet.</p>
+              <p className="text-[11px] italic" style={{ color: 'var(--text-tertiary)' }}>No crew assigned to this job yet.</p>
             ) : (
               <select
                 value={selectedWorkerId}
                 onChange={(e) => setSelectedWorkerId(e.target.value)}
-                className="w-full text-sm text-slate-700 border border-slate-200 rounded-md px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-brand-400"
+                className="w-full text-[12px] rounded-[4px] px-3 py-2"
+                style={INPUT_STYLE}
               >
                 <option value="">Unassigned</option>
                 {workers.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name} — {w.role}
-                  </option>
+                  <option key={w.id} value={w.id}>{w.name} — {w.role}</option>
                 ))}
               </select>
             )}
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void handleCreate()}
+            <button type="button" onClick={() => void handleCreate()}
               disabled={!description.trim() || saving}
-              className="px-4 py-2 text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-40 rounded-lg transition-colors"
-            >
+              className="px-4 py-2 text-[12px] font-semibold rounded-[4px] disabled:opacity-40"
+              style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}>
               {saving ? 'Saving…' : 'Add task'}
             </button>
-            <button
-              type="button"
-              onClick={() => { setShowForm(false); setDescription(''); setSelectedWorkerId('') }}
-              className="px-4 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors"
-            >
+            <button type="button" onClick={() => { setShowForm(false); setDescription(''); setSelectedWorkerId('') }}
+              className="px-4 py-2 text-[12px] font-medium rounded-[4px]"
+              style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}>
               Cancel
             </button>
           </div>
         </div>
       )}
 
-      {/* ── Completed tasks ──────────────────────────────────────────────────── */}
+      {/* Completed tasks */}
       {done.length > 0 && (
-        <div className="pt-2 border-t border-slate-100">
-          <p className="text-xs font-medium text-slate-400 mb-2 uppercase tracking-wide">
+        <div className="pt-2" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
+          <p className="text-[10px] font-medium uppercase tracking-[0.06em] mb-2" style={{ color: 'var(--text-tertiary)' }}>
             Completed ({done.length})
           </p>
-          <ul className="space-y-2">
+          <ul className="space-y-1.5">
             {done.map((task) => (
-              <li key={task.id} className="flex items-start gap-3 px-3 py-2.5 bg-slate-50 border border-slate-100 rounded-lg">
-                <span className="flex-shrink-0 mt-0.5 w-5 h-5 rounded-full bg-brand-500 flex items-center justify-center">
-                  <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3} aria-hidden="true">
+              <li key={task.id} className="flex items-start gap-2.5 rounded-[6px]"
+                style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', padding: '8px 12px', opacity: 0.7 }}>
+                <span className="flex-shrink-0 mt-0.5 w-4 h-4 rounded-full flex items-center justify-center"
+                  style={{ backgroundColor: 'var(--status-green)' }}>
+                  <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3} style={{ color: '#fff' }} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                   </svg>
                 </span>
-                <div className="min-w-0 flex-1 opacity-60">
-                  <p className="text-sm text-slate-500 line-through leading-snug">{task.description}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12px] line-through leading-snug" style={{ color: 'var(--text-tertiary)' }}>{task.description}</p>
                   {task.assigned_to && (
-                    <p className="text-xs text-slate-400 mt-0.5">{task.assigned_to}</p>
+                    <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>{task.assigned_to}</p>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void handleReopen(task.id)}
-                  title="Reopen task"
-                  className="flex-shrink-0 text-xs text-slate-400 hover:text-brand-600 transition-colors px-1"
-                >
+                <button type="button" onClick={() => void handleReopen(task.id)}
+                  className="flex-shrink-0 text-[11px] px-1"
+                  style={{ color: 'var(--text-tertiary)' }}>
                   Undo
                 </button>
               </li>

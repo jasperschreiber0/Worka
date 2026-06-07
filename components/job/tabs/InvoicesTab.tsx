@@ -20,32 +20,31 @@ function formatCurrency(amount: number): string {
   }).format(amount)
 }
 
-function statusDotClass(status: string): string {
+function statusDotColor(status: string): string {
   switch (status) {
-    case 'overdue':
-      return 'bg-red-500'
-    case 'sent':
-      return 'bg-amber-400'
-    case 'paid':
-      return 'bg-green-500'
-    case 'draft':
-    default:
-      return 'bg-slate-400'
+    case 'overdue': return 'var(--status-red)'
+    case 'sent':    return 'var(--status-amber)'
+    case 'paid':    return 'var(--status-green)'
+    default:        return 'var(--text-tertiary)'
+  }
+}
+
+function statusTextColor(status: string): string {
+  switch (status) {
+    case 'overdue': return 'var(--status-red)'
+    case 'paid':    return 'var(--status-green)'
+    case 'sent':    return 'var(--status-amber)'
+    default:        return 'var(--text-secondary)'
   }
 }
 
 function statusLabel(status: string): string {
   switch (status) {
-    case 'overdue':
-      return 'Overdue'
-    case 'sent':
-      return 'Sent'
-    case 'paid':
-      return 'Paid'
-    case 'draft':
-      return 'Draft'
-    default:
-      return status
+    case 'overdue': return 'Overdue'
+    case 'sent':    return 'Sent'
+    case 'paid':    return 'Paid'
+    case 'draft':   return 'Draft'
+    default:        return status
   }
 }
 
@@ -57,7 +56,7 @@ export default function InvoicesTab({ invoices, onAddInvoice }: InvoicesTabProps
   return (
     <div className="p-4 space-y-3">
       {/* Count header */}
-      <p className="text-sm font-medium text-slate-700">
+      <p className="text-[13px] font-medium" style={{ color: 'var(--text-secondary)' }}>
         {count === 0 ? 'No invoices' : `${count} invoice${count !== 1 ? 's' : ''}`}
       </p>
 
@@ -67,28 +66,28 @@ export default function InvoicesTab({ invoices, onAddInvoice }: InvoicesTabProps
           {invoices.map((inv) => (
             <li
               key={inv.id}
-              className="bg-white border border-slate-200 rounded-lg px-3 py-3 flex items-start justify-between gap-3 shadow-sm"
+              className="rounded-lg px-3 py-3 flex items-start justify-between gap-3"
+              style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)' }}
             >
               <div className="min-w-0">
-                <p className="text-sm text-slate-800 font-semibold">
+                <p className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
                   {formatCurrency(inv.amount)}
                 </p>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
                   Due {inv.due_date}
                   {inv.sent_at && <> &middot; Sent {inv.sent_at}</>}
                 </p>
               </div>
               <div className="flex-shrink-0 flex items-center gap-1.5 mt-0.5">
                 <span
-                  className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(inv.status)}`}
+                  className="w-2 h-2 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: statusDotColor(inv.status) }}
                   aria-hidden="true"
                 />
-                <span className={`text-xs font-medium ${
-                  inv.status === 'overdue' ? 'text-red-600' :
-                  inv.status === 'paid' ? 'text-green-600' :
-                  inv.status === 'sent' ? 'text-amber-600' :
-                  'text-slate-500'
-                }`}>
+                <span
+                  className="text-[11px] font-medium"
+                  style={{ color: statusTextColor(inv.status) }}
+                >
                   {statusLabel(inv.status)}
                 </span>
               </div>
@@ -99,13 +98,14 @@ export default function InvoicesTab({ invoices, onAddInvoice }: InvoicesTabProps
 
       {/* Empty state */}
       {count === 0 && (
-        <p className="text-sm text-slate-400">No invoices on this job yet.</p>
+        <p className="text-[13px]" style={{ color: 'var(--text-tertiary)' }}>No invoices on this job yet.</p>
       )}
 
       {/* Add invoice button */}
       <button
         type="button"
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors mt-1"
+        className="inline-flex items-center gap-1.5 text-[13px] font-medium transition-colors mt-1"
+        style={{ color: 'var(--orange-primary)' }}
         onClick={onAddInvoice}
       >
         Add invoice

@@ -45,14 +45,22 @@ const EVENT_ICONS: Record<string, React.ReactNode> = {
   ),
 }
 
-const EVENT_COLORS: Record<string, string> = {
-  quote_sent: 'bg-blue-100 text-blue-600',
-  invoice_sent: 'bg-green-100 text-green-600',
-  variation_approved: 'bg-green-100 text-green-600',
-  variation_pending: 'bg-amber-100 text-amber-600',
-  milestone_reached: 'bg-purple-100 text-purple-600',
-  job_activated: 'bg-brand-100 text-brand-600',
-  upload: 'bg-slate-100 text-slate-500',
+function eventIconStyle(eventType: string): { backgroundColor: string; color: string } {
+  switch (eventType) {
+    case 'quote_sent':
+      return { backgroundColor: 'rgba(59,130,246,0.15)', color: 'var(--status-blue)' }
+    case 'invoice_sent':
+    case 'variation_approved':
+      return { backgroundColor: 'rgba(34,197,94,0.15)', color: 'var(--status-green)' }
+    case 'variation_pending':
+      return { backgroundColor: 'rgba(245,158,11,0.15)', color: 'var(--status-amber)' }
+    case 'milestone_reached':
+      return { backgroundColor: 'rgba(168,85,247,0.15)', color: '#a855f7' }
+    case 'job_activated':
+      return { backgroundColor: 'rgba(255,107,43,0.15)', color: 'var(--orange-primary)' }
+    default:
+      return { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }
+  }
 }
 
 function formatTime(ts: string): string {
@@ -104,10 +112,13 @@ export default function ProofTab({ jobId }: ProofTabProps) {
       <div className="p-4 space-y-4">
         {[1, 2, 3].map(i => (
           <div key={i} className="flex gap-3">
-            <div className="w-7 h-7 rounded-full bg-slate-200 animate-pulse flex-shrink-0" />
+            <div
+              className="w-7 h-7 rounded-full animate-pulse flex-shrink-0"
+              style={{ backgroundColor: 'var(--bg-elevated)' }}
+            />
             <div className="flex-1 space-y-2 pt-1">
-              <div className="h-3.5 bg-slate-200 rounded animate-pulse w-3/4" />
-              <div className="h-3 bg-slate-200 rounded animate-pulse w-1/3" />
+              <div className="h-3.5 rounded animate-pulse w-3/4" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+              <div className="h-3 rounded animate-pulse w-1/3" style={{ backgroundColor: 'var(--bg-elevated)' }} />
             </div>
           </div>
         ))}
@@ -118,13 +129,23 @@ export default function ProofTab({ jobId }: ProofTabProps) {
   if (events.length === 0) {
     return (
       <div className="p-6 text-center">
-        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-3">
-          <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <div
+          className="w-10 h-10 rounded-full flex items-center justify-center mx-auto mb-3"
+          style={{ backgroundColor: 'var(--bg-elevated)' }}
+        >
+          <svg
+            className="w-5 h-5"
+            style={{ color: 'var(--text-tertiary)' }}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={1.5}
+          >
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
           </svg>
         </div>
-        <p className="text-sm text-slate-500">No proof events recorded yet.</p>
-        <p className="text-xs text-slate-400 mt-1">Actions like quotes, variations, and invoices appear here automatically.</p>
+        <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>No proof events recorded yet.</p>
+        <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>Actions like quotes, variations, and invoices appear here automatically.</p>
       </div>
     )
   }
@@ -134,33 +155,54 @@ export default function ProofTab({ jobId }: ProofTabProps) {
   return (
     <div className="p-4">
       <div className="mb-4">
-        <p className="text-xs text-slate-500">Legal-grade chronological record of all job activity. Every event is timestamped and immutable.</p>
+        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+          Legal-grade chronological record of all job activity. Every event is timestamped and immutable.
+        </p>
       </div>
 
       {Array.from(groups.entries()).map(([dateLabel, dateEvents]) => (
         <div key={dateLabel} className="mb-5">
           <div className="flex items-center gap-2 mb-3">
-            <div className="h-px flex-1 bg-slate-100" />
-            <span className="text-xs font-medium text-slate-400 uppercase tracking-wide">{dateLabel}</span>
-            <div className="h-px flex-1 bg-slate-100" />
+            <div className="h-px flex-1" style={{ backgroundColor: 'var(--bg-border)' }} />
+            <span
+              className="text-[10px] font-medium uppercase tracking-wide"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              {dateLabel}
+            </span>
+            <div className="h-px flex-1" style={{ backgroundColor: 'var(--bg-border)' }} />
           </div>
 
           <div className="space-y-0">
             {dateEvents.map((event, i) => {
-              const iconColor = EVENT_COLORS[event.event_type] ?? 'bg-slate-100 text-slate-500'
+              const iconStyle = eventIconStyle(event.event_type)
               const icon = EVENT_ICONS[event.event_type] ?? EVENT_ICONS['upload']
               return (
-                <div key={event.id} className="flex items-start gap-3 py-2.5 border-b border-slate-50 last:border-0">
+                <div
+                  key={event.id}
+                  className="flex items-start gap-3 py-2.5 last:border-0"
+                  style={{ borderBottom: i < dateEvents.length - 1 ? '0.5px solid var(--bg-border)' : undefined }}
+                >
                   <div className="flex flex-col items-center flex-shrink-0 mt-0.5">
-                    <div className={`w-7 h-7 rounded-full flex items-center justify-center ${iconColor}`}>
+                    <div
+                      className="w-7 h-7 rounded-full flex items-center justify-center"
+                      style={iconStyle}
+                    >
                       {icon}
                     </div>
-                    {i < dateEvents.length - 1 && <div className="w-px bg-slate-100 flex-1 mt-1 min-h-[12px]" />}
+                    {i < dateEvents.length - 1 && (
+                      <div className="w-px flex-1 mt-1 min-h-[12px]" style={{ backgroundColor: 'var(--bg-border)' }} />
+                    )}
                   </div>
                   <div className="flex-1 min-w-0 pb-1">
-                    <p className="text-sm text-slate-700 leading-snug">{event.description}</p>
+                    <p className="text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>
+                      {event.description}
+                    </p>
                   </div>
-                  <span className="text-xs text-slate-400 flex-shrink-0 mt-0.5 whitespace-nowrap">
+                  <span
+                    className="text-[11px] flex-shrink-0 mt-0.5 whitespace-nowrap"
+                    style={{ color: 'var(--text-tertiary)' }}
+                  >
                     {event.display_time ?? formatTime(event.created_at)}
                   </span>
                 </div>
@@ -170,8 +212,10 @@ export default function ProofTab({ jobId }: ProofTabProps) {
         </div>
       ))}
 
-      <div className="mt-4 pt-3 border-t border-slate-100 text-center">
-        <p className="text-xs text-slate-400">{events.length} event{events.length !== 1 ? 's' : ''} recorded</p>
+      <div className="mt-4 pt-3 text-center" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
+        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+          {events.length} event{events.length !== 1 ? 's' : ''} recorded
+        </p>
       </div>
     </div>
   )
