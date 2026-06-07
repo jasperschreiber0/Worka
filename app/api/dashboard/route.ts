@@ -171,7 +171,7 @@ export async function GET() {
       if (!varByJob.has(v.job_id)) varByJob.set(v.job_id, [])
       varByJob.get(v.job_id)!.push(v)
     }
-    for (const [jobId, vars] of varByJob.entries()) {
+    for (const [jobId, vars] of Array.from(varByJob.entries())) {
       const job = (jobs ?? []).find(j => j.id === jobId)
       const addr = job?.address?.split(',')[0] ?? 'Unknown job'
       alerts.push({
