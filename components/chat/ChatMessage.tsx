@@ -166,14 +166,14 @@ function UserAvatar() {
 
 function MsgRow({ avatar, label, timestamp, children }: { avatar: React.ReactNode; label: string; timestamp: Date; children: React.ReactNode }) {
   return (
-    <div className="flex items-start gap-2.5 mb-[14px]" role="listitem">
+    <div className="flex items-start gap-2.5 mb-[14px] group animate-slide-up" role="listitem">
       {avatar}
       <div className="flex-1 min-w-0">
         <p className="text-[10px] font-medium uppercase tracking-[0.08em] mb-1" style={{ color: 'var(--text-tertiary)' }}>
           {label}
         </p>
         {children}
-        <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
+        <p className="text-[11px] mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ color: 'var(--text-tertiary)' }}>
           {relativeTime(timestamp)}
         </p>
       </div>

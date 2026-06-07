@@ -98,7 +98,7 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
                   {/* Top row: badge + optional blocker */}
                   <div className="flex items-center gap-2 mb-2">
                     <span
-                      className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-[3px]"
+                      className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-[3px] animate-amber-pulse"
                       style={badgeStyle}
                     >
                       {badgeLabel}

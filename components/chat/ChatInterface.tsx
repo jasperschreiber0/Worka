@@ -1318,6 +1318,12 @@ export default function ChatInterface({
           >
             v{process.env.NEXT_PUBLIC_APP_VERSION}
           </span>
+          {!isDemo && (
+            <span className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[3px] text-[10px] font-semibold" style={{ backgroundColor: 'rgba(76,175,80,0.12)', color: 'var(--status-green)' }}>
+              <span className="pulse-dot" style={{ width: 5, height: 5, backgroundColor: 'var(--status-green)', color: 'var(--status-green)' }} />
+              Live
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -1434,15 +1440,20 @@ export default function ChatInterface({
           />
         ))}
 
-        {/* Loading indicator — pulsing WorkA avatar, no text */}
+        {/* Typing indicator — three animated dots with WorkA avatar */}
         {loading && (
-          <div className="flex items-start gap-2.5 mb-5" role="status" aria-label="WorkA is responding">
+          <div className="flex items-start gap-2.5 mb-5 animate-slide-up" role="status" aria-label="WorkA is responding">
             <div
-              className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold animate-pulse"
-              style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)', animationDuration: '800ms' }}
+              className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[13px] font-semibold"
+              style={{ backgroundColor: 'var(--orange-subtle)', color: 'var(--orange-primary)' }}
               aria-hidden="true"
             >
               W
+            </div>
+            <div className="flex items-center gap-1.5 mt-2" aria-hidden="true">
+              <span className="typing-dot" />
+              <span className="typing-dot" />
+              <span className="typing-dot" />
             </div>
           </div>
         )}

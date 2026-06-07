@@ -72,19 +72,65 @@
 
 @layer utilities {
   @keyframes fade-in {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
+
+  /* ── Message slide-up ────────────────────────────────────────────── */
+  @keyframes slide-up-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-slide-up { animation: slide-up-in 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards; }
+
+  /* ── Typing dots ─────────────────────────────────────────────────── */
+  @keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+  .typing-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background-color: var(--orange-primary);
+    animation: typing-bounce 1.2s ease infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.18s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+  /* ── Worker / status pulse dot ───────────────────────────────────── */
+  @keyframes pulse-ring {
+    0% { transform: scale(1); opacity: 0.8; }
+    70% { transform: scale(2.6); opacity: 0; }
+    100% { transform: scale(2.6); opacity: 0; }
+  }
+  .pulse-dot {
+    position: relative;
+    display: inline-block;
+    width: 7px; height: 7px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .pulse-dot::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse-ring 2s ease-out infinite;
   }
 
-  .animate-fade-in {
-    animation: fade-in 0.3s ease-out forwards;
+  /* ── Amber slow pulse (overdue alerts) ──────────────────────────── */
+  @keyframes amber-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
+  .animate-amber-pulse { animation: amber-pulse 2.2s ease-in-out infinite; }
+
+  /* ── Count-up shimmer (numbers loading in) ──────────────────────── */
+  @keyframes shimmer-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-number-in { animation: shimmer-in 0.4s ease-out forwards; }
 
   /* ── Dark system utility classes ──────────────────────────────────── */
   .section-label {

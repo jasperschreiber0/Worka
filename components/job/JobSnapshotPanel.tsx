@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import type { PermissionRole } from '@/lib/auth/role-guard'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
@@ -31,6 +31,34 @@ export interface JobSnapshotPanelProps {
 interface ActivationModalState {
   isOpen: boolean
   quote: JobSnapshot['quote'] | null
+}
+
+// ─── Count-up hook ────────────────────────────────────────────────────────────
+
+function useCountUp(target: number | null | undefined, duration = 600): number | null {
+  const [value, setValue] = useState<number | null>(null)
+  const frameRef = useRef<number | null>(null)
+  const prevTargetRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (target == null) { setValue(null); return }
+    if (target === prevTargetRef.current) return
+    prevTargetRef.current = target
+
+    const start = Date.now()
+    const from = 0
+    const step = () => {
+      const elapsed = Date.now() - start
+      const progress = Math.min(elapsed / duration, 1)
+      const eased = 1 - Math.pow(1 - progress, 3) // ease-out-cubic
+      setValue(Math.round(from + (target - from) * eased))
+      if (progress < 1) frameRef.current = requestAnimationFrame(step)
+    }
+    frameRef.current = requestAnimationFrame(step)
+    return () => { if (frameRef.current != null) cancelAnimationFrame(frameRef.current) }
+  }, [target, duration])
+
+  return value
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -216,6 +244,11 @@ export default function JobSnapshotPanel({
     quoteTotalCost && quoteTotalCost > 0 ? Math.min(100, Math.round((paidSentInvoiceTotal / quoteTotalCost) * 100)) : null
 
   const recentComms = (snapshot?.comms.messages ?? []).slice(0, 3)
+
+  // Animated count-up for financial figures
+  const animatedContract = useCountUp(quoteTotalCost)
+  const animatedInvoiced = useCountUp(paidSentInvoiceTotal)
+  const animatedVariations = useCountUp(variationsTotal > 0 ? variationsTotal : null)
 
   const STAGES = ['Quoting', 'Quoted', 'Active', 'Complete']
   const stageMap: Record<string, number> = { quoting: 0, quoted: 1, active: 2, complete: 3, archived: 3 }
@@ -422,19 +455,19 @@ export default function JobSnapshotPanel({
                 {/* Contract row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Contract</span>
-                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(quoteTotalCost)}</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedContract)}</span>
                 </div>
                 {/* Variations row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Variations</span>
-                  <span style={{ fontSize: 12, fontWeight: 500, color: variationsTotal > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>
-                    {variationsTotal > 0 ? formatAUD(variationsTotal) : '—'}
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: variationsTotal > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>
+                    {animatedVariations != null ? formatAUD(animatedVariations) : '—'}
                   </span>
                 </div>
                 {/* Invoiced row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: quoteTotalCost ? 12 : 0 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoiced</span>
-                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(paidSentInvoiceTotal)}</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedInvoiced)}</span>
                 </div>
                 {/* Feature 18: Margin health */}
                 {quoteTotalCost != null && quoteTotalCost > 0 && snapshot.overview.spend_to_date != null && (() => {
@@ -637,7 +670,16 @@ export default function JobSnapshotPanel({
                         borderTop: idx === 0 ? 'none' : '0.5px solid var(--bg-border)',
                       }}
                     >
-                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{w.name}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {/* Pulsing dot — workers are on the clock */}
+                        <span
+                          className="pulse-dot"
+                          style={{ backgroundColor: 'var(--status-green)', color: 'var(--status-green)' }}
+                          title="On site"
+                          aria-label="On site"
+                        />
+                        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{w.name}</span>
+                      </div>
                       <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{w.role}</span>
                     </div>
                   ))}
