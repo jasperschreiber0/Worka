@@ -50,7 +50,7 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
 
   return (
     <div className="max-w-full">
-      {/* Summary — primary weight, not secondary, to signal authority */}
+      {/* Summary */}
       <p className="text-[13px] leading-relaxed mb-3" style={{ color: 'var(--text-primary)', lineHeight: '1.5' }}>
         {summaryText}
       </p>
@@ -59,19 +59,92 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
         <div className="space-y-2">
           {sorted.map((alert, index) => {
             const isClickable = !!(alert.action && onAction)
+            const isHigh = alert.priority === 'high'
+            const isMed = alert.priority === 'medium'
+            const blocker = detectBlocker(alert.message)
 
-            // Badge colors per priority
-            const badgeStyle: React.CSSProperties = alert.priority === 'high'
+            // Badge style
+            const badgeStyle: React.CSSProperties = isHigh
               ? { backgroundColor: 'rgba(244,67,54,0.15)', color: 'var(--status-red)' }
-              : alert.priority === 'medium'
+              : isMed
               ? { backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' }
               : { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-tertiary)' }
 
-            const badgeLabel = alert.priority === 'high' ? 'HIGH' : alert.priority === 'medium' ? 'MED' : 'LOW'
+            const badgeLabel = isHigh ? 'URGENT' : isMed ? 'ACTION' : 'FYI'
 
-            const isHigh = alert.priority === 'high'
-            const blocker = detectBlocker(alert.message)
+            // HIGH alerts: larger card with left accent border, prominent quick-action button
+            if (isHigh) {
+              return (
+                <div
+                  key={alert.entity_id ? `${alert.entity_id}-${index}` : index}
+                  role={isClickable ? 'button' : undefined}
+                  tabIndex={isClickable ? 0 : undefined}
+                  aria-label={isClickable ? alert.action : undefined}
+                  className={`rounded-lg transition-colors${isClickable ? ' cursor-pointer focus:outline-none' : ''}`}
+                  style={{
+                    padding: '14px 16px',
+                    backgroundColor: 'rgba(244,67,54,0.07)',
+                    border: '1px solid rgba(244,67,54,0.3)',
+                    borderLeft: '3px solid var(--status-red)',
+                  }}
+                  onClick={() => { if (isClickable) onAction!(alert.action!, alert.entity_id, alert.entity_type) }}
+                  onKeyDown={(e) => {
+                    if (isClickable && (e.key === 'Enter' || e.key === ' ')) {
+                      e.preventDefault()
+                      onAction!(alert.action!, alert.entity_id, alert.entity_type)
+                    }
+                  }}
+                >
+                  {/* Top row: badge + optional blocker */}
+                  <div className="flex items-center gap-2 mb-2">
+                    <span
+                      className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-[3px]"
+                      style={badgeStyle}
+                    >
+                      {badgeLabel}
+                    </span>
+                    {blocker && (
+                      <span
+                        className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-[3px]"
+                        style={BLOCKER_STYLE[blocker]}
+                      >
+                        Waiting · {blocker}
+                      </span>
+                    )}
+                  </div>
+                  {/* Message — large, primary weight */}
+                  <p style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--text-primary)', marginBottom: 10 }}>
+                    {alert.message}
+                  </p>
+                  {/* Actions row */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {alert.quick_action && onQuickAction && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onQuickAction(alert.quick_action!, alert.entity_id, alert.entity_type)
+                        }}
+                        className="text-[12px] font-semibold px-3 py-1.5 rounded-[5px] transition-opacity hover:opacity-85"
+                        style={{
+                          backgroundColor: 'var(--orange-primary)',
+                          color: '#fff',
+                        }}
+                      >
+                        {alert.quick_action}
+                      </button>
+                    )}
+                    {alert.action && (
+                      <span className="text-[12px] font-medium" style={{ color: 'var(--orange-primary)' }}>
+                        {alert.action} →
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )
+            }
 
+            // MEDIUM / LOW alerts: compact row
             return (
               <div
                 key={alert.entity_id ? `${alert.entity_id}-${index}` : index}
@@ -80,13 +153,11 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
                 aria-label={isClickable ? alert.action : undefined}
                 className={`rounded-[4px] transition-colors${isClickable ? ' cursor-pointer focus:outline-none' : ''}`}
                 style={{
-                  padding: isHigh ? '12px 14px' : '8px 12px',
-                  backgroundColor: isHigh ? 'rgba(244,67,54,0.06)' : 'var(--bg-surface)',
-                  border: isHigh ? '0.5px solid rgba(244,67,54,0.25)' : '0.5px solid var(--bg-border)',
+                  padding: '9px 12px',
+                  backgroundColor: 'var(--bg-surface)',
+                  border: '0.5px solid var(--bg-border)',
                 }}
-                onClick={() => {
-                  if (isClickable) onAction!(alert.action!, alert.entity_id, alert.entity_type)
-                }}
+                onClick={() => { if (isClickable) onAction!(alert.action!, alert.entity_id, alert.entity_type) }}
                 onKeyDown={(e) => {
                   if (isClickable && (e.key === 'Enter' || e.key === ' ')) {
                     e.preventDefault()
@@ -95,7 +166,6 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
                 }}
               >
                 <div className="flex items-start gap-2.5">
-                  {/* Priority badge */}
                   <span
                     className="flex-shrink-0 mt-0.5 text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-[3px]"
                     style={badgeStyle}
@@ -103,28 +173,26 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
                     {badgeLabel}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      {blocker && (
-                        <span
-                          className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-[3px] flex-shrink-0"
-                          style={BLOCKER_STYLE[blocker]}
-                        >
-                          Waiting · {blocker}
-                        </span>
-                      )}
-                    </div>
+                    {blocker && (
+                      <span
+                        className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-[3px] flex-shrink-0 mb-1 inline-block"
+                        style={BLOCKER_STYLE[blocker]}
+                      >
+                        Waiting · {blocker}
+                      </span>
+                    )}
                     <p
                       style={{
-                        fontSize: isHigh ? 14 : 13,
-                        fontWeight: isHigh ? 500 : 400,
+                        fontSize: 13,
+                        fontWeight: 400,
                         lineHeight: 1.45,
-                        color: isHigh ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        color: 'var(--text-secondary)',
                       }}
                     >
                       {alert.message}
                     </p>
                     {(alert.action || alert.quick_action) && (
-                      <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                         {alert.action && (
                           <span className="text-[12px] font-medium" style={{ color: 'var(--orange-primary)' }}>
                             {alert.action} →
@@ -139,7 +207,7 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
                             }}
                             className="text-[11px] font-semibold px-2 py-0.5 rounded-[3px] transition-colors"
                             style={{
-                              backgroundColor: isHigh ? 'rgba(255,107,43,0.15)' : 'var(--bg-elevated)',
+                              backgroundColor: 'var(--bg-elevated)',
                               border: '0.5px solid rgba(255,107,43,0.4)',
                               color: 'var(--orange-primary)',
                             }}
@@ -153,9 +221,9 @@ export default function MorningBriefCard({ message, alerts, onAction, onQuickAct
                   {isClickable && (
                     <svg
                       className="flex-shrink-0"
-                      width={isHigh ? 14 : 12}
-                      height={isHigh ? 14 : 12}
-                      style={{ marginTop: 2, color: isHigh ? 'var(--status-red)' : 'var(--text-tertiary)' }}
+                      width={12}
+                      height={12}
+                      style={{ marginTop: 3, color: 'var(--text-tertiary)' }}
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"

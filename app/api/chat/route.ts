@@ -169,6 +169,8 @@ interface ChatResponse {
   // Single event preserved for backwards compat; primary path uses events[]
   event?: ChatEvent
   events?: ChatEvent[]
+  // Proactive follow-up — WorkA injects this as a second message after the brief
+  follow_up?: string
 }
 
 // ─── Action orchestration context ─────────────────────────────────────────────
@@ -408,7 +410,7 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[]; follow_up?: 
   const alerts: Alert[] = [
     {
       priority: 'high',
-      message: '$28,000 invoice on Fitzroy (14 Merri St) is 3 days overdue — the Hendersons haven\'t paid. Every day costs you cashflow.',
+      message: 'Fitzroy (14 Merri St) — $28,000 invoice 3 days overdue. The Hendersons haven\'t paid. Draft a chaser now before it becomes a dispute.',
       action: 'Chase payment',
       quick_action: 'Send chaser now',
       entity_id: '00000000-0000-0000-0000-000000000061',
@@ -416,7 +418,7 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[]; follow_up?: 
     },
     {
       priority: 'high',
-      message: '2 Fitzroy variations worth $3,880 are waiting on your sign-off — kitchen benchtop ($3,200) and extra GPO points ($680). Trades are invoicing regardless.',
+      message: 'Fitzroy — 2 variations worth $3,880 need your sign-off today. Kitchen benchtop ($3,200) + extra GPO points ($680). Trades are invoicing you regardless.',
       action: 'Review variations',
       quick_action: 'Approve all ($3,880)',
       entity_id: '00000000-0000-0000-0000-000000000010',
@@ -424,7 +426,7 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[]; follow_up?: 
     },
     {
       priority: 'medium',
-      message: 'Toorak quote ($127,500) sent to Tom Caruso 5 days ago — no reply. Quotes older than 7 days have a 40% lower acceptance rate.',
+      message: 'Toorak — $127,500 quote sent to Tom Caruso 5 days ago, no reply. Waiting on CLIENT. After 7 days acceptance drops 40% — send a follow-up today.',
       action: 'Follow up client',
       quick_action: 'Draft follow-up',
       entity_id: '00000000-0000-0000-0000-000000000041',
@@ -432,16 +434,17 @@ function getDemoMorningBrief(): { message: string; alerts: Alert[]; follow_up?: 
     },
     {
       priority: 'low',
-      message: '52 Bendigo St (Brunswick) — 11 days in quoting, no quote sent yet. Client is waiting on CLIENT.',
+      message: 'Brunswick (52 Bendigo St) — 11 days in quoting, no quote sent yet. Client is waiting. Waiting on CLIENT.',
       action: 'Draft quote',
       entity_id: '00000000-0000-0000-0000-000000000030',
       entity_type: 'job',
     },
   ]
 
-  const message = '3 jobs active. $28k overdue from the Hendersons — 3 days past due. Toorak quote sitting with Tom Caruso for 5 days, no word. Two Fitzroy variations worth $3,880 need your sign-off before the trade invoices roll in.'
+  const message = '3 jobs active. $28k overdue from the Hendersons — 3 days past due. Toorak quote with Tom Caruso 5 days, no reply. Two Fitzroy variations ($3,880) need your sign-off before trades invoice you.'
+  const follow_up = 'Want me to send the payment chaser to the Hendersons now? It takes 30 seconds.'
 
-  return { message, alerts }
+  return { message, alerts, follow_up }
 }
 
 // ─── Live Supabase Morning Brief ──────────────────────────────────────────────
@@ -484,10 +487,12 @@ async function getLiveMorningBrief(
 
       const address = (job as { address: string } | null)?.address ?? 'unknown job'
       const dueRelative = inv.due_date ? relativeDate(inv.due_date) : 'recently'
+      const shortAddr = address.split(',')[0]
       alerts.push({
         priority: 'high',
-        message: `${formatAUD(inv.amount)} invoice on ${address} was due ${dueRelative} — not paid. Every day costs you cashflow. Draft a payment chaser now.`,
+        message: `${shortAddr} — ${formatAUD(inv.amount)} invoice ${dueRelative} overdue. Not paid. Draft a chaser before it becomes a dispute.`,
         action: 'Chase payment',
+        quick_action: 'Send chaser now',
         entity_id: inv.id,
         entity_type: 'invoice',
       })
@@ -521,13 +526,15 @@ async function getLiveMorningBrief(
       const totalAmount = vars.reduce((sum: number, v: Variation) => sum + (v.amount ?? 0), 0)
       const priority: 'high' | 'medium' = count >= 2 ? 'high' : 'medium'
 
+      const shortAddr2 = address.split(',')[0]
       alerts.push({
         priority,
         message:
           count === 1
-            ? `${address} — variation for ${formatAUD(vars[0].amount ?? 0)} (${vars[0].title}) waiting for your sign-off. Trade is invoicing regardless.`
-            : `${address} — ${count} variations totalling ${formatAUD(totalAmount)} waiting on your sign-off. Trades are invoicing regardless.`,
+            ? `${shortAddr2} — ${formatAUD(vars[0].amount ?? 0)} variation (${vars[0].title}) needs your sign-off. Trade is invoicing you regardless.`
+            : `${shortAddr2} — ${count} variations totalling ${formatAUD(totalAmount)} need your sign-off today. Trades are invoicing you regardless.`,
         action: 'Review variations',
+        quick_action: count === 1 ? `Approve ${formatAUD(vars[0].amount ?? 0)}` : `Approve all (${formatAUD(totalAmount)})`,
         entity_id: jobId,
         entity_type: 'job',
       })
@@ -578,10 +585,12 @@ async function getLiveMorningBrief(
       const address = (job as { address: string } | null)?.address ?? 'unknown job'
       const sentRelative = quote.sent_at ? relativeDate(quote.sent_at) : 'recently'
 
+      const shortAddrQ = address.split(',')[0]
       alerts.push({
         priority: 'medium',
-        message: `${address} — quote for ${formatAUD(quote.total_cost ?? 0)} sent ${sentRelative} with no response. Client is waiting on CLIENT. Quotes older than 7 days have a 40% lower acceptance rate.`,
+        message: `${shortAddrQ} — ${formatAUD(quote.total_cost ?? 0)} quote sent ${sentRelative}, no reply. Waiting on CLIENT. Follow up today — acceptance rate drops 40% after 7 days.`,
         action: 'Follow up client',
+        quick_action: 'Draft follow-up',
         entity_id: quote.id,
         entity_type: 'quote',
       })
@@ -616,7 +625,7 @@ async function getLiveMorningBrief(
       const daysLabel = daysInQuoting != null && daysInQuoting > 0 ? `${daysInQuoting} day${daysInQuoting !== 1 ? 's' : ''}` : null
       alerts.push({
         priority: daysInQuoting != null && daysInQuoting > 14 ? 'medium' : 'low',
-        message: `${shortAddr} — ${daysLabel ? `${daysLabel} in quoting, ` : ''}no quote sent yet. Client is waiting on CLIENT.`,
+        message: `${shortAddr} — ${daysLabel ? `${daysLabel} since job created, ` : ''}no quote sent yet. Client is waiting on CLIENT.`,
         action: 'Draft quote',
         entity_id: jobWithDate.id,
         entity_type: 'job',
@@ -1513,6 +1522,9 @@ async function orchestrateActions(
             : getDemoMorningBrief()
         messageParts.push(brief.message)
         accumulated.alerts = brief.alerts
+        if ((brief as { follow_up?: string }).follow_up) {
+          accumulated.follow_up = (brief as { follow_up?: string }).follow_up
+        }
         break
       }
 

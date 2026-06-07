@@ -881,18 +881,18 @@ export default function ChatInterface({
 
       // After morning brief, inject a proactive follow-up prompt
       if (data.intent?.includes('morning_brief') && data.alerts && data.alerts.length > 0) {
+        // Prefer the server-supplied follow_up; fall back to deriving from top alert
         const topAlert = [...data.alerts].sort((a, b) => {
           const order = { high: 0, medium: 1, low: 2 }
           return order[a.priority] - order[b.priority]
         }).find(a => a.action)
-        if (topAlert?.action) {
-          const followUpContent = topAlert.action === 'Chase payment'
-            ? "Want me to draft the payment chaser to the Hendersons now?"
-            : topAlert.action === 'Review variations'
-            ? "Want me to pull up the Fitzroy variations for your sign-off?"
-            : topAlert.action === 'Follow up'
-            ? "Want me to draft a follow-up to Tom Caruso about the Toorak quote?"
-            : `Want me to help with: ${topAlert.action.toLowerCase()}?`
+        const followUpContent = (data as { follow_up?: string }).follow_up
+          ?? (topAlert?.action === 'Chase payment' ? "Want me to send the payment chaser now? Takes 30 seconds."
+            : topAlert?.action === 'Review variations' ? `Want me to pull up the variations for your sign-off?`
+            : topAlert?.action === 'Follow up client' ? `Want me to draft a follow-up email to the client?`
+            : topAlert?.action ? `Want me to help with: ${topAlert.action.toLowerCase()}?`
+            : null)
+        if (followUpContent) {
           setTimeout(() => {
             setMessages(prev => [...prev, {
               id: generateId(),
@@ -900,7 +900,7 @@ export default function ChatInterface({
               content: followUpContent,
               timestamp: new Date(),
             }])
-          }, 600)
+          }, 700)
         }
       }
 
@@ -1658,17 +1658,22 @@ export default function ChatInterface({
             // Derive chips from the actual alerts returned
             const hasOverdueInvoice = lastAlerts.some(a => a.action === 'Chase payment')
             const hasVariations = lastAlerts.some(a => a.action === 'Review variations')
-            const hasStaleQuote = lastAlerts.some(a => a.action === 'Follow up')
+            const hasStaleQuote = lastAlerts.some(a => a.action === 'Follow up client')
+            // Derive chip labels from actual alert data
+            const overdueAlert = lastAlerts.find(a => a.action === 'Chase payment')
+            const staleQuoteAlert = lastAlerts.find(a => a.action === 'Follow up client')
+            const overdueAddr = overdueAlert?.message.match(/^([^—]+) —/)?.[1]?.trim() ?? 'overdue invoice'
+            const staleAddr = staleQuoteAlert?.message.match(/^([^—]+) —/)?.[1]?.trim() ?? 'quote follow-up'
             if (hasOverdueInvoice) {
               chips = [
-                { label: 'Chase Fitzroy payment', msg: 'draft payment chaser for Fitzroy invoice' },
-                { label: hasVariations ? 'Review variations' : "My jobs", msg: hasVariations ? 'show my variations' : 'show my jobs' },
-                { label: hasStaleQuote ? 'Follow up Toorak' : "What's on", msg: hasStaleQuote ? 'draft follow-up to Tom Caruso about Toorak quote' : 'whats on today' },
+                { label: `Chase ${overdueAddr} payment`, msg: 'draft payment chaser' },
+                { label: hasVariations ? 'Review variations' : 'My jobs', msg: hasVariations ? 'show my variations' : 'show my jobs' },
+                { label: hasStaleQuote ? `Follow up ${staleAddr}` : "What's on", msg: hasStaleQuote ? `draft follow-up email about ${staleAddr} quote` : 'whats on today' },
               ]
             } else if (hasVariations) {
               chips = [
                 { label: 'Review variations', msg: 'show my variations' },
-                { label: hasStaleQuote ? 'Follow up Toorak' : 'My jobs', msg: hasStaleQuote ? 'draft follow-up to Tom Caruso about Toorak quote' : 'show my jobs' },
+                { label: hasStaleQuote ? `Follow up ${staleAddr}` : 'My jobs', msg: hasStaleQuote ? `draft follow-up email about ${staleAddr} quote` : 'show my jobs' },
                 { label: "What's on", msg: 'whats on today' },
               ]
             } else {

@@ -415,7 +415,8 @@ export default function JobSnapshotPanel({
               </SectionGroup>
             )}
 
-            {/* ── 2. FINANCIALS ───────────────────────────────────────────── */}
+            {/* ── 2. FINANCIALS — hidden when no financial data exists yet ── */}
+            {(quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
             <SectionGroup label="Financials">
               <div style={CARD_STYLE}>
                 {/* Contract row */}
@@ -481,6 +482,7 @@ export default function JobSnapshotPanel({
                 )}
               </div>
             </SectionGroup>
+            ) : null}
 
             {/* ── 3. TIMELINE ─────────────────────────────────────────────── */}
             <SectionGroup label="Timeline">
