@@ -47,16 +47,19 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
 
             const badgeLabel = alert.priority === 'high' ? 'HIGH' : alert.priority === 'medium' ? 'MED' : 'LOW'
 
+            const isHigh = alert.priority === 'high'
+
             return (
               <div
                 key={alert.entity_id ? `${alert.entity_id}-${index}` : index}
                 role={isClickable ? 'button' : undefined}
                 tabIndex={isClickable ? 0 : undefined}
                 aria-label={isClickable ? alert.action : undefined}
-                className={`rounded-[4px] px-3 py-2.5 transition-colors${isClickable ? ' cursor-pointer focus:outline-none' : ''}`}
+                className={`rounded-[4px] transition-colors${isClickable ? ' cursor-pointer focus:outline-none' : ''}`}
                 style={{
-                  backgroundColor: 'var(--bg-surface)',
-                  border: '0.5px solid var(--bg-border)',
+                  padding: isHigh ? '12px 14px' : '8px 12px',
+                  backgroundColor: isHigh ? 'rgba(244,67,54,0.06)' : 'var(--bg-surface)',
+                  border: isHigh ? '0.5px solid rgba(244,67,54,0.25)' : '0.5px solid var(--bg-border)',
                 }}
                 onClick={() => {
                   if (isClickable) onAction!(alert.action!, alert.entity_id, alert.entity_type)
@@ -68,33 +71,42 @@ export default function MorningBriefCard({ message, alerts, onAction }: MorningB
                   }
                 }}
               >
-                <div className="flex items-start gap-2">
+                <div className="flex items-start gap-2.5">
                   {/* Priority badge */}
                   <span
-                    className="flex-shrink-0 mt-0.5 text-[10px] font-medium uppercase px-1.5 py-0.5 rounded-[3px]"
+                    className="flex-shrink-0 mt-0.5 text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-[3px]"
                     style={badgeStyle}
                   >
                     {badgeLabel}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="text-[13px] leading-snug" style={{ color: 'var(--text-primary)' }}>
+                    <p
+                      style={{
+                        fontSize: isHigh ? 14 : 13,
+                        fontWeight: isHigh ? 500 : 400,
+                        lineHeight: 1.45,
+                        color: isHigh ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      }}
+                    >
                       {alert.message}
                     </p>
                     {alert.action && (
-                      <p className="mt-1 text-[12px]" style={{ color: 'var(--orange-primary)' }}>
+                      <p className="mt-1.5 text-[12px] font-medium" style={{ color: 'var(--orange-primary)' }}>
                         {alert.action} →
                       </p>
                     )}
                   </div>
                   {isClickable && (
                     <svg
-                      className="w-3.5 h-3.5 flex-shrink-0 mt-0.5"
+                      className="flex-shrink-0"
+                      width={isHigh ? 14 : 12}
+                      height={isHigh ? 14 : 12}
+                      style={{ marginTop: 2, color: isHigh ? 'var(--status-red)' : 'var(--text-tertiary)' }}
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"
                       strokeWidth={2.5}
                       aria-hidden="true"
-                      style={{ color: 'var(--text-tertiary)' }}
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>

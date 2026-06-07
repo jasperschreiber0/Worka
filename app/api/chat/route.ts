@@ -403,43 +403,39 @@ async function extractActions(
 
 // ─── Demo Morning Brief ───────────────────────────────────────────────────────
 
-function getDemoMorningBrief(): { message: string; alerts: Alert[] } {
+function getDemoMorningBrief(): { message: string; alerts: Alert[]; follow_up?: string } {
   const alerts: Alert[] = [
     {
       priority: 'high',
-      message: 'Invoice for $28,000 on the Fitzroy job (14 Merri St) is 3 days overdue. The Hendersons have not paid.',
+      message: '$28,000 invoice on Fitzroy (14 Merri St) is 3 days overdue — the Hendersons haven\'t paid. Every day costs you cashflow.',
       action: 'Chase payment',
       entity_id: '00000000-0000-0000-0000-000000000061',
       entity_type: 'invoice',
     },
     {
       priority: 'high',
-      message: '2 variations on the Fitzroy job are waiting for approval — kitchen benchtop upgrade ($3,200) and extra GPO points ($680).',
+      message: '2 Fitzroy variations worth $3,880 are waiting on your sign-off — kitchen benchtop ($3,200) and extra GPO points ($680). Trades are invoicing regardless.',
       action: 'Review variations',
       entity_id: '00000000-0000-0000-0000-000000000010',
       entity_type: 'job',
     },
     {
       priority: 'medium',
-      message: 'Toorak quote for $127,500 was sent to Tom Caruso 5 days ago with no response yet.',
+      message: 'Toorak quote ($127,500) sent to Tom Caruso 5 days ago — no reply. Quotes older than 7 days have a 40% lower acceptance rate.',
       action: 'Follow up',
       entity_id: '00000000-0000-0000-0000-000000000041',
       entity_type: 'quote',
     },
     {
       priority: 'low',
-      message: '3 active jobs · 2 pending variations · 1 overdue invoice. Brunswick job at 52 Bendigo St is still in quoting.',
+      message: '52 Bendigo St (Brunswick) is in quoting — no quote sent yet. Client is waiting on CLIENT.',
+      action: 'Open job',
+      entity_id: '00000000-0000-0000-0000-000000000030',
       entity_type: 'job',
     },
   ]
 
-  const message =
-    'Good morning. Here\'s what needs your attention.\n\n' +
-    'Suggested order:\n' +
-    '1. Resolve Brunswick assumptions — 2 items are blocking the quote from being issued\n' +
-    '2. Call the Hendersons — $28,000 invoice is 3 days overdue\n' +
-    '3. Follow up Tom Caruso at Toorak — quote sent 5 days ago, no response\n' +
-    '4. Approve 2 Fitzroy variations ($3,880 total)'
+  const message = '3 jobs active. $28k overdue from the Hendersons — 3 days past due. Toorak quote sitting with Tom Caruso for 5 days, no word. Two Fitzroy variations worth $3,880 need your sign-off before the trade invoices roll in.'
 
   return { message, alerts }
 }
@@ -646,14 +642,39 @@ async function getLiveMorningBrief(
   const medAlerts = alerts.filter((a) => a.priority === 'medium')
   const priorityItems = [...highAlerts, ...medAlerts].slice(0, 4)
 
-  let message = 'Good morning. Here\'s what needs your attention today.'
+  let message = 'Morning. Here\'s what needs your attention.'
   if (alerts.length === 0) {
-    message = 'Good morning. No jobs set up yet — type **"new job at [address]"** to create your first one, or **"add Jack, he\'s a carpenter"** to invite your crew.'
+    message = 'Morning — no jobs set up yet. Type "new job at [address]" to create your first one.'
   } else if (highCount === 0 && medCount === 0) {
-    message = 'Good morning. No urgent items today — everything is on track.'
+    message = 'Morning. Nothing urgent — everything is on track.'
   } else {
-    const itemLines = priorityItems.map((a, i) => `${i + 1}. ${a.message}${a.action ? ' → ' + a.action : ''}`).join('\n')
-    message = `Good morning. ${highCount > 0 ? `${highCount} item${highCount !== 1 ? 's' : ''} need${highCount === 1 ? 's' : ''} immediate attention.` : 'Here\'s what needs your attention.'}\n\nSuggested order:\n${itemLines}`
+    // Build a tight ops-manager style summary
+    const parts: string[] = []
+    const activeJobAlerts = alerts.filter((a) => a.entity_type === 'job' && a.priority === 'low' && a.action === 'Show jobs')
+    const activeCount = activeJobAlerts[0]?.message.match(/^(\d+) active/)?.[1]
+    if (activeCount) parts.push(`${activeCount} jobs active.`)
+    const overdueInv = alerts.find((a) => a.entity_type === 'invoice' && a.priority === 'high')
+    if (overdueInv) {
+      const amtMatch = overdueInv.message.match(/\$[\d,]+/)
+      const addrMatch = overdueInv.message.match(/on (.+?) (?:was|is)/)
+      if (amtMatch && addrMatch) parts.push(`${amtMatch[0]} overdue on ${addrMatch[1]} — chase today.`)
+    }
+    const staleQ = alerts.find((a) => a.entity_type === 'quote' && a.priority === 'medium')
+    if (staleQ) {
+      const daysMatch = staleQ.message.match(/(\d+ \w+ ago|recently)/)
+      const addrMatch = staleQ.message.match(/on (.+?) was/)
+      if (addrMatch) parts.push(`${addrMatch[1]} quote sent ${daysMatch?.[1] ?? 'recently'} — no reply yet.`)
+    }
+    const varAlerts = alerts.filter((a) => a.action === 'Review variations')
+    if (varAlerts.length > 0) {
+      const totalVars = varAlerts.reduce((sum, a) => {
+        const m = a.message.match(/totalling \$([\d,]+)/)
+        return sum + (m ? parseInt(m[1].replace(',', '')) : 0)
+      }, 0)
+      const varCount = alerts.filter((a) => a.priority === 'high' && a.action === 'Review variations').length
+      parts.push(`${varCount > 1 ? varCount + ' jobs have' : 'Variations'} waiting on your sign-off${totalVars > 0 ? ` — $${totalVars.toLocaleString('en-AU')} total` : ''}.`)
+    }
+    message = parts.length > 0 ? parts.join(' ') : `${highCount} item${highCount !== 1 ? 's' : ''} need immediate attention.`
   }
 
   return { message, alerts }

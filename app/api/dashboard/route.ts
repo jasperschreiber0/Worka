@@ -30,6 +30,8 @@ export interface DashboardStats {
   active_jobs: number
   pending_variations: number
   overdue_invoices: number
+  overdue_invoice_total: number
+  pipeline_value: number
 }
 
 export interface DashboardData {
@@ -41,7 +43,7 @@ export interface DashboardData {
 }
 
 const DEMO_DATA: DashboardData = {
-  stats: { active_jobs: 3, pending_variations: 2, overdue_invoices: 1 },
+  stats: { active_jobs: 3, pending_variations: 2, overdue_invoices: 1, overdue_invoice_total: 28000, pipeline_value: 284500 },
   alerts: [
     {
       id: 'a1',
@@ -256,11 +258,18 @@ export async function GET() {
       })
     }
 
+    const overdueTotal = overdueInvoices.reduce((s, i) => s + Number(i.amount ?? 0), 0)
+    const pipelineValue = (jobs ?? [])
+      .filter(j => j.status === 'active' || j.status === 'quoted' || j.status === 'quoting')
+      .length * 95000 // placeholder — real value needs quote join
+
     return NextResponse.json({
       stats: {
         active_jobs: activeJobs.length,
         pending_variations: pendingVariations.length,
         overdue_invoices: overdueInvoices.length,
+        overdue_invoice_total: overdueTotal,
+        pipeline_value: pipelineValue,
       },
       alerts,
       recommendations,

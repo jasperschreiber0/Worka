@@ -346,6 +346,14 @@ export default function ChatInterface({
   const recognitionRef = useRef<{ stop: () => void } | null>(null)
   const [pendingFilesForUpload, setPendingFilesForUpload] = useState<File[] | null>(null)
   const [lastResponseType, setLastResponseType] = useState<string | null>(null)
+  const [lastAlerts, setLastAlerts] = useState<Alert[]>([])
+  const [dashboardStats, setDashboardStats] = useState<{
+    active_jobs: number
+    pending_variations: number
+    overdue_invoices: number
+    overdue_invoice_total: number
+    pipeline_value: number
+  } | null>(null)
 
   const [pendingDropFiles, setPendingDropFiles] = useState<Array<{ file: File; type: string; label: string }>>([])
   const [dropJobQuery, setDropJobQuery] = useState<string>('')
@@ -369,6 +377,24 @@ export default function ChatInterface({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // Fetch dashboard stats once on mount for the stats bar
+  useEffect(() => {
+    fetch('/api/dashboard')
+      .then(r => r.json())
+      .then((data: { stats?: { active_jobs: number; pending_variations: number; overdue_invoices: number; overdue_invoice_total?: number; pipeline_value?: number } }) => {
+        if (data.stats) {
+          setDashboardStats({
+            active_jobs: data.stats.active_jobs,
+            pending_variations: data.stats.pending_variations,
+            overdue_invoices: data.stats.overdue_invoices,
+            overdue_invoice_total: data.stats.overdue_invoice_total ?? 0,
+            pipeline_value: data.stats.pipeline_value ?? 0,
+          })
+        }
+      })
+      .catch(() => {/* silently fail — stats bar is optional */})
+  }, [])
 
   // Focus input on mount so user can start typing immediately
   useEffect(() => {
@@ -771,6 +797,32 @@ export default function ChatInterface({
         setMessages((prev) => [...prev, assistantMessage])
       }
       setLastResponseType(data.intent ?? null)
+      if (data.alerts) setLastAlerts(data.alerts)
+
+      // After morning brief, inject a proactive follow-up prompt
+      if (data.intent?.includes('morning_brief') && data.alerts && data.alerts.length > 0) {
+        const topAlert = [...data.alerts].sort((a, b) => {
+          const order = { high: 0, medium: 1, low: 2 }
+          return order[a.priority] - order[b.priority]
+        }).find(a => a.action)
+        if (topAlert?.action) {
+          const followUpContent = topAlert.action === 'Chase payment'
+            ? "Want me to draft the payment chaser to the Hendersons now?"
+            : topAlert.action === 'Review variations'
+            ? "Want me to pull up the Fitzroy variations for your sign-off?"
+            : topAlert.action === 'Follow up'
+            ? "Want me to draft a follow-up to Tom Caruso about the Toorak quote?"
+            : `Want me to help with: ${topAlert.action.toLowerCase()}?`
+          setTimeout(() => {
+            setMessages(prev => [...prev, {
+              id: generateId(),
+              role: 'assistant' as const,
+              content: followUpContent,
+              timestamp: new Date(),
+            }])
+          }, 600)
+        }
+      }
 
       // Handle Layer 3 events
       // Dispatch all Layer 3 events — handles both events[] (multi-action) and
@@ -1192,7 +1244,7 @@ export default function ChatInterface({
 
         <div className="flex items-center gap-2">
           <Link href="/settings/rates" className="text-[13px] font-medium px-2.5 py-1 rounded-[4px] transition-colors" style={{ color: 'var(--text-secondary)' }}>
-            Data
+            Rates
           </Link>
           {isDemo && (
             <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-[3px] text-[11px] font-semibold" style={{ backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)', border: '0.5px solid var(--pill-awaiting-border)' }}>
@@ -1219,6 +1271,62 @@ export default function ChatInterface({
           </div>
         </div>
       </header>
+
+      {/* ── Stats bar ──────────────────────────────────────────────────────── */}
+      {dashboardStats && (
+        <div
+          className="flex-shrink-0 flex items-center gap-0 overflow-x-auto"
+          style={{ borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+        >
+          {[
+            {
+              label: 'Active jobs',
+              value: String(dashboardStats.active_jobs),
+              color: 'var(--text-primary)',
+              onClick: () => void sendMessage('show my jobs'),
+            },
+            {
+              label: 'Pipeline',
+              value: dashboardStats.pipeline_value >= 1000
+                ? `$${Math.round(dashboardStats.pipeline_value / 1000)}k`
+                : `$${dashboardStats.pipeline_value.toLocaleString('en-AU')}`,
+              color: 'var(--text-primary)',
+              onClick: () => void sendMessage('show my jobs'),
+            },
+            {
+              label: 'Overdue',
+              value: dashboardStats.overdue_invoice_total > 0
+                ? `$${Math.round(dashboardStats.overdue_invoice_total / 1000)}k`
+                : dashboardStats.overdue_invoices > 0 ? `${dashboardStats.overdue_invoices}` : '—',
+              color: dashboardStats.overdue_invoices > 0 ? 'var(--status-red)' : 'var(--text-tertiary)',
+              onClick: dashboardStats.overdue_invoices > 0 ? () => void sendMessage('show overdue invoices') : undefined,
+            },
+            {
+              label: 'Variations',
+              value: dashboardStats.pending_variations > 0 ? String(dashboardStats.pending_variations) : '—',
+              color: dashboardStats.pending_variations > 0 ? 'var(--status-amber)' : 'var(--text-tertiary)',
+              onClick: dashboardStats.pending_variations > 0 ? () => void sendMessage('show my variations') : undefined,
+            },
+          ].map((stat, i) => (
+            <button
+              key={stat.label}
+              type="button"
+              onClick={stat.onClick}
+              disabled={!stat.onClick}
+              className="flex flex-col items-center justify-center flex-1 min-w-0 py-2 transition-colors disabled:cursor-default"
+              style={{
+                borderRight: i < 3 ? '0.5px solid var(--bg-border)' : 'none',
+                backgroundColor: 'transparent',
+              }}
+              onMouseOver={(e) => { if (stat.onClick) e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+              onMouseOut={(e) => { e.currentTarget.style.backgroundColor = 'transparent' }}
+            >
+              <span className="text-[15px] font-semibold leading-none" style={{ color: stat.color }}>{stat.value}</span>
+              <span className="text-[10px] mt-1 uppercase tracking-wide leading-none" style={{ color: 'var(--text-tertiary)' }}>{stat.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── Messages ───────────────────────────────────────────────────────── */}
       <div
@@ -1464,11 +1572,29 @@ export default function ChatInterface({
           type Chip = { label: string; msg?: string; fill?: string }
           let chips: Chip[]
           if (lastResponseType?.includes('morning_brief')) {
-            chips = [
-              { label: 'Show variations', msg: 'show my variations' },
-              { label: 'My jobs', msg: 'show my jobs' },
-              { label: 'Add task', fill: 'task for ' },
-            ]
+            // Derive chips from the actual alerts returned
+            const hasOverdueInvoice = lastAlerts.some(a => a.action === 'Chase payment')
+            const hasVariations = lastAlerts.some(a => a.action === 'Review variations')
+            const hasStaleQuote = lastAlerts.some(a => a.action === 'Follow up')
+            if (hasOverdueInvoice) {
+              chips = [
+                { label: 'Chase Fitzroy payment', msg: 'draft payment chaser for Fitzroy invoice' },
+                { label: hasVariations ? 'Review variations' : "My jobs", msg: hasVariations ? 'show my variations' : 'show my jobs' },
+                { label: hasStaleQuote ? 'Follow up Toorak' : "What's on", msg: hasStaleQuote ? 'draft follow-up to Tom Caruso about Toorak quote' : 'whats on today' },
+              ]
+            } else if (hasVariations) {
+              chips = [
+                { label: 'Review variations', msg: 'show my variations' },
+                { label: hasStaleQuote ? 'Follow up Toorak' : 'My jobs', msg: hasStaleQuote ? 'draft follow-up to Tom Caruso about Toorak quote' : 'show my jobs' },
+                { label: "What's on", msg: 'whats on today' },
+              ]
+            } else {
+              chips = [
+                { label: 'Show all jobs', msg: 'show my jobs' },
+                { label: 'My team', msg: 'show my team' },
+                { label: "What's on", msg: 'whats on today' },
+              ]
+            }
           } else if (lastResponseType?.includes('show_variation') || lastResponseType?.includes('variation')) {
             chips = [
               { label: 'Draft follow-up', msg: 'draft a follow-up to the client' },
