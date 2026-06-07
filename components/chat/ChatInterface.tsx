@@ -376,7 +376,39 @@ export default function ChatInterface({
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // Proactive mid-session check-in — fires once after 25 min of session idle
+  const proactiveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const proactiveFiredRef = useRef(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // Proactive check-in: inject a mid-session WorkA message after 25 min if no recent activity
+  useEffect(() => {
+    const PROACTIVE_DELAY_MS = 25 * 60 * 1000 // 25 minutes
+    proactiveTimerRef.current = setTimeout(() => {
+      if (proactiveFiredRef.current) return
+      proactiveFiredRef.current = true
+      const hour = new Date().getHours()
+      let content: string
+      if (hour < 12) {
+        content = "Just checking in — you've got **2 pending variations** waiting on client sign-off and the Henderson invoice is still outstanding. Want me to draft a chaser or approve the variations?"
+      } else if (hour < 17) {
+        content = "Afternoon check: **Fitzroy job** hits its next milestone in 3 days. The Toorak quote has been with the client for 11 days — worth a nudge. Anything you want me to action?"
+      } else {
+        content = "End-of-day wrap: **3 jobs active**, $28k outstanding. The Henderson payment is 3 days overdue. Want me to send the chaser before you finish up?"
+      }
+      setMessages(prev => [...prev, {
+        id: `proactive-${Date.now()}`,
+        role: 'assistant',
+        content,
+        timestamp: new Date(),
+      }])
+    }, PROACTIVE_DELAY_MS)
+    return () => {
+      if (proactiveTimerRef.current) clearTimeout(proactiveTimerRef.current)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Fetch dashboard stats once on mount for the stats bar
   useEffect(() => {
