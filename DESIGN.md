@@ -1,9 +1,7 @@
 # DESIGN.md — WorkA Visual Reference
 
-**Read this file at the start of every Claude Code session, alongside CLAUDE.md.**
+**Read this file at the start of every Claude Code session that touches UI, alongside CLAUDE.md.**
 **DESIGN.md governs feel. CLAUDE.md governs logic. Both are non-negotiable.**
-
-The canonical visual reference for WorkA is the two screenshots in `/design/reference/`. Every component, layout, and interaction decision in this document was extracted from those images. When in doubt, look at the reference screenshots, not at this document.
 
 ---
 
@@ -17,7 +15,7 @@ The aesthetic is: **dark, dense, precise, trustworthy.** Every element earns its
 
 **Four rules that govern every design decision:**
 1. Information density over whitespace — builders are scanning, not reading
-2. Hierarchy through weight, not color — color is reserved for status signals only
+2. Hierarchy through weight and size, not color — color is reserved for status signals only
 3. No chrome, no navigation, no tabs — the job IS the interface
 4. Orange means action or alert. Never decorative.
 
@@ -42,9 +40,9 @@ These are the exact values. Do not approximate. Do not introduce new colors.
   --text-ghost: #333333;      /* placeholder text */
 
   /* Brand — orange, used sparingly */
-  --orange-primary: #ff6b2b;  /* WorkA avatar, critical values, VAR references inline */
+  --orange-primary: #ff6b2b;  /* WorkA avatar, critical values, action buttons */
   --orange-subtle: rgba(255, 107, 43, 0.13); /* WorkA avatar background */
-  --orange-text: #ff6b2b;     /* pending days count, block on stage = Yes, inline VAR/$ refs */
+  --orange-text: #ff6b2b;     /* pending days count, inline $ refs */
 
   /* Status signals */
   --status-green: #4caf50;    /* clocked in, completed stages, active dot */
@@ -59,31 +57,50 @@ These are the exact values. Do not approximate. Do not introduce new colors.
 }
 ```
 
+**RGBA tinted backgrounds** (use when you need a background tied to a status):
+```
+Green bg:  rgba(76,175,80,0.15)   border: rgba(76,175,80,0.25)
+Red bg:    rgba(244,67,54,0.1)    border: rgba(244,67,54,0.3)
+Amber bg:  rgba(255,152,0,0.1)    border: rgba(255,152,0,0.3)
+Blue bg:   rgba(33,150,243,0.1)   border: rgba(33,150,243,0.3)
+```
+
+**How to apply colors in code — always inline style, never Tailwind color classes:**
+```tsx
+// CORRECT
+<span style={{ color: 'var(--status-amber)' }}>$9,200</span>
+<div style={{ backgroundColor: 'rgba(244,67,54,0.1)', border: '0.5px solid rgba(244,67,54,0.3)' }}>
+
+// WRONG — never Tailwind color utilities
+<span className="text-amber-500">$9,200</span>
+<div className="bg-red-100 border-red-300">
+```
+
 ---
 
 ## 3. Typography
 
-```css
-/* Font stack — system sans, no imports needed */
-font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+```
+Font: Inter (loaded from Google Fonts in app/layout.tsx)
+Mono: JetBrains Mono (for references, quote refs, VAR codes)
 
-/* Scale — used consistently across all components */
---text-xs: 10px;    /* section labels (FINANCIALS, TIMELINE, CLIENT), timestamps */
---text-sm: 11px;    /* secondary metadata, subtext, pill labels */
---text-base: 13px;  /* body copy, chat messages, right panel values */
---text-md: 14px;    /* job title in header, card titles, primary labels */
---text-lg: 16px;    /* variation dollar amount ($4,850) */
---text-xl: 18px;    /* job name in right panel (Collingwood Fit-Out) */
+Scale used across all components:
+  10px  — section labels (FINANCIALS, TIMELINE, CLIENT), timestamps, badge labels
+  11px  — secondary metadata, subtext, pill labels, sub-rows
+  12px  — body copy in right panel, card metadata rows
+  13px  — chat messages, main card text, form inputs
+  14px  — card titles, primary labels, job status
+  15px  — URGENT alert message text
+  16px  — variation dollar amount
+  18px  — job name in right panel header
 
-/* Weights */
---weight-normal: 400;
---weight-medium: 500;   /* job titles, contact names, primary labels */
---weight-semibold: 600; /* variation title, right panel job name, $ amounts */
---weight-bold: 700;     /* variation dollar amount */
+Weights:
+  400 — body copy, secondary labels
+  500 — job titles, contact names, primary values, medium/low alert text
+  600 — URGENT alert message, card titles, dollar amounts
+  700 — large dollar amounts (variation total)
 
-/* Letter spacing */
---tracking-section: 0.08em;  /* section labels — FINANCIALS, TIMELINE, CLIENT */
-/* All section labels are uppercase with this tracking */
+Section labels: 10px, uppercase, letter-spacing 0.08em, var(--text-tertiary)
 ```
 
 ---
@@ -97,28 +114,51 @@ This is the core layout. It appears whenever a job is in context.
 │         CHAT COLUMN         │    RIGHT PANEL        │
 │         ~65% width          │    ~35% width         │
 │                             │                       │
-│  [header: job title]        │  [JOB SNAPSHOT]       │
+│  [header: WorkA + version]  │  [JOB SNAPSHOT]       │
+│  [stats bar: 4 numbers]     │  [CLIENT]             │
 │                             │  [FINANCIALS]         │
 │  [message thread]           │  [TIMELINE]           │
+│                             │  [NEXT MILESTONE]     │
+│  [variation card]           │  [PENDING ACTIONS]    │
 │                             │  [CREW ON SITE]       │
-│  [variation card]           │  [DOCUMENTS]          │
-│                             │                       │
-│  [action chips]             │                       │
-│  [input bar]                │                       │
+│  [contextual chips]         │  [COMMS]              │
+│  [input bar]                │  [quick actions bar]  │
 └─────────────────────────────┴──────────────────────┘
 ```
 
-**Exact split:** `grid-template-columns: 1fr 280px` at the reference scale. Right panel is fixed width, not fluid.
+**Split:** `ChatShell.tsx` uses a flex layout — chat column grows, right panel is `w-80` (320px) fixed on md+. On mobile, right panel becomes a bottom sheet (`MobileJobSheet.tsx`).
 
-**Divider:** `border-right: 0.5px solid var(--bg-border)` — hairline, not a visible gutter.
+**Divider:** `borderLeft: '0.5px solid var(--bg-border)'` — hairline only.
 
-**No border-radius on the shell** — the panel fills its container edge to edge.
+**Right panel scroll:** the panel body scrolls independently. Header and quick-actions bar are sticky.
 
-**Right panel:** no scroll unless content overflows. Sections stack vertically with `24px` gap between section groups.
+**When no job is selected:** right panel shows the aggregate pulse — active jobs count, pipeline value, overdue total, pending variations. Not an empty state.
 
 ---
 
-## 5. Chat Column
+## 5. Stats Bar
+
+Four always-visible numbers above the message thread. Each is a clickable button that sends a chat message.
+
+```
+┌──────────┬──────────┬──────────┬──────────┐
+│  3       │  $455k   │  $28k    │  2       │
+│  JOBS    │ PIPELINE │  OVERDUE │  VAR     │
+└──────────┴──────────┴──────────┴──────────┘
+
+height: auto (py-2)
+border-bottom: 0.5px solid var(--bg-border)
+background: var(--bg-shell)
+Values: 15px, font-semibold, color varies by state
+Labels: 10px, uppercase, letter-spacing 0.06em, var(--text-tertiary)
+Overdue value: var(--status-red) when > 0
+Variations value: var(--status-amber) when > 0
+Active jobs / Pipeline: var(--text-primary)
+```
+
+---
+
+## 6. Chat Column
 
 ### Header
 ```
@@ -127,12 +167,13 @@ padding: 14px 16px
 border-bottom: 0.5px solid var(--bg-border)
 background: var(--bg-shell)
 
-Left: back arrow (←) in var(--text-tertiary), 18px
-      Job title: var(--text-primary), 14px, weight 500
-      Stage below title: "Stage: Rough-in" — var(--text-tertiary), 11px
+Left:  WorkA logo + "WorkA" wordmark (14px, weight 600)
+       version chip (10px, var(--text-tertiary))
+Right: "Rates" link, Demo pill (when in demo mode), username, avatar menu
 ```
 
 ### Message Thread
+
 ```
 padding: 16px
 gap between messages: 14px
@@ -142,81 +183,29 @@ gap between messages: 14px
 ```
 Label: "YOU" — var(--text-tertiary), 10px, weight 500, letter-spacing 0.08em
 Avatar: 28px circle, background var(--bg-elevated), color var(--text-tertiary)
-Message text: var(--text-secondary), 13px, italic style
+Message text: var(--text-secondary), 13px
 ```
 
 **WORKA message:**
 ```
 Label: "WORKA" — var(--text-tertiary), 10px, weight 500, letter-spacing 0.08em
-Avatar: 28px circle, background var(--orange-subtle), color var(--orange-primary)
-         Contains "W" character, weight 600
+Avatar: 28px circle, background var(--orange-subtle), color var(--orange-primary), "W" weight 600
 Message text: var(--text-primary), 13px, weight 400, line-height 1.5
 ```
 
-**Critical:** WorkA message text is heavier and brighter than user message text. The hierarchy signals authority.
+WorkA message text is heavier and brighter than user message text. The hierarchy signals authority.
 
-### Draft Email Card
-```
-background: var(--bg-elevated)
-border: 0.5px solid var(--bg-border)
-border-radius: 6px
-padding: 14px 16px
-margin-top: 8px (inside WorkA message bubble area)
-```
+### Contextual Action Chips
 
-**Draft email header bar:**
+Appear below the last WorkA message, above the input. Maximum 3. Derived from the actual alerts returned — first chip is primary (orange tint), others are secondary (elevated).
+
 ```
-"DRAFT EMAIL" label — var(--text-tertiary), 10px, uppercase, tracking 0.08em
-"To: email@address.com" — right-aligned, var(--text-secondary), 11px
-border-bottom: 0.5px solid var(--bg-border)
-padding-bottom: 10px
-margin-bottom: 10px
+Primary chip:   background rgba(255,107,43,0.13), border rgba(255,107,43,0.3), color var(--orange-primary)
+Secondary chip: background var(--bg-elevated), border var(--bg-border), color var(--text-secondary)
+border-radius: 4px, padding: 6px 12px, font-size: 12px
 ```
 
-**From/Subject rows:**
-```
-Label (From, Subj.): var(--text-tertiary), 11px, min-width 40px
-Value: var(--text-secondary), 11px
-gap between label and value: 12px
-row gap: 4px
-border-bottom: 0.5px solid var(--bg-border) after subject row
-padding-bottom: 10px, margin-bottom: 14px
-```
-
-**Email body text:**
-```
-var(--text-primary), 13px, line-height 1.6
-paragraphs separated by 12px margin
-```
-
-**Inline highlights within email body:**
-```
-VAR-004 references: var(--orange-primary), no background, no underline — just color
-Dollar amounts: var(--orange-primary), same treatment
-These are the ONLY colored text elements in the email body
-```
-
-**Edit/Revise bar at bottom of draft:**
-```
-background: white (!) — this is intentional contrast
-border-radius: 4px
-padding: 10px 16px
-display: flex, justify-content: space-between
-"Edit a line or ask WorkA to ad[just]" — #333, 13px (truncated in reference)
-"Revise ↑" — var(--text-tertiary), 13px, right side
-```
-
-### Action Chips
-```
-Appear below last message, above input
-Row of 3: "Send to client", "Mark as approved", "Dismiss" (or similar)
-background: var(--bg-elevated)
-border: 0.5px solid var(--bg-border)
-border-radius: 4px
-padding: 6px 12px
-font-size: 12px, color: var(--text-secondary)
-gap: 8px between chips
-```
+Chip labels are derived from real alert data — address extracted from the actual alert message text, not hardcoded names.
 
 ### Input Bar
 ```
@@ -225,341 +214,277 @@ border: 0.5px solid var(--bg-border)
 border-radius: 6px
 padding: 12px 16px
 margin: 0 16px 16px
-placeholder: "Reply to WorkA..." — var(--text-ghost), 13px
-No send button visible — enter to send
+placeholder: "Ask WorkA anything..." — var(--text-ghost), 13px
+Mic button: right side, activates speech recognition (en-AU)
 ```
 
 ---
 
-## 6. Variation Card
+## 7. Morning Brief Card
 
-This is the most important component. It surfaces inside the chat column when a variation is relevant.
+The most important chat component. Rendered by `MorningBriefCard.tsx`.
+
+### HIGH alerts (priority: 'high') — badge label: URGENT
+
+These must dominate the visual field. They are the reason the builder opened the app.
 
 ```
-background: var(--bg-surface)   ← slightly lighter than shell
+border-radius: 8px (rounded-lg)
+background: rgba(244,67,54,0.07)
+border: 1px solid rgba(244,67,54,0.3)
+border-left: 3px solid var(--status-red)   ← thick left accent
+padding: 14px 16px
+
+Badge: "URGENT" — 10px, bold, uppercase, red bg/text
+Message: 15px, weight 600, var(--text-primary), margin-bottom 10px
+Quick-action button: filled orange background (#ff6b2b), white text, 12px semibold, 3px border-radius
+Action label: "Chase payment →" — 12px, var(--orange-primary), secondary to button
+```
+
+### MEDIUM alerts (priority: 'medium') — badge label: ACTION
+
+```
+background: var(--bg-surface)
+border: 0.5px solid var(--bg-border)
+padding: 9px 12px, border-radius: 4px
+
+Badge: "ACTION" — amber bg/text
+Message: 13px, weight 400, var(--text-secondary)
+Quick-action: ghost style (bg-elevated + orange border + orange text)
+```
+
+### LOW alerts (priority: 'low') — badge label: FYI
+
+Same structure as MEDIUM but badge uses muted colors (`--bg-elevated` / `--text-tertiary`).
+
+### Blocker chips
+
+When an alert message contains "waiting on client / trade / council / supplier", a blocker chip appears above the message text:
+
+```
+CLIENT:   rgba(33,150,243,0.12) bg, var(--status-blue) text
+TRADE:    pill-awaiting colors
+COUNCIL:  rgba(156,39,176,0.12) bg, #ce93d8 text
+SUPPLIER: var(--bg-elevated) bg, var(--text-tertiary) text
+```
+
+### Summary text
+
+The brief opens with a summary paragraph (13px, var(--text-primary), line-height 1.5) before the alert cards. Tight ops-manager tone: "3 jobs active. $28k overdue from Fitzroy — 3 days past due."
+
+### Follow-up injection
+
+700ms after the morning brief renders, a second WorkA message is injected. It comes from the server's `follow_up` field — always specific to the top alert: "Want me to send the payment chaser for Fitzroy now? It takes 30 seconds."
+
+---
+
+## 8. Variation Card
+
+Rendered inline in the chat thread when a variation is relevant.
+
+```
+background: var(--bg-surface)
 border: 0.5px solid var(--bg-border)
 border-radius: 6px
 padding: 14px 16px
 margin-top: 10px
 ```
 
-**Card header row:**
-```
-Left: "VAR-004 · Logged 12 May 2026" — var(--text-tertiary), 11px
-Right: Status pill — "Awaiting approval"
-       background: var(--pill-awaiting-bg)
-       border: 0.5px solid var(--pill-awaiting-border)
-       color: var(--pill-awaiting-text)
-       border-radius: 3px
-       padding: 3px 8px
-       font-size: 11px, weight 500
-```
-
-**Card title:**
-```
-"Structural beam upgrade — engineer specified"
-font-size: 14px, weight 600, color: var(--text-primary)
-margin-top: 8px
-```
-
-**Card description:**
-```
-font-size: 12px, color: var(--text-secondary), line-height: 1.5
-margin-top: 4px
-```
-
-**Dollar amount:**
-```
-"$4,850"
-font-size: 20px, weight 700, color: var(--text-primary)
-margin-top: 12px
-```
-
-**Sub-line below dollar:**
-```
-"inc. GST · Labour $1,200 · Materials $3,650"
-font-size: 11px, color: var(--text-tertiary)
-margin-top: 2px
-```
-
-**Footer metadata row:**
-```
-Three columns: Submitted by / Days pending / Contract impact
-Label: var(--text-tertiary), 10px, uppercase, tracking 0.06em
-Value: var(--text-secondary), 12px, weight 500
-"3 days" value: var(--orange-text) — orange because it signals urgency
-"+$4,850" value: var(--text-primary)
-margin-top: 14px
-border-top: 0.5px solid var(--bg-border)
-padding-top: 10px
-```
+**Card header:** `"VAR-001 · 2 days ago"` left, status pill right
+**Title:** 14px, weight 600, var(--text-primary)
+**Description:** 12px, var(--text-secondary), line-height 1.5
+**Dollar amount:** 20px, weight 700, var(--text-primary)
+**Sub-line:** `"Labour $800 · Materials $2,400"` — 11px, var(--text-tertiary)
+**Footer metadata:** Submitted by / Days pending (orange if urgent) / Contract impact
+**Action row:** Approve (green) + Reject (red) buttons, then "Send to client →" link button below
 
 ---
 
-## 7. Right Panel — Job Snapshot
+## 9. Right Panel — Job Snapshot
 
 ### Panel Header
 ```
-"JOB SNAPSHOT" — var(--text-tertiary), 10px, uppercase, letter-spacing 0.08em
-padding: 14px 16px 0
+"JOB SNAPSHOT" eyebrow — 10px, uppercase, letter-spacing 0.08em, var(--text-tertiary)
+Job address: 16px, weight 600, var(--text-primary)
+Job ref + status pill: 11px row below
+Stage pipeline: 4 dots (Quoting / Quoted / Active / Complete)
 ```
 
-**Job name:**
+### Section pattern (all sections)
+```tsx
+<SectionGroup label="FINANCIALS">
+  {/* rows */}
+</SectionGroup>
 ```
-"Collingwood Fit-Out"
-font-size: 18px, weight 600, color: var(--text-primary)
-margin-top: 4px
-```
-
-**Job subtitle:**
-```
-"Commercial · 142 Smith St"
-font-size: 12px, color: var(--text-tertiary)
-```
-
-**Divider after header:**
-```
-border-bottom: 0.5px solid var(--bg-border)
-margin: 12px 0
-```
-
-### Section Labels (all sections follow this pattern)
-```
-"FINANCIALS", "TIMELINE", "CREW ON SITE", "DOCUMENTS", "CLIENT", "CONTACT"
-font-size: 10px, uppercase, letter-spacing: 0.08em
-color: var(--text-tertiary)
-margin-bottom: 10px
-```
+Section label: 10px, uppercase, letter-spacing 0.08em, var(--text-tertiary), margin-bottom 8px.
+Rows: `display: flex, justify-content: space-between`. Label 12px var(--text-secondary), value 12px var(--text-primary) weight 500.
 
 ### Financials Section
+
+**Only rendered when at least one of: quote total > 0, variations total > 0, invoiced total > 0.** Hidden entirely for quoting jobs with no quote yet.
+
+Rows: Contract / Variations / Invoiced / Margin (health badge: Healthy/Watch/At risk)
+Progress bar: 3px height, var(--orange-primary) fill, var(--bg-border) track.
+Below bar: "X% invoiced" left, "$Y remaining" right — 10px, var(--text-tertiary).
+
+### Next Milestone callout
+
+Appears inside the Timeline section. Shows the next actionable step with timing:
+- Quoting → "Send quote" + quote deadline if set
+- Quoted → "Awaiting client approval" + sent date
+- Active → next invoice amount + due date
+
 ```
-Each row: label left, value right
-display: flex, justify-content: space-between
-padding: 3px 0
+8px orange dot + label (12px, weight 500, var(--text-primary)) + timing (11px, var(--text-tertiary))
 ```
 
-**Row styles:**
-```
-Label: var(--text-secondary), 12px
-Value: var(--text-primary), 12px, weight 500
+### Client Section
+Avatar: 32px circle, background `#2c3e50`, initials white weight 700, 11px.
+Name: 14px, weight 600. Email/phone rows with SVG icons.
+Last contact: derived from most recent comms message timestamp.
 
-Special values:
-  "Variations total" value ($9,200): var(--status-amber)
-  "Margin" value (22%): var(--status-green) — only if healthy
-```
+### Pending Actions Section
+Only rendered when `pendingVariations.length > 0 || overdueInvoices.length > 0`.
+Card rows with amber/red tinting per item type.
 
-**Margin progress bar:**
-```
-height: 3px
-border-radius: 2px
-background: var(--bg-border)
-fill: var(--orange-primary) — orange fill, not green
-width: proportional to invoiced %
-margin-top: 4px, margin-bottom: 2px
-```
+### Crew on Site / Tasks / Comms
+Standard section pattern. Comms section only rendered when messages exist.
 
-**Below bar:**
+### Quick Actions Bar (bottom, sticky)
 ```
-"Invoiced 50%" left, "$93,400 remaining" right
-font-size: 10px, color: var(--text-tertiary)
-```
-
-### Timeline Section
-```
-Each stage: dot + label
-dot: 8px circle
-  completed: var(--status-green) filled
-  current: var(--orange-primary) filled + "← now" label
-  pending: var(--bg-border) — empty/unfilled
-
-"← now" indicator:
-  color: var(--orange-primary), font-size: 11px
-  appears inline after current stage name
-
-Stage label:
-  completed: var(--text-secondary), 12px
-  current: var(--text-primary), 12px, weight 500
-  pending: var(--text-tertiary), 12px
-```
-
-**PC date and days remaining:**
-```
-"PC date" label / "14 Jul 2026" value
-"Days remaining" label / "60" value (right-aligned, weight 600)
-margin-top: 12px
-```
-
-### Crew On Site Section
-```
-Each row: name left, status right
-Name: var(--text-secondary), 12px
-Status:
-  "Clocked in": var(--status-green), 12px, weight 500
-  "Off today": var(--text-tertiary), 12px
-row gap: 6px
-```
-
-### Documents Section
-```
-Each row: icon + filename left, date right
-Icon: 12px, var(--text-tertiary) — file icon for docs, camera icon for photos
-Filename: var(--text-secondary), 12px
-Date: var(--text-tertiary), 11px
-row gap: 8px
-```
-
-### Client Section (right panel top)
-```
-"CLIENT" section label
-Job/company name: var(--text-primary), 14px, weight 600
-Company sub: var(--text-secondary), 12px
-```
-
-**Contact block:**
-```
-Avatar: 32px circle, background: #2c3e50 (dark slate), initials white, weight 600, 13px
-Name: var(--text-primary), 13px, weight 500
-Title: var(--text-secondary), 11px
-```
-
-**Contact details:**
-```
-Each row: icon + text
-Icons: 12px, var(--text-tertiary)
-Text: var(--text-secondary), 12px
-row gap: 4px
-```
-
-### VAR Status Section
-```
-Label-value rows, same pattern as financials
-"Value" / "$4,850 inc. GST": var(--text-primary), weight 500
-"Logged" / "12 May 2026": var(--text-secondary)
-"Pending" / "3 days": var(--orange-text) — orange for urgency
-"Previous contact" / "Verbal, 10 May": var(--text-secondary)
-"Block on stage" / "Yes": var(--status-red) — red, critical
-```
-
-### Communication History
-```
-Each entry: colored dot + text + date/author
-Dot: 7px circle
-  Most recent / active: var(--status-green)
-  Historical: var(--text-tertiary)
-
-Entry text: var(--text-secondary), 12px, line-height 1.4
-Date + author: var(--text-tertiary), 10px, margin-top: 2px
-row gap: 10px
+padding: 10px 16px
+border-top: 0.5px solid var(--bg-border)
+background: var(--bg-shell)
+flex row of text buttons: "Compose email", "View quote", "Upload plans", "Add task"
+color: var(--orange-primary), 12px, weight 500
 ```
 
 ---
 
-## 8. Spacing System
+## 10. Aggregate Pulse (no job selected)
+
+When no job is in context, right panel shows a 2×2 grid of stat cards:
+
+```
+Active jobs / Pipeline value / Overdue / Variations
+Each: centered value (22px, weight 700) + label (10px, uppercase, var(--text-tertiary))
+Card: var(--bg-surface) background, padding 12px 8px
+Overdue value: var(--status-red) when > 0
+Variations value: var(--status-amber) when > 0
+```
+
+Below the grid: muted hint text pointing to chat as the entry point.
+
+---
+
+## 11. Client Variation Approval Portal (`/approve/variation/[id]`)
+
+A separate public-facing dark page. Uses hardcoded dark values (not CSS vars, since globals.css may not be available in all rendering contexts):
+
+```
+Shell: #0f1117
+Card: #1a1f2e, border rgba(255,255,255,0.08), border-radius 16px (rounded-2xl)
+Text primary: #f1f5f9
+Text secondary: #94a3b8
+Text tertiary: #64748b
+Orange: #ff6b2b
+Approve button: #4caf50 filled
+Reject button: rgba(244,67,54,0.12) bg, #f44336 text
+```
+
+The approve button shows the amount inline: "Approve — $3,200". Name confirmation step appears as a modal before any action is committed.
+
+---
+
+## 12. Spacing System
 
 ```
 4px   — tight internal padding (icon gaps, row sub-spacing)
 6px   — chip padding vertical, small row gaps
-8px   — standard row gap, card internal spacing
-10px  — section internal padding, border padding
+8px   — standard row gap, card internal spacing, section label margin
+9px   — compact alert card padding (medium/low)
+10px  — section internal padding
 12px  — standard component padding, paragraph spacing
-14px  — chat message padding, card padding
-16px  — column padding (left/right)
+14px  — chat message padding, URGENT alert padding
+16px  — column padding (left/right), quick actions padding
 24px  — section group separation in right panel
 ```
 
 **Border radius:**
 ```
 3px  — status pills, small badges
-4px  — action chips, small interactive elements
+4px  — action chips, medium/low alert cards, small interactive elements
 6px  — cards (variation card, draft email card), input bar
-8px  — nothing larger than this anywhere in the product
+8px  — URGENT alert cards, client portal cards (rounded-lg)
+16px — client portal main card only (rounded-2xl)
 ```
 
 ---
 
-## 9. Component Patterns — How to Build Everything
+## 13. Interaction Rules
 
-### Every section in the right panel follows this exact pattern:
-```tsx
-<section>
-  <p className="section-label">FINANCIALS</p>
-  <div className="section-rows">
-    <div className="row">
-      <span className="label">Contract value</span>
-      <span className="value">$187,400</span>
-    </div>
-  </div>
-</section>
-```
-
-### Every status value uses a semantic class, not inline color:
-```tsx
-// CORRECT
-<span className="value-amber">$9,200</span>
-<span className="value-orange">3 days</span>
-<span className="value-red">Yes</span>
-<span className="value-green">Clocked in</span>
-
-// WRONG — never inline colors
-<span style={{ color: '#ff9800' }}>$9,200</span>
-```
-
-### Avatar initials pattern:
-```tsx
-// WorkA avatar
-<div className="avatar avatar-worka">W</div>
-
-// User avatar  
-<div className="avatar avatar-user"><UserIcon size={14} /></div>
-
-// Contact avatar (uses first letters of name)
-<div className="avatar avatar-contact">MR</div>
-```
-
----
-
-## 10. What Must Never Appear
-
-These are absolute prohibitions extracted from the design philosophy:
-
-- **No white or light backgrounds anywhere** in the builder-facing interface
-- **No colored backgrounds for section labels** — they are plain text, no pills, no boxes
-- **No tabs, no sidebar navigation, no breadcrumbs** — the header back arrow is the only navigation
-- **No rounded corners above 8px**
-- **No shadows** — depth is created through background color layering only
-- **No gradients** — except the margin progress bar fill
-- **No icons larger than 16px** in the right panel
-- **No placeholder skeleton loaders with pulse animation** — show real data or nothing
-- **No success toast notifications** — state changes are reflected inline, silently
-- **No modal overlays for variations** — variations live in the chat column as cards
-- **Orange is never decorative** — every use of orange signals action, urgency, or the WorkA brand
-
----
-
-## 11. Interaction Rules
-
-**Right panel opens** when a job is in context. Closes when the user navigates to a general query.
+**Right panel opens** when a job is explicitly selected (clicking a job row, sending a job message, tapping a job name in chat). It does NOT auto-open from morning brief alert clicks — those trigger `onAction` which sends a chat message. The panel opens as a side-effect of that if the response mentions a job.
 
 **Variation cards appear inline** in the chat thread — not in the right panel. The right panel shows job-level status. The chat column shows the action items.
 
 **Draft email cards appear inline** in the chat thread, directly below the WorkA message that generated them.
 
-**Action chips appear below** the last WorkA message. Maximum 3 chips. They are the only way the builder takes a decisive action. No buttons anywhere else in the chat column.
+**Quick-action buttons on URGENT alerts** execute directly — they don't navigate. They call `handleQuickAction` which drafts emails, approves variations, or sends chasers without leaving chat.
 
-**The input bar is always visible** at the bottom of the chat column. It never disappears. Placeholder text changes contextually: "Reply to WorkA...", "Approve, revise, or ask a question...", etc.
+**Loading state:** WorkA avatar pulses (opacity 0.4 → 1.0, 800ms) while generating. No spinner, no text.
 
-**Loading states:** WorkA avatar appears with a pulsing opacity (0.4 → 1.0, 800ms ease) while a response is being generated. No spinner. No text. Just the avatar pulsing.
+**Proactive check-in:** After 25 minutes of inactivity, WorkA injects a time-aware message surfacing the next risk: morning → variations, afternoon → milestone, evening → outstanding items. Fires once per session.
 
----
+**Voice input:** Mic button in input bar. Uses Web Speech API, `lang: 'en-AU'`. Transcribed text populates the input field, builder presses enter to send.
 
-## 12. Session Instruction for Claude Code
-
-At the start of every session that touches UI, add this instruction:
-
-> "Before writing any component, read DESIGN.md in full. Every color, spacing value, typography decision, and component pattern is specified there. Do not use Tailwind default colors — use the CSS custom properties defined in DESIGN.md. Do not introduce any new visual patterns not present in the reference screenshots. If you are unsure about a visual decision, refer to /design/reference/ screenshots before deciding."
-
-And include both reference screenshots in the session context.
+**Scope hints in AssumptionReview:** Accept removes the hint from the list and increments an accepted counter shown in the completion banner. Dismiss removes from list only. Both are local state — not persisted to DB in demo mode.
 
 ---
 
-*DESIGN.md is a living document. When a new component is designed that isn't covered here, add it to this file before the session ends.*
+## 14. Alert Copy Convention
+
+Every alert message follows the same structure:
+
+```
+[Short address] — [specific fact with numbers] — [consequence or urgency]
+```
+
+Examples:
+- `"Fitzroy — $28,000 invoice 3 days overdue. Draft a chaser before it becomes a dispute."`
+- `"Fitzroy — 2 variations worth $3,880 need your sign-off today. Trades are invoicing you regardless."`
+- `"Toorak — $127,500 quote sent to Tom Caruso 5 days ago, no reply. Waiting on CLIENT."`
+- `"Brunswick — 11 days since job created, no quote sent yet. Client is waiting. Waiting on CLIENT."`
+
+Rules:
+- Always start with the short address (first part before comma)
+- Always include the dollar amount and days elapsed
+- Never use passive voice for consequences ("trades will invoice" not "trade invoicing may occur")
+- Blocker label (Waiting on CLIENT/TRADE/COUNCIL/SUPPLIER) appears in the message text AND as a styled chip in the card
+
+---
+
+## 15. What Must Never Appear
+
+- **No white or light backgrounds** anywhere in the builder-facing interface
+- **No Tailwind color utilities** — `bg-slate-*`, `text-gray-*`, `bg-white`, `bg-green-*`, etc. Use CSS vars.
+- **No colored backgrounds for section labels** — they are plain text
+- **No tabs, no sidebar navigation, no breadcrumbs** — the chat input is the only navigation
+- **No rounded corners above 16px** (and 16px only on the client approval portal)
+- **No shadows** — depth through background color layering only
+- **No gradients** — except the margin progress bar fill
+- **No success toast notifications** — state changes reflected inline
+- **No modal overlays for variations** — variations live in the chat column as inline cards
+- **No hardcoded names in the UI layer** (no "Hendersons", "Tom Caruso" in ChatInterface.tsx) — derive from alert data
+- **Orange is never decorative** — every use of orange signals action, urgency, or the WorkA brand
+
+---
+
+## 16. Session Instruction for Claude Code
+
+At the start of every session that touches UI:
+
+> "Read DESIGN.md in full before writing any component. Every color must use CSS custom properties from Section 2 — never Tailwind color utilities. Every alert must follow the copy convention in Section 14. Check Section 15 (What Must Never Appear) before shipping. If uncertain about a visual decision, check DESIGN.md first, then ask."
+
+---
+
+*DESIGN.md is a living document. When a new component is built that isn't covered here, add it before the session ends.*

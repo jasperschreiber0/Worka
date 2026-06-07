@@ -77,6 +77,10 @@ When the initial "new job" message contains no address, the chat route asks "Whi
 
 **This is the canonical pattern for two-step chat flows.** Any future flow that requires a follow-up answer should track pending intent in a `useState` flag inside `ChatInterface.tsx` and rewrite only the outgoing API payload, leaving the displayed message unchanged.
 
+### Morning brief — follow-up injection
+
+After a morning brief response, `ChatInterface` injects a second assistant message 700ms later. The content comes from the `follow_up` field in `ChatResponse` (set by `getDemoMorningBrief` / `getLiveMorningBrief`). If absent, it falls back to deriving a prompt from the top alert's `action` field. The follow-up is always specific — naming the address and the exact action ("Want me to send the payment chaser for Fitzroy now?"), never generic.
+
 ---
 
 ## Fallback Data Mode
@@ -107,7 +111,7 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 
 ## Auth
 
-- `middleware.ts` — protects `/chat`, `/settings/*`, `/dashboard`; redirects to `/login?next=<path>`
+- `middleware.ts` — protects `/chat`, `/settings/*`; redirects to `/login?next=<path>`
 - `lib/auth/get-session.ts` — `getSessionUser()` for server components (cookies-based)
 - `@supabase/auth-helpers-nextjs` v0.10 is the only Supabase auth helper used:
   - Client components: `createClientComponentClient<Database>()`
@@ -116,6 +120,11 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 - `lib/supabase/client.ts` — singleton browser client (use in client components when you don't need cookie-based auth)
 - `lib/supabase/server.ts` — server client + `createAdminClient()` (service role, bypasses RLS — edge functions only)
 
+**Public routes (no auth required):**
+- `/approve/variation/[variationId]` — client-facing variation approval portal
+- `/join/[token]` — worker onboarding
+- `/login`, `/signup`, `/`, `/privacy`, `/terms`
+
 ---
 
 ## Key UI Components
@@ -123,37 +132,34 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 ### Chat layer (`components/chat/`)
 | Component | Role |
 |-----------|------|
-| `ChatInterface.tsx` | Main chat UI — message history, input, side-effect dispatcher for all `event.type` values |
+| `ChatInterface.tsx` | Main chat UI — message history, input, side-effect dispatcher for all `event.type` values. Owns proactive 25-min check-in timer, time-aware welcome message, follow-up injection after morning brief. |
 | `ChatMessage.tsx` | Single message bubble — renders text + inline action buttons |
-| `MorningBriefCard.tsx` | Structured morning brief with ranked alerts, inline priority badges, clickable rows |
+| `MorningBriefCard.tsx` | Structured morning brief. HIGH alerts render as large cards (15px/600, left red border, filled orange CTA). MEDIUM/LOW are compact rows. Badge labels: URGENT / ACTION / FYI. |
 | `UploadPanel.tsx` | File upload drawer; opens on `open_upload_panel` event |
 | `WorkerModal.tsx` | Worker created confirmation; opens on `open_worker_modal` event |
 | `EmailDraftModal.tsx` | Draft email for approval; opens on `open_email_draft` event |
 | `MarginCard.tsx` | Per-job margin display with status pills |
-| `AssumptionReview.tsx` | AI assumption resolution (accept / adjust / exclude); also renders SimilarJobsCard and ScopeIntelligenceCard from estimation memory |
+| `AssumptionReview.tsx` | AI assumption resolution (accept / adjust / exclude). Also renders SimilarJobsCard and ScopeIntelligenceCard. Scope hints track accepted/dismissed state locally; accepted count shown in completion banner. |
 | `ActivationModal.tsx` | Job activation confirmation — shows 8 milestones + 5 invoices |
 | `InboundEmailAlert.tsx` | Floating overlay on `inbound_email_alert` event |
 | `IntakeProgress.tsx` | SSE progress bar during PDF extraction; passes `memoryData` to `onComplete` |
+| `VariationCard.tsx` | Inline variation card in chat — approve/reject + "Send to client" share link |
+| `JobListCard.tsx` | Clickable job list rendered when builder asks "show my jobs" |
 
 ### Estimation layer (`components/estimation/`)
 | Component | Role |
 |-----------|------|
 | `SimilarJobsCard.tsx` | Shows matched historical projects with similarity %, quoted/final cost, variance |
-| `ScopeIntelligenceCard.tsx` | Scope gap hints with confidence levels; Accept (adds to scope) / Dismiss per item |
+| `ScopeIntelligenceCard.tsx` | Scope gap hints with confidence levels; Accept / Dismiss per item |
 | `ExplainabilityCard.tsx` | Per-trade confidence bars, similar project range, key drivers, accordion expand |
 
 ### Job panel layer (`components/job/`)
 | Component | Role |
 |-----------|------|
-| `JobSnapshotPanel.tsx` | Right-side split panel — tabbed job detail view |
-| `MobileJobSheet.tsx` | Bottom sheet version on mobile |
-| `tabs/OverviewTab.tsx` | Job summary, milestones, team |
-| `tabs/QuoteTab.tsx` | Quote summary + activate button |
-| `tabs/VariationsTab.tsx` | Variation list + approval flow |
-| `tabs/InvoicesTab.tsx` | Invoice schedule |
-| `tabs/FilesTab.tsx` | Uploaded files |
-| `tabs/CommsTab.tsx` | Communication history |
-| `tabs/ProofTab.tsx` | Proof event timeline grouped by date |
+| `JobSnapshotPanel.tsx` | Right-side split panel. Renders all job data inline (not via tab sub-components). Sections: Client, Financials (hidden when no financial data), Timeline, Next Milestone, Pending Actions, Crew, Tasks, Comms. |
+| `MobileJobSheet.tsx` | Bottom sheet version on mobile — portal-rendered, slide-up animation |
+
+**Note:** `components/job/tabs/` contains OverviewTab, QuoteTab, VariationsTab, InvoicesTab, FilesTab, CommsTab, ProofTab — these files exist but are not imported anywhere. `JobSnapshotPanel.tsx` renders everything inline. The tab files are available for future use if a tabbed layout is adopted.
 
 ### Quote layer (`components/quote/`)
 | Component | Role |
@@ -161,11 +167,13 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 | `QuoteView.tsx` | Full quote modal — category accordion, PC/PS register, sell price per line, confidence indicators |
 | `SendQuoteModal.tsx` | Send quote confirmation with email preview |
 
-### Dashboard (`app/dashboard/`)
+### Dashboard components (`components/dashboard/`)
 | Component | Role |
 |-----------|------|
-| `DashboardShell.tsx` | Command Centre — greeting, stats bar, Universal Drop Zone, alerts/recommendations grid |
-| `components/dashboard/UniversalDropZone.tsx` | Drag-and-drop or click upload (PDF/image) or plain-English question input routing to `/chat?q=...` |
+| `UniversalDropZone.tsx` | Drag-and-drop or click upload (PDF/image) or plain-English question input routing to `/chat?q=...` |
+| `AIRecommendationsSection.tsx` | Recommendation cards |
+| `NeedsAttentionSection.tsx` | Urgent alert tiles |
+| `RecentActivityFeed.tsx` | Activity feed |
 
 ### Shell (`app/chat/`)
 - `page.tsx` — async server component; calls `getSessionUser()`, passes session props to `ChatShell`
@@ -176,6 +184,50 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 - `pendingEmailDraft: { jobId, intentHint }` → ChatInterface opens EmailDraftModal
 - `pendingQuoteView: string | null` (quote_id) → ChatInterface scrolls to quote
 
+### Client-facing pages
+- `app/approve/variation/[variationId]/page.tsx` — mobile-first dark portal where clients approve or reject a variation. Fetches `GET /api/variations/[id]`, submits via `PATCH /api/variations/[id]`. Name confirmation step before finalising. No auth required.
+
+---
+
+## ChatResponse type — key fields
+
+```ts
+interface ChatResponse {
+  intent: string
+  message: string
+  alerts?: Alert[]           // morning brief alert cards
+  follow_up?: string         // injected as second message after morning brief
+  worker?: Worker
+  invite_url?: string
+  job?: Job
+  duplicate?: boolean
+  existing_job?: Job
+  variation?: DemoVariation
+  all_variations?: DemoVariation[]
+  margin_jobs?: MarginJob[]
+  job_list?: JobListItem[]
+  worker_list?: WorkerListItem[]
+  state_changes?: StateChange[]
+  event?: ChatEvent          // backwards-compat single event
+  events?: ChatEvent[]       // primary path
+}
+```
+
+### Alert type
+
+```ts
+interface Alert {
+  priority: 'high' | 'medium' | 'low'
+  message: string             // short address first: "Fitzroy — $28k invoice 3 days overdue."
+  action?: string             // row click label + handler key: 'Chase payment', 'Review variations', etc.
+  quick_action?: string       // one-tap execute button label: 'Send chaser now', 'Approve all ($3,880)'
+  entity_id?: string
+  entity_type?: 'job' | 'invoice' | 'variation' | 'quote'
+}
+```
+
+**Alert copy convention:** lead with the short address (`"Fitzroy —"`), then the specific fact, then the consequence. Never start with a generic verb. Days elapsed must be explicit: `"11 days since job created, no quote sent yet"` not `"no quote sent"`.
+
 ---
 
 ## API Routes (`app/api/`)
@@ -185,14 +237,17 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 | `POST /api/chat` | Main chat handler — intent classification + dispatch |
 | `POST /api/intake/[fileId]` | AI extraction pipeline v2 — 12 SSE stages including memory retrieval and scope intelligence |
 | `POST /api/upload` | File upload to Supabase Storage |
-| `GET /api/dashboard` | Dashboard stats, alerts, recommendations (derived from live job/invoice/variation data) |
+| `GET /api/dashboard` | Dashboard stats, alerts, recommendations |
 | `GET /api/jobs` | Job list for snapshot panel |
 | `GET/POST /api/quotes` | Quote fetch and creation |
 | `GET /api/quotes/[quoteId]` | Full quote with line items grouped by trade category |
 | `GET /api/quotes/[quoteId]/export-pdf` | HTML quote export |
 | `POST /api/quotes/[quoteId]/send` | Send quote to client via Resend |
 | `POST /api/quotes/[quoteId]/revise` | Create revised quote version |
-| `GET/POST /api/variations` | Variation management |
+| `GET/POST /api/variations` | Variation list |
+| `GET /api/variations/[variationId]` | Single variation detail |
+| `PATCH /api/variations/[variationId]` | Client approves/rejects variation (no auth — public) |
+| `POST /api/variations/[variationId]/share` | Generate client approval link |
 | `POST /api/estimation/scope-hints` | Pattern-match scope gaps for a project type |
 | `POST /api/classify-document` | Claude classifies an uploaded PDF/image document type |
 | `GET /api/email-sync/connect` | OAuth initiation (Gmail / Outlook) |
@@ -336,7 +391,22 @@ These appear in the chat header. When bumping the version for a release, update 
 
 ---
 
-## Styling
+## Styling — Non-Negotiable Rules
+
+All components use CSS custom properties. **Never use Tailwind color utilities** (`bg-slate-*`, `text-gray-*`, `bg-white`, etc.) in any authenticated builder-facing component. Use CSS vars:
+
+```
+Backgrounds:   var(--bg-shell)  var(--bg-surface)  var(--bg-elevated)  var(--bg-border)
+Text:          var(--text-primary)  var(--text-secondary)  var(--text-tertiary)
+Brand:         var(--orange-primary)  var(--orange-subtle)
+Status:        var(--status-green)  var(--status-amber)  var(--status-red)  var(--status-blue)
+Pill:          var(--pill-awaiting-bg)  var(--pill-awaiting-border)  var(--pill-awaiting-text)
+```
+
+RGBA equivalents for tinted backgrounds (use when `rgba()` needed):
+- Green bg: `rgba(76,175,80,0.15)` / Red bg: `rgba(244,67,54,0.1)` / Amber bg: `rgba(255,152,0,0.1)` / Blue bg: `rgba(33,150,243,0.1)`
+
+Tailwind **utility classes** (layout, spacing, flex, grid, rounded, etc.) are fine. Only color classes are banned.
 
 - Tailwind CSS 3 with custom `brand` colour palette (orange-based, `brand-500` = `#d88428`)
 - Custom utilities in `tailwind.config.ts`: `.pt-safe`, `.pb-safe`, `.pl-safe`, `.pr-safe` for iPhone safe-area insets
