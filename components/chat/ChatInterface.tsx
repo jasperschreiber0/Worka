@@ -313,6 +313,7 @@ export default function ChatInterface({
   const [loading, setLoading] = useState(false)
   const [hasSentInitial, setHasSentInitial] = useState(false)
   const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
+  const [pendingMorningBriefAction, setPendingMorningBriefAction] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [pendingTask, setPendingTask] = useState<{ description: string; jobs: Array<{ id: string; address: string; status: string }> } | null>(null)
   const [workerModal, setWorkerModal] = useState<WorkerModalState>({
@@ -754,15 +755,19 @@ export default function ChatInterface({
   const sendMessage = useCallback(async (text: string, forceCreate?: boolean) => {
     const trimmed = text.trim()
     if (!trimmed || loading) return
-    const apiMessage =
-      awaitingAddressForNewJob && !trimmed.toLowerCase().startsWith('new job')
-        ? `new job at ${trimmed}`
-        : trimmed
-    setAwaitingAddressForNewJob(false)
-
-    // If we're awaiting an address for a new job, silently prefix the API payload
-    // but NOT when forceCreate is true (that's a button action with a known address already)
-    const apiPayload = (awaitingAddressForNewJob && !forceCreate) ? `new job at ${trimmed}` : trimmed
+    // If user confirms a morning-brief follow-up action ("yes", "sure", "ok", "do it", "yep", "yeah"),
+    // rewrite the API payload to the stored action. Display stays unchanged.
+    const isAffirmative = /^(yes|yep|yeah|sure|ok|okay|do it|go ahead|sounds good|lets do it|let's do it)$/i.test(trimmed)
+    let apiPayload: string
+    if (pendingMorningBriefAction && isAffirmative) {
+      apiPayload = pendingMorningBriefAction
+      setPendingMorningBriefAction(null)
+    } else if (awaitingAddressForNewJob && !trimmed.toLowerCase().startsWith('new job') && !forceCreate) {
+      apiPayload = `new job at ${trimmed}`
+    } else {
+      apiPayload = trimmed
+      if (!isAffirmative) setPendingMorningBriefAction(null)
+    }
     setAwaitingAddressForNewJob(false)
     setPendingTask(null)
 
@@ -849,18 +854,30 @@ export default function ChatInterface({
 
       // After morning brief, inject a proactive follow-up prompt
       if (data.intent?.includes('morning_brief') && data.alerts && data.alerts.length > 0) {
-        // Prefer the server-supplied follow_up; fall back to deriving from top alert
         const topAlert = [...data.alerts].sort((a, b) => {
           const order = { high: 0, medium: 1, low: 2 }
           return order[a.priority] - order[b.priority]
         }).find(a => a.action)
+
+        // Derive the action payload to send if user says "yes"
+        const addrMatch = topAlert?.message?.match(/^([^—]+) —/)
+        const addr = addrMatch?.[1]?.trim()
+        const pendingCmd =
+          topAlert?.action === 'Chase payment' && addr ? `draft payment chaser for ${addr}` :
+          topAlert?.action === 'Review variations' && addr ? `show variations for ${addr}` :
+          topAlert?.action === 'Follow up client' && addr ? `draft follow-up email for ${addr}` :
+          (topAlert?.action === 'Draft quote' || topAlert?.action === 'Review quote') && addr ? `start quote for ${addr}` :
+          null
+
         const followUpContent = (data as { follow_up?: string }).follow_up
-          ?? (topAlert?.action === 'Chase payment' ? "Want me to send the payment chaser now? Takes 30 seconds."
-            : topAlert?.action === 'Review variations' ? `Want me to pull up the variations for your sign-off?`
-            : topAlert?.action === 'Follow up client' ? `Want me to draft a follow-up email to the client?`
-            : topAlert?.action ? `Want me to help with: ${topAlert.action.toLowerCase()}?`
+          ?? (topAlert?.action === 'Chase payment' && addr ? `Want me to send the payment chaser for ${addr} now? Takes 30 seconds.`
+            : topAlert?.action === 'Review variations' && addr ? `Want me to pull up the ${addr} variations for your sign-off?`
+            : topAlert?.action === 'Follow up client' && addr ? `Want me to draft a follow-up email for the ${addr} quote?`
+            : (topAlert?.action === 'Draft quote' || topAlert?.action === 'Review quote') && addr ? `Want me to start the ${addr} quote now?`
             : null)
+
         if (followUpContent) {
+          if (pendingCmd) setPendingMorningBriefAction(pendingCmd)
           setTimeout(() => {
             setMessages(prev => [...prev, {
               id: generateId(),

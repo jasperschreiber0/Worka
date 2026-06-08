@@ -556,9 +556,10 @@ async function getLiveMorningBrief(
       const deadline = new Date(job.quote_deadline)
       const hoursLeft = (deadline.getTime() - Date.now()) / (1000 * 60 * 60)
       const urgency = hoursLeft < 0 ? 'OVERDUE' : hoursLeft < 24 ? `${Math.round(hoursLeft)}h left` : `${Math.round(hoursLeft / 24)} day(s)`
+      const shortAddrD = job.address.split(',')[0]
       alerts.push({
         priority: hoursLeft < 24 ? 'high' : 'medium',
-        message: `Quote deadline for ${job.address} — ${urgency}. Send the quote now or call the client.`,
+        message: `${shortAddrD} — quote deadline ${urgency}. Send the quote now or call the client.`,
         action: hoursLeft < 0 ? 'Draft quote' : 'Review quote',
         entity_id: job.id,
         entity_type: 'job',
@@ -2567,7 +2568,8 @@ async function routeDemoMessage(
     lower.includes('not uploaded') ||
     lower.includes("haven't uploaded") ||
     lower.includes('havent uploaded')
-  if (!uncertainPlan && (lower.includes('upload') || lower.includes('plans') || lower.includes('drawings'))) {
+  const isStartQuote = lower.startsWith('start quote') || lower.startsWith('draft quote for') || lower.startsWith('quote for')
+  if (!uncertainPlan && (lower.includes('upload') || lower.includes('plans') || lower.includes('drawings') || isStartQuote)) {
     if (!actions.some((a) => a.type === 'create_job')) {
       actions.push({ type: 'open_upload_panel', entities: {}, confidence: 85 })
     }
