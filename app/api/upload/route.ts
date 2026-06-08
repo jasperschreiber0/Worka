@@ -68,8 +68,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .createSignedUploadUrl(storagePath)
 
       if (signError || !signData) {
-        console.error('Signed URL error:', signError)
-        return NextResponse.json({ error: 'Failed to create upload URL' }, { status: 500 })
+        const errMsg = signError?.message ?? 'unknown'
+        console.error('Signed URL error:', errMsg, signError)
+        return NextResponse.json(
+          { error: `Storage error: ${errMsg}. Check that the "plans" bucket exists in Supabase Storage and has upload permissions.` },
+          { status: 500 }
+        )
       }
 
       // Ensure builder row exists (no-op if already present — satisfies FK)
@@ -91,8 +95,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .single()
 
       if (dbError || !fileRow) {
-        console.error('DB insert error:', JSON.stringify(dbError))
-        return NextResponse.json({ error: 'Failed to create file record' }, { status: 500 })
+        const dbMsg = typeof dbError === 'object' && dbError !== null && 'message' in dbError ? String((dbError as { message: string }).message) : JSON.stringify(dbError)
+        console.error('DB insert error:', dbMsg)
+        return NextResponse.json({ error: `Database error: ${dbMsg}` }, { status: 500 })
       }
 
       return NextResponse.json(

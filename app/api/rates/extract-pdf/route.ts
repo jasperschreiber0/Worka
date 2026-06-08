@@ -81,7 +81,7 @@ Return ONLY valid JSON:
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const response = await (client.messages.create as any)({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2048,
+      max_tokens: 4096,
       messages: [
         {
           role: 'user',
@@ -94,10 +94,22 @@ Return ONLY valid JSON:
     })
 
     const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
+
+    // Extract JSON — handle both bare JSON and markdown code blocks
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return NextResponse.json({ error: 'Could not extract rates from PDF' }, { status: 422 })
 
-    const parsed = JSON.parse(jsonMatch[0]) as { rates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> }
+    // Repair truncated JSON: if the response was cut off mid-array, close it
+    let rawJson = jsonMatch[0]
+    if (!rawJson.trimEnd().endsWith('}')) {
+      // Find last complete object boundary and close the structure
+      const lastClose = rawJson.lastIndexOf('}')
+      if (lastClose > 0) {
+        rawJson = rawJson.slice(0, lastClose + 1) + ']}'
+      }
+    }
+
+    const parsed = JSON.parse(rawJson) as { rates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> }
 
     const rates: ExtractedRate[] = (parsed.rates ?? []).map((r) => ({
       trade_category_id: r.trade_category_id,

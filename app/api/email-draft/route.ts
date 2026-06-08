@@ -210,7 +210,7 @@ ${contextMessage ? `Additional context from builder: ${contextMessage}` : ''}
 
 Write a professional, clear email that:
 - Is courteous and professional — never use slang, colloquialisms, or casual greetings like "G'day", "Mate", "Hey", "Hi there"
-- Opens with "Dear [Client Name]," or "Hi [First Name]," — never with informal greetings
+- Opens with "Hi [First Name]," using the actual client first name from context — never "Dear Client," or generic openers
 - References the specific job address and client name from the context
 - States the purpose clearly in the first sentence
 - Is concise — 3–5 sentences for follow-ups, slightly longer for detailed matters
@@ -275,11 +275,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
       intent_hint,
     }
 
-    // Try AI draft if API key available
+    // Try AI draft if API key available AND we have job context
+    // Without job context the AI produces a generic, useless email — use fallback instead
     const apiKey = process.env.ANTHROPIC_API_KEY
     let draft: EmailDraft
 
-    if (apiKey) {
+    if (apiKey && jobCtx) {
       const anthropic = new Anthropic({ apiKey })
       draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic)
     } else {
