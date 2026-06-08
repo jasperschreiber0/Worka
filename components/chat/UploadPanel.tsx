@@ -39,13 +39,16 @@ function generateFileId(): string {
 
 // ─── Accepted file types ──────────────────────────────────────────────────────
 
-const ACCEPTED_EXTENSIONS = '.pdf,.dwg,.jpg,.jpeg,.png,.heic'
+const ACCEPTED_EXTENSIONS = '.pdf,.dwg,.jpg,.jpeg,.png,.heic,.csv'
 const ACCEPTED_MIME_TYPES = [
   'application/pdf',
   'image/jpeg',
   'image/png',
   'image/heic',
   'image/heif',
+  'text/csv',
+  'application/csv',
+  'text/plain',
 ]
 
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
@@ -53,7 +56,7 @@ const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 function isAcceptedFile(file: File): boolean {
   if (ACCEPTED_MIME_TYPES.includes(file.type)) return true
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-  return ['pdf', 'dwg', 'jpg', 'jpeg', 'png', 'heic'].includes(ext)
+  return ['pdf', 'dwg', 'jpg', 'jpeg', 'png', 'heic', 'csv'].includes(ext)
 }
 
 // ─── Inner component (rendered inside portal) ─────────────────────────────────
@@ -142,7 +145,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
     const arr = Array.from(incoming)
     const accepted = arr.filter(isAcceptedFile)
     if (accepted.length < arr.length) {
-      showToast('Some files were skipped — only PDF, DWG, JPG, PNG, and HEIC are accepted.')
+      showToast('Some files were skipped — only PDF, DWG, JPG, PNG, HEIC, and CSV are accepted.')
     }
     setFiles((prev) => [
       ...prev,
@@ -407,7 +410,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
                       </p>
                       <p className="text-xs text-slate-500 mt-0.5">or tap to browse</p>
                     </div>
-                    <p className="text-xs text-slate-400">PDF · DWG · Images accepted</p>
+                    <p className="text-xs text-slate-400">PDF · DWG · Images · CSV accepted</p>
                   </>
                 ) : (
                   <div className="w-full space-y-2" onClick={(e) => e.stopPropagation()}>
@@ -509,6 +512,10 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
                   <li className="flex items-start gap-2">
                     <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
                     Engineer drawings
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-slate-400 mt-0.5" aria-hidden="true">•</span>
+                    Estimate spreadsheets (CSV)
                   </li>
                 </ul>
               </div>

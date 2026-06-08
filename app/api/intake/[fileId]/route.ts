@@ -150,12 +150,6 @@ export async function GET(
         // Stage: analysing
         emit('progress', PROGRESS_STAGES[2])
 
-        // Convert to base64 for Anthropic API
-        const fileBuffer = await fileData.arrayBuffer()
-        const base64Data = Buffer.from(fileBuffer).toString('base64')
-        const isPdf = fileRow.file_type === 'pdf'
-        const mediaType = isPdf ? 'application/pdf' : 'image/jpeg'
-
         const Anthropic = (await import('@anthropic-ai/sdk')).default
         const client = new Anthropic({ apiKey: anthropicKey })
 
@@ -176,22 +170,9 @@ export async function GET(
           { id: 13, name: 'Preliminaries' },
         ]
 
-        const extractionPrompt = `You are a quantity surveyor AI for Australian residential construction.
+        const tradeCategoryList = tradeCategories.map((c) => `${c.id}. ${c.name}`).join('\n')
 
-Analyse the provided building plans and extract quantities for each of the 13 trade categories below.
-
-For each line item you identify, provide:
-- trade_category_id (1–13)
-- description (clear item name)
-- quantity (numeric value or null if not determinable)
-- unit (e.g. "m2", "lm", "each", "m3" — or null if not determinable)
-- dimensions_string (e.g. "12.5m × 8.4m" — or null if not extractable from plans)
-- confidence (0–100: 100 = exact from plans, 50 = estimated, 0 = not determinable)
-
-Trade categories:
-${tradeCategories.map((c) => `${c.id}. ${c.name}`).join('\n')}
-
-Return a JSON object:
+        const jsonOutputSchema = `Return a JSON object:
 {
   "line_items": [
     {
@@ -207,11 +188,15 @@ Return a JSON object:
 
 Return ONLY valid JSON. No explanation, no markdown fences.`
 
+        const fileBuffer = await fileData.arrayBuffer()
+        const isCsv =
+          fileRow.filename.toLowerCase().endsWith('.csv') ||
+          fileRow.file_type === 'other'
+
         // Emit extraction stages as we process
         const extractionStages = [3, 4, 5, 6, 7] // indices into PROGRESS_STAGES
         let stageIndex = 0
 
-        // We emit each stage while Anthropic processes
         const stageEmitter = setInterval(() => {
           if (stageIndex < extractionStages.length) {
             emit('progress', PROGRESS_STAGES[extractionStages[stageIndex]])
@@ -222,29 +207,73 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
         let anthropicResponse: string
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const messageContent: any[] = isPdf
-            ? [
-                {
-                  type: 'document',
-                  source: {
-                    type: 'base64',
-                    media_type: 'application/pdf',
-                    data: base64Data,
+          let messageContent: any[]
+
+          if (isCsv) {
+            const csvText = new TextDecoder('utf-8').decode(fileBuffer)
+            messageContent = [
+              {
+                type: 'text',
+                text: `You are a quantity surveyor AI for Australian residential construction.
+
+The builder has uploaded a CSV estimate or bill of quantities. Parse every row and map each line item to the correct trade category below.
+
+For each line item provide:
+- trade_category_id (1–13, best match)
+- description (clear item name from the CSV)
+- quantity (numeric value or null if blank/invalid)
+- unit (unit from CSV, e.g. "m2", "lm", "each", "m3" — or null)
+- dimensions_string (any dimension text found in the row, or null)
+- confidence (0–100: 100 = all fields present and unambiguous)
+
+Trade categories:
+${tradeCategoryList}
+
+CSV content:
+\`\`\`
+${csvText.slice(0, 50000)}
+\`\`\`
+
+${jsonOutputSchema}`,
+              },
+            ]
+          } else {
+            const isPdf = fileRow.file_type === 'pdf'
+            const base64Data = Buffer.from(fileBuffer).toString('base64')
+
+            const extractionPrompt = `You are a quantity surveyor AI for Australian residential construction.
+
+Analyse the provided building plans and extract quantities for each of the 13 trade categories below.
+
+For each line item you identify, provide:
+- trade_category_id (1–13)
+- description (clear item name)
+- quantity (numeric value or null if not determinable)
+- unit (e.g. "m2", "lm", "each", "m3" — or null if not determinable)
+- dimensions_string (e.g. "12.5m × 8.4m" — or null if not extractable from plans)
+- confidence (0–100: 100 = exact from plans, 50 = estimated, 0 = not determinable)
+
+Trade categories:
+${tradeCategoryList}
+
+${jsonOutputSchema}`
+
+            messageContent = isPdf
+              ? [
+                  {
+                    type: 'document',
+                    source: { type: 'base64', media_type: 'application/pdf', data: base64Data },
                   },
-                },
-                { type: 'text', text: extractionPrompt },
-              ]
-            : [
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: 'image/jpeg',
-                    data: base64Data,
+                  { type: 'text', text: extractionPrompt },
+                ]
+              : [
+                  {
+                    type: 'image',
+                    source: { type: 'base64', media_type: 'image/jpeg', data: base64Data },
                   },
-                },
-                { type: 'text', text: extractionPrompt },
-              ]
+                  { type: 'text', text: extractionPrompt },
+                ]
+          }
 
           const response = await client.messages.create({
             model: 'claude-sonnet-4-20250514',

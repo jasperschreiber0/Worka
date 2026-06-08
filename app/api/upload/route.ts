@@ -12,6 +12,9 @@ const ACCEPTED_MIME_TYPES = new Set([
   'image/heic',
   'image/heif',
   'application/octet-stream',
+  'text/csv',
+  'application/csv',
+  'text/plain',
 ])
 
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
@@ -28,8 +31,8 @@ function detectFileType(filename: string): FileType {
 
 function isAcceptedMimeType(mimeType: string): boolean {
   if (ACCEPTED_MIME_TYPES.has(mimeType)) return true
-  // Allow image/* broadly
   if (mimeType.startsWith('image/')) return true
+  if (mimeType.startsWith('text/')) return true
   return false
 }
 
