@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { File as DBFile, FileType, FileIntakeStatus } from '@/lib/types/database.types'
-import { cacheFile } from '@/lib/file-cache'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_FILE_SIZE = 52428800 // 50 MB
-
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -18,49 +16,69 @@ function detectFileType(filename: string): FileType {
   return 'other'
 }
 
+function uniqueStoragePath(builderId: string, jobId: string, filename: string): string {
+  const uid = crypto.randomUUID().slice(0, 8)
+  const ext = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')) : ''
+  const base = filename.includes('.') ? filename.slice(0, filename.lastIndexOf('.')) : filename
+  return `${builderId}/${jobId}/${base}-${uid}${ext}`
+}
+
 // ─── POST /api/upload ─────────────────────────────────────────────────────────
 //
-// Accepts JSON { job_id, builder_id, filename, content_type, size?, file_data? }.
-// file_data: base64-encoded file bytes — if present, cached in memory so the
-// intake pipeline can process without Supabase Storage.
-// In real mode: also creates a Supabase Storage presigned URL for persistent storage.
-// In demo mode: returns a mock file record with upload_url = 'demo://skip'.
+// Accepts small JSON { job_id, builder_id, filename, content_type, size }.
+// NO file bytes — the browser uploads directly to Supabase Storage via the
+// signed URL returned in `upload_url`. This bypasses Vercel's 4.5 MB body limit.
+//
+// Flow:
+//   1. POST /api/upload → creates DB record, returns { file, upload_url }
+//   2. Browser PUTs file bytes to upload_url (direct to Supabase Storage)
+//   3. Browser GETs /api/intake/[fileId] → AI extraction reads from storage
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  let body: { job_id?: string; builder_id?: string; filename?: string; content_type?: string; size?: number; file_data?: string }
+  let body: { job_id?: string; builder_id?: string; filename?: string; content_type?: string; size?: number }
   try {
     body = await req.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { job_id, builder_id: rawBuilderId, filename, content_type, size, file_data } = body
+  const { job_id, builder_id: rawBuilderId, filename, content_type, size } = body
   const builder_id = rawBuilderId ?? DEMO_BUILDER_ID
 
   if (!job_id) return NextResponse.json({ error: 'job_id is required' }, { status: 400 })
   if (!filename) return NextResponse.json({ error: 'filename is required' }, { status: 400 })
 
-  const mimeType = content_type || 'application/octet-stream'
-
   if (size && size > MAX_FILE_SIZE) {
     return NextResponse.json({ error: 'File exceeds maximum size of 50 MB' }, { status: 422 })
   }
 
+  const mimeType = content_type || 'application/octet-stream'
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const isSupabaseConfigured = Boolean(supabaseUrl && supabaseKey)
 
-  // ── Real mode: try Supabase, but always succeed via memory cache ──────────
   if (isSupabaseConfigured) {
     try {
       const { createClient } = await import('@supabase/supabase-js')
       const supabase = createClient(supabaseUrl!, supabaseKey!)
 
-      // Ensure builder row exists
-      await supabase.from('builders').upsert({ id: builder_id }, { onConflict: 'id', ignoreDuplicates: true })
+      const storagePath = uniqueStoragePath(builder_id, job_id, filename)
 
-      // Insert file record
-      const storagePath = `${builder_id}/${job_id}/${filename}`
+      // Create signed upload URL first — if storage isn't set up this will error
+      const { data: signData, error: signError } = await supabase.storage
+        .from('plans')
+        .createSignedUploadUrl(storagePath)
+
+      if (signError || !signData?.signedUrl) {
+        const msg = signError?.message ?? 'Could not create upload URL'
+        console.error('Signed URL error:', msg)
+        return NextResponse.json(
+          { error: `Storage error: ${msg}. Ensure the "plans" bucket exists in Supabase Storage.` },
+          { status: 500 }
+        )
+      }
+
+      // Insert DB record
       const { data: fileRow, error: dbError } = await supabase
         .from('files')
         .insert({
@@ -76,42 +94,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .single()
 
       if (dbError || !fileRow) {
-        const dbMsg = typeof dbError === 'object' && dbError !== null && 'message' in dbError
-          ? String((dbError as { message: string }).message)
-          : JSON.stringify(dbError)
-        console.error('DB insert error:', dbMsg)
-        // Fall through to demo mode rather than failing
-      } else {
-        const dbFile = fileRow as DBFile
-
-        // Cache file bytes in memory so intake works even if storage upload fails
-        if (file_data) {
-          cacheFile(dbFile.id, file_data, mimeType, filename)
-        }
-
-        // Try to get a storage signed URL — non-fatal if it fails
-        let signedUrl = 'memory://cached'
-        try {
-          const { data: signData } = await supabase.storage
-            .from('plans')
-            .createSignedUploadUrl(storagePath)
-          if (signData?.signedUrl) signedUrl = signData.signedUrl
-        } catch {
-          // Storage not configured — intake will use memory cache
-        }
-
-        return NextResponse.json({ file: dbFile, upload_url: signedUrl }, { status: 201 })
+        const msg = (dbError as { message?: string } | null)?.message ?? 'unknown'
+        console.error('DB insert error:', msg)
+        return NextResponse.json({ error: `Database error: ${msg}` }, { status: 500 })
       }
+
+      return NextResponse.json(
+        { file: fileRow as DBFile, upload_url: signData.signedUrl, content_type: mimeType },
+        { status: 201 }
+      )
     } catch (err) {
-      console.error('Upload error:', err)
-      // Fall through to demo mode
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('Upload error:', msg)
+      return NextResponse.json({ error: `Upload failed: ${msg}` }, { status: 500 })
     }
   }
 
-  // ── Demo / fallback mode: return mock file record ─────────────────────────
-  const fileId = crypto.randomUUID()
+  // ── Demo mode ─────────────────────────────────────────────────────────────
   const demoFile: DBFile = {
-    id: fileId,
+    id: crypto.randomUUID(),
     job_id,
     quote_id: null,
     builder_id,
@@ -120,11 +121,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     file_type: detectFileType(filename),
     intake_status: 'uploaded' as FileIntakeStatus,
     created_at: new Date().toISOString(),
-  }
-
-  // Cache file bytes even in demo mode so intake can process them
-  if (file_data) {
-    cacheFile(fileId, file_data, mimeType, filename)
   }
 
   return NextResponse.json({ file: demoFile, upload_url: 'demo://skip' }, { status: 201 })

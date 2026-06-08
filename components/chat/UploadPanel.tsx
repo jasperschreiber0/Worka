@@ -214,18 +214,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   // If Supabase Storage is configured, the server also attempts to persist there.
 
   const uploadSingleFile = useCallback(async (sf: SelectedFile): Promise<DBFile> => {
-    // Read file as base64
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        const result = e.target?.result as string
-        // Strip the data URL prefix (e.g. "data:application/pdf;base64,")
-        resolve(result.split(',')[1] ?? result)
-      }
-      reader.onerror = () => reject(new Error(`Failed to read ${sf.file.name}`))
-      reader.readAsDataURL(sf.file)
-    })
-
+    // Step 1: Register the file with the server (metadata only — no bytes sent through Vercel)
     const res = await fetch('/api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -235,7 +224,6 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         filename: sf.file.name,
         content_type: sf.file.type || 'application/octet-stream',
         size: sf.file.size,
-        file_data: base64,
       }),
     })
 
@@ -244,18 +232,18 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
       throw new Error((body as { error?: string }).error ?? `Failed to upload ${sf.file.name}`)
     }
 
-    const { file: dbFile, upload_url } = await res.json() as { file: DBFile; upload_url: string }
+    const { file: dbFile, upload_url, content_type } = await res.json() as { file: DBFile; upload_url: string; content_type?: string }
 
-    // If Supabase returned a real signed URL, also persist to storage (non-fatal if fails)
-    if (upload_url && !upload_url.startsWith('demo://') && !upload_url.startsWith('memory://')) {
-      try {
-        await fetch(upload_url, {
-          method: 'PUT',
-          body: sf.file,
-          headers: { 'Content-Type': sf.file.type || 'application/octet-stream' },
-        })
-      } catch {
-        // Non-fatal — file is already cached in memory for intake
+    // Step 2: Upload file bytes directly to Supabase Storage via signed URL (bypasses Vercel)
+    if (upload_url && !upload_url.startsWith('demo://')) {
+      const putRes = await fetch(upload_url, {
+        method: 'PUT',
+        body: sf.file,
+        headers: { 'Content-Type': content_type ?? sf.file.type ?? 'application/octet-stream' },
+      })
+      if (!putRes.ok) {
+        const errText = await putRes.text().catch(() => putRes.statusText)
+        throw new Error(`Storage upload failed: ${errText}`)
       }
     }
 
