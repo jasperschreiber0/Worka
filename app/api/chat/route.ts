@@ -746,6 +746,12 @@ async function createWorker(params: CreateWorkerParams): Promise<CreateWorkerRes
       auth: { autoRefreshToken: false, persistSession: false },
     })
 
+    // Ensure builder row exists
+    await supabase.from('builders').upsert(
+      { id: builder_id, email: '', name: builder_id },
+      { onConflict: 'id', ignoreDuplicates: true }
+    )
+
     const { data: workerRow, error } = await supabase
       .from('workers')
       .insert({
@@ -889,6 +895,12 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
       const supabase = createClient(supabaseUrl, serviceRoleKey, {
         auth: { autoRefreshToken: false, persistSession: false },
       })
+
+      // Ensure builder row exists — handles users who signed up before the trigger was applied
+      await supabase.from('builders').upsert(
+        { id: builder_id, email: '', name: builder_id },
+        { onConflict: 'id', ignoreDuplicates: true }
+      )
 
       if (!force_create) {
         const firstTokens = address.trim().split(/\s+/).slice(0, 3).join(' ')

@@ -62,6 +62,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const { createClient } = await import('@supabase/supabase-js')
       const supabase = createClient(supabaseUrl!, supabaseKey!)
 
+      // Ensure builder row exists for users who signed up before the trigger was applied
+      await supabase.from('builders').upsert(
+        { id: builder_id, email: '', name: builder_id },
+        { onConflict: 'id', ignoreDuplicates: true }
+      )
+
       const storagePath = uniqueStoragePath(builder_id, job_id, filename)
 
       // Create signed upload URL first — if storage isn't set up this will error
