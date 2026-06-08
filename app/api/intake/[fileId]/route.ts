@@ -350,13 +350,23 @@ export async function GET(
 
         emit('progress', PROGRESS_STAGES[2]) // analysing
 
-        const isPdf = (cached?.mediaType ?? primaryMediaType ?? '').includes('pdf') || fileRow?.file_type === 'pdf'
+        const detectedMediaType = cached?.mediaType ?? primaryMediaType ?? ''
+        const isPdf = detectedMediaType.includes('pdf') || fileRow?.file_type === 'pdf'
+        const isCsv = detectedMediaType.includes('csv') || detectedMediaType.includes('text/plain')
+          || fileRow?.filename?.toLowerCase().endsWith('.csv')
         const mediaType = isPdf ? 'application/pdf' : 'image/jpeg'
 
+        // CSV: decode as UTF-8 text and inject as a text block
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const docBlock: any = isPdf
-          ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Data } }
-          : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } }
+        let docBlock: any
+        if (isCsv) {
+          const csvText = Buffer.from(base64Data, 'base64').toString('utf-8')
+          docBlock = { type: 'text', text: `CSV FILE CONTENTS:\n\`\`\`\n${csvText.slice(0, 60000)}\n\`\`\`` }
+        } else if (isPdf) {
+          docBlock = { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Data } }
+        } else {
+          docBlock = { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } }
+        }
 
         // Load sibling files — check memory cache first, then Supabase Storage
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -365,12 +375,18 @@ export async function GET(
           try {
             const sibCached = getCachedFile(sibId)
             if (sibCached) {
+              const sibIsCsv = sibCached.mediaType.includes('csv') || sibCached.mediaType.includes('text/plain') || sibCached.filename?.toLowerCase().endsWith('.csv')
               const sibIsPdf = sibCached.mediaType.includes('pdf')
-              siblingBlocks.push(
-                sibIsPdf
-                  ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibCached.base64 } }
-                  : { type: 'image', source: { type: 'base64', media_type: sibCached.mediaType, data: sibCached.base64 } }
-              )
+              if (sibIsCsv) {
+                const sibText = Buffer.from(sibCached.base64, 'base64').toString('utf-8')
+                siblingBlocks.push({ type: 'text', text: `CSV FILE CONTENTS (${sibCached.filename ?? 'file'}):\n\`\`\`\n${sibText.slice(0, 30000)}\n\`\`\`` })
+              } else {
+                siblingBlocks.push(
+                  sibIsPdf
+                    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibCached.base64 } }
+                    : { type: 'image', source: { type: 'base64', media_type: sibCached.mediaType, data: sibCached.base64 } }
+                )
+              }
               continue
             }
             if (!supabase) continue
