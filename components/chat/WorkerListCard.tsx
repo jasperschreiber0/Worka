@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
 
 export interface WorkerListItem {
   id: string
@@ -32,7 +32,7 @@ interface WorkerListCardProps {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function statusPillStyle(status: string): React.CSSProperties {
+function statusPillStyle(status: string): CSSProperties {
   if (status === 'active') return { backgroundColor: 'rgba(76,175,80,0.12)', color: 'var(--status-green)' }
   if (status === 'invited') return { backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' }
   return { backgroundColor: 'var(--bg-elevated)', color: 'var(--text-tertiary)' }
@@ -47,7 +47,7 @@ function parseTasks(raw: string): ParsedTask[] {
     .map((text, i) => ({ text, key: `${i}-${text}` }))
 }
 
-const INPUT_STYLE: React.CSSProperties = {
+const INPUT_STYLE: CSSProperties = {
   width: '100%',
   fontSize: 13,
   padding: '6px 10px',
@@ -58,7 +58,7 @@ const INPUT_STYLE: React.CSSProperties = {
   outline: 'none',
 }
 
-const LABEL_STYLE: React.CSSProperties = {
+const LABEL_STYLE: CSSProperties = {
   display: 'block',
   fontSize: 11,
   color: 'var(--text-tertiary)',
@@ -311,6 +311,7 @@ function WorkerRow({
   onUpdated,
   onRemoved,
 }: {
+  key?: string
   worker: WorkerListItem
   builderId: string
   onUpdated?: (w: WorkerListItem) => void

@@ -206,12 +206,24 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   )
 
   // ── Upload handler ────────────────────────────────────────────────────────
-  // Two-step: (1) POST metadata → get presigned URL + DB record,
-  //           (2) PUT file bytes directly to Supabase Storage.
-  // This bypasses Vercel's 4.5 MB request body limit for large plan files.
+  // Sends file bytes as base64 in the JSON body so the server can cache them
+  // in memory for the intake pipeline — no Supabase Storage required.
+  // If Supabase Storage is configured, the server also attempts to persist there.
 
   const uploadSingleFile = useCallback(async (sf: SelectedFile): Promise<DBFile> => {
-    const metaRes = await fetch('/api/upload', {
+    // Read file as base64
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        const result = e.target?.result as string
+        // Strip the data URL prefix (e.g. "data:application/pdf;base64,")
+        resolve(result.split(',')[1] ?? result)
+      }
+      reader.onerror = () => reject(new Error(`Failed to read ${sf.file.name}`))
+      reader.readAsDataURL(sf.file)
+    })
+
+    const res = await fetch('/api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -220,23 +232,28 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         filename: sf.file.name,
         content_type: sf.file.type || 'application/octet-stream',
         size: sf.file.size,
+        file_data: base64,
       }),
     })
 
-    if (!metaRes.ok) {
-      const body = await metaRes.json().catch(() => ({ error: 'Upload failed' }))
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: 'Upload failed' }))
       throw new Error((body as { error?: string }).error ?? `Failed to upload ${sf.file.name}`)
     }
 
-    const { file: dbFile, upload_url } = await metaRes.json() as { file: DBFile; upload_url: string }
+    const { file: dbFile, upload_url } = await res.json() as { file: DBFile; upload_url: string }
 
-    if (upload_url && !upload_url.startsWith('demo://')) {
-      const putRes = await fetch(upload_url, {
-        method: 'PUT',
-        body: sf.file,
-        headers: { 'Content-Type': sf.file.type || 'application/octet-stream' },
-      })
-      if (!putRes.ok) throw new Error(`Storage transfer failed for ${sf.file.name}`)
+    // If Supabase returned a real signed URL, also persist to storage (non-fatal if fails)
+    if (upload_url && !upload_url.startsWith('demo://') && !upload_url.startsWith('memory://')) {
+      try {
+        await fetch(upload_url, {
+          method: 'PUT',
+          body: sf.file,
+          headers: { 'Content-Type': sf.file.type || 'application/octet-stream' },
+        })
+      } catch {
+        // Non-fatal — file is already cached in memory for intake
+      }
     }
 
     return dbFile

@@ -234,7 +234,12 @@ export async function GET(
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const anthropicKey = process.env.ANTHROPIC_API_KEY
-  const isRealMode = Boolean(supabaseUrl && supabaseKey && anthropicKey)
+
+  // Real mode requires Anthropic key + file data available (via memory cache OR Supabase).
+  // We no longer require Supabase Storage — files are cached in memory at upload time.
+  const { getCachedFile } = await import('@/lib/file-cache')
+  const hasFileData = Boolean(getCachedFile(fileId)) || Boolean(supabaseUrl && supabaseKey)
+  const isRealMode = Boolean(anthropicKey && hasFileData)
 
   const encoder = new TextEncoder()
 
@@ -289,45 +294,63 @@ export async function GET(
       try {
         emit('progress', PROGRESS_STAGES[0]) // uploading
 
-        const { createClient } = await import('@supabase/supabase-js')
-        const supabase = createClient(supabaseUrl!, supabaseKey!)
         const Anthropic = (await import('@anthropic-ai/sdk')).default
         const client = new Anthropic({ apiKey: anthropicKey })
 
-        // Fetch file record
-        const { data: fileRow, error: fileErr } = await supabase
-          .from('files')
-          .select('*')
-          .eq('id', fileId)
-          .single()
-
-        if (fileErr || !fileRow) {
-          emit('error', { message: 'File not found' })
-          controller.close()
-          return
+        // Supabase is optional — memory cache is the primary file source
+        const hasSupabase = Boolean(supabaseUrl && supabaseKey)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let supabase: any = null
+        if (hasSupabase) {
+          const { createClient } = await import('@supabase/supabase-js')
+          supabase = createClient(supabaseUrl!, supabaseKey!)
         }
 
-        await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId)
+        // Fetch file record from DB if Supabase available — otherwise proceed with cache only
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let fileRow: any = null
+        if (supabase) {
+          const { data, error: fileErr } = await supabase
+            .from('files')
+            .select('*')
+            .eq('id', fileId)
+            .single()
+          if (!fileErr) fileRow = data
+          await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId).catch(() => {})
+        }
 
         emit('progress', PROGRESS_STAGES[1]) // reading
 
-        // Download file
-        const { data: fileData, error: downloadErr } = await supabase.storage
-          .from('plans')
-          .download(fileRow.storage_path)
+        // ── Load primary file — check memory cache first, then Supabase Storage ──
+        const { getCachedFile } = await import('@/lib/file-cache')
+        const cached = getCachedFile(fileId)
 
-        if (downloadErr || !fileData) {
-          emit('error', { message: 'Failed to read file from storage' })
-          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
-          controller.close()
-          return
+        let base64Data: string
+        let primaryMediaType: string
+
+        if (cached) {
+          base64Data = cached.base64
+          primaryMediaType = cached.mediaType
+        } else {
+          const { data: fileData, error: downloadErr } = await supabase.storage
+            .from('plans')
+            .download(fileRow.storage_path)
+
+          if (downloadErr || !fileData) {
+            emit('error', { message: 'File not found in storage. Make sure the Supabase "plans" bucket exists and files are uploaded before processing.' })
+            await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
+            controller.close()
+            return
+          }
+
+          const fileBuffer = await fileData.arrayBuffer()
+          base64Data = Buffer.from(fileBuffer).toString('base64')
+          primaryMediaType = fileRow?.file_type === 'pdf' ? 'application/pdf' : 'image/jpeg'
         }
 
         emit('progress', PROGRESS_STAGES[2]) // analysing
 
-        const fileBuffer = await fileData.arrayBuffer()
-        const base64Data = Buffer.from(fileBuffer).toString('base64')
-        const isPdf = fileRow.file_type === 'pdf'
+        const isPdf = (cached?.mediaType ?? primaryMediaType ?? '').includes('pdf') || fileRow?.file_type === 'pdf'
         const mediaType = isPdf ? 'application/pdf' : 'image/jpeg'
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -335,11 +358,22 @@ export async function GET(
           ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Data } }
           : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } }
 
-        // Load sibling files (additional documents from the same upload batch)
+        // Load sibling files — check memory cache first, then Supabase Storage
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const siblingBlocks: any[] = []
-        for (const sibId of siblingFileIds.slice(0, 4)) { // cap at 4 siblings
+        for (const sibId of siblingFileIds.slice(0, 6)) { // support up to 6 siblings (7 total)
           try {
+            const sibCached = getCachedFile(sibId)
+            if (sibCached) {
+              const sibIsPdf = sibCached.mediaType.includes('pdf')
+              siblingBlocks.push(
+                sibIsPdf
+                  ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibCached.base64 } }
+                  : { type: 'image', source: { type: 'base64', media_type: sibCached.mediaType, data: sibCached.base64 } }
+              )
+              continue
+            }
+            if (!supabase) continue
             const { data: sibRow } = await supabase.from('files').select('*').eq('id', sibId).single()
             if (!sibRow) continue
             const { data: sibData } = await supabase.storage.from('plans').download(sibRow.storage_path)
@@ -515,7 +549,7 @@ export async function GET(
         } catch {
           console.error('[intake] Malformed AI response:', anthropicResponse?.slice(0, 200))
           emit('error', { message: 'Could not extract line items from the plans — the PDF may be unclear or image-based.' })
-          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+          if (supabase) await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
           controller.close()
           return
         }
@@ -553,99 +587,89 @@ export async function GET(
         const explainability = buildExplainability(lineItems, similarProjects, projectMetadata)
         void confidenceSummary // used for future explainability enrichment
 
-        const { data: quoteRow, error: quoteErr } = await supabase
-          .from('quotes')
-          .insert({
-            job_id,
-            builder_id,
-            status: 'draft',
-            total_cost: null,
-            margin_pct: null,
-            confidence_score: null,
-            version: 1,
-          })
-          .select()
-          .single()
+        // ── Step 7: Persist to DB if Supabase available, otherwise use memory ──
+        let quoteId = `quote-${fileId.slice(0, 8)}`
 
-        if (quoteErr || !quoteRow) {
-          emit('error', { message: 'Failed to create quote' })
-          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
-          controller.close()
-          return
-        }
+        if (supabase) {
+          try {
+            const { data: quoteRow, error: quoteErr } = await supabase
+              .from('quotes')
+              .insert({
+                job_id,
+                builder_id,
+                status: 'draft',
+                total_cost: null,
+                margin_pct: null,
+                confidence_score: null,
+                version: 1,
+              })
+              .select()
+              .single()
 
-        if (validatedItems.length > 0) {
-          const lineItemInserts = validatedItems
-            .filter(item => item.assumption_status !== 'excluded')
-            .map(item => ({
-              quote_id: quoteRow.id,
-              trade_category_id: item.trade_category_id,
-              description: item.description,
-              quantity: item.quantity,
-              unit: item.unit,
-              rate: null,
-              total: null,
-              confidence: item.confidence,
-              dimensions_string: item.dimensions_string,
-              is_assumption: item.is_assumption,
-              assumption_status: item.assumption_status ?? null,
-              pricing_type: item.pricing_type ?? 'measured',
-              source_ref: item.source_ref ?? null,
-              margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
-              labour_cost: item.labour_cost ?? null,
-              material_cost: item.material_cost ?? null,
-              subcontract_cost: item.subcontract_cost ?? null,
-              plant_cost: item.plant_cost ?? null,
-            }))
+            if (!quoteErr && quoteRow) {
+              quoteId = quoteRow.id
 
-          const { data: insertedItems } = await supabase
-            .from('quote_line_items')
-            .insert(lineItemInserts)
-            .select()
+              if (validatedItems.length > 0) {
+                const lineItemInserts = validatedItems
+                  .filter(item => item.assumption_status !== 'excluded')
+                  .map(item => ({
+                    quote_id: quoteRow.id,
+                    trade_category_id: item.trade_category_id,
+                    description: item.description,
+                    quantity: item.quantity,
+                    unit: item.unit,
+                    rate: null,
+                    total: null,
+                    confidence: item.confidence,
+                    dimensions_string: item.dimensions_string,
+                    is_assumption: item.is_assumption,
+                    assumption_status: item.assumption_status ?? null,
+                    pricing_type: item.pricing_type ?? 'measured',
+                    source_ref: item.source_ref ?? null,
+                    margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
+                    labour_cost: item.labour_cost ?? null,
+                    material_cost: item.material_cost ?? null,
+                    subcontract_cost: item.subcontract_cost ?? null,
+                    plant_cost: item.plant_cost ?? null,
+                  }))
 
-          if (insertedItems && assumptions.length > 0) {
-            const assumptionInserts = assumptions.map(a => {
-              const matchingItem = insertedItems.find(li => li.description === a.description)
-              return {
-                quote_id: quoteRow.id,
-                line_item_id: matchingItem?.id ?? null,
-                description: a.message,
-                resolution_type: null,
-                resolved_at: null,
-                resolved_by: null,
+                const { data: insertedItems } = await supabase
+                  .from('quote_line_items')
+                  .insert(lineItemInserts)
+                  .select()
+
+                if (insertedItems && assumptions.length > 0) {
+                  const assumptionInserts = assumptions.map(a => {
+                    const matchingItem = insertedItems.find((li: { description: string }) => li.description === a.description)
+                    return {
+                      quote_id: quoteRow.id,
+                      line_item_id: matchingItem?.id ?? null,
+                      description: a.message,
+                      resolution_type: null,
+                      resolved_at: null,
+                      resolved_by: null,
+                    }
+                  })
+                  await supabase.from('assumptions').insert(assumptionInserts).catch(() => {})
+                }
               }
-            })
-            await supabase.from('assumptions').insert(assumptionInserts)
+
+              await supabase.from('project_memory').upsert({
+                job_id, builder_id, quote_id: quoteRow.id, status: 'draft', ...projectMetadata,
+              }, { onConflict: 'job_id' }).catch(() => {})
+
+              await supabase.from('quotes')
+                .update({ metadata: { explainability, similar_project_count: similarProjects.length } })
+                .eq('id', quoteRow.id).catch(() => {})
+
+              await supabase.from('files')
+                .update({ intake_status: 'extracted', quote_id: quoteRow.id })
+                .eq('id', fileId).catch(() => {})
+            }
+          } catch {
+            // Non-fatal — quote ID already set to memory-based ID
           }
         }
-
-        // ── Step 8: Store project memory ──────────────────────────────────
-        try {
-          await supabase.from('project_memory').upsert({
-            job_id,
-            builder_id,
-            quote_id: quoteRow.id,
-            status: 'draft',
-            ...projectMetadata,
-          }, { onConflict: 'job_id' })
-        } catch {
-          // Non-fatal
-        }
-
-        // ── Step 9: Store explainability against quote ─────────────────────
-        try {
-          await supabase
-            .from('quotes')
-            .update({ metadata: { explainability, similar_project_count: similarProjects.length } })
-            .eq('id', quoteRow.id)
-        } catch {
-          // Non-fatal
-        }
-
-        await supabase
-          .from('files')
-          .update({ intake_status: 'extracted', quote_id: quoteRow.id })
-          .eq('id', fileId)
 
         const unresolvedCount = assumptions.filter(a => a.gate !== 3).length
 
@@ -653,7 +677,7 @@ export async function GET(
           stage: 'complete',
           message: `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.`,
           pct: 100,
-          quote_id: quoteRow.id,
+          quote_id: quoteId,
           assumption_count: unresolvedCount,
           similar_projects: similarProjects,
           scope_hints: scopeHints,
