@@ -584,10 +584,40 @@ export default function JobSnapshotPanel({
                 let nextLabel: string
                 let timing: string | null = null
                 if (displayStatus === 'quoting') {
+                  // If no quote exists yet, show upload CTA instead
+                  if (!snapshot?.quote && onUploadPlans && job) {
+                    return (
+                      <div style={{ padding: '4px 2px 8px' }}>
+                        <button
+                          type="button"
+                          onClick={() => onUploadPlans(job)}
+                          style={{
+                            width: '100%',
+                            padding: '10px 14px',
+                            backgroundColor: 'var(--orange-primary)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 8,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                          }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                          </svg>
+                          Upload plans to start quote
+                        </button>
+                      </div>
+                    )
+                  }
                   nextLabel = 'Send quote'
                   const qDeadline = snapshot?.job.quote_deadline
                   if (qDeadline) {
-                    // quote_deadline is relative string like "in 2 days" or "3 days ago"
                     timing = qDeadline
                   }
                 } else if (displayStatus === 'quoted') {

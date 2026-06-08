@@ -332,12 +332,19 @@ export async function GET(
           base64Data = cached.base64
           primaryMediaType = cached.mediaType
         } else {
+          if (!fileRow) {
+            emit('error', { message: 'File record not found — the upload may not have completed. Please try uploading again.' })
+            controller.close()
+            return
+          }
+
           const { data: fileData, error: downloadErr } = await supabase.storage
             .from('plans')
             .download(fileRow.storage_path)
 
           if (downloadErr || !fileData) {
-            emit('error', { message: 'File not found in storage. Make sure the Supabase "plans" bucket exists and files are uploaded before processing.' })
+            const storageMsg = (downloadErr as { message?: string } | null)?.message ?? 'unknown'
+            emit('error', { message: `File not found in storage (${storageMsg}). Make sure the Supabase "plans" bucket exists and the file uploaded successfully.` })
             await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
             controller.close()
             return
@@ -506,11 +513,19 @@ export async function GET(
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const response = await (client.messages.create as any)({
-            model: 'claude-sonnet-4-20250514',
+            model: 'claude-sonnet-4-6',
             max_tokens: 4096,
             messages: [{ role: 'user', content: [...allDocBlocks, { type: 'text', text: extractionPrompt }] }],
           })
           anthropicResponse = response.content[0]?.type === 'text' ? response.content[0].text : ''
+        } catch (aiErr) {
+          clearInterval(stageEmitter)
+          const aiMsg = aiErr instanceof Error ? aiErr.message : String(aiErr)
+          console.error('[intake] Anthropic extraction error:', aiMsg)
+          emit('error', { message: `AI extraction failed: ${aiMsg}` })
+          if (supabase) await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
+          controller.close()
+          return
         } finally {
           clearInterval(stageEmitter)
         }
