@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import type { EstimateTotals } from '@/lib/intake-store'
 import SendQuoteModal from './SendQuoteModal'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -40,6 +41,7 @@ interface QuoteApiResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
+  estimate?: EstimateTotals | null
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -199,13 +201,32 @@ function LineItemRow({ item }: LineItemRowProps) {
     <div className={rowClass} role="row">
       {/* Description — takes most space */}
       <div className="flex-1 min-w-0">
-        <span className={`text-sm leading-tight block truncate ${textClass}`}>
-          {item.description}
+        <span className={`text-sm leading-tight block ${textClass}`}>
+          <span className="truncate">{item.description}</span>
+          {item.item_type === 'pc_allowance' && (
+            <span
+              className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-semibold uppercase tracking-wide align-middle"
+              title="PC allowance — to be confirmed"
+            >
+              PC
+            </span>
+          )}
+          {item.item_type === 'provisional_sum' && (
+            <span
+              className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-semibold uppercase tracking-wide align-middle"
+              title="Provisional sum — requires quote"
+            >
+              PS
+            </span>
+          )}
         </span>
         {item.dimensions_string && !isExcluded && (
           <span className="text-xs text-slate-400 block truncate mt-0.5">
             {item.dimensions_string}
           </span>
+        )}
+        {item.notes && !isExcluded && (
+          <span className="text-xs text-slate-400 block mt-0.5">{item.notes}</span>
         )}
       </div>
 
@@ -343,9 +364,10 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
 
 interface SummaryCardProps {
   summary: QuoteSummary
+  estimate?: EstimateTotals | null
 }
 
-function SummaryCard({ summary }: SummaryCardProps) {
+function SummaryCard({ summary, estimate }: SummaryCardProps) {
   const confidenceLabel =
     summary.confidence_score >= 80
       ? 'High confidence'
@@ -359,16 +381,57 @@ function SummaryCard({ summary }: SummaryCardProps) {
         <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Summary</h3>
       </div>
       <div className="divide-y divide-slate-100">
-        <div className="flex items-center justify-between px-4 py-2.5">
-          <span className="text-sm text-slate-600">Total cost</span>
-          <span className="text-sm font-bold text-slate-900 tabular-nums">
-            {formatCurrency(summary.total_cost)}
-          </span>
-        </div>
-        <div className="flex items-center justify-between px-4 py-2.5">
-          <span className="text-sm text-slate-600">Margin</span>
-          <span className="text-sm font-semibold text-slate-900">{summary.margin_pct}%</span>
-        </div>
+        {estimate ? (
+          <>
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <span className="text-sm text-slate-600">Direct cost (ex GST)</span>
+              <span className="text-sm font-semibold text-slate-900 tabular-nums">
+                {formatCurrency(estimate.subtotal)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <span className="text-sm text-slate-600">
+                Contingency ({estimate.contingency_pct}%)
+              </span>
+              <span className="text-sm font-semibold text-slate-900 tabular-nums">
+                {formatCurrency(estimate.contingency_amount)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <span className="text-sm text-slate-600">
+                Builder&apos;s margin ({estimate.margin_pct}%)
+              </span>
+              <span className="text-sm font-semibold text-slate-900 tabular-nums">
+                {formatCurrency(estimate.margin_amount)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <span className="text-sm text-slate-600">GST ({estimate.gst_pct}%)</span>
+              <span className="text-sm font-semibold text-slate-900 tabular-nums">
+                {formatCurrency(estimate.gst_amount)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50">
+              <span className="text-sm font-semibold text-slate-800">Total (inc GST)</span>
+              <span className="text-sm font-bold text-slate-900 tabular-nums">
+                {formatCurrency(estimate.total_inc_gst)}
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <span className="text-sm text-slate-600">Total cost</span>
+              <span className="text-sm font-bold text-slate-900 tabular-nums">
+                {formatCurrency(summary.total_cost)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <span className="text-sm text-slate-600">Margin</span>
+              <span className="text-sm font-semibold text-slate-900">{summary.margin_pct}%</span>
+            </div>
+          </>
+        )}
         <div className="flex items-center justify-between px-4 py-2.5">
           <span className="text-sm text-slate-600">Confidence</span>
           <div className="flex items-center gap-2">
@@ -432,6 +495,58 @@ function SummaryCard({ summary }: SummaryCardProps) {
             </span>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ─── PC allowance / provisional sum schedule ──────────────────────────────────
+
+function AllowanceScheduleCard({ items }: { items: DemoQuoteLineItem[] }) {
+  const allowances = items.filter(
+    (i) =>
+      (i.item_type === 'pc_allowance' || i.item_type === 'provisional_sum') &&
+      i.assumption_status !== 'excluded'
+  )
+  if (allowances.length === 0) return null
+
+  const total = allowances.reduce((sum, i) => sum + (i.total ?? 0), 0)
+
+  return (
+    <div className="mx-4 mb-4 border border-amber-200 rounded-xl overflow-hidden shadow-sm">
+      <div className="bg-amber-50 px-4 py-2 border-b border-amber-200 flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-amber-700 uppercase tracking-wide">
+          PC allowances &amp; provisional sums
+        </h3>
+        <span className="text-xs font-semibold text-amber-700 tabular-nums">
+          {formatCurrency(total)}
+        </span>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {allowances.map((item) => (
+          <div key={item.id} className="flex items-start justify-between gap-3 px-4 py-2">
+            <div className="min-w-0">
+              <span className="text-sm text-slate-800 block">
+                {item.description}
+                <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600">
+                  {item.item_type === 'pc_allowance' ? 'PC' : 'PS'}
+                </span>
+              </span>
+              {item.notes && (
+                <span className="text-xs text-slate-400 block mt-0.5">{item.notes}</span>
+              )}
+            </div>
+            <span className="text-sm font-medium text-slate-900 tabular-nums flex-shrink-0">
+              {formatTotal(item.total)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="px-4 py-2 bg-amber-50/50 border-t border-amber-100">
+        <p className="text-xs text-amber-700">
+          These amounts are allowances only — confirm selections or obtain supplier quotes
+          before relying on them.
+        </p>
       </div>
     </div>
   )
@@ -782,7 +897,12 @@ function QuoteViewInner({
           {!isLoading && !error && data && (
             <div className="pt-4 pb-2">
               {/* Summary card */}
-              <SummaryCard summary={data.summary} />
+              <SummaryCard summary={data.summary} estimate={data.estimate} />
+
+              {/* PC allowances & provisional sums */}
+              <AllowanceScheduleCard
+                items={data.line_items_by_category.flatMap((g) => g.items)}
+              />
 
               {/* Category sections */}
               {data.line_items_by_category.map((group) => (

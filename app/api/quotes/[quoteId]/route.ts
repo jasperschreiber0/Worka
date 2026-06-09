@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import { getGeneratedQuote, type EstimateTotals } from '@/lib/intake-store'
+import { computeEstimateTotals, DEFAULT_CONTINGENCY_PCT, DEFAULT_GST_PCT } from '@/lib/estimate'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -26,6 +28,8 @@ interface QuoteResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
+  /** Estimate breakdown (subtotal, contingency, margin, GST) when available */
+  estimate?: EstimateTotals | null
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -97,6 +101,18 @@ export async function GET(
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const isRealMode = Boolean(supabaseUrl && supabaseKey)
 
+  // ── AI-generated quote held in memory (no Supabase configured) ────────────
+  const generated = getGeneratedQuote(quoteId)
+  if (generated) {
+    const response: QuoteResponse = {
+      quote: generated.quote,
+      line_items_by_category: groupByCategory(generated.items),
+      summary: computeSummary(generated.quote, generated.items),
+      estimate: generated.estimate,
+    }
+    return NextResponse.json(response)
+  }
+
   // ── Demo mode ──────────────────────────────────────────────────────────────
   if (!isRealMode || quoteId === 'demo-quote-id') {
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
@@ -116,19 +132,12 @@ export async function GET(
     const { createClient } = await import('@supabase/supabase-js')
     const supabase = createClient(supabaseUrl!, supabaseKey!)
 
-    // Fetch the quote with job address
+    // Fetch the quote with job address (select * so optional estimate columns
+    // from migration 008 are included when present)
     const { data: quoteRow, error: quoteErr } = await supabase
       .from('quotes')
       .select(`
-        id,
-        job_id,
-        builder_id,
-        status,
-        total_cost,
-        margin_pct,
-        confidence_score,
-        version,
-        created_at,
+        *,
         jobs (
           address
         )
@@ -147,18 +156,7 @@ export async function GET(
     const { data: lineRows, error: lineErr } = await supabase
       .from('quote_line_items')
       .select(`
-        id,
-        quote_id,
-        trade_category_id,
-        description,
-        quantity,
-        unit,
-        rate,
-        total,
-        confidence,
-        dimensions_string,
-        is_assumption,
-        assumption_status,
+        *,
         trade_categories (
           id,
           name
@@ -204,16 +202,29 @@ export async function GET(
         dimensions_string: row.dimensions_string ?? null,
         is_assumption: row.is_assumption ?? false,
         assumption_status: (row.assumption_status ?? null) as DemoQuoteLineItem['assumption_status'],
+        item_type: (row.item_type ?? null) as DemoQuoteLineItem['item_type'],
+        pricing_basis: (row.pricing_basis ?? null) as DemoQuoteLineItem['pricing_basis'],
+        notes: row.notes ?? null,
       }
     })
 
     const line_items_by_category = groupByCategory(items)
     const summary = computeSummary(quote, items)
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const quoteAny = quoteRow as any
+    const estimate = computeEstimateTotals(
+      items.map((i) => ({ total: i.total, assumption_status: i.assumption_status })),
+      Number(quoteAny.contingency_pct ?? DEFAULT_CONTINGENCY_PCT),
+      Number(quoteRow.margin_pct ?? 18),
+      Number(quoteAny.gst_pct ?? DEFAULT_GST_PCT)
+    )
+
     const response: QuoteResponse = {
       quote,
       line_items_by_category,
       summary,
+      estimate,
     }
 
     return NextResponse.json(response)

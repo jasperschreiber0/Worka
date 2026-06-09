@@ -5,10 +5,10 @@ import { useEffect, useRef, useState } from 'react'
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface IntakeProgressProps {
-  fileId: string
+  fileIds: string[]
   jobId: string
   builderId: string
-  filename: string
+  filenames: string[]
   onComplete: (quoteId: string, assumptionCount: number) => void
   onError: () => void
 }
@@ -42,10 +42,10 @@ const STAGE_LABELS: Record<string, string> = {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function IntakeProgress({
-  fileId,
+  fileIds,
   jobId,
   builderId,
-  filename,
+  filenames,
   onComplete,
   onError,
 }: IntakeProgressProps) {
@@ -61,8 +61,14 @@ export default function IntakeProgress({
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
 
+  const prevMessageRef = useRef<string | null>(null)
+
+  // Stable key so re-renders with an equivalent array don't reopen the stream
+  const fileIdsParam = fileIds.join(',')
+
   useEffect(() => {
-    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}`
+    const primaryFileId = fileIdsParam.split(',')[0]
+    const url = `/api/intake/${encodeURIComponent(primaryFileId)}?file_ids=${encodeURIComponent(fileIdsParam)}&job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}`
     const es = new EventSource(url)
     eventSourceRef.current = es
 
@@ -72,7 +78,7 @@ export default function IntakeProgress({
 
         // Move previous stage to completed list
         if (prevStageRef.current && prevStageRef.current !== data.stage) {
-          const label = STAGE_LABELS[prevStageRef.current]
+          const label = STAGE_LABELS[prevStageRef.current] ?? prevMessageRef.current
           if (label) {
             setCompletedStages((prev) => [
               ...prev,
@@ -81,6 +87,7 @@ export default function IntakeProgress({
           }
         }
         prevStageRef.current = data.stage
+        prevMessageRef.current = data.message.replace(/\.\.\.$/, '')
 
         setProgress(data)
       } catch {
@@ -100,7 +107,7 @@ export default function IntakeProgress({
 
         // Move last active stage to completed
         if (prevStageRef.current) {
-          const label = STAGE_LABELS[prevStageRef.current]
+          const label = STAGE_LABELS[prevStageRef.current] ?? prevMessageRef.current
           if (label) {
             setCompletedStages((prev) => [
               ...prev,
@@ -139,7 +146,7 @@ export default function IntakeProgress({
     return () => {
       es.close()
     }
-  }, [fileId, jobId, builderId, onComplete, onError])
+  }, [fileIdsParam, jobId, builderId, onComplete, onError])
 
   // ── Error state ────────────────────────────────────────────────────────────
   if (hasError) {
@@ -160,7 +167,11 @@ export default function IntakeProgress({
           <p className="text-sm font-semibold text-red-700">Processing failed</p>
         </div>
         <p className="text-sm text-red-600 pl-10">
-          Could not process <span className="font-medium">{filename}</span>. Please try again.
+          Could not process{' '}
+          <span className="font-medium">
+            {filenames.length === 1 ? filenames[0] : `${filenames.length} files`}
+          </span>
+          . Please try again.
         </p>
       </div>
     )
@@ -196,7 +207,11 @@ export default function IntakeProgress({
             />
           </svg>
         </div>
-        <p className="text-sm font-medium text-slate-800 truncate min-w-0">{filename}</p>
+        <p className="text-sm font-medium text-slate-800 truncate min-w-0">
+          {filenames.length === 1
+            ? filenames[0]
+            : `${filenames.length} files — ${filenames.join(', ')}`}
+        </p>
       </div>
 
       {/* Progress bar */}

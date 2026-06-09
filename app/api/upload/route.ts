@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { File as DBFile, FileType, FileIntakeStatus } from '@/lib/types/database.types'
+import { storePendingFile } from '@/lib/intake-store'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -141,7 +142,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // ── Demo mode: return mock File record ────────────────────────────────────
+  // ── No Supabase: hold the file bytes in memory so the AI intake pipeline ──
+  // can still analyse them when ANTHROPIC_API_KEY is configured.
   const demoFile: DBFile = {
     id: crypto.randomUUID(),
     job_id,
@@ -152,6 +154,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     file_type: detectFileType(filename),
     intake_status: 'uploaded' as FileIntakeStatus,
     created_at: new Date().toISOString(),
+  }
+
+  try {
+    const bytes = await uploadedFile.arrayBuffer()
+    const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+    const mediaType =
+      demoFile.file_type === 'pdf'
+        ? 'application/pdf'
+        : ext === 'png'
+          ? 'image/png'
+          : ext === 'webp'
+            ? 'image/webp'
+            : 'image/jpeg'
+    storePendingFile({
+      id: demoFile.id,
+      job_id,
+      builder_id,
+      filename,
+      media_type: mediaType,
+      base64: Buffer.from(bytes).toString('base64'),
+      created_at: demoFile.created_at,
+    })
+  } catch (err) {
+    console.error('Failed to buffer uploaded file for intake:', err)
   }
 
   return NextResponse.json(

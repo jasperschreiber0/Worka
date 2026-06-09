@@ -17,6 +17,11 @@ export interface DemoQuoteLineItem {
   dimensions_string: string | null
   is_assumption: boolean
   assumption_status: 'unresolved' | 'accepted' | 'adjusted' | 'excluded' | null
+  /** measured = priced from quantities; PC allowance / provisional sum = allowance pending confirmation */
+  item_type?: 'measured' | 'pc_allowance' | 'provisional_sum' | null
+  /** How the price was derived: measured | inferred | allowance */
+  pricing_basis?: 'measured' | 'inferred' | 'allowance' | null
+  notes?: string | null
 }
 
 export interface DemoQuote {

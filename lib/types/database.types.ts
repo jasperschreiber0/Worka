@@ -98,6 +98,9 @@ export interface Quote {
   created_at: string
   sent_at: string | null
   approved_at: string | null
+  /** Migration 008 — estimate breakdown percentages */
+  contingency_pct?: number | null
+  gst_pct?: number | null
 }
 
 export interface QuoteLineItem {
@@ -116,6 +119,10 @@ export interface QuoteLineItem {
   is_assumption: boolean
   assumption_status: AssumptionStatus | null
   created_at: string
+  /** Migration 008 — estimate classification & provenance */
+  item_type?: 'measured' | 'pc_allowance' | 'provisional_sum' | null
+  pricing_basis?: 'measured' | 'inferred' | 'allowance' | null
+  notes?: string | null
 }
 
 export interface CostRate {

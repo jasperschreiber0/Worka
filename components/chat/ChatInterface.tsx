@@ -315,16 +315,30 @@ export default function ChatInterface({
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
-        content: `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.`,
-        alerts: [
-          {
-            priority: 'high',
-            message: `${assumptionCount} item${assumptionCount !== 1 ? 's' : ''} need your input before the quote is ready`,
-            action: 'Review assumptions',
-            entity_id: quoteId,
-            entity_type: 'quote',
-          },
-        ],
+        content:
+          assumptionCount > 0
+            ? `Draft estimate ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.`
+            : `Draft estimate ready for ${jobAddress} — no assumptions outstanding. Review it and send when you're happy.`,
+        alerts:
+          assumptionCount > 0
+            ? [
+                {
+                  priority: 'high',
+                  message: `${assumptionCount} item${assumptionCount !== 1 ? 's' : ''} need your input before the quote is ready`,
+                  action: 'Review assumptions',
+                  entity_id: quoteId,
+                  entity_type: 'quote',
+                },
+              ]
+            : [
+                {
+                  priority: 'medium',
+                  message: 'Draft estimate is ready to review',
+                  action: 'Review assumptions',
+                  entity_id: quoteId,
+                  entity_type: 'quote',
+                },
+              ],
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])
@@ -333,7 +347,8 @@ export default function ChatInterface({
   )
 
   // Pending action that requires sendMessage (defined later)
- const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
 
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(

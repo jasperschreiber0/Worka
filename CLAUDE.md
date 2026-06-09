@@ -73,6 +73,8 @@ The entire app runs without Supabase by checking `process.env.NEXT_PUBLIC_SUPABA
 - All API routes return in-memory demo data from `lib/*-demo.ts` files
 - Edge functions are not called
 
+**AI-only mode**: if `ANTHROPIC_API_KEY` is set but Supabase is not, the plan intake pipeline still runs the real AI estimate — `/api/upload` buffers file bytes in `lib/intake-store.ts` (globalThis-backed in-memory store) and `/api/intake/[fileId]` analyses the full plan set with Claude, then serves the generated quote from memory via `/api/quotes/[quoteId]`. Only with no API key at all does intake fall back to the canned demo quote.
+
 **Demo data files** (all in `lib/`):
 | File | Purpose |
 |------|---------|
@@ -146,7 +148,7 @@ The entire app runs without Supabase by checking `process.env.NEXT_PUBLIC_SUPABA
 | Route | Purpose |
 |-------|---------|
 | `POST /api/chat` | Main chat handler — intent classification + dispatch |
-| `POST /api/intake/[fileId]` | AI extraction pipeline for uploaded PDFs |
+| `GET /api/intake/[fileId]` | AI estimate pipeline (SSE) — pass `file_ids` to analyse a multi-file plan set together |
 | `POST /api/upload` | File upload to Supabase Storage |
 | `GET /api/jobs` | Job list for snapshot panel |
 | `GET/POST /api/quotes` | Quote fetch and creation |
@@ -158,6 +160,8 @@ The entire app runs without Supabase by checking `process.env.NEXT_PUBLIC_SUPABA
 | `POST /api/email-sync/simulate` | Trigger demo email scenario |
 | `POST /api/email-draft` | Generate draft email via Claude |
 | `POST /api/assumptions` | Resolve an AI assumption |
+
+**Estimate engine** (`lib/estimate.ts`, model `claude-opus-4-8`): each uploaded document is analysed separately (streaming, adaptive thinking), line items are merged across the plan set, priced via the 5-tier rate hierarchy (Supabase mode) with the AI's market rate as fallback, run through 4 quantity-validation gates, and rolled up as direct cost → contingency (8%) → builder's margin (18%) → GST (10%) — never hidden inside trade rates. Schedule items with $0/TBC become PC allowances; under-specified structural scope becomes provisional sums (`item_type` on `quote_line_items`, surfaced as a schedule in `QuoteView`).
 
 ---
 
@@ -204,6 +208,7 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 005_job_activation.sql   — job_milestones, invoice_schedule, proof_events
 006_rbac_refs.sql        — role-based access refs
 007_job_workers.sql      — job ↔ worker assignment
+008_estimate_fields.sql  — item_type/pricing_basis/notes on line items, contingency/GST pcts on quotes
 ```
 
 ---

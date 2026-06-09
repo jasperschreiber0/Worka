@@ -68,7 +68,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
   // Upload + intake state
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const [uploadedFile, setUploadedFile] = useState<DBFile | null>(null)
+  const [uploadedFiles, setUploadedFiles] = useState<DBFile[]>([])
   const [intakeStarted, setIntakeStarted] = useState(false)
 
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -89,7 +89,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
         setDragOver(false)
         setUploading(false)
         setUploadError(null)
-        setUploadedFile(null)
+        setUploadedFiles([])
         setIntakeStarted(false)
       }, 300)
       return () => clearTimeout(id)
@@ -199,30 +199,35 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
   const handleUpload = useCallback(async () => {
     if (files.length === 0 || uploading) return
 
-    // Upload the first file (one at a time for intake progress)
-    const selectedFile = files[0]
-
     setUploading(true)
     setUploadError(null)
 
     try {
-      const formData = new FormData()
-      formData.append('file', selectedFile.file)
-      formData.append('job_id', job.id)
-      formData.append('builder_id', DEMO_BUILDER_ID)
+      // Upload every selected file — the whole plan set is analysed together
+      const uploaded: DBFile[] = []
+      for (const selectedFile of files) {
+        const formData = new FormData()
+        formData.append('file', selectedFile.file)
+        formData.append('job_id', job.id)
+        formData.append('builder_id', DEMO_BUILDER_ID)
 
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      })
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        })
 
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Upload failed' }))
-        throw new Error((body as { error?: string }).error ?? 'Upload failed')
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({ error: 'Upload failed' }))
+          throw new Error(
+            `${selectedFile.file.name}: ${(body as { error?: string }).error ?? 'Upload failed'}`
+          )
+        }
+
+        const data = await res.json() as { file: DBFile; intake_started: boolean }
+        uploaded.push(data.file)
       }
 
-      const data = await res.json() as { file: DBFile; intake_started: boolean }
-      setUploadedFile(data.file)
+      setUploadedFiles(uploaded)
       setIntakeStarted(true)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed — please try again.'
@@ -245,7 +250,7 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
   )
 
   const handleIntakeError = useCallback(() => {
-    setUploadedFile(null)
+    setUploadedFiles([])
     setIntakeStarted(false)
     setUploadError('Processing failed — please try uploading again.')
   }, [])
@@ -327,12 +332,12 @@ function UploadPanelInner({ isOpen, onClose, job, onIntakeComplete }: UploadPane
         <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
 
           {/* ── Intake progress (replaces drop zone after upload) ─── */}
-          {intakeStarted && uploadedFile ? (
+          {intakeStarted && uploadedFiles.length > 0 ? (
             <IntakeProgress
-              fileId={uploadedFile.id}
+              fileIds={uploadedFiles.map((f) => f.id)}
               jobId={job.id}
               builderId={DEMO_BUILDER_ID}
-              filename={uploadedFile.filename}
+              filenames={uploadedFiles.map((f) => f.filename)}
               onComplete={handleIntakeComplete}
               onError={handleIntakeError}
             />
