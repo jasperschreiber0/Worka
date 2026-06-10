@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
+import { recordProofEvent } from '@/lib/proof'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,19 @@ export async function POST(
   })
 
   const updated = applyState(base)
+
+  // WorkA Proof: the approval decision is evidence — record it automatically
+  await recordProofEvent({
+    jobId: base.job_id,
+    builderId: body.builder_id,
+    eventType: action === 'approved' ? 'variation_approved' : 'variation_rejected',
+    description: `Variation ${base.variation_ref ?? base.id} ${action}: ${base.title} ($${base.amount.toLocaleString('en-AU')})`,
+    metadata: {
+      variation_id: base.id,
+      amount: base.amount,
+      decided_at: now,
+    },
+  })
 
   // Prepare notification draft for approved variations — held for builder review, never auto-sent
   const notificationDraft =

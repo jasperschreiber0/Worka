@@ -8,6 +8,7 @@ import {
   formatDisplayTime,
   type DemoProofEvent,
 } from '@/lib/activation-demo'
+import { recordProofEvent } from '@/lib/proof'
 import { randomUUID } from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -115,11 +116,11 @@ export async function POST(
 
 // ─── Demo mode activation ─────────────────────────────────────────────────────
 
-function handleDemoActivation(
+async function handleDemoActivation(
   jobId: string,
   quoteId: string,
-  _builderId: string
-): NextResponse {
+  builderId: string
+): Promise<NextResponse> {
   // Look up the job (allow any known job ID)
   const job = DEMO_JOBS[jobId]
   if (!job) {
@@ -180,10 +181,10 @@ function handleDemoActivation(
   const invoiceSchedule = generateInvoiceSchedule(jobId, quote.total_cost)
   const now = new Date().toISOString()
 
-  const firstProofEvent: DemoProofEvent = {
-    id: randomUUID(),
-    job_id: jobId,
-    event_type: 'job_activated',
+  const recorded = await recordProofEvent({
+    jobId,
+    builderId,
+    eventType: 'job_activated',
     description: `Job activated — work begins on ${job.address}`,
     metadata: {
       quote_id: quoteId,
@@ -191,6 +192,14 @@ function handleDemoActivation(
       milestone_count: milestones.length,
       invoice_schedule_count: invoiceSchedule.length,
     },
+  })
+
+  const firstProofEvent: DemoProofEvent = recorded ?? {
+    id: randomUUID(),
+    job_id: jobId,
+    event_type: 'job_activated',
+    description: `Job activated — work begins on ${job.address}`,
+    metadata: { quote_id: quoteId, total_cost: quote.total_cost },
     created_at: now,
     display_time: 'just now',
   }
@@ -323,12 +332,12 @@ async function handleLiveActivation(
     }))
   )
 
-  // 7. Create first proof event
+  // 7. Create first proof event (hash-chained via the proof engine)
   const now = new Date().toISOString()
-  const firstProofEvent: DemoProofEvent = {
-    id: randomUUID(),
-    job_id: jobId,
-    event_type: 'job_activated',
+  const recorded = await recordProofEvent({
+    jobId,
+    builderId,
+    eventType: 'job_activated',
     description: `Job activated — work begins on ${job.address}`,
     metadata: {
       quote_id: quoteId,
@@ -336,18 +345,17 @@ async function handleLiveActivation(
       milestone_count: milestones.length,
       invoice_schedule_count: invoiceSchedule.length,
     },
+  })
+
+  const firstProofEvent: DemoProofEvent = recorded ?? {
+    id: randomUUID(),
+    job_id: jobId,
+    event_type: 'job_activated',
+    description: `Job activated — work begins on ${job.address}`,
+    metadata: { quote_id: quoteId, total_cost: quote.total_cost },
     created_at: now,
     display_time: formatDisplayTime(now),
   }
-
-  await supabase.from('proof_events').insert({
-    id: firstProofEvent.id,
-    job_id: jobId,
-    builder_id: builderId,
-    event_type: firstProofEvent.event_type,
-    description: firstProofEvent.description,
-    metadata: firstProofEvent.metadata,
-  })
 
   return NextResponse.json({
     job: { id: jobId, address: job.address, status: 'active' },

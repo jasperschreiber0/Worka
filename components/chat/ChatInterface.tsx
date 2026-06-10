@@ -333,7 +333,8 @@ export default function ChatInterface({
   )
 
   // Pending action that requires sendMessage (defined later)
- const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [awaitingAddressForNewJob, setAwaitingAddressForNewJob] = useState(false)
 
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
