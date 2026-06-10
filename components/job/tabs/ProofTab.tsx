@@ -3,6 +3,12 @@
 import { useState, useEffect } from 'react'
 import type { DemoProofEvent } from '@/lib/activation-demo'
 
+interface ProofChainStatus {
+  verified: boolean
+  chained_count: number
+  total_count: number
+}
+
 interface ProofTabProps {
   jobId: string
 }
@@ -33,14 +39,14 @@ const EVENT_ICONS: Record<string, React.ReactNode> = {
       <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125" />
     </svg>
   ),
-  milestone_reached: (
-    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" />
-    </svg>
-  ),
   job_activated: (
     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+    </svg>
+  ),
+  email_sent: (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
     </svg>
   ),
 }
@@ -53,9 +59,10 @@ function eventIconStyle(eventType: string): { backgroundColor: string; color: st
     case 'variation_approved':
       return { backgroundColor: 'rgba(34,197,94,0.15)', color: 'var(--status-green)' }
     case 'variation_pending':
+    case 'variation_notice_sent':
       return { backgroundColor: 'rgba(245,158,11,0.15)', color: 'var(--status-amber)' }
-    case 'milestone_reached':
-      return { backgroundColor: 'rgba(168,85,247,0.15)', color: '#a855f7' }
+    case 'email_sent':
+      return { backgroundColor: 'rgba(59,130,246,0.15)', color: 'var(--status-blue)' }
     case 'job_activated':
       return { backgroundColor: 'rgba(255,107,43,0.15)', color: 'var(--orange-primary)' }
     default:
@@ -66,8 +73,7 @@ function eventIconStyle(eventType: string): { backgroundColor: string; color: st
 function formatTime(ts: string): string {
   const d = new Date(ts)
   const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+  const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24))
 
   if (diffDays === 0) return d.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' })
   if (diffDays === 1) return 'Yesterday'
@@ -94,6 +100,7 @@ function groupByDate(events: DemoProofEvent[]) {
 
 export default function ProofTab({ jobId }: ProofTabProps) {
   const [events, setEvents] = useState<DemoProofEvent[]>([])
+  const [chain, setChain] = useState<ProofChainStatus | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -102,6 +109,7 @@ export default function ProofTab({ jobId }: ProofTabProps) {
       .then(r => r.json())
       .then(data => {
         setEvents(data.events ?? [])
+        setChain(data.chain ?? null)
         setLoading(false)
       })
       .catch(() => setLoading(false))
@@ -151,12 +159,22 @@ export default function ProofTab({ jobId }: ProofTabProps) {
   }
 
   const groups = groupByDate(events)
+  const chainIntact = chain && chain.chained_count > 0 && chain.verified
+  const chainBroken = chain && chain.chained_count > 0 && !chain.verified
 
   return (
     <div className="p-4">
+      {/* Integrity status */}
       <div className="mb-4">
-        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
-          Legal-grade chronological record of all job activity. Every event is timestamped and immutable.
+        <p
+          className="text-[11px]"
+          style={{ color: chainBroken ? 'var(--status-red)' : 'var(--text-tertiary)' }}
+        >
+          {chainBroken
+            ? 'Integrity check failed — contact support'
+            : chainIntact
+              ? `Tamper-evident · ${chain.chained_count} of ${chain.total_count} events hash-verified`
+              : 'Legal-grade chronological record of all job activity.'}
         </p>
       </div>
 
@@ -212,9 +230,20 @@ export default function ProofTab({ jobId }: ProofTabProps) {
         </div>
       ))}
 
-      <div className="mt-4 pt-3 text-center" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
-        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+      <div className="mt-4 pt-3" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
+        <p className="text-[11px] mb-2" style={{ color: 'var(--text-tertiary)' }}>
           {events.length} event{events.length !== 1 ? 's' : ''} recorded
+        </p>
+        <a
+          href={`/api/jobs/${jobId}/proof/export`}
+          download
+          className="text-[12px] font-medium"
+          style={{ color: 'var(--orange-primary)' }}
+        >
+          Download Proof Pack →
+        </a>
+        <p className="text-[10px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
+          Timestamped evidence document for payment disputes.
         </p>
       </div>
     </div>

@@ -257,6 +257,23 @@ interface Alert {
 | `POST /api/email-sync/simulate` | Trigger demo email scenario |
 | `POST /api/email-draft` | Generate draft email via Claude |
 | `POST /api/assumptions` | Resolve an AI assumption |
+| `GET /api/jobs/[jobId]/proof` | WorkA Proof trail for a job + hash-chain status |
+| `GET /api/jobs/[jobId]/proof/export` | Download the Proof Pack (plain-text evidence document) |
+| `GET /api/cron/morning-brief` | Vercel Cron target — emails the daily brief to every builder (guarded by `CRON_SECRET`) |
+
+---
+
+## WorkA Proof
+
+`lib/proof.ts` is the central audit-trail engine. **Every consequential job action must call `recordProofEvent()`** — quote sent, variation approved/rejected, variation notice emailed, outbound client email, job activated. Events are SHA-256 hash-chained per job (each event's hash covers the previous event's hash), making the trail tamper-evident. `verifyProofChain()` re-validates the chain; the Proof tab (`components/job/tabs/ProofTab.tsx`) shows the trail and links the Proof Pack export at `/api/jobs/[jobId]/proof/export`.
+
+Recording is best-effort: `recordProofEvent` never throws — a proof failure must not break the builder action it documents. Demo mode appends to the in-memory `demoProofLog`; real mode inserts into the `proof_events` table.
+
+---
+
+## Morning Brief Delivery
+
+`vercel.json` schedules `GET /api/cron/morning-brief` daily at 20:45 UTC (6:45am AEST). The route authenticates via `Authorization: Bearer $CRON_SECRET`, asks the `morning-brief` edge function for each builder's ranked brief, formats it with `lib/morning-brief.ts`, and sends via Resend. Demo mode sends the demo brief to `MORNING_BRIEF_TEST_EMAIL` if set.
 
 ---
 
@@ -449,3 +466,5 @@ See `.env.local.example`. Key variables:
 | `GOOGLE_CLIENT_ID/SECRET` | Gmail OAuth |
 | `MICROSOFT_CLIENT_ID/SECRET` | Outlook OAuth |
 | `RESEND_API_KEY` | Email delivery |
+| `CRON_SECRET` | Auth for `/api/cron/morning-brief` (Vercel Cron sends it as a Bearer token) |
+| `MORNING_BRIEF_TEST_EMAIL` | Demo-mode recipient for the daily brief email |

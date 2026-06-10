@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { addCommEntry, demoCommHistory } from '@/lib/comms-demo'
 import { randomUUID } from 'crypto'
 import { requirePermission } from '@/lib/auth/role-guard'
+import { recordProofEvent } from '@/lib/proof'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -138,6 +139,23 @@ export async function POST(
       communicationId = entry.id
       // Log for debugging
       console.log('[/api/email-draft/send] Demo comms history length:', demoCommHistory.length)
+    }
+
+    // WorkA Proof: outbound client email is dispute evidence when job-linked
+    if (job_id) {
+      await recordProofEvent({
+        jobId: job_id,
+        builderId: builder_id,
+        eventType: 'email_sent',
+        description: `Email sent to ${to} — "${subject}"`,
+        metadata: {
+          to,
+          subject,
+          communication_id: communicationId,
+          linked_variation_id: linked_variation_id ?? null,
+          linked_invoice_id: linked_invoice_id ?? null,
+        },
+      })
     }
 
     return NextResponse.json({

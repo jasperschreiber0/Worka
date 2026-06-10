@@ -3,6 +3,13 @@ import { createClient } from '@supabase/supabase-js'
 import { addCommEntry } from '@/lib/comms-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
 import { randomUUID } from 'crypto'
+import { recordProofEvent } from '@/lib/proof'
+
+// Quote job IDs for proof recording in demo mode
+const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
+  'demo-quote-id': '00000000-0000-0000-0000-000000000011',
+  'demo-quote-id-toorak': '00000000-0000-0000-0000-000000000011',
+}
 
 // ─── In-memory demo quote status map ─────────────────────────────────────────
 
@@ -84,6 +91,19 @@ export async function POST(
       linked_variation_id: null,
       linked_invoice_id: null,
     })
+
+    // WorkA Proof: quote dispatch is dispute evidence — record it automatically
+    const demoJobId = DEMO_QUOTE_JOB_MAP[quoteId]
+    if (demoJobId) {
+      await recordProofEvent({
+        jobId: demoJobId,
+        builderId: body.builder_id,
+        eventType: 'quote_sent',
+        description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
+        metadata: { quote_id: quoteId, to: body.to, subject: body.subject, communication_id: commId },
+      })
+    }
+
     return NextResponse.json<ConfirmSendResponse>({ sent: true, sent_at: sentAt, communication_id: commId })
   }
 
@@ -164,6 +184,15 @@ export async function POST(
     .single()
 
   const communicationId = (commRow as { id: string } | null)?.id ?? randomUUID()
+
+  // WorkA Proof: quote sent to client is the key evidence in a payment dispute
+  await recordProofEvent({
+    jobId: quoteRow.job_id,
+    builderId: body.builder_id,
+    eventType: 'quote_sent',
+    description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
+    metadata: { quote_id: quoteId, to: body.to, subject: body.subject, communication_id: communicationId },
+  })
 
   return NextResponse.json<ConfirmSendResponse>({
     sent: true,

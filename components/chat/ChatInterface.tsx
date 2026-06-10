@@ -557,7 +557,6 @@ export default function ChatInterface({
     [uploadPanel.job]
   )
 
-
   // Handler: action button clicked in MorningBriefCard or ChatMessage
   const handleAction = useCallback(
     (action: string, entityId?: string, entityType?: string) => {

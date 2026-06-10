@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import type { PermissionRole } from '@/lib/auth/role-guard'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
+import ProofTab from '@/components/job/tabs/ProofTab'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -751,6 +752,15 @@ export default function JobSnapshotPanel({
                       </div>
                     </div>
                   ))}
+                </div>
+              </SectionGroup>
+            )}
+
+            {/* ── 7. PROOF TRAIL ──────────────────────────────────────────── */}
+            {job && (
+              <SectionGroup label="Proof trail">
+                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
+                  <ProofTab jobId={job.id} />
                 </div>
               </SectionGroup>
             )}

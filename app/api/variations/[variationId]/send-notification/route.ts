@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { DEMO_VARIATIONS } from '@/lib/variations-demo'
+import { recordProofEvent } from '@/lib/proof'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -75,6 +77,24 @@ export async function POST(
   // Log to communication_history (demo: just acknowledge)
   // In live mode, insert into Supabase communication_history table:
   // await supabase.from('communication_history').insert({ ... })
+
+  // WorkA Proof: client notification is the evidence that matters in a
+  // payment dispute — record that it went out, to whom, and when
+  const variation = DEMO_VARIATIONS.find((v) => v.id === variationId)
+  if (variation) {
+    await recordProofEvent({
+      jobId: variation.job_id,
+      builderId: body.builder_id,
+      eventType: 'variation_notice_sent',
+      description: `Variation approval notice for "${variation.title}" emailed to ${to}`,
+      metadata: {
+        variation_id: variationId,
+        to,
+        subject,
+        communication_id: communicationId,
+      },
+    })
+  }
 
   return NextResponse.json({
     sent: true,
