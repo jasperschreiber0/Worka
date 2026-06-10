@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requirePermission } from '@/lib/auth/role-guard'
+import { recordProofEvent } from '@/lib/proof'
+
+// The demo quote belongs to the Toorak job
+const DEMO_QUOTE_JOB_ID = '00000000-0000-0000-0000-000000000011'
 
 // ─── In-memory demo quote status map ─────────────────────────────────────────
 // Shared across requests within the same server process.
@@ -82,6 +86,20 @@ export async function POST(
 
   if (quoteId === 'demo-quote-id') {
     demoQuoteStatusMap.set(quoteId, { status: 'sent', sent_at: sentAt })
+
+    // WorkA Proof: quote dispatch is recorded automatically
+    await recordProofEvent({
+      jobId: DEMO_QUOTE_JOB_ID,
+      builderId: body.builder_id,
+      eventType: 'quote_sent',
+      description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
+      metadata: {
+        quote_id: quoteId,
+        to: body.to,
+        subject: body.subject,
+        communication_id: communicationId,
+      },
+    })
   } else {
     // Real Supabase path:
     // await supabase.from('quotes').update({ status: 'sent', sent_at: sentAt }).eq('id', quoteId)
