@@ -110,8 +110,89 @@ export async function POST(
     quote = data.quote
     items = data.items
   } else {
-    // Real Supabase path — not implemented in this session
-    return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!sbUrl || !sbKey) {
+      return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
+    const { createClient } = await import('@supabase/supabase-js')
+    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+
+    const [{ data: quoteRow }, { data: lineItems }] = await Promise.all([
+      sb.from('quotes')
+        .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
+        .eq('id', quoteId).eq('builder_id', body.builder_id).single(),
+      sb.from('quote_line_items')
+        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status')
+        .eq('quote_id', quoteId),
+    ])
+
+    if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+
+    type QuoteRow = { id: string; job_id: string; status: string; total_cost: number; margin_pct: number; confidence_score: number; version: number; created_at: string }
+    type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null }
+    type JobRow = { address: string; client_id: string | null }
+    type ClientRow = { name: string; email: string | null }
+    type BuilderRow = { business_name: string | null; contact_name: string | null }
+
+    const tq = quoteRow as QuoteRow
+    const { data: jobRow } = await sb.from('jobs').select('address, client_id').eq('id', tq.job_id).single()
+    const tj = jobRow as JobRow | null
+
+    let resolvedClientName = body.client_name ?? 'there'
+    let resolvedClientEmail = body.client_email ?? ''
+    if (tj?.client_id) {
+      const { data: clientRow } = await sb.from('clients').select('name, email').eq('id', tj.client_id).single()
+      const tc = clientRow as ClientRow | null
+      if (tc) {
+        resolvedClientName = body.client_name ?? tc.name ?? 'there'
+        resolvedClientEmail = body.client_email ?? tc.email ?? ''
+      }
+    }
+
+    const { data: builderRow } = await sb.from('builders').select('business_name, contact_name').eq('id', body.builder_id).single()
+    const tb = builderRow as BuilderRow | null
+    const resolvedBuilderName = tb?.contact_name ?? 'Dave Nguyen'
+    const resolvedBusinessName = tb?.business_name ?? 'Nguyen Building Co.'
+
+    quote = {
+      id: tq.id, job_id: tq.job_id, job_address: tj?.address ?? 'the project',
+      builder_id: body.builder_id,
+      status: tq.status as DemoQuote['status'], total_cost: tq.total_cost,
+      margin_pct: tq.margin_pct, confidence_score: tq.confidence_score,
+      version: tq.version, created_at: tq.created_at,
+    }
+    items = ((lineItems ?? []) as LineItemRow[]).map((li) => ({
+      id: li.id, quote_id: quoteId, trade_category_id: li.trade_category_id,
+      trade_category_name: '', description: li.description,
+      quantity: li.quantity, unit: li.unit, rate: li.rate, total: li.total,
+      dimensions_string: null,
+      is_assumption: li.is_assumption,
+      assumption_status: li.assumption_status as DemoQuoteLineItem['assumption_status'],
+      confidence: 100,
+      pricing_type: 'measured' as const,
+      source_ref: null,
+      margin_pct: 0.15,
+      labour_cost: null,
+      material_cost: null,
+      subcontract_cost: null,
+      plant_cost: null,
+    }))
+
+    const activeItemsDb = items.filter((i) => i.assumption_status !== 'excluded' && i.total !== null)
+    const emailBodyDb = buildEmailBody({
+      clientName: resolvedClientName, address: quote.job_address,
+      totalCost: quote.total_cost, lineCount: activeItemsDb.length,
+      builderName: resolvedBuilderName, businessName: resolvedBusinessName,
+      customMessage: body.message,
+    })
+    const draftDb: EmailDraft = {
+      to: resolvedClientEmail || 'client@example.com',
+      subject: `Quote for ${quote.job_address} — ${resolvedBusinessName}`,
+      body: emailBodyDb,
+      quote_summary: { total_cost: quote.total_cost, margin_pct: quote.margin_pct, line_count: activeItemsDb.length, address: quote.job_address },
+    }
+    return NextResponse.json({ draft: draftDb, requires_confirmation: true } as SendResponse)
   }
 
   // ── Verify quote is in pending_review state ───────────────────────────────

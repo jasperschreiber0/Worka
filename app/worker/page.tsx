@@ -1,11 +1,16 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import { DEMO_WORKER_JACK } from '@/lib/worker-demo'
 import WorkerPortal from './WorkerPortal'
 
 export const metadata: Metadata = {
   title: 'WorkA — My Jobs',
   description: 'Your site details and tasks for today.',
-  viewport: 'width=device-width, initial-scale=1, viewport-fit=cover',
+}
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
 }
 
 export default function WorkerPage() {

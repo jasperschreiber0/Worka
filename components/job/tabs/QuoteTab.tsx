@@ -9,6 +9,7 @@ interface QuoteTabProps {
   quote: JobSnapshot['quote']
   onViewQuote: (quoteId: string) => void
   onActivateJob?: (quoteId: string) => void
+  onStartQuote?: () => void
   userRole?: import('@/lib/auth/role-guard').PermissionRole
 }
 
@@ -25,43 +26,38 @@ function formatCurrency(amount: number): string {
 
 function formatStatus(status: string): string {
   switch (status) {
-    case 'draft':
-      return 'Draft'
-    case 'pending_review':
-      return 'Pending review'
-    case 'sent':
-      return 'Sent'
-    case 'approved':
-      return 'Approved'
-    case 'rejected':
-      return 'Rejected'
-    default:
-      return status
+    case 'draft':          return 'Draft'
+    case 'pending_review': return 'Pending review'
+    case 'sent':           return 'Sent'
+    case 'approved':       return 'Approved'
+    case 'rejected':       return 'Rejected'
+    default:               return status
   }
 }
 
-function confidenceColour(score: number): string {
-  if (score >= 75) return 'text-green-500'
-  if (score >= 50) return 'text-amber-500'
-  return 'text-red-500'
+function confidenceCssColor(score: number): string {
+  if (score >= 75) return 'var(--status-green)'
+  if (score >= 50) return 'var(--status-amber)'
+  return 'var(--status-red)'
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function QuoteTab({ quote, onViewQuote, onActivateJob, userRole = 'owner' }: QuoteTabProps) {
+export default function QuoteTab({ quote, onViewQuote, onActivateJob, onStartQuote, userRole = 'owner' }: QuoteTabProps) {
   // ── No quote ───────────────────────────────────────────────────────────────
   if (!quote) {
     return (
       <div className="p-4 space-y-4">
-        <p className="text-sm text-slate-500">No quote yet</p>
+        <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>
+          No quote yet — upload your plans to get started.
+        </p>
         <button
           type="button"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors"
-          onClick={() => {
-            // Session 11: wire to quote creation flow
-          }}
+          className="inline-flex items-center gap-1.5 text-[13px] font-medium transition-colors"
+          style={{ color: 'var(--orange-primary)' }}
+          onClick={onStartQuote}
         >
-          Start a quote
+          Upload plans &amp; start quote
           <svg
             className="w-3.5 h-3.5"
             fill="none"
@@ -78,55 +74,63 @@ export default function QuoteTab({ quote, onViewQuote, onActivateJob, userRole =
   }
 
   // ── Quote exists ───────────────────────────────────────────────────────────
-  const dotColour = confidenceColour(quote.confidence_score ?? 0)
+  const score = quote.confidence_score ?? 0
+  const dotColor = confidenceCssColor(score)
 
   return (
     <div className="p-4 space-y-4">
       {/* Header */}
       <div>
-        <p className="text-sm font-semibold text-slate-800">Quote v{quote.version}</p>
+        <p className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          Quote v{quote.version}
+        </p>
         {quote.quote_ref && (
-          <p className="text-xs font-mono text-brand-600 mt-0.5">{quote.quote_ref}</p>
+          <p className="text-[11px] font-mono mt-0.5" style={{ color: 'var(--orange-primary)' }}>
+            {quote.quote_ref}
+          </p>
         )}
         {quote.sent_at ? (
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
             Sent {quote.sent_at} &middot; Awaiting response
           </p>
         ) : (
-          <p className="text-xs text-slate-500 mt-0.5">Not yet sent</p>
+          <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>Not yet sent</p>
         )}
       </div>
 
       {/* Details grid */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-        <span className="text-sm text-slate-500">Total</span>
-        <span className="text-sm text-slate-800 font-semibold">
+        <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Total</span>
+        <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
           {quote.total_cost !== null ? formatCurrency(quote.total_cost) : '—'}
         </span>
 
-        <span className="text-sm text-slate-500">Confidence</span>
-        <span className={`text-sm font-medium flex items-center gap-1.5 ${dotColour}`}>
+        <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Confidence</span>
+        <span className="text-[13px] font-medium flex items-center gap-1.5" style={{ color: dotColor }}>
           <span
-            className={`w-2 h-2 rounded-full flex-shrink-0 ${
-              (quote.confidence_score ?? 0) >= 75
-                ? 'bg-green-500'
-                : (quote.confidence_score ?? 0) >= 50
-                  ? 'bg-amber-500'
-                  : 'bg-red-500'
-            }`}
+            className="w-2 h-2 rounded-full flex-shrink-0"
+            style={{ backgroundColor: dotColor }}
             aria-hidden="true"
           />
           {quote.confidence_score !== null ? `${quote.confidence_score}%` : '—'}
         </span>
 
-        <span className="text-sm text-slate-500">Status</span>
-        <span className="text-sm text-slate-700">{formatStatus(quote.status ?? '')}</span>
+        <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Status</span>
+        <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>
+          {formatStatus(quote.status ?? '')}
+        </span>
       </div>
 
       {/* Unresolved assumptions warning */}
       {quote.unresolved_count > 0 && (
-        <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2">
-          <p className="text-xs text-amber-800">
+        <div
+          className="rounded-md px-3 py-2"
+          style={{
+            backgroundColor: 'var(--pill-awaiting-bg)',
+            border: '0.5px solid var(--pill-awaiting-border)',
+          }}
+        >
+          <p className="text-[11px]" style={{ color: 'var(--pill-awaiting-text)' }}>
             {quote.unresolved_count} assumption{quote.unresolved_count !== 1 ? 's' : ''} need your
             review before this quote can be sent.
           </p>
@@ -138,7 +142,8 @@ export default function QuoteTab({ quote, onViewQuote, onActivateJob, userRole =
         <button
           type="button"
           onClick={() => onViewQuote(quote.id!)}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors"
+          className="inline-flex items-center gap-1.5 text-[13px] font-medium transition-colors"
+          style={{ color: 'var(--orange-primary)' }}
         >
           View quote
           <svg
@@ -157,12 +162,13 @@ export default function QuoteTab({ quote, onViewQuote, onActivateJob, userRole =
       {/* Activation trigger — show when quote is sent or approved, owner role only */}
       {quote.id && onActivateJob && (quote.status === 'sent' || quote.status === 'approved') && hasPermission(userRole ?? 'owner', 'owner') && (
         <div className="pt-1">
-          <div className="border-t border-slate-200 pt-4 mt-1">
-            <p className="text-xs text-slate-500 mb-2.5">Client approved?</p>
+          <div className="pt-4 mt-1" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
+            <p className="text-[11px] mb-2.5" style={{ color: 'var(--text-secondary)' }}>Client approved?</p>
             <button
               type="button"
               onClick={() => onActivateJob(quote.id!)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-500 text-white text-sm font-semibold hover:bg-brand-600 transition-colors shadow-sm"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-semibold transition-colors"
+              style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}
             >
               Activate job
               <svg

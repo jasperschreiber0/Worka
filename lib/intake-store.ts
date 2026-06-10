@@ -1,23 +1,12 @@
-// ─── In-memory intake state (demo / AI-only mode) ──────────────────────────────
-// When Supabase is not configured, uploaded plan files and generated quotes are
-// held in memory so the AI estimate pipeline can run end-to-end without a DB.
-// Stored on globalThis so the state survives Next.js dev-server HMR reloads,
-// matching the pattern used by the other lib/*-demo.ts modules.
+// ─── In-memory store for AI-generated quotes (no-Supabase mode) ─────────────────
+// When Supabase is not configured, the intake pipeline stores the generated
+// estimate here so /api/quotes/[quoteId] can serve it. Module-level singleton on
+// globalThis so it survives Next.js dev HMR reloads — uploaded file bytes are
+// handled separately by lib/file-cache.ts.
 
 import type { DemoQuote, DemoQuoteLineItem } from './quote-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface PendingIntakeFile {
-  id: string
-  job_id: string
-  builder_id: string
-  filename: string
-  media_type: string
-  /** Raw file bytes, base64-encoded for the Anthropic document API */
-  base64: string
-  created_at: string
-}
 
 export interface EstimateTotals {
   /** Sum of all included line item totals, ex GST */
@@ -39,48 +28,24 @@ export interface GeneratedQuoteRecord {
   estimate: EstimateTotals
 }
 
-interface IntakeStore {
-  files: Map<string, PendingIntakeFile>
-  quotes: Map<string, GeneratedQuoteRecord>
-}
-
 // ─── Global store ─────────────────────────────────────────────────────────────
 
 declare global {
   // eslint-disable-next-line no-var
-  var __workaIntakeStore: IntakeStore | undefined
+  var __workaGeneratedQuotes: Map<string, GeneratedQuoteRecord> | undefined
 }
 
-function getStore(): IntakeStore {
-  if (!globalThis.__workaIntakeStore) {
-    globalThis.__workaIntakeStore = {
-      files: new Map(),
-      quotes: new Map(),
-    }
+function getStore(): Map<string, GeneratedQuoteRecord> {
+  if (!globalThis.__workaGeneratedQuotes) {
+    globalThis.__workaGeneratedQuotes = new Map()
   }
-  return globalThis.__workaIntakeStore
+  return globalThis.__workaGeneratedQuotes
 }
-
-// ─── File helpers ─────────────────────────────────────────────────────────────
-
-export function storePendingFile(file: PendingIntakeFile): void {
-  getStore().files.set(file.id, file)
-}
-
-export function getPendingFile(id: string): PendingIntakeFile | undefined {
-  return getStore().files.get(id)
-}
-
-export function removePendingFile(id: string): void {
-  getStore().files.delete(id)
-}
-
-// ─── Quote helpers ────────────────────────────────────────────────────────────
 
 export function storeGeneratedQuote(record: GeneratedQuoteRecord): void {
-  getStore().quotes.set(record.quote.id, record)
+  getStore().set(record.quote.id, record)
 }
 
 export function getGeneratedQuote(quoteId: string): GeneratedQuoteRecord | undefined {
-  return getStore().quotes.get(quoteId)
+  return getStore().get(quoteId)
 }

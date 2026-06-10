@@ -81,8 +81,17 @@ export interface Job {
   status: JobStatus
   job_type: string | null
   notes: string | null
+  budget_estimate: number | null
+  scope_notes: string | null
+  quote_deadline: string | null   // ISO date: "YYYY-MM-DD"
+  client_deadline: string | null  // ISO date: "YYYY-MM-DD"
   created_at: string
   updated_at: string
+}
+
+export interface StateChange {
+  status: 'saved' | 'found' | 'warning' | 'blocked' | 'info'
+  label: string
 }
 
 export interface Quote {
@@ -98,10 +107,9 @@ export interface Quote {
   created_at: string
   sent_at: string | null
   approved_at: string | null
-  /** Migration 008 — estimate breakdown percentages */
-  contingency_pct?: number | null
-  gst_pct?: number | null
 }
+
+export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
 
 export interface QuoteLineItem {
   id: string
@@ -119,10 +127,17 @@ export interface QuoteLineItem {
   is_assumption: boolean
   assumption_status: AssumptionStatus | null
   created_at: string
-  /** Migration 008 — estimate classification & provenance */
-  item_type?: 'measured' | 'pc_allowance' | 'provisional_sum' | null
-  pricing_basis?: 'measured' | 'inferred' | 'allowance' | null
-  notes?: string | null
+  /** Cost split columns */
+  labour_cost: number | null
+  material_cost: number | null
+  subcontract_cost: number | null
+  plant_cost: number | null
+  /** measured | pc_allowance | provisional_sum */
+  pricing_type: PricingType
+  /** Drawing reference e.g. "A3.1", "SK-04" */
+  source_ref: string | null
+  /** Per-line margin rate (0–1). PS items always 0. */
+  margin_pct: number
 }
 
 export interface CostRate {
@@ -363,6 +378,47 @@ export type IntentType =
   | 'variation'
   | 'invoice'
   | 'unknown'
+
+// ─── Multi-action extraction types ───────────────────────────────────────────
+
+export type ActionType =
+  | 'morning_brief'
+  | 'add_worker'
+  | 'create_job'
+  | 'job_query'
+  | 'variation'
+  | 'invoice'
+  | 'email_draft'
+  | 'email_sync_status'
+  | 'simulate_email'
+  | 'margin_query'
+  | 'open_upload_panel'
+  | 'review_assumptions'
+  | 'update_job_context'
+  | 'add_task'
+  | 'upload_rates'
+  | 'client_lookup'
+  | 'meeting_prep'
+  | 'payment_risk'
+  | 'conflict_detected'
+  | 'worker_onboarding'
+  | 'roadmap'
+  | 'team_notifications'
+  | 'approve_quote'
+  | 'end_of_day'
+  | 'task_help'
+  | 'unknown'
+
+export interface ExtractedAction {
+  type: ActionType
+  entities: Record<string, string>
+  confidence: number
+}
+
+export interface ExtractActionsResponse {
+  actions: ExtractedAction[]
+  raw_context: Record<string, string>
+}
 
 export interface ClassifyIntentRequest {
   message: string

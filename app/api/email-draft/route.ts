@@ -208,12 +208,19 @@ ${contextBlock}
 Email purpose: ${intentContext[intentHint]}
 ${contextMessage ? `Additional context from builder: ${contextMessage}` : ''}
 
-Write a brief, professional email that:
-- Sounds like a tradie builder — professional but not overly corporate
-- References the specific job address
-- Gets to the point quickly
-- Uses Australian English
-- Includes a subject line
+Write a professional, clear email that:
+- Is courteous and professional — never use slang, colloquialisms, or casual greetings like "G'day", "Mate", "Hey", "Hi there"
+- Opens with "Hi [First Name]," using the actual client first name from context — never "Dear Client," or generic openers
+- References the specific job address and client name from the context
+- States the purpose clearly in the first sentence
+- Is concise — 3–5 sentences for follow-ups, slightly longer for detailed matters
+- Uses correct Australian English spelling (not US English)
+- Includes a subject line that clearly describes the email topic
+- Signs off professionally with "Kind regards," or "Regards," followed by: ${builderName}\n${businessName}
+- Never uses exclamation marks
+
+IMPORTANT: Do NOT use square bracket placeholders like [Client Name], [Job Address], [Phone Number] etc.
+Use the actual values from the job context. If a value is unknown, omit that detail entirely rather than using a placeholder.
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -268,11 +275,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
       intent_hint,
     }
 
-    // Try AI draft if API key available
+    // Try AI draft if API key available AND we have job context
+    // Without job context the AI produces a generic, useless email — use fallback instead
     const apiKey = process.env.ANTHROPIC_API_KEY
     let draft: EmailDraft
 
-    if (apiKey) {
+    if (apiKey && jobCtx) {
       const anthropic = new Anthropic({ apiKey })
       draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic)
     } else {

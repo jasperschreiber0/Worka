@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
-import type { EstimateTotals } from '@/lib/intake-store'
 import SendQuoteModal from './SendQuoteModal'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -41,7 +40,6 @@ interface QuoteApiResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
-  estimate?: EstimateTotals | null
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -77,8 +75,8 @@ function ConfidenceIndicator({ confidence, isAssumption, assumptionStatus }: Con
   if (isAssumption && assumptionStatus === 'unresolved') {
     return (
       <span className="flex items-center gap-1 flex-shrink-0">
-        <span className="w-2.5 h-2.5 rounded-full bg-red-500 flex-shrink-0" aria-hidden="true" />
-        <span className="text-xs font-medium text-red-600 whitespace-nowrap">Needs input</span>
+        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
+        <span className="text-[11px] font-medium whitespace-nowrap" style={{ color: 'var(--status-red)' }}>Needs input</span>
       </span>
     )
   }
@@ -86,8 +84,8 @@ function ConfidenceIndicator({ confidence, isAssumption, assumptionStatus }: Con
   if (assumptionStatus === 'excluded') {
     return (
       <span className="flex items-center gap-1 flex-shrink-0">
-        <span className="w-2.5 h-2.5 rounded-full bg-slate-400 flex-shrink-0" aria-hidden="true" />
-        <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Excluded</span>
+        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: 'var(--text-tertiary)' }} aria-hidden="true" />
+        <span className="text-[11px] font-medium whitespace-nowrap" style={{ color: 'var(--text-tertiary)' }}>Excluded</span>
       </span>
     )
   }
@@ -95,8 +93,8 @@ function ConfidenceIndicator({ confidence, isAssumption, assumptionStatus }: Con
   if (confidence >= 85) {
     return (
       <span className="flex items-center gap-1 flex-shrink-0" title={`Confidence: ${confidence}%`}>
-        <span className="w-2.5 h-2.5 rounded-full bg-green-500 flex-shrink-0" aria-hidden="true" />
-        <span className="text-xs font-medium text-green-600">{confidence}%</span>
+        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: 'var(--status-green)' }} aria-hidden="true" />
+        <span className="text-[11px] font-medium" style={{ color: 'var(--status-green)' }}>{confidence}%</span>
       </span>
     )
   }
@@ -104,16 +102,16 @@ function ConfidenceIndicator({ confidence, isAssumption, assumptionStatus }: Con
   if (confidence >= 60) {
     return (
       <span className="flex items-center gap-1 flex-shrink-0" title={`Confidence: ${confidence}%`}>
-        <span className="w-2.5 h-2.5 rounded-full bg-amber-400 flex-shrink-0" aria-hidden="true" />
-        <span className="text-xs font-medium text-amber-500">{confidence}%</span>
+        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: 'var(--status-amber)' }} aria-hidden="true" />
+        <span className="text-[11px] font-medium" style={{ color: 'var(--status-amber)' }}>{confidence}%</span>
       </span>
     )
   }
 
   return (
     <span className="flex items-center gap-1 flex-shrink-0" title={`Confidence: ${confidence}%`}>
-      <span className="w-2.5 h-2.5 rounded-full bg-red-500 flex-shrink-0" aria-hidden="true" />
-      <span className="text-xs font-medium text-red-600">{confidence}%</span>
+      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
+      <span className="text-[11px] font-medium" style={{ color: 'var(--status-red)' }}>{confidence}%</span>
     </span>
   )
 }
@@ -123,23 +121,32 @@ function ConfidenceIndicator({ confidence, isAssumption, assumptionStatus }: Con
 function OverallConfidenceBadge({ score }: { score: number }) {
   if (score >= 80) {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-100 text-green-700 text-sm font-semibold">
-        <span className="w-2 h-2 rounded-full bg-green-500" aria-hidden="true" />
+      <span
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[13px] font-semibold"
+        style={{ backgroundColor: 'rgba(76,175,80,0.15)', color: 'var(--status-green)' }}
+      >
+        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: 'var(--status-green)' }} aria-hidden="true" />
         {score}%
       </span>
     )
   }
   if (score >= 60) {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-100 text-amber-700 text-sm font-semibold">
-        <span className="w-2 h-2 rounded-full bg-amber-400" aria-hidden="true" />
+      <span
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[13px] font-semibold"
+        style={{ backgroundColor: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }}
+      >
+        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: 'var(--status-amber)' }} aria-hidden="true" />
         {score}%
       </span>
     )
   }
   return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-100 text-red-700 text-sm font-semibold">
-      <span className="w-2 h-2 rounded-full bg-red-500" aria-hidden="true" />
+    <span
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[13px] font-semibold"
+      style={{ backgroundColor: 'rgba(244,67,54,0.1)', color: 'var(--status-red)' }}
+    >
+      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
       {score}%
     </span>
   )
@@ -149,12 +156,12 @@ function OverallConfidenceBadge({ score }: { score: number }) {
 
 function SkeletonRow() {
   return (
-    <div className="flex items-center gap-3 px-3 py-2.5 border-b border-slate-100 last:border-0">
-      <div className="flex-1 animate-pulse bg-slate-200 rounded h-4" />
-      <div className="w-16 animate-pulse bg-slate-200 rounded h-4" />
-      <div className="w-16 animate-pulse bg-slate-200 rounded h-4" />
-      <div className="w-16 animate-pulse bg-slate-200 rounded h-4" />
-      <div className="w-16 animate-pulse bg-slate-200 rounded h-4" />
+    <div className="flex items-center gap-3 px-3 py-2.5 last:border-0" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+      <div className="flex-1 animate-pulse rounded h-4" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+      <div className="w-16 animate-pulse rounded h-4" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+      <div className="w-16 animate-pulse rounded h-4" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+      <div className="w-16 animate-pulse rounded h-4" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+      <div className="w-16 animate-pulse rounded h-4" style={{ backgroundColor: 'var(--bg-elevated)' }} />
     </div>
   )
 }
@@ -164,17 +171,43 @@ function SkeletonCategory() {
     <div className="mb-3">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-2">
-          <div className="w-4 h-4 animate-pulse bg-slate-200 rounded" />
-          <div className="w-40 h-5 animate-pulse bg-slate-200 rounded" />
+          <div className="w-4 h-4 animate-pulse rounded" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+          <div className="w-40 h-5 animate-pulse rounded" style={{ backgroundColor: 'var(--bg-elevated)' }} />
         </div>
-        <div className="w-20 h-5 animate-pulse bg-slate-200 rounded" />
+        <div className="w-20 h-5 animate-pulse rounded" style={{ backgroundColor: 'var(--bg-elevated)' }} />
       </div>
-      <div className="border border-slate-200 rounded-lg mx-4 overflow-hidden">
+      <div className="mx-4 overflow-hidden rounded-lg" style={{ border: '1px solid var(--bg-border)' }}>
         <SkeletonRow />
         <SkeletonRow />
       </div>
     </div>
   )
+}
+
+// ─── Pricing type tag ─────────────────────────────────────────────────────────
+
+function PricingTypeTag({ type }: { type: DemoQuoteLineItem['pricing_type'] }) {
+  if (type === 'pc_allowance') {
+    return (
+      <span
+        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide"
+        style={{ backgroundColor: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }}
+      >
+        PC
+      </span>
+    )
+  }
+  if (type === 'provisional_sum') {
+    return (
+      <span
+        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide"
+        style={{ backgroundColor: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }}
+      >
+        PS
+      </span>
+    )
+  }
+  return null
 }
 
 // ─── Line item row ────────────────────────────────────────────────────────────
@@ -186,74 +219,96 @@ interface LineItemRowProps {
 function LineItemRow({ item }: LineItemRowProps) {
   const isExcluded = item.assumption_status === 'excluded'
   const isUnresolved = item.is_assumption && item.assumption_status === 'unresolved'
+  const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
 
-  const rowClass = [
-    'flex items-start gap-2 px-3 py-2.5 border-b border-slate-100 last:border-0',
-    isUnresolved ? 'bg-red-50' : '',
-    isExcluded ? 'opacity-60' : '',
-  ]
-    .filter(Boolean)
-    .join(' ')
-
-  const textClass = isExcluded ? 'line-through text-slate-400' : 'text-slate-800'
+  const sellTotal = item.total !== null ? Math.round(item.total * (1 + item.margin_pct)) : null
 
   return (
-    <div className={rowClass} role="row">
+    <div
+      className={['flex items-start gap-2 px-3 py-2.5 last:border-0', isExcluded ? 'opacity-60' : ''].filter(Boolean).join(' ')}
+      style={{
+        borderBottom: '1px solid var(--bg-border)',
+        backgroundColor: isUnresolved ? 'rgba(244,67,54,0.06)' : undefined,
+      }}
+      role="row"
+    >
       {/* Description — takes most space */}
       <div className="flex-1 min-w-0">
-        <span className={`text-sm leading-tight block ${textClass}`}>
-          <span className="truncate">{item.description}</span>
-          {item.item_type === 'pc_allowance' && (
-            <span
-              className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-semibold uppercase tracking-wide align-middle"
-              title="PC allowance — to be confirmed"
-            >
-              PC
-            </span>
-          )}
-          {item.item_type === 'provisional_sum' && (
-            <span
-              className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-semibold uppercase tracking-wide align-middle"
-              title="Provisional sum — requires quote"
-            >
-              PS
-            </span>
-          )}
-        </span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span
+            className="text-[13px] leading-tight"
+            style={{
+              color: isExcluded ? 'var(--text-tertiary)' : 'var(--text-primary)',
+              textDecoration: isExcluded ? 'line-through' : undefined,
+            }}
+          >
+            {item.description}
+          </span>
+          <PricingTypeTag type={item.pricing_type} />
+        </div>
         {item.dimensions_string && !isExcluded && (
-          <span className="text-xs text-slate-400 block truncate mt-0.5">
+          <span className="text-[11px] block truncate mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
             {item.dimensions_string}
           </span>
         )}
-        {item.notes && !isExcluded && (
-          <span className="text-xs text-slate-400 block mt-0.5">{item.notes}</span>
+        {item.source_ref && !isExcluded && (
+          <span className="text-[11px] block mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
+            {item.source_ref}
+          </span>
         )}
       </div>
 
-      {/* Qty + unit */}
-      <div className="flex-shrink-0 text-right w-14 sm:w-20">
-        <span className={`text-sm tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
-          {formatQuantity(item.quantity)}
-          {item.unit ? (
-            <span className="text-xs text-slate-500 ml-0.5">{item.unit}</span>
-          ) : (
-            <span className="text-xs text-red-500 ml-0.5">[?]</span>
-          )}
-        </span>
-      </div>
+      {/* Qty + unit — hidden for allowances */}
+      {!isAllowance && (
+        <div className="flex-shrink-0 text-right w-14 sm:w-20">
+          <span
+            className="text-[13px] tabular-nums"
+            style={{
+              color: isExcluded ? 'var(--text-tertiary)' : 'var(--text-secondary)',
+              textDecoration: isExcluded ? 'line-through' : undefined,
+            }}
+          >
+            {formatQuantity(item.quantity)}
+            {item.unit ? (
+              <span className="text-[11px] ml-0.5" style={{ color: 'var(--text-tertiary)' }}>{item.unit}</span>
+            ) : (
+              <span className="text-[11px] ml-0.5" style={{ color: 'var(--status-red)' }}>[?]</span>
+            )}
+          </span>
+        </div>
+      )}
+      {isAllowance && <div className="flex-shrink-0 w-14 sm:w-20" />}
 
       {/* Rate */}
       <div className="flex-shrink-0 text-right w-16 sm:w-20 hidden sm:block">
-        <span className={`text-sm tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-600'}`}>
-          {formatRate(item.rate)}
+        <span
+          className="text-[13px] tabular-nums"
+          style={{
+            color: isExcluded ? 'var(--text-tertiary)' : 'var(--text-secondary)',
+            textDecoration: isExcluded ? 'line-through' : undefined,
+          }}
+        >
+          {isAllowance ? 'Allowance' : formatRate(item.rate)}
         </span>
       </div>
 
-      {/* Total */}
+      {/* Sell total (cost + margin) */}
       <div className="flex-shrink-0 text-right w-16 sm:w-24">
-        <span className={`text-sm font-medium tabular-nums ${isExcluded ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
-          {isExcluded ? 'Excluded' : formatTotal(item.total)}
+        <span
+          className="text-[13px] font-medium tabular-nums"
+          style={{
+            color: isExcluded ? 'var(--text-tertiary)' : 'var(--text-primary)',
+            textDecoration: isExcluded ? 'line-through' : undefined,
+          }}
+        >
+          {isExcluded ? 'Excluded' : (sellTotal !== null ? formatCurrency(sellTotal) : formatTotal(item.total))}
         </span>
+        {!isExcluded && item.margin_pct > 0 && item.total !== null && (
+          <span className="text-[10px] block" style={{ color: 'var(--text-tertiary)' }}>{Math.round(item.margin_pct * 100)}% margin</span>
+        )}
+        {!isExcluded && item.pricing_type === 'provisional_sum' && (
+          <span className="text-[10px] block" style={{ color: 'var(--status-amber)' }}>0% margin</span>
+        )}
       </div>
 
       {/* Confidence indicator */}
@@ -264,6 +319,89 @@ function LineItemRow({ item }: LineItemRowProps) {
           assumptionStatus={item.assumption_status}
         />
       </div>
+    </div>
+  )
+}
+
+// ─── PC/PS Register ───────────────────────────────────────────────────────────
+
+interface PcPsRegisterProps {
+  items: DemoQuoteLineItem[]
+}
+
+function PcPsRegister({ items }: PcPsRegisterProps) {
+  const pcItems = items.filter(i => i.pricing_type === 'pc_allowance')
+  const psItems = items.filter(i => i.pricing_type === 'provisional_sum')
+
+  if (pcItems.length === 0 && psItems.length === 0) return null
+
+  const pcTotal = pcItems.reduce((s, i) => s + (i.total ?? 0), 0)
+  const psTotal = psItems.reduce((s, i) => s + (i.total ?? 0), 0)
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
+      <div className="px-4 py-2" style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderBottom: '1px solid rgba(255,152,0,0.2)' }}>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>
+          PC &amp; Provisional Sum Register
+        </h3>
+        <p className="text-[11px] mt-0.5" style={{ color: 'var(--status-amber)' }}>
+          These amounts are estimates. Final costs depend on client selections (PC) or actual scope (PS).
+        </p>
+      </div>
+      {pcItems.length > 0 && (
+        <div style={{ borderBottom: '1px solid rgba(255,152,0,0.15)' }}>
+          <div className="px-4 py-1.5" style={{ backgroundColor: 'var(--bg-elevated)' }}>
+            <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>Prime Cost Allowances</span>
+          </div>
+          {pcItems.map(item => (
+            <div
+              key={item.id}
+              className="flex items-center justify-between px-4 py-2"
+              style={{ borderTop: '1px solid rgba(255,152,0,0.08)', backgroundColor: 'var(--bg-surface)' }}
+            >
+              <div>
+                <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{item.description}</span>
+                {item.source_ref && <span className="text-[11px] ml-2" style={{ color: 'var(--text-tertiary)' }}>{item.source_ref}</span>}
+              </div>
+              <span className="text-[13px] font-medium tabular-nums" style={{ color: 'var(--text-primary)' }}>{formatCurrency(item.total ?? 0)}</span>
+            </div>
+          ))}
+          <div
+            className="flex items-center justify-between px-4 py-2"
+            style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderTop: '1px solid rgba(255,152,0,0.15)' }}
+          >
+            <span className="text-[11px] font-semibold" style={{ color: 'var(--status-amber)' }}>PC Total</span>
+            <span className="text-[13px] font-bold tabular-nums" style={{ color: 'var(--status-amber)' }}>{formatCurrency(pcTotal)}</span>
+          </div>
+        </div>
+      )}
+      {psItems.length > 0 && (
+        <div>
+          <div className="px-4 py-1.5" style={{ backgroundColor: 'var(--bg-elevated)' }}>
+            <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>Provisional Sums</span>
+          </div>
+          {psItems.map(item => (
+            <div
+              key={item.id}
+              className="flex items-center justify-between px-4 py-2"
+              style={{ borderTop: '1px solid rgba(255,152,0,0.08)', backgroundColor: 'var(--bg-surface)' }}
+            >
+              <div>
+                <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{item.description}</span>
+                {item.source_ref && <span className="text-[11px] ml-2" style={{ color: 'var(--text-tertiary)' }}>{item.source_ref}</span>}
+              </div>
+              <span className="text-[13px] font-medium tabular-nums" style={{ color: 'var(--text-primary)' }}>{formatCurrency(item.total ?? 0)}</span>
+            </div>
+          ))}
+          <div
+            className="flex items-center justify-between px-4 py-2"
+            style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderTop: '1px solid rgba(255,152,0,0.15)' }}
+          >
+            <span className="text-[11px] font-semibold" style={{ color: 'var(--status-amber)' }}>PS Total (0% margin)</span>
+            <span className="text-[13px] font-bold tabular-nums" style={{ color: 'var(--status-amber)' }}>{formatCurrency(psTotal)}</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -280,6 +418,9 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
   const hasUnresolved = group.items.some(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
   )
+  const onlyAllowances = group.items.length > 0 && group.items.every(
+    (i) => i.pricing_type === 'pc_allowance' || i.pricing_type === 'provisional_sum'
+  )
 
   return (
     <div className="mb-2">
@@ -287,14 +428,18 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
       <button
         type="button"
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 transition-colors text-left rounded-lg"
+        className="w-full flex items-center justify-between px-4 py-3 transition-colors text-left rounded-lg"
+        style={{ color: 'inherit' }}
+        onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-elevated)')}
+        onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
         aria-expanded={isExpanded}
         aria-controls={`category-${group.category_id}`}
       >
         <div className="flex items-center gap-2">
           {/* Chevron */}
           <svg
-            className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${isExpanded ? 'rotate-0' : '-rotate-90'}`}
+            className={`w-4 h-4 transition-transform duration-200 ${isExpanded ? 'rotate-0' : '-rotate-90'}`}
+            style={{ color: 'var(--text-tertiary)' }}
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -303,22 +448,32 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
-          <span className="text-sm font-semibold text-slate-800 uppercase tracking-wide">
+          <span className="text-[13px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-primary)' }}>
             {group.category_name}
           </span>
           {hasUnresolved && (
             <span
-              className="text-amber-500 text-sm leading-none ml-1"
+              className="text-[13px] leading-none ml-1"
+              style={{ color: 'var(--status-amber)' }}
               aria-label="Has unresolved items"
               title="Has unresolved assumptions"
             >
               ⚠
             </span>
           )}
+          {!hasUnresolved && onlyAllowances && (
+            <span
+              className="text-[10px] font-semibold px-1.5 py-0.5 rounded ml-1"
+              style={{ backgroundColor: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }}
+              title="All items in this category are PC allowances or provisional sums"
+            >
+              PC/PS
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="text-sm font-semibold text-slate-900 tabular-nums">
+          <span className="text-[13px] font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
             {formatCurrency(group.category_total)}
           </span>
         </div>
@@ -332,22 +487,25 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
           maxHeight: isExpanded ? '9999px' : '0px',
         }}
       >
-        <div className="mx-4 mb-2 border border-slate-200 rounded-lg overflow-hidden">
+        <div className="mx-4 mb-2 rounded-lg overflow-hidden" style={{ border: '1px solid var(--bg-border)' }}>
           {/* Column headers — hidden on mobile, visible on sm+ */}
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-50 border-b border-slate-200">
-            <div className="flex-1 text-xs font-medium text-slate-500 uppercase tracking-wide">
+          <div
+            className="hidden sm:flex items-center gap-2 px-3 py-1.5"
+            style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}
+          >
+            <div className="flex-1 text-[11px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
               Description
             </div>
-            <div className="flex-shrink-0 w-20 text-right text-xs font-medium text-slate-500 uppercase tracking-wide">
+            <div className="flex-shrink-0 w-20 text-right text-[11px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
               Qty
             </div>
-            <div className="flex-shrink-0 w-20 text-right text-xs font-medium text-slate-500 uppercase tracking-wide">
+            <div className="flex-shrink-0 w-20 text-right text-[11px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
               Rate
             </div>
-            <div className="flex-shrink-0 w-24 text-right text-xs font-medium text-slate-500 uppercase tracking-wide">
+            <div className="flex-shrink-0 w-24 text-right text-[11px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
               Total
             </div>
-            <div className="flex-shrink-0 w-24 text-right text-xs font-medium text-slate-500 uppercase tracking-wide">
+            <div className="flex-shrink-0 w-24 text-right text-[11px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
               Confidence
             </div>
           </div>
@@ -364,10 +522,9 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
 
 interface SummaryCardProps {
   summary: QuoteSummary
-  estimate?: EstimateTotals | null
 }
 
-function SummaryCard({ summary, estimate }: SummaryCardProps) {
+function SummaryCard({ summary }: SummaryCardProps) {
   const confidenceLabel =
     summary.confidence_score >= 80
       ? 'High confidence'
@@ -376,73 +533,36 @@ function SummaryCard({ summary, estimate }: SummaryCardProps) {
       : 'Low confidence — red items need input'
 
   return (
-    <div className="mx-4 mb-4 border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-      <div className="bg-slate-50 px-4 py-2 border-b border-slate-200">
-        <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Summary</h3>
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden shadow-sm" style={{ border: '1px solid var(--bg-border)' }}>
+      <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>Summary</h3>
       </div>
-      <div className="divide-y divide-slate-100">
-        {estimate ? (
-          <>
-            <div className="flex items-center justify-between px-4 py-2.5">
-              <span className="text-sm text-slate-600">Direct cost (ex GST)</span>
-              <span className="text-sm font-semibold text-slate-900 tabular-nums">
-                {formatCurrency(estimate.subtotal)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-2.5">
-              <span className="text-sm text-slate-600">
-                Contingency ({estimate.contingency_pct}%)
-              </span>
-              <span className="text-sm font-semibold text-slate-900 tabular-nums">
-                {formatCurrency(estimate.contingency_amount)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-2.5">
-              <span className="text-sm text-slate-600">
-                Builder&apos;s margin ({estimate.margin_pct}%)
-              </span>
-              <span className="text-sm font-semibold text-slate-900 tabular-nums">
-                {formatCurrency(estimate.margin_amount)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-2.5">
-              <span className="text-sm text-slate-600">GST ({estimate.gst_pct}%)</span>
-              <span className="text-sm font-semibold text-slate-900 tabular-nums">
-                {formatCurrency(estimate.gst_amount)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50">
-              <span className="text-sm font-semibold text-slate-800">Total (inc GST)</span>
-              <span className="text-sm font-bold text-slate-900 tabular-nums">
-                {formatCurrency(estimate.total_inc_gst)}
-              </span>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="flex items-center justify-between px-4 py-2.5">
-              <span className="text-sm text-slate-600">Total cost</span>
-              <span className="text-sm font-bold text-slate-900 tabular-nums">
-                {formatCurrency(summary.total_cost)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-2.5">
-              <span className="text-sm text-slate-600">Margin</span>
-              <span className="text-sm font-semibold text-slate-900">{summary.margin_pct}%</span>
-            </div>
-          </>
-        )}
-        <div className="flex items-center justify-between px-4 py-2.5">
-          <span className="text-sm text-slate-600">Confidence</span>
+      <div style={{ backgroundColor: 'var(--bg-surface)' }}>
+        <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Total cost</span>
+          <span className="text-[13px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+            {formatCurrency(summary.total_cost)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Margin</span>
+          <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{summary.margin_pct}%</span>
+        </div>
+        <div
+          className="flex items-center justify-between px-4 py-2.5"
+          style={{ borderBottom: summary.unresolved_count > 0 || summary.assumption_count > 0 ? '1px solid var(--bg-border)' : undefined }}
+        >
+          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Confidence</span>
           <div className="flex items-center gap-2">
             <OverallConfidenceBadge score={summary.confidence_score} />
-            <span className="text-xs text-slate-500 hidden sm:inline">{confidenceLabel}</span>
+            <span className="text-[11px] hidden sm:inline" style={{ color: 'var(--text-tertiary)' }}>{confidenceLabel}</span>
           </div>
         </div>
         {summary.unresolved_count > 0 && (
-          <div className="flex items-center gap-2 px-4 py-2.5 bg-red-50">
+          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(244,67,54,0.08)' }}>
             <svg
-              className="w-4 h-4 text-red-500 flex-shrink-0"
+              className="w-4 h-4 flex-shrink-0"
+              style={{ color: 'var(--status-red)' }}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -455,16 +575,17 @@ function SummaryCard({ summary, estimate }: SummaryCardProps) {
                 d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
               />
             </svg>
-            <span className="text-sm font-medium text-red-700">
+            <span className="text-[13px] font-medium" style={{ color: 'var(--status-red)' }}>
               {summary.unresolved_count} item{summary.unresolved_count !== 1 ? 's' : ''} need
               {summary.unresolved_count === 1 ? 's' : ''} your input before sending
             </span>
           </div>
         )}
         {summary.unresolved_count === 0 && summary.assumption_count > 0 && (
-          <div className="flex items-center gap-2 px-4 py-2.5 bg-green-50">
+          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
             <svg
-              className="w-4 h-4 text-green-500 flex-shrink-0"
+              className="w-4 h-4 flex-shrink-0"
+              style={{ color: 'var(--status-green)' }}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -473,15 +594,16 @@ function SummaryCard({ summary, estimate }: SummaryCardProps) {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
-            <span className="text-sm font-medium text-green-700">
+            <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
               All assumptions resolved — quote is ready to send
             </span>
           </div>
         )}
         {summary.unresolved_count === 0 && summary.assumption_count === 0 && (
-          <div className="flex items-center gap-2 px-4 py-2.5 bg-green-50">
+          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
             <svg
-              className="w-4 h-4 text-green-500 flex-shrink-0"
+              className="w-4 h-4 flex-shrink-0"
+              style={{ color: 'var(--status-green)' }}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -490,63 +612,11 @@ function SummaryCard({ summary, estimate }: SummaryCardProps) {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
-            <span className="text-sm font-medium text-green-700">
+            <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
               Quote is ready to send
             </span>
           </div>
         )}
-      </div>
-    </div>
-  )
-}
-
-// ─── PC allowance / provisional sum schedule ──────────────────────────────────
-
-function AllowanceScheduleCard({ items }: { items: DemoQuoteLineItem[] }) {
-  const allowances = items.filter(
-    (i) =>
-      (i.item_type === 'pc_allowance' || i.item_type === 'provisional_sum') &&
-      i.assumption_status !== 'excluded'
-  )
-  if (allowances.length === 0) return null
-
-  const total = allowances.reduce((sum, i) => sum + (i.total ?? 0), 0)
-
-  return (
-    <div className="mx-4 mb-4 border border-amber-200 rounded-xl overflow-hidden shadow-sm">
-      <div className="bg-amber-50 px-4 py-2 border-b border-amber-200 flex items-center justify-between">
-        <h3 className="text-xs font-semibold text-amber-700 uppercase tracking-wide">
-          PC allowances &amp; provisional sums
-        </h3>
-        <span className="text-xs font-semibold text-amber-700 tabular-nums">
-          {formatCurrency(total)}
-        </span>
-      </div>
-      <div className="divide-y divide-slate-100">
-        {allowances.map((item) => (
-          <div key={item.id} className="flex items-start justify-between gap-3 px-4 py-2">
-            <div className="min-w-0">
-              <span className="text-sm text-slate-800 block">
-                {item.description}
-                <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600">
-                  {item.item_type === 'pc_allowance' ? 'PC' : 'PS'}
-                </span>
-              </span>
-              {item.notes && (
-                <span className="text-xs text-slate-400 block mt-0.5">{item.notes}</span>
-              )}
-            </div>
-            <span className="text-sm font-medium text-slate-900 tabular-nums flex-shrink-0">
-              {formatTotal(item.total)}
-            </span>
-          </div>
-        ))}
-      </div>
-      <div className="px-4 py-2 bg-amber-50/50 border-t border-amber-100">
-        <p className="text-xs text-amber-700">
-          These amounts are allowances only — confirm selections or obtain supplier quotes
-          before relying on them.
-        </p>
       </div>
     </div>
   )
@@ -564,9 +634,12 @@ interface ActionBarProps {
 
 function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBarProps) {
   return (
-    <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3">
+    <div
+      className="flex-shrink-0 px-4 py-3"
+      style={{ borderTop: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+    >
       {!summary.can_send && (
-        <p className="text-sm text-red-600 font-medium mb-2 flex items-center gap-1.5">
+        <p className="text-[13px] font-medium mb-2 flex items-center gap-1.5" style={{ color: 'var(--status-red)' }}>
           <svg
             className="w-4 h-4 flex-shrink-0"
             fill="none"
@@ -595,21 +668,30 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
               ? 'Send quote to client'
               : `Resolve ${summary.unresolved_count} item${summary.unresolved_count !== 1 ? 's' : ''} to enable sending`
           }
-          className="btn-primary px-4 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed flex-1 sm:flex-none"
+          className="btn-primary px-4 py-2 text-[13px] disabled:opacity-40 disabled:cursor-not-allowed flex-1 sm:flex-none"
         >
           Send to client
         </button>
         <button
           type="button"
           onClick={() => onExportPdf(quoteId)}
-          className="btn-secondary px-4 py-2 text-sm flex-1 sm:flex-none"
+          className="btn-secondary px-4 py-2 text-[13px] flex-1 sm:flex-none"
         >
           Export PDF
         </button>
         <button
           type="button"
           onClick={() => onRevise(quoteId)}
-          className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors flex-1 sm:flex-none"
+          className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors flex-1 sm:flex-none"
+          style={{ color: 'var(--text-secondary)' }}
+          onMouseEnter={e => {
+            e.currentTarget.style.color = 'var(--text-primary)'
+            e.currentTarget.style.backgroundColor = 'var(--bg-elevated)'
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.color = 'var(--text-secondary)'
+            e.currentTarget.style.backgroundColor = ''
+          }}
         >
           Revise
         </button>
@@ -794,19 +876,31 @@ function QuoteViewInner({
       <div
         ref={panelRef}
         className={[
-          'relative flex flex-col w-full h-full bg-white sm:max-w-3xl sm:mx-auto sm:my-6 sm:rounded-2xl sm:h-auto sm:max-h-[calc(100vh-3rem)] shadow-2xl',
+          'relative flex flex-col w-full h-full sm:max-w-3xl sm:mx-auto sm:my-6 sm:rounded-2xl sm:h-auto sm:max-h-[calc(100vh-3rem)] shadow-2xl',
           'transition-transform duration-220 ease-out',
           visible ? 'translate-y-0 sm:scale-100' : 'translate-y-8 sm:scale-95',
         ].join(' ')}
-        style={{ transitionDuration: '220ms' }}
+        style={{ backgroundColor: 'var(--bg-surface)', transitionDuration: '220ms' }}
       >
         {/* ── Header ───────────────────────────────────────────────── */}
-        <div className="flex items-center justify-between px-4 pt-4 pb-3 border-b border-slate-200 bg-white sm:rounded-t-2xl flex-shrink-0 sticky top-0 z-10">
+        <div
+          className="flex items-center justify-between px-4 pt-4 pb-3 sm:rounded-t-2xl flex-shrink-0 sticky top-0 z-10"
+          style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+        >
           <div className="flex items-center gap-3 min-w-0">
             <button
               ref={closeButtonRef}
               onClick={handleClose}
-              className="w-8 h-8 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0"
+              className="w-8 h-8 flex items-center justify-center rounded-full transition-colors flex-shrink-0"
+              style={{ color: 'var(--text-tertiary)' }}
+              onMouseEnter={e => {
+                e.currentTarget.style.color = 'var(--text-primary)'
+                e.currentTarget.style.backgroundColor = 'var(--bg-elevated)'
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.color = 'var(--text-tertiary)'
+                e.currentTarget.style.backgroundColor = ''
+              }}
               aria-label="Close quote view"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth={2}>
@@ -815,12 +909,15 @@ function QuoteViewInner({
             </button>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-900 truncate">
+                <h2 className="text-base font-bold truncate" style={{ color: 'var(--text-primary)' }}>
                   {sentAt ? 'Quote' : 'Draft Quote'} v{data?.quote.version ?? 1}
                 </h2>
                 {data && !sentAt && <OverallConfidenceBadge score={data.quote.confidence_score} />}
                 {sentAt && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-semibold">
+                  <span
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold"
+                    style={{ backgroundColor: 'rgba(76,175,80,0.15)', color: 'var(--status-green)' }}
+                  >
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                     </svg>
@@ -829,10 +926,10 @@ function QuoteViewInner({
                 )}
               </div>
               {data && (
-                <p className="text-xs text-slate-500 truncate mt-0.5">
+                <p className="text-[11px] truncate mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
                   {data.quote.job_address}
                   {sentAt && (
-                    <span className="ml-1 text-green-600">
+                    <span className="ml-1" style={{ color: 'var(--status-green)' }}>
                       &mdash; sent {new Date(sentAt).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}
                     </span>
                   )}
@@ -848,14 +945,18 @@ function QuoteViewInner({
           {isLoading && (
             <div className="pt-4">
               {/* Skeleton summary card */}
-              <div className="mx-4 mb-4 border border-slate-200 rounded-xl overflow-hidden">
-                <div className="bg-slate-50 px-4 py-2 border-b border-slate-200">
-                  <div className="w-20 h-3 animate-pulse bg-slate-200 rounded" />
+              <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }}>
+                <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
+                  <div className="w-20 h-3 animate-pulse rounded" style={{ backgroundColor: 'var(--bg-border)' }} />
                 </div>
                 {[0, 1, 2].map((i) => (
-                  <div key={i} className="flex items-center justify-between px-4 py-2.5 border-b border-slate-100 last:border-0">
-                    <div className="w-24 h-4 animate-pulse bg-slate-200 rounded" />
-                    <div className="w-20 h-4 animate-pulse bg-slate-200 rounded" />
+                  <div
+                    key={i}
+                    className="flex items-center justify-between px-4 py-2.5 last:border-0"
+                    style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+                  >
+                    <div className="w-24 h-4 animate-pulse rounded" style={{ backgroundColor: 'var(--bg-elevated)' }} />
+                    <div className="w-20 h-4 animate-pulse rounded" style={{ backgroundColor: 'var(--bg-elevated)' }} />
                   </div>
                 ))}
               </div>
@@ -869,7 +970,8 @@ function QuoteViewInner({
           {!isLoading && error && (
             <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
               <svg
-                className="w-10 h-10 text-red-400 mb-3"
+                className="w-10 h-10 mb-3"
+                style={{ color: 'var(--status-red)' }}
                 fill="none"
                 viewBox="0 0 24 24"
                 stroke="currentColor"
@@ -882,11 +984,11 @@ function QuoteViewInner({
                   d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"
                 />
               </svg>
-              <p className="text-sm text-red-600 font-medium">{error}</p>
+              <p className="text-[13px] font-medium" style={{ color: 'var(--status-red)' }}>{error}</p>
               <button
                 type="button"
                 onClick={handleClose}
-                className="mt-4 btn-secondary text-sm px-4 py-2"
+                className="mt-4 btn-secondary text-[13px] px-4 py-2"
               >
                 Close
               </button>
@@ -897,12 +999,13 @@ function QuoteViewInner({
           {!isLoading && !error && data && (
             <div className="pt-4 pb-2">
               {/* Summary card */}
-              <SummaryCard summary={data.summary} estimate={data.estimate} />
+              <SummaryCard summary={data.summary} />
 
-              {/* PC allowances & provisional sums */}
-              <AllowanceScheduleCard
-                items={data.line_items_by_category.flatMap((g) => g.items)}
-              />
+              {/* PC/PS register */}
+              {(() => {
+                const allItems = data.line_items_by_category.flatMap(g => g.items)
+                return <PcPsRegister items={allItems} />
+              })()}
 
               {/* Category sections */}
               {data.line_items_by_category.map((group) => (

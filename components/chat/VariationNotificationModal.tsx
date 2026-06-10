@@ -47,11 +47,12 @@ const FOCUSABLE_SELECTOR =
 function Spinner() {
   return (
     <svg
-      className="animate-spin h-4 w-4 text-white"
+      className="animate-spin h-4 w-4"
       xmlns="http://www.w3.org/2000/svg"
       fill="none"
       viewBox="0 0 24 24"
       aria-hidden="true"
+      style={{ color: '#fff' }}
     >
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path
@@ -238,25 +239,33 @@ export default function VariationNotificationModal({
   return (
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center p-4"
-      style={{ backgroundColor: 'rgba(15, 23, 42, 0.7)' }}
+      style={{ backgroundColor: 'rgba(15, 23, 42, 0.75)' }}
       aria-modal="true"
       role="dialog"
       aria-label="Notify client about approved variation"
     >
       <div
         ref={panelRef}
-        className="w-full max-w-lg bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
-        style={{ maxHeight: 'calc(100vh - 2rem)' }}
+        className="w-full max-w-lg rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        style={{
+          maxHeight: 'calc(100vh - 2rem)',
+          background: 'var(--bg-surface)',
+          border: '0.5px solid var(--bg-border)',
+        }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 flex-shrink-0">
+        <div
+          className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+          style={{ borderBottom: '0.5px solid var(--bg-border)' }}
+        >
           <div className="flex items-center gap-3">
             {(step === 'confirm' || step === 'sending') && (
               <button
                 type="button"
                 onClick={() => setStep('draft')}
                 disabled={step === 'sending'}
-                className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-7 h-7 flex items-center justify-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ color: 'var(--text-tertiary)' }}
                 aria-label="Back to draft"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -264,7 +273,7 @@ export default function VariationNotificationModal({
                 </svg>
               </button>
             )}
-            <h2 className="text-sm font-semibold text-slate-900">
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
               {step === 'loading' && 'Preparing draft…'}
               {step === 'draft' && 'Notify client?'}
               {(step === 'confirm' || step === 'sending') && 'Confirm send'}
@@ -273,14 +282,15 @@ export default function VariationNotificationModal({
           </div>
           <div className="flex items-center gap-3">
             {(step === 'draft' || step === 'confirm') && (
-              <span className="text-xs font-medium text-slate-400">
+              <span className="text-xs font-medium" style={{ color: 'var(--text-tertiary)' }}>
                 Step {step === 'draft' ? '1' : '2'} of 2
               </span>
             )}
             <button
               type="button"
               onClick={onClose}
-              className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-full transition-colors"
+              style={{ color: 'var(--text-tertiary)' }}
               aria-label="Close"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -296,25 +306,45 @@ export default function VariationNotificationModal({
           {/* Loading */}
           {step === 'loading' && (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
-              <svg className="animate-spin h-8 w-8 text-brand-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <svg
+                className="animate-spin h-8 w-8"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+                style={{ color: 'var(--orange-primary)' }}
+              >
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
-              <p className="text-sm text-slate-500">Preparing notification draft…</p>
+              <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Preparing notification draft…</p>
             </div>
           )}
 
           {/* Error */}
           {step === 'error' && (
             <div className="flex flex-col items-center justify-center py-16 px-6 text-center gap-3">
-              <svg className="w-10 h-10 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <svg
+                className="w-10 h-10"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.5}
+                aria-hidden="true"
+                style={{ color: 'var(--status-red)' }}
+              >
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-              <p className="text-sm text-red-600 font-medium">{loadError}</p>
+              <p className="text-sm font-medium" style={{ color: 'var(--status-red)' }}>{loadError}</p>
               <button
                 type="button"
                 onClick={onClose}
-                className="mt-2 px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                className="mt-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+                style={{
+                  color: 'var(--text-secondary)',
+                  border: '0.5px solid var(--bg-border)',
+                  background: 'var(--bg-elevated)',
+                }}
               >
                 Close
               </button>
@@ -324,13 +354,17 @@ export default function VariationNotificationModal({
           {/* Step 1 — Draft review */}
           {step === 'draft' && (
             <div className="px-5 py-5 space-y-4">
-              <p className="text-sm text-slate-600 leading-relaxed">
+              <p className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                 The variation has been approved. Do you want to notify the client?
               </p>
 
               {/* To */}
               <div>
-                <label htmlFor="notif-to" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label
+                  htmlFor="notif-to"
+                  className="block text-xs font-semibold uppercase tracking-wide mb-1.5"
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
                   To
                 </label>
                 <input
@@ -339,23 +373,42 @@ export default function VariationNotificationModal({
                   value={draftTo}
                   onChange={(e) => setDraftTo(e.target.value)}
                   placeholder="client@example.com"
-                  className="w-full px-3 py-2 text-sm text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+                  className="w-full px-3 py-2 text-sm rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+                  style={{
+                    color: 'var(--text-primary)',
+                    background: 'var(--bg-elevated)',
+                    border: '0.5px solid var(--bg-border)',
+                  }}
                 />
               </div>
 
               {/* Subject */}
               <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label
+                  className="block text-xs font-semibold uppercase tracking-wide mb-1.5"
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
                   Subject
                 </label>
-                <p className="px-3 py-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg select-text">
+                <p
+                  className="px-3 py-2 text-sm rounded-lg select-text"
+                  style={{
+                    color: 'var(--text-secondary)',
+                    background: 'var(--bg-elevated)',
+                    border: '0.5px solid var(--bg-border)',
+                  }}
+                >
                   {draftSubject}
                 </p>
               </div>
 
               {/* Body */}
               <div>
-                <label htmlFor="notif-body" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label
+                  htmlFor="notif-body"
+                  className="block text-xs font-semibold uppercase tracking-wide mb-1.5"
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
                   Message
                 </label>
                 <textarea
@@ -363,7 +416,12 @@ export default function VariationNotificationModal({
                   value={draftBody}
                   onChange={(e) => setDraftBody(e.target.value)}
                   rows={10}
-                  className="w-full px-3 py-2 text-sm text-slate-900 font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent resize-y leading-relaxed"
+                  className="w-full px-3 py-2 text-sm font-mono rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent resize-y leading-relaxed"
+                  style={{
+                    color: 'var(--text-primary)',
+                    background: 'var(--bg-elevated)',
+                    border: '0.5px solid var(--bg-border)',
+                  }}
                 />
               </div>
             </div>
@@ -373,27 +431,62 @@ export default function VariationNotificationModal({
           {(step === 'confirm' || step === 'sending') && (
             <div className="px-5 py-6 space-y-5">
               {/* Sending to */}
-              <div className="flex items-center gap-2.5 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <div
+                className="flex items-center gap-2.5 p-3 rounded-lg"
+                style={{
+                  background: 'rgba(76,175,80,0.15)',
+                  border: '0.5px solid var(--status-green)',
+                }}
+              >
+                <svg
+                  className="w-5 h-5 flex-shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  aria-hidden="true"
+                  style={{ color: 'var(--status-green)' }}
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-green-700 uppercase tracking-wide">Sending to</p>
-                  <p className="text-sm font-medium text-green-900 truncate">{draftTo}</p>
+                  <p
+                    className="text-xs font-semibold uppercase tracking-wide"
+                    style={{ color: 'var(--status-green)' }}
+                  >
+                    Sending to
+                  </p>
+                  <p
+                    className="text-sm font-medium truncate"
+                    style={{ color: 'var(--text-primary)' }}
+                  >
+                    {draftTo}
+                  </p>
                 </div>
               </div>
 
               {/* Explanation */}
-              <div className="space-y-3 text-sm text-slate-600 leading-relaxed">
+              <div className="space-y-3 text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                 <p>
                   This will notify the client that their variation has been approved. WorkA will log this to the job&apos;s communication history.
                 </p>
               </div>
 
               {/* Subject preview */}
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Subject</p>
-                <p className="text-sm text-slate-700">{draftSubject}</p>
+              <div
+                className="p-3 rounded-lg"
+                style={{
+                  background: 'var(--bg-elevated)',
+                  border: '0.5px solid var(--bg-border)',
+                }}
+              >
+                <p
+                  className="text-xs font-semibold uppercase tracking-wide mb-1"
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
+                  Subject
+                </p>
+                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{draftSubject}</p>
               </div>
             </div>
           )}
@@ -401,11 +494,22 @@ export default function VariationNotificationModal({
 
         {/* Footer / Actions */}
         {step === 'draft' && (
-          <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{
+              borderTop: '0.5px solid var(--bg-border)',
+              background: 'var(--bg-surface)',
+            }}
+          >
             <button
               type="button"
               onClick={() => { onClose(); onSent() }}
-              className="px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              className="px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+              style={{
+                color: 'var(--text-secondary)',
+                border: '0.5px solid var(--bg-border)',
+                background: 'var(--bg-elevated)',
+              }}
             >
               Skip — don&apos;t notify
             </button>
@@ -413,7 +517,8 @@ export default function VariationNotificationModal({
               type="button"
               onClick={() => setStep('confirm')}
               disabled={!draftTo.trim()}
-              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: 'var(--orange-primary)', color: '#fff' }}
             >
               Looks good
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
@@ -424,12 +529,23 @@ export default function VariationNotificationModal({
         )}
 
         {(step === 'confirm' || step === 'sending') && (
-          <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{
+              borderTop: '0.5px solid var(--bg-border)',
+              background: 'var(--bg-surface)',
+            }}
+          >
             <button
               type="button"
               onClick={() => setStep('draft')}
               disabled={step === 'sending'}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                color: 'var(--text-secondary)',
+                border: '0.5px solid var(--bg-border)',
+                background: 'var(--bg-elevated)',
+              }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
@@ -440,7 +556,8 @@ export default function VariationNotificationModal({
               type="button"
               onClick={handleConfirmSend}
               disabled={step === 'sending'}
-              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: 'var(--orange-primary)', color: '#fff' }}
             >
               {step === 'sending' ? (
                 <>

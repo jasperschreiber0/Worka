@@ -14,7 +14,7 @@ export default async function ChatPage() {
 
   return (
     <main className="h-screen overflow-hidden">
-      <Suspense fallback={<div className="h-screen bg-white" />}>
+      <Suspense fallback={<div className="h-screen" style={{ backgroundColor: 'var(--bg-shell)' }} />}>
         <ChatShell builderId={user.id} userName={user.full_name} userInitials={user.initials} isDemo={user.is_demo} />
       </Suspense>
     </main>

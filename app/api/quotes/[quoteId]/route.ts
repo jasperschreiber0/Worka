@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
-import { getGeneratedQuote, type EstimateTotals } from '@/lib/intake-store'
-import { computeEstimateTotals, DEFAULT_CONTINGENCY_PCT, DEFAULT_GST_PCT } from '@/lib/estimate'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -28,8 +26,6 @@ interface QuoteResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
-  /** Estimate breakdown (subtotal, contingency, margin, GST) when available */
-  estimate?: EstimateTotals | null
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -101,18 +97,6 @@ export async function GET(
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const isRealMode = Boolean(supabaseUrl && supabaseKey)
 
-  // ── AI-generated quote held in memory (no Supabase configured) ────────────
-  const generated = getGeneratedQuote(quoteId)
-  if (generated) {
-    const response: QuoteResponse = {
-      quote: generated.quote,
-      line_items_by_category: groupByCategory(generated.items),
-      summary: computeSummary(generated.quote, generated.items),
-      estimate: generated.estimate,
-    }
-    return NextResponse.json(response)
-  }
-
   // ── Demo mode ──────────────────────────────────────────────────────────────
   if (!isRealMode || quoteId === 'demo-quote-id') {
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
@@ -132,12 +116,19 @@ export async function GET(
     const { createClient } = await import('@supabase/supabase-js')
     const supabase = createClient(supabaseUrl!, supabaseKey!)
 
-    // Fetch the quote with job address (select * so optional estimate columns
-    // from migration 008 are included when present)
+    // Fetch the quote with job address
     const { data: quoteRow, error: quoteErr } = await supabase
       .from('quotes')
       .select(`
-        *,
+        id,
+        job_id,
+        builder_id,
+        status,
+        total_cost,
+        margin_pct,
+        confidence_score,
+        version,
+        created_at,
         jobs (
           address
         )
@@ -156,7 +147,25 @@ export async function GET(
     const { data: lineRows, error: lineErr } = await supabase
       .from('quote_line_items')
       .select(`
-        *,
+        id,
+        quote_id,
+        trade_category_id,
+        description,
+        quantity,
+        unit,
+        rate,
+        total,
+        confidence,
+        dimensions_string,
+        is_assumption,
+        assumption_status,
+        pricing_type,
+        source_ref,
+        margin_pct,
+        labour_cost,
+        material_cost,
+        subcontract_cost,
+        plant_cost,
         trade_categories (
           id,
           name
@@ -169,8 +178,7 @@ export async function GET(
       return NextResponse.json({ error: lineErr.message }, { status: 500 })
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const jobRow = (quoteRow as any).jobs as { address: string } | null
+    const jobRow = (quoteRow as typeof quoteRow & { jobs: { address: string } | null }).jobs
 
     const quote: DemoQuote = {
       id: quoteRow.id,
@@ -186,8 +194,7 @@ export async function GET(
     }
 
     const items: DemoQuoteLineItem[] = (lineRows ?? []).map((row) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tc = (row as any).trade_categories as { id: number; name: string } | null
+      const tc = (row as typeof row & { trade_categories: { id: number; name: string } | null }).trade_categories
       return {
         id: row.id,
         quote_id: row.quote_id,
@@ -202,34 +209,29 @@ export async function GET(
         dimensions_string: row.dimensions_string ?? null,
         is_assumption: row.is_assumption ?? false,
         assumption_status: (row.assumption_status ?? null) as DemoQuoteLineItem['assumption_status'],
-        item_type: (row.item_type ?? null) as DemoQuoteLineItem['item_type'],
-        pricing_basis: (row.pricing_basis ?? null) as DemoQuoteLineItem['pricing_basis'],
-        notes: row.notes ?? null,
+        pricing_type: ((row as Record<string, unknown>).pricing_type ?? 'measured') as DemoQuoteLineItem['pricing_type'],
+        source_ref: ((row as Record<string, unknown>).source_ref ?? null) as string | null,
+        margin_pct: ((row as Record<string, unknown>).margin_pct ?? 0.15) as number,
+        labour_cost: ((row as Record<string, unknown>).labour_cost ?? null) as number | null,
+        material_cost: ((row as Record<string, unknown>).material_cost ?? null) as number | null,
+        subcontract_cost: ((row as Record<string, unknown>).subcontract_cost ?? null) as number | null,
+        plant_cost: ((row as Record<string, unknown>).plant_cost ?? null) as number | null,
       }
     })
 
     const line_items_by_category = groupByCategory(items)
     const summary = computeSummary(quote, items)
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const quoteAny = quoteRow as any
-    const estimate = computeEstimateTotals(
-      items.map((i) => ({ total: i.total, assumption_status: i.assumption_status })),
-      Number(quoteAny.contingency_pct ?? DEFAULT_CONTINGENCY_PCT),
-      Number(quoteRow.margin_pct ?? 18),
-      Number(quoteAny.gst_pct ?? DEFAULT_GST_PCT)
-    )
-
     const response: QuoteResponse = {
       quote,
       line_items_by_category,
       summary,
-      estimate,
     }
 
     return NextResponse.json(response)
-  } catch (err) {
-    console.error('Quote GET error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  } catch {
+    const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
+    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
+    return NextResponse.json({ quote: DEMO_QUOTE, line_items_by_category, summary })
   }
 }
