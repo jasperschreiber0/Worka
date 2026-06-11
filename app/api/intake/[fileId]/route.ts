@@ -1,6 +1,11 @@
 import { NextRequest } from 'next/server'
 import type { ProjectMetadata, SimilarProject, ScopeHint, BuilderEstimationProfile } from '@/lib/types/estimation.types'
 
+// Streaming AI extraction can take several minutes on large plan sets —
+// without this Vercel kills the function mid-stream.
+export const dynamic = 'force-dynamic'
+export const maxDuration = 300
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ProgressEvent {
@@ -506,6 +511,9 @@ export async function GET(
           if (stageIdx < stageIndices.length) {
             emit('progress', PROGRESS_STAGES[stageIndices[stageIdx]])
             stageIdx++
+          } else {
+            // Keep the SSE connection alive while Claude processes
+            controller.enqueue(encoder.encode(': keepalive\n\n'))
           }
         }, 2000)
 
@@ -514,7 +522,7 @@ export async function GET(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const response = await (client.messages.create as any)({
             model: 'claude-sonnet-4-6',
-            max_tokens: 4096,
+            max_tokens: 8192,
             messages: [{ role: 'user', content: [...allDocBlocks, { type: 'text', text: extractionPrompt }] }],
           })
           anthropicResponse = response.content[0]?.type === 'text' ? response.content[0].text : ''
@@ -574,7 +582,13 @@ export async function GET(
         let confidenceSummary = ''
 
         try {
-          const parsed = JSON.parse(anthropicResponse)
+          let jsonText = anthropicResponse.trim()
+          const fence = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/)
+          if (fence) jsonText = fence[1].trim()
+          const start = jsonText.indexOf('{')
+          const end = jsonText.lastIndexOf('}')
+          if (start >= 0 && end > start) jsonText = jsonText.slice(start, end + 1)
+          const parsed = JSON.parse(jsonText)
           lineItems = parsed.line_items ?? []
           confidenceSummary = parsed.confidence_summary ?? ''
         } catch {

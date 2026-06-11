@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { File as DBFile, FileType, FileIntakeStatus } from '@/lib/types/database.types'
 
+export const maxDuration = 60
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_FILE_SIZE = 52428800 // 50 MB
