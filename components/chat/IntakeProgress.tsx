@@ -61,6 +61,7 @@ export default function IntakeProgress({
   const [completedStages, setCompletedStages] = useState<CompletedStage[]>([])
   const [isDone, setIsDone] = useState(false)
   const [hasError, setHasError] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
@@ -72,6 +73,16 @@ export default function IntakeProgress({
     const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}`
     const es = new EventSource(url)
     eventSourceRef.current = es
+    let settled = false
+
+    const failOnce = (message?: string) => {
+      if (settled) return
+      settled = true
+      setHasError(true)
+      if (message) setErrorMessage(message)
+      es.close()
+      onError()
+    }
 
     es.addEventListener('progress', (e: MessageEvent) => {
       try {
@@ -121,6 +132,7 @@ export default function IntakeProgress({
 
         setProgress({ stage: 'complete', message: data.message, pct: 100 })
         setIsDone(true)
+        settled = true
         es.close()
 
         setTimeout(() => {
@@ -131,26 +143,28 @@ export default function IntakeProgress({
           })
         }, 1000)
       } catch {
-        setHasError(true)
-        es.close()
-        onError()
+        failOnce()
       }
     })
 
-    es.addEventListener('error', () => {
-      setHasError(true)
-      es.close()
-      onError()
+    // Handles both server-emitted `event: error` (has .data) and
+    // EventSource connection failures (no .data).
+    es.addEventListener('error', (e: Event) => {
+      let message: string | undefined
+      const data = (e as MessageEvent).data as string | undefined
+      if (data) {
+        try { message = (JSON.parse(data) as { message?: string }).message } catch { /* ignore */ }
+      }
+      failOnce(message)
     })
 
     es.onerror = () => {
       if (es.readyState === EventSource.CLOSED) return
-      setHasError(true)
-      es.close()
-      onError()
+      failOnce()
     }
 
     return () => {
+      settled = true
       es.close()
     }
   }, [fileId, jobId, builderId, onComplete, onError])
@@ -174,7 +188,7 @@ export default function IntakeProgress({
           <p className="text-sm font-semibold text-[#f44336]">Processing failed</p>
         </div>
         <p className="text-sm text-[#f44336] pl-10">
-          Could not process <span className="font-medium">{filename}</span>. Please try again.
+          {errorMessage ?? <>Could not process <span className="font-medium">{filename}</span>. Please try again.</>}
         </p>
       </div>
     )
