@@ -711,9 +711,9 @@ async function getLiveMorningBrief(
       follow_up = `Want me to pull up the ${addr} variations for your sign-off?`
     } else if (topAlert.action === 'Follow up client' && addr) {
       follow_up = `Want me to draft a follow-up email for the ${addr} quote?`
-    } else if (topAlert.action === 'Draft quote' && addr) {
-      follow_up = `Want me to start the ${addr} quote now?`
     }
+    // No follow-up for 'Draft quote' — the alert card already has a
+    // Draft quote button; asking "want me to start the quote?" duplicates it.
   }
 
   return { message, alerts, follow_up }
@@ -3019,6 +3019,39 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         message: `You have ${DEMO_JOB_LIST.length} active jobs. Tap one to open it.`,
         job_list: DEMO_JOB_LIST,
       })
+    }
+
+    // Pre-extract fast path: "start quote ..." — resolve the job directly and
+    // open the upload panel. Alert action buttons send "start quote for job
+    // <uuid>"; typed messages send "start quote for <address>". Neither should
+    // round-trip through the LLM or fall into fuzzy address matching.
+    const startQuoteMatch = message.match(/^\s*(?:start|draft)\s+(?:the\s+)?quote\s+for\s+(?:job\s+)?(.+?)\s*$/i)
+    if (startQuoteMatch) {
+      const ref = startQuoteMatch[1].trim()
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (ref && supabaseUrl && serviceRoleKey) {
+        const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)
+        let jobQuery = supabase
+          .from('jobs')
+          .select('*')
+          .eq('builder_id', builderId)
+          .not('status', 'eq', 'archived')
+          .limit(2)
+        jobQuery = isUuid ? jobQuery.eq('id', ref) : jobQuery.ilike('address', `%${ref}%`)
+        const { data: matchedJobs } = await jobQuery
+        if (matchedJobs && matchedJobs.length > 0) {
+          const job = matchedJobs[0] as Job
+          return NextResponse.json({
+            intent: 'start_quote',
+            message: `Opening the upload panel for ${job.address} — drop the plans in and I'll draft the quote.`,
+            job,
+            event: { type: 'open_upload_panel', job_id: job.id },
+          })
+        }
+        // No match — fall through to the normal classification flow
+      }
     }
 
     // Pre-extract fast path: data/rate upload — never let this fall through to Haiku

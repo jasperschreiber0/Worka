@@ -289,10 +289,10 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
     [onIntakeComplete, onClose]
   )
 
-  const handleIntakeError = useCallback(() => {
+  const handleIntakeError = useCallback((message?: string) => {
     setUploadedFile(null)
     setIntakeStarted(false)
-    setUploadError('Processing failed — please try uploading again.')
+    setUploadError(message ?? 'Processing failed — please try uploading again.')
   }, [])
 
   const handleBackdropClick = useCallback(
