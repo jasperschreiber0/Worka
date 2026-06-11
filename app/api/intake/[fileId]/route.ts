@@ -380,7 +380,13 @@ export async function GET(
           docBlock = { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } }
         }
 
-        // Load sibling files — check memory cache first, then Supabase Storage
+        // Load sibling files — check memory cache first, then Supabase Storage.
+        // Anthropic caps requests at 32MB total, so budget raw bytes across all
+        // attached documents and skip siblings that don't fit rather than
+        // failing the entire request.
+        const MAX_TOTAL_RAW_BYTES = 20 * 1024 * 1024
+        let attachedRawBytes = Math.ceil(base64Data.length * 0.75)
+        let skippedSiblingCount = 0
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const siblingBlocks: any[] = []
         for (const sibId of siblingFileIds.slice(0, 6)) { // support up to 6 siblings (7 total)
@@ -392,13 +398,19 @@ export async function GET(
               if (sibIsCsv) {
                 const sibText = Buffer.from(sibCached.base64, 'base64').toString('utf-8')
                 siblingBlocks.push({ type: 'text', text: `CSV FILE CONTENTS (${sibCached.filename ?? 'file'}):\n\`\`\`\n${sibText.slice(0, 30000)}\n\`\`\`` })
-              } else {
-                siblingBlocks.push(
-                  sibIsPdf
-                    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibCached.base64 } }
-                    : { type: 'image', source: { type: 'base64', media_type: sibCached.mediaType, data: sibCached.base64 } }
-                )
+                continue
               }
+              const sibRawBytes = Math.ceil(sibCached.base64.length * 0.75)
+              if (attachedRawBytes + sibRawBytes > MAX_TOTAL_RAW_BYTES) {
+                skippedSiblingCount++
+                continue
+              }
+              attachedRawBytes += sibRawBytes
+              siblingBlocks.push(
+                sibIsPdf
+                  ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibCached.base64 } }
+                  : { type: 'image', source: { type: 'base64', media_type: sibCached.mediaType, data: sibCached.base64 } }
+              )
               continue
             }
             if (!supabase) continue
@@ -407,6 +419,11 @@ export async function GET(
             const { data: sibData } = await supabase.storage.from('plans').download(sibRow.storage_path)
             if (!sibData) continue
             const sibBuffer = await sibData.arrayBuffer()
+            if (attachedRawBytes + sibBuffer.byteLength > MAX_TOTAL_RAW_BYTES) {
+              skippedSiblingCount++
+              continue
+            }
+            attachedRawBytes += sibBuffer.byteLength
             const sibBase64 = Buffer.from(sibBuffer).toString('base64')
             const sibIsPdf = sibRow.file_type === 'pdf'
             siblingBlocks.push(
@@ -431,11 +448,13 @@ export async function GET(
         }
 
         try {
+          // Metadata only needs the primary document — sending the full set
+          // risks blowing the request size limit for a 512-token answer.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const metaResponse = await (client.messages.create as any)({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 512,
-            messages: [{ role: 'user', content: [...allDocBlocks, { type: 'text', text: METADATA_PROMPT }] }],
+            messages: [{ role: 'user', content: [docBlock, { type: 'text', text: METADATA_PROMPT }] }],
           })
           const metaText = metaResponse.content[0]?.type === 'text' ? metaResponse.content[0].text : ''
           const metaMatch = metaText.match(/\{[\s\S]*\}/)
@@ -518,19 +537,47 @@ export async function GET(
         }, 2000)
 
         let anthropicResponse: string
+        let droppedToPrimaryOnly = false
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const response = await (client.messages.create as any)({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 8192,
-            messages: [{ role: 'user', content: [...allDocBlocks, { type: 'text', text: extractionPrompt }] }],
-          })
-          anthropicResponse = response.content[0]?.type === 'text' ? response.content[0].text : ''
+          const callExtraction = async (blocks: any[]): Promise<string> => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const response = await (client.messages.create as any)({
+              model: 'claude-sonnet-4-6',
+              max_tokens: 8192,
+              messages: [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }],
+            })
+            return response.content[0]?.type === 'text' ? response.content[0].text : ''
+          }
+
+          try {
+            anthropicResponse = await callExtraction(allDocBlocks)
+          } catch (firstErr) {
+            const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
+            const isTooLarge = /request_too_large|too large|prompt is too long|too long|page limit|100 pages|413/i.test(firstMsg)
+            if (isTooLarge && allDocBlocks.length > 1) {
+              // Combined documents exceed AI limits — retry with the primary
+              // document only rather than failing the whole intake.
+              console.warn('[intake] Full document set too large, retrying with primary only:', firstMsg)
+              anthropicResponse = await callExtraction([docBlock])
+              droppedToPrimaryOnly = true
+            } else {
+              throw firstErr
+            }
+          }
         } catch (aiErr) {
           clearInterval(stageEmitter)
           const aiMsg = aiErr instanceof Error ? aiErr.message : String(aiErr)
           console.error('[intake] Anthropic extraction error:', aiMsg)
-          emit('error', { message: `AI extraction failed: ${aiMsg}` })
+          const friendly =
+            /request_too_large|too large|prompt is too long|too long/i.test(aiMsg)
+              ? 'The plans are too large for AI analysis — try uploading fewer or smaller PDFs (key plan sheets only).'
+              : /page/i.test(aiMsg) && /100/.test(aiMsg)
+                ? 'The PDFs exceed the 100-page AI limit — upload the key plan sheets only.'
+                : /rate.?limit|429|overloaded|529/i.test(aiMsg)
+                  ? 'The AI service is busy right now — please try again in a minute.'
+                  : `AI extraction failed: ${aiMsg.slice(0, 180)}`
+          emit('error', { message: friendly })
           if (supabase) await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
           controller.close()
           return
@@ -718,9 +765,15 @@ export async function GET(
 
         const unresolvedCount = assumptions.filter(a => a.gate !== 3).length
 
+        const sizeNote = droppedToPrimaryOnly
+          ? ' Note: the full document set exceeded AI limits, so the estimate is based on the primary document only.'
+          : skippedSiblingCount > 0
+            ? ` Note: ${skippedSiblingCount} file${skippedSiblingCount !== 1 ? 's were' : ' was'} too large to include in the AI analysis.`
+            : ''
+
         const completeData: CompleteEvent = {
           stage: 'complete',
-          message: `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.`,
+          message: `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.${sizeNote}`,
           pct: 100,
           quote_id: quoteId,
           assumption_count: unresolvedCount,

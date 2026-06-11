@@ -11,7 +11,7 @@ export interface IntakeProgressProps {
   filename: string
   additionalFileIds?: string[]
   onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
-  onError: () => void
+  onError: (message?: string) => void
 }
 
 interface ProgressState {
@@ -81,7 +81,7 @@ export default function IntakeProgress({
       setHasError(true)
       if (message) setErrorMessage(message)
       es.close()
-      onError()
+      onError(message)
     }
 
     es.addEventListener('progress', (e: MessageEvent) => {

@@ -861,18 +861,18 @@ export default function ChatInterface({
         // Derive the action payload to send if user says "yes"
         const addrMatch = topAlert?.message?.match(/^([^—]+) —/)
         const addr = addrMatch?.[1]?.trim()
+        // No follow-up for 'Draft quote' / 'Review quote' — the alert card
+        // already has a button that does exactly that; asking again is noise.
         const pendingCmd =
           topAlert?.action === 'Chase payment' && addr ? `draft payment chaser for ${addr}` :
           topAlert?.action === 'Review variations' && addr ? `show variations for ${addr}` :
           topAlert?.action === 'Follow up client' && addr ? `draft follow-up email for ${addr}` :
-          (topAlert?.action === 'Draft quote' || topAlert?.action === 'Review quote') && addr ? `start quote for ${addr}` :
           null
 
         const followUpContent = (data as { follow_up?: string }).follow_up
           ?? (topAlert?.action === 'Chase payment' && addr ? `Want me to send the payment chaser for ${addr} now? Takes 30 seconds.`
             : topAlert?.action === 'Review variations' && addr ? `Want me to pull up the ${addr} variations for your sign-off?`
             : topAlert?.action === 'Follow up client' && addr ? `Want me to draft a follow-up email for the ${addr} quote?`
-            : (topAlert?.action === 'Draft quote' || topAlert?.action === 'Review quote') && addr ? `Want me to start the ${addr} quote now?`
             : null)
 
         if (followUpContent) {
