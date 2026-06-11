@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { hasPermission } from '@/lib/auth/role-guard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -19,6 +19,7 @@ export interface VariationCardVariation {
   materials_cost?: number
   submitted_by?: string
   days_pending?: number
+  blocks_next_stage?: boolean
 }
 
 interface VariationCardProps {
@@ -35,170 +36,208 @@ function formatAUD(amount: number): string {
   return `$${amount.toLocaleString('en-AU')}`
 }
 
-function statusBadgeClass(status: string): string {
-  switch (status) {
-    case 'approved':
-      return 'bg-green-100 text-green-700 border-green-200'
-    case 'rejected':
-      return 'bg-slate-100 text-slate-600 border-slate-200'
-    case 'draft':
-      return 'bg-slate-100 text-slate-600 border-slate-200'
-    case 'pending':
-    default:
-      return 'bg-amber-100 text-amber-700 border-amber-200'
-  }
-}
-
-function cardClass(status: string): string {
-  switch (status) {
-    case 'approved':
-      return 'bg-green-50 border border-green-200'
-    case 'rejected':
-      return 'bg-slate-100 border border-slate-200'
-    default:
-      return 'bg-amber-50 border border-amber-200'
-  }
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'approved':
-      return 'Approved'
-    case 'rejected':
-      return 'Rejected'
-    case 'draft':
-      return 'Draft'
-    case 'pending':
-    default:
-      return 'Pending'
-  }
-}
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function VariationCard({ variation, onApprove, onReject, onViewJob, userRole = 'owner' }: VariationCardProps) {
   const [localStatus, setLocalStatus] = useState(variation.status)
+  const [confirming, setConfirming] = useState<'approve' | 'reject' | null>(null)
+  const [shareLink, setShareLink] = useState<string | null>(null)
+  const [shareCopied, setShareCopied] = useState(false)
+  const [shareLoading, setShareLoading] = useState(false)
   const isPending = localStatus === 'pending'
 
+  const handleSendToClient = useCallback(async () => {
+    if (shareLink) {
+      await navigator.clipboard.writeText(shareLink).catch(() => {})
+      setShareCopied(true)
+      setTimeout(() => setShareCopied(false), 2000)
+      return
+    }
+    setShareLoading(true)
+    try {
+      const res = await fetch(`/api/variations/${variation.id}/share`, { method: 'POST' })
+      const data = await res.json() as { link?: string }
+      if (data.link) {
+        setShareLink(data.link)
+        await navigator.clipboard.writeText(data.link).catch(() => {})
+        setShareCopied(true)
+        setTimeout(() => setShareCopied(false), 2000)
+      }
+    } catch { /* ignore */ }
+    finally { setShareLoading(false) }
+  }, [shareLink, variation.id])
+
   function handleApprove() {
+    if (confirming !== 'approve') { setConfirming('approve'); return }
+    setConfirming(null)
     setLocalStatus('approved')
     onApprove(variation.id)
   }
 
   function handleReject() {
+    if (confirming !== 'reject') { setConfirming('reject'); return }
+    setConfirming(null)
     setLocalStatus('rejected')
     onReject(variation.id)
   }
 
+  // Status pill style
+  const pillStyle: React.CSSProperties = localStatus === 'approved'
+    ? { backgroundColor: 'rgba(76,175,80,0.15)', border: '0.5px solid rgba(76,175,80,0.3)', color: 'var(--status-green)' }
+    : localStatus === 'rejected'
+    ? { backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', color: 'var(--text-tertiary)' }
+    : { backgroundColor: 'var(--pill-awaiting-bg)', border: '0.5px solid var(--pill-awaiting-border)', color: 'var(--pill-awaiting-text)' }
+
+  const pillLabel = localStatus === 'approved' ? 'Approved' : localStatus === 'rejected' ? 'Rejected' : 'Awaiting approval'
+
   return (
     <div
-      className={`rounded-xl p-4 mt-2 w-full max-w-sm ${cardClass(localStatus)}`}
+      className="rounded-[6px] mt-2 w-full max-w-sm"
       role="region"
       aria-label={`Variation: ${variation.title}`}
+      style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)', padding: '14px 16px' }}
     >
       {/* Header row */}
-      <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-            Variation
-          </span>
-          {variation.variation_ref && (
-            <span className="text-xs font-mono font-semibold text-brand-600 bg-brand-50 px-1.5 py-0.5 rounded">
-              {variation.variation_ref}
-            </span>
-          )}
-        </div>
+      <div className="flex items-center justify-between">
+        <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+          {variation.variation_ref && `${variation.variation_ref} · `}Logged {variation.created_display}
+        </span>
         <span
-          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${statusBadgeClass(localStatus)}`}
+          className="text-[11px] font-medium px-2 py-0.5 rounded-[3px]"
+          style={pillStyle}
         >
-          {statusLabel(localStatus)}
+          {pillLabel}
         </span>
       </div>
 
-      {/* Address + age */}
-      <p className="text-xs text-slate-500 mb-2">
-        {variation.job_address} &middot; {variation.created_display}
-      </p>
-
-      {/* Submitted by */}
-      {variation.submitted_by && (
-        <p className="text-xs text-slate-400 mb-1.5">Submitted by {variation.submitted_by}</p>
-      )}
-
       {/* Title */}
-      <p className="text-sm font-semibold text-slate-900 leading-snug mb-1">
+      <p className="text-[14px] font-semibold mt-2 leading-snug" style={{ color: 'var(--text-primary)' }}>
         {variation.title}
       </p>
 
-      {/* Amount + breakdown */}
-      <div className="mb-3">
-        <p className="text-lg font-bold text-slate-900">{formatAUD(variation.amount)}</p>
-        {(variation.labour_cost !== undefined || variation.materials_cost !== undefined) && (
-          <div className="flex gap-3 mt-1">
-            {variation.labour_cost !== undefined && (
-              <span className="text-xs text-slate-500">
-                Labour: <span className="font-medium text-slate-700">{formatAUD(variation.labour_cost)}</span>
-              </span>
-            )}
-            {variation.materials_cost !== undefined && (
-              <span className="text-xs text-slate-500">
-                Materials: <span className="font-medium text-slate-700">{formatAUD(variation.materials_cost)}</span>
-              </span>
-            )}
-          </div>
-        )}
+      {/* Description (job address) */}
+      <p className="text-[12px] leading-[1.5] mt-1" style={{ color: 'var(--text-secondary)' }}>
+        {variation.job_address}
+      </p>
+
+      {/* Dollar amount — largest number on the card */}
+      <p className="text-[20px] font-bold mt-3" style={{ color: 'var(--text-primary)' }}>
+        {formatAUD(variation.amount)}
+      </p>
+
+      {/* Sub-line */}
+      {(variation.labour_cost !== undefined || variation.materials_cost !== undefined) && (
+        <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
+          inc. GST
+          {variation.labour_cost !== undefined && ` · Labour ${formatAUD(variation.labour_cost)}`}
+          {variation.materials_cost !== undefined && ` · Materials ${formatAUD(variation.materials_cost)}`}
+        </p>
+      )}
+
+      {/* Footer metadata — three columns */}
+      <div className="grid grid-cols-3 gap-2 mt-[14px] pt-[10px]" style={{ borderTop: '0.5px solid var(--bg-border)' }}>
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.06em]" style={{ color: 'var(--text-tertiary)' }}>Submitted by</p>
+          <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--text-secondary)' }}>{variation.submitted_by ?? '—'}</p>
+        </div>
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.06em]" style={{ color: 'var(--text-tertiary)' }}>Days pending</p>
+          <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--orange-primary)' }}>{variation.days_pending ?? '—'}</p>
+        </div>
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.06em]" style={{ color: 'var(--text-tertiary)' }}>Contract impact</p>
+          <p className="text-[12px] font-medium mt-0.5" style={{ color: 'var(--text-primary)' }}>+{formatAUD(variation.amount)}</p>
+        </div>
       </div>
+
+      {/* Blocks next stage — red-tinted container */}
+      {variation.blocks_next_stage && (
+        <div
+          className="mt-2 px-2.5 py-2 rounded-[4px] flex items-center gap-2"
+          style={{ backgroundColor: 'rgba(244,67,54,0.08)', border: '0.5px solid rgba(244,67,54,0.3)' }}
+        >
+          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ color: 'var(--status-red)' }} aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+          </svg>
+          <p className="text-[12px] font-semibold" style={{ color: 'var(--status-red)' }}>Blocks next stage: YES</p>
+        </div>
+      )}
 
       {/* Actions */}
       {isPending && hasPermission(userRole ?? 'owner', 'site_manager') ? (
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleApprove}
-            className="flex-1 px-3 py-2.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
-          >
-            Approve {formatAUD(variation.amount)}
-          </button>
-          <button
-            type="button"
-            onClick={handleReject}
-            className="px-3 py-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
-          >
-            Reject
-          </button>
-          {onViewJob && variation.job_id && (
-            <button
-              type="button"
-              onClick={() => onViewJob(variation.job_id!)}
-              className="px-3 py-2.5 text-xs font-medium text-brand-600 hover:text-brand-700 flex items-center gap-1 whitespace-nowrap"
-            >
-              Details
-              <svg
-                className="w-3 h-3"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-                aria-hidden="true"
+        <div className="space-y-2 mt-3">
+          {confirming === 'approve' && (
+            <div className="flex items-center gap-2 rounded-[4px] px-3 py-2" style={{ backgroundColor: 'rgba(76,175,80,0.1)', border: '0.5px solid rgba(76,175,80,0.3)' }}>
+              <p className="flex-1 text-[12px] font-medium" style={{ color: 'var(--status-green)' }}>Confirm approve {formatAUD(variation.amount)}?</p>
+              <button type="button" onClick={handleApprove} className="text-[12px] font-semibold rounded-[4px] px-2 py-1" style={{ color: 'var(--status-green)', backgroundColor: 'rgba(76,175,80,0.2)', border: '0.5px solid rgba(76,175,80,0.3)' }}>Yes</button>
+              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>Cancel</button>
+            </div>
+          )}
+          {confirming === 'reject' && (
+            <div className="flex items-center gap-2 rounded-[4px] px-3 py-2" style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>
+              <p className="flex-1 text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>Confirm reject?</p>
+              <button type="button" onClick={handleReject} className="text-[12px] font-semibold rounded-[4px] px-2 py-1" style={{ color: 'var(--text-secondary)', backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>Yes</button>
+              <button type="button" onClick={() => setConfirming(null)} className="text-[12px] font-medium" style={{ color: 'var(--text-tertiary)' }}>Cancel</button>
+            </div>
+          )}
+          {!confirming && (
+            <>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleApprove}
+                  className="flex-1 text-[12px] font-semibold px-3 py-2 rounded-[4px]"
+                  style={{ backgroundColor: 'rgba(76,175,80,0.2)', color: 'var(--status-green)', border: '0.5px solid rgba(76,175,80,0.3)' }}
+                >
+                  Approve {formatAUD(variation.amount)}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleReject}
+                  className="text-[12px] px-3 py-2 rounded-[4px]"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}
+                >
+                  Reject
+                </button>
+                {onViewJob && variation.job_id && (
+                  <button
+                    type="button"
+                    onClick={() => onViewJob(variation.job_id!)}
+                    className="px-3 py-2 text-[12px] font-medium flex items-center gap-1 whitespace-nowrap"
+                    style={{ color: 'var(--orange-primary)' }}
+                  >
+                    Details →
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleSendToClient()}
+                disabled={shareLoading}
+                className="w-full text-[12px] font-medium px-3 py-2 rounded-[4px] flex items-center justify-center gap-1.5"
+                style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '0.5px solid var(--bg-border)' }}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-              </svg>
-            </button>
+                {shareLoading ? 'Generating link…' : shareCopied ? '✓ Link copied!' : shareLink ? 'Copy approval link' : 'Send to client →'}
+              </button>
+              {shareLink && (
+                <p className="text-[10px] break-all mt-0.5" style={{ color: 'var(--text-tertiary)' }}>{shareLink}</p>
+              )}
+            </>
           )}
         </div>
       ) : isPending ? (
-        <p className="text-xs text-slate-400 italic">Approval requires Site Manager access</p>
+        <p className="text-[12px] italic mt-3" style={{ color: 'var(--text-tertiary)' }}>Approval requires Site Manager access</p>
       ) : (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 mt-3">
           {localStatus === 'approved' ? (
-            <span className="flex items-center gap-1.5 text-sm font-semibold text-green-700">
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold" style={{ color: 'var(--status-green)' }}>
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
               </svg>
               Approved
             </span>
           ) : (
-            <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-500">
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold" style={{ color: 'var(--text-tertiary)' }}>
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>

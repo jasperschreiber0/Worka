@@ -54,7 +54,7 @@ const FOCUSABLE_SELECTOR =
 function Spinner() {
   return (
     <svg
-      className="animate-spin h-4 w-4 text-white"
+      className="animate-spin h-4 w-4"
       xmlns="http://www.w3.org/2000/svg"
       fill="none"
       viewBox="0 0 24 24"
@@ -242,18 +242,22 @@ export default function EmailDraftModal({
     >
       <div
         ref={panelRef}
-        className="w-full max-w-lg bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
-        style={{ maxHeight: 'calc(100vh - 2rem)' }}
+        className="w-full max-w-lg rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        style={{ maxHeight: 'calc(100vh - 2rem)', background: 'var(--bg-surface)' }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 flex-shrink-0">
+        <div
+          className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+          style={{ borderBottom: '1px solid var(--bg-border)' }}
+        >
           <div className="flex items-center gap-3">
             {(step === 'confirm' || step === 'sending') && (
               <button
                 type="button"
                 onClick={() => setStep('draft')}
                 disabled={step === 'sending'}
-                className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-7 h-7 flex items-center justify-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ color: 'var(--text-tertiary)' }}
                 aria-label="Back to draft"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -261,7 +265,7 @@ export default function EmailDraftModal({
                 </svg>
               </button>
             )}
-            <h2 className="text-sm font-semibold text-slate-900">
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
               {step === 'loading' && 'Drafting email…'}
               {step === 'draft' && 'Draft email'}
               {(step === 'confirm' || step === 'sending') && 'Confirm send'}
@@ -270,14 +274,15 @@ export default function EmailDraftModal({
           </div>
           <div className="flex items-center gap-3">
             {(step === 'draft' || step === 'confirm') && (
-              <span className="text-xs font-medium text-slate-400">
+              <span className="text-xs font-medium" style={{ color: 'var(--text-tertiary)' }}>
                 Step {step === 'draft' ? '1' : '2'} of 2
               </span>
             )}
             <button
               type="button"
               onClick={onClose}
-              className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-full transition-colors"
+              style={{ color: 'var(--text-tertiary)' }}
               aria-label="Close"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -295,18 +300,18 @@ export default function EmailDraftModal({
             <div className="px-5 py-5 space-y-4">
               {/* To skeleton */}
               <div>
-                <div className="h-3 w-6 bg-slate-200 rounded animate-pulse mb-1.5" />
-                <div className="h-9 w-full bg-slate-100 rounded-lg animate-pulse" />
+                <div className="h-3 w-6 rounded animate-pulse mb-1.5" style={{ background: 'var(--bg-elevated)' }} />
+                <div className="h-9 w-full rounded-lg animate-pulse" style={{ background: 'var(--bg-elevated)' }} />
               </div>
               {/* Subject skeleton */}
               <div>
-                <div className="h-3 w-14 bg-slate-200 rounded animate-pulse mb-1.5" />
-                <div className="h-9 w-full bg-slate-100 rounded-lg animate-pulse" />
+                <div className="h-3 w-14 rounded animate-pulse mb-1.5" style={{ background: 'var(--bg-elevated)' }} />
+                <div className="h-9 w-full rounded-lg animate-pulse" style={{ background: 'var(--bg-elevated)' }} />
               </div>
               {/* Body skeleton */}
               <div>
-                <div className="h-3 w-16 bg-slate-200 rounded animate-pulse mb-1.5" />
-                <div className="h-48 w-full bg-slate-100 rounded-lg animate-pulse" />
+                <div className="h-3 w-16 rounded animate-pulse mb-1.5" style={{ background: 'var(--bg-elevated)' }} />
+                <div className="h-48 w-full rounded-lg animate-pulse" style={{ background: 'var(--bg-elevated)' }} />
               </div>
             </div>
           )}
@@ -314,14 +319,15 @@ export default function EmailDraftModal({
           {/* Error */}
           {step === 'error' && (
             <div className="flex flex-col items-center justify-center py-16 px-6 text-center gap-3">
-              <svg className="w-10 h-10 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true" style={{ color: 'var(--status-red)' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-              <p className="text-sm text-red-600 font-medium">{loadError}</p>
+              <p className="text-sm font-medium" style={{ color: 'var(--status-red)' }}>{loadError}</p>
               <button
                 type="button"
                 onClick={onClose}
-                className="mt-2 px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                className="mt-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+                style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
               >
                 Close
               </button>
@@ -333,7 +339,7 @@ export default function EmailDraftModal({
             <div className="px-5 py-5 space-y-4">
               {/* To */}
               <div>
-                <label htmlFor="email-draft-to" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label htmlFor="email-draft-to" className="block text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--text-secondary)' }}>
                   To
                 </label>
                 <input
@@ -342,23 +348,27 @@ export default function EmailDraftModal({
                   value={draftTo}
                   onChange={(e) => setDraftTo(e.target.value)}
                   placeholder="client@example.com"
-                  className="w-full px-3 py-2 text-sm text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+                  className="w-full px-3 py-2 text-sm rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+                  style={{ color: 'var(--text-primary)', background: 'var(--bg-shell)', border: '1px solid var(--bg-border)' }}
                 />
               </div>
 
               {/* Subject — display only */}
               <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label className="block text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--text-secondary)' }}>
                   Subject
                 </label>
-                <p className="px-3 py-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg select-text">
+                <p
+                  className="px-3 py-2 text-sm rounded-lg select-text"
+                  style={{ color: 'var(--text-secondary)', background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+                >
                   {draftSubject}
                 </p>
               </div>
 
               {/* Body — editable */}
               <div>
-                <label htmlFor="email-draft-body" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label htmlFor="email-draft-body" className="block text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--text-secondary)' }}>
                   Message
                 </label>
                 <textarea
@@ -366,7 +376,8 @@ export default function EmailDraftModal({
                   value={draftBody}
                   onChange={(e) => setDraftBody(e.target.value)}
                   rows={12}
-                  className="w-full px-3 py-2 text-sm text-slate-900 font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent resize-y leading-relaxed"
+                  className="w-full px-3 py-2 text-sm font-mono rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent resize-y leading-relaxed"
+                  style={{ color: 'var(--text-primary)', background: 'var(--bg-shell)', border: '1px solid var(--bg-border)' }}
                 />
               </div>
             </div>
@@ -376,33 +387,33 @@ export default function EmailDraftModal({
           {(step === 'confirm' || step === 'sending') && (
             <div className="px-5 py-6 space-y-5">
               {/* Sending to */}
-              <div className="flex items-center gap-2.5 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <div className="flex items-center gap-2.5 p-3 rounded-lg" style={{ background: 'rgba(76,175,80,0.15)', border: '1px solid rgba(76,175,80,0.25)' }}>
+                <svg className="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true" style={{ color: 'var(--status-green)' }}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-green-700 uppercase tracking-wide">Sending to</p>
-                  <p className="text-sm font-medium text-green-900 truncate">{draftTo}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--status-green)' }}>Sending to</p>
+                  <p className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>{draftTo}</p>
                 </div>
               </div>
 
               {/* Irreversibility warning */}
-              <div className="flex items-start gap-2.5 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                <svg className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <div className="flex items-start gap-2.5 p-3 rounded-lg" style={{ background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.25)' }}>
+                <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true" style={{ color: 'var(--status-amber)' }}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
                 </svg>
                 <div>
-                  <p className="text-xs font-semibold text-amber-800 mb-0.5">This will send immediately</p>
-                  <p className="text-xs text-amber-700 leading-relaxed">
+                  <p className="text-xs font-semibold mb-0.5" style={{ color: 'var(--status-amber)' }}>This will send immediately</p>
+                  <p className="text-xs leading-relaxed" style={{ color: 'var(--status-amber)' }}>
                     The email will be sent to <span className="font-semibold">{draftTo}</span> and logged to communication history. This cannot be undone.
                   </p>
                 </div>
               </div>
 
               {/* Subject preview */}
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Subject</p>
-                <p className="text-sm text-slate-700">{draftSubject}</p>
+              <div className="p-3 rounded-lg" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}>
+                <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--text-tertiary)' }}>Subject</p>
+                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{draftSubject}</p>
               </div>
             </div>
           )}
@@ -410,11 +421,15 @@ export default function EmailDraftModal({
 
         {/* Footer / Actions */}
         {step === 'draft' && (
-          <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{ borderTop: '1px solid var(--bg-border)', background: 'var(--bg-surface)' }}
+          >
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              className="px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+              style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
             >
               Cancel
             </button>
@@ -422,7 +437,7 @@ export default function EmailDraftModal({
               type="button"
               onClick={() => setStep('confirm')}
               disabled={!draftTo.trim()}
-              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed btn-primary"
             >
               Looks good
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
@@ -433,12 +448,16 @@ export default function EmailDraftModal({
         )}
 
         {(step === 'confirm' || step === 'sending') && (
-          <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{ borderTop: '1px solid var(--bg-border)', background: 'var(--bg-surface)' }}
+          >
             <button
               type="button"
               onClick={() => setStep('draft')}
               disabled={step === 'sending'}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
@@ -449,7 +468,7 @@ export default function EmailDraftModal({
               type="button"
               onClick={handleConfirmSend}
               disabled={step === 'sending'}
-              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed btn-primary"
             >
               {step === 'sending' ? (
                 <>

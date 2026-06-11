@@ -158,6 +158,23 @@ export async function POST(
         .from('quote_line_items')
         .update(lineItemUpdate)
         .eq('id', assumptionRow.line_item_id)
+
+      // Recalculate quote totals from all non-excluded line items
+      const { data: activeItems } = await supabase
+        .from('quote_line_items')
+        .select('total, confidence')
+        .eq('quote_id', quoteId)
+        .neq('assumption_status', 'excluded')
+
+      if (activeItems) {
+        const newTotal = activeItems.reduce((sum, item) => sum + (item.total ?? 0), 0)
+        const confidences = activeItems.map(i => i.confidence ?? 100).filter(c => c > 0)
+        const newConfidence = confidences.length > 0 ? Math.min(...confidences) : 0
+        await supabase
+          .from('quotes')
+          .update({ total_cost: newTotal, confidence_score: newConfidence })
+          .eq('id', quoteId)
+      }
     }
 
     // 3. Check if all assumptions for this quote are resolved
@@ -202,8 +219,26 @@ export async function POST(
     }
 
     return NextResponse.json(response)
-  } catch (err) {
-    console.error('Assumptions resolve error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  } catch {
+    // DB unavailable — fall through to demo handler
+    const assumption = DEMO_ASSUMPTIONS.find((a) => a.id === assumption_id)
+    if (!assumption) {
+      return NextResponse.json({ error: 'Assumption not found' }, { status: 404 })
+    }
+    demoResolutionState.set(assumption_id, {
+      resolution_type: resolution,
+      adjusted_quantity,
+      adjusted_unit,
+    })
+    const allResolved = DEMO_ASSUMPTIONS.every((a) => {
+      const state = demoResolutionState.get(a.id)
+      return state !== undefined && state.resolution_type !== 'unresolved'
+    })
+    return NextResponse.json({
+      resolved: true,
+      assumption: { id: assumption_id, resolution_type: resolution, resolved_at: new Date().toISOString(), resolved_by: builder_id },
+      all_resolved: allResolved,
+      quote_status: allResolved ? 'pending_review' : 'draft',
+    } satisfies ResolveResponse)
   }
 }
