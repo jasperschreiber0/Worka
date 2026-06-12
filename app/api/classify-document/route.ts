@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 export interface ClassificationResult {
   type: 'plan' | 'receipt' | 'supplier_quote' | 'variation_request' | 'certificate' | 'contract' | 'photo' | 'unknown'
@@ -103,6 +104,11 @@ Document types:
 Keep summary under 12 words. Be direct. Only include secondary actions when genuinely useful.`
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   let formData: FormData
   try {
     formData = await request.formData()

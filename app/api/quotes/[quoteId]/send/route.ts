@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -96,8 +97,9 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  if (!body.builder_id) {
-    return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
+  const sessionBuilderId = await getAuthenticatedBuilderId()
+  if (!sessionBuilderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   // ── Fetch quote data ──────────────────────────────────────────────────────
@@ -121,7 +123,7 @@ export async function POST(
     const [{ data: quoteRow }, { data: lineItems }] = await Promise.all([
       sb.from('quotes')
         .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
-        .eq('id', quoteId).eq('builder_id', body.builder_id).single(),
+        .eq('id', quoteId).eq('builder_id', sessionBuilderId).single(),
       sb.from('quote_line_items')
         .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status')
         .eq('quote_id', quoteId),
@@ -150,14 +152,14 @@ export async function POST(
       }
     }
 
-    const { data: builderRow } = await sb.from('builders').select('business_name, contact_name').eq('id', body.builder_id).single()
+    const { data: builderRow } = await sb.from('builders').select('business_name, contact_name').eq('id', sessionBuilderId).single()
     const tb = builderRow as BuilderRow | null
     const resolvedBuilderName = tb?.contact_name ?? 'Dave Nguyen'
     const resolvedBusinessName = tb?.business_name ?? 'Nguyen Building Co.'
 
     quote = {
       id: tq.id, job_id: tq.job_id, job_address: tj?.address ?? 'the project',
-      builder_id: body.builder_id,
+      builder_id: sessionBuilderId,
       status: tq.status as DemoQuote['status'], total_cost: tq.total_cost,
       margin_pct: tq.margin_pct, confidence_score: tq.confidence_score,
       version: tq.version, created_at: tq.created_at,

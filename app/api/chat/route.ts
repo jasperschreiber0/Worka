@@ -13,6 +13,7 @@ import type {
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -177,6 +178,8 @@ interface ChatResponse {
 
 interface OrchestrationContext {
   builder_id: string
+  /** Forwarded to internal API fetches so session auth carries through. */
+  cookie_header: string
   force_create: boolean
   // Resolved job context — set when a job is created or a duplicate is found
   resolved_job_id: string | null
@@ -1313,10 +1316,12 @@ function handleEmailDraft(entities: Record<string, string>): Partial<ChatRespons
   }
 }
 
-async function handleEmailSyncStatus(builderId: string): Promise<Partial<ChatResponse>> {
+async function handleEmailSyncStatus(builderId: string, cookieHeader: string): Promise<Partial<ChatResponse>> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
-    const res = await fetch(`${appUrl}/api/email-sync/status?builder_id=${builderId}`)
+    const res = await fetch(`${appUrl}/api/email-sync/status?builder_id=${builderId}`, {
+      headers: { cookie: cookieHeader },
+    })
     const data = await res.json() as {
       connected: boolean
       provider: 'gmail' | 'outlook' | null
@@ -1344,12 +1349,12 @@ async function handleEmailSyncStatus(builderId: string): Promise<Partial<ChatRes
   }
 }
 
-async function handleSimulateEmail(builderId: string): Promise<Partial<ChatResponse>> {
+async function handleSimulateEmail(builderId: string, cookieHeader: string): Promise<Partial<ChatResponse>> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
     const res = await fetch(`${appUrl}/api/email-sync/simulate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', cookie: cookieHeader },
       body: JSON.stringify({ builder_id: builderId, scenario: 'invoice_query' }),
     })
     const data = await res.json() as {
@@ -1840,13 +1845,13 @@ async function orchestrateActions(
       }
 
       case 'email_sync_status': {
-        const result = await handleEmailSyncStatus(ctx.builder_id)
+        const result = await handleEmailSyncStatus(ctx.builder_id, ctx.cookie_header)
         if (result.message) messageParts.push(result.message)
         break
       }
 
       case 'simulate_email': {
-        const result = await handleSimulateEmail(ctx.builder_id)
+        const result = await handleSimulateEmail(ctx.builder_id, ctx.cookie_header)
         if (result.message) messageParts.push(result.message)
         if (result.event) events.push(result.event)
         break
@@ -2477,7 +2482,8 @@ const DEMO_JOB_LIST: JobListItem[] = DEMO_JOBS.map(j => ({
 async function routeDemoMessage(
   message: string,
   builderId: string,
-  forceCreate: boolean
+  forceCreate: boolean,
+  cookieHeader: string
 ): Promise<ChatResponse> {
   const lower = message.toLowerCase()
 
@@ -2886,6 +2892,7 @@ async function routeDemoMessage(
 
   const ctx: OrchestrationContext = {
     builder_id: builderId,
+    cookie_header: cookieHeader,
     force_create: forceCreate,
     resolved_job_id: null,
     resolved_job: null,
@@ -2902,7 +2909,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
   try {
     const body = (await request.json()) as ChatRequestBody
     const message = body.message?.trim()
-    const builderId = body.builder_id ?? '00000000-0000-0000-0000-000000000001'
+    const builderId = await getAuthenticatedBuilderId()
+    if (!builderId) {
+      return NextResponse.json(
+        { intent: 'unknown', message: 'Unauthorized' },
+        { status: 401 }
+      )
+    }
     const forceCreate = body.force_create === true
 
     if (!message) {
@@ -2915,7 +2928,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     const apiKey = process.env.ANTHROPIC_API_KEY
 
     if (!apiKey) {
-      const result = await routeDemoMessage(message, builderId, forceCreate)
+      const result = await routeDemoMessage(message, builderId, forceCreate, request.headers.get('cookie') ?? '')
       return NextResponse.json(result)
     }
 
@@ -3095,6 +3108,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
     const ctx: OrchestrationContext = {
       builder_id: builderId,
+      cookie_header: request.headers.get('cookie') ?? '',
       force_create: forceCreate,
       resolved_job_id: null,
       resolved_job: null,

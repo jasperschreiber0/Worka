@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDemoJobList } from '@/lib/job-snapshot-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── GET /api/jobs ────────────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const builderId = request.nextUrl.searchParams.get('builder_id')
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
   const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
 
@@ -12,9 +16,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ jobs: getDemoJobList() })
   }
 
-  if (!builderId) {
-    return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
-  }
 
   const { createClient } = await import('@supabase/supabase-js')
   const sb = createClient(

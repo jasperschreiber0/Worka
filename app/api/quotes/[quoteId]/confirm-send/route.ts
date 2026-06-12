@@ -4,6 +4,7 @@ import { addCommEntry } from '@/lib/comms-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
 import { randomUUID } from 'crypto'
 import { recordProofEvent } from '@/lib/proof'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // Quote job IDs for proof recording in demo mode
 const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
@@ -51,8 +52,9 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  if (!body.builder_id) {
-    return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
+  const sessionBuilderId = await getAuthenticatedBuilderId()
+  if (!sessionBuilderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!body.to || !body.subject || !body.body) {
     return NextResponse.json({ error: 'to, subject, and body are required' }, { status: 400 })
@@ -80,7 +82,7 @@ export async function POST(
     demoQuoteStatusMap.set(quoteId, { status: 'sent', sent_at: sentAt })
     const commId = randomUUID()
     addCommEntry({
-      builder_id: body.builder_id,
+      builder_id: sessionBuilderId,
       job_id: null,
       direction: 'outbound',
       channel: 'email',
@@ -97,7 +99,7 @@ export async function POST(
     if (demoJobId) {
       await recordProofEvent({
         jobId: demoJobId,
-        builderId: body.builder_id,
+        builderId: sessionBuilderId,
         eventType: 'quote_sent',
         description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
         metadata: { quote_id: quoteId, to: body.to, subject: body.subject, communication_id: commId },
@@ -118,7 +120,7 @@ export async function POST(
     .from('quotes')
     .select('id, status, job_id')
     .eq('id', quoteId)
-    .eq('builder_id', body.builder_id)
+    .eq('builder_id', sessionBuilderId)
     .single()
 
   if (fetchErr || !quoteRow) {
@@ -170,7 +172,7 @@ export async function POST(
   const { data: commRow } = await supabase
     .from('communication_history')
     .insert({
-      builder_id: body.builder_id,
+      builder_id: sessionBuilderId,
       job_id: quoteRow.job_id ?? null,
       direction: 'outbound',
       channel: 'email',
@@ -188,7 +190,7 @@ export async function POST(
   // WorkA Proof: quote sent to client is the key evidence in a payment dispute
   await recordProofEvent({
     jobId: quoteRow.job_id,
-    builderId: body.builder_id,
+    builderId: sessionBuilderId,
     eventType: 'quote_sent',
     description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
     metadata: { quote_id: quoteId, to: body.to, subject: body.subject, communication_id: communicationId },

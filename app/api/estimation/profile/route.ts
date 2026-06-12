@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { BuilderEstimationProfile } from '@/lib/types/estimation.types'
 import { DEMO_BUILDER_PROFILE } from '@/lib/estimation-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── GET /api/estimation/profile?builder_id=xxx ───────────────────────────────
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const builderId = request.nextUrl.searchParams.get('builder_id')
-  if (!builderId) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const isDemo = !process.env.NEXT_PUBLIC_SUPABASE_URL
   if (isDemo) {

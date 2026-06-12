@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { JobTask } from '@/lib/job-snapshot-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // In-memory store for demo tasks (keyed by jobId)
 const DEMO_TASKS: Record<string, JobTask[]> = {}
@@ -14,6 +15,11 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { jobId } = params
 
   const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
@@ -23,6 +29,9 @@ export async function GET(
   }
 
   const sb = await getSupabaseClient()
+  const owned = await jobBelongsToBuilder(sb, jobId, builderId)
+  if (!owned) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+
   const { data, error } = await sb
     .from('job_tasks')
     .select('id, description, assigned_to, assigned_worker_id, status, created_at')
@@ -52,6 +61,11 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { jobId } = params
 
   let body: CreateTaskBody | CompleteTaskBody
@@ -76,6 +90,8 @@ export async function POST(
 
     try {
       const sb = await getSupabaseClient()
+      const owned = await jobBelongsToBuilder(sb, jobId, builderId)
+      if (!owned) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
       const { error } = await sb
         .from('job_tasks')
         .update({ status: newStatus })
@@ -111,6 +127,8 @@ export async function POST(
 
   try {
     const sb = await getSupabaseClient()
+    const owned = await jobBelongsToBuilder(sb, jobId, builderId)
+    if (!owned) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     const { data, error } = await sb
       .from('job_tasks')
       .insert({
@@ -131,6 +149,14 @@ export async function POST(
   if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
   DEMO_TASKS[jobId].unshift(newTask)
   return NextResponse.json({ task: newTask }, { status: 201 })
+}
+
+// ─── Ownership guard ──────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function jobBelongsToBuilder(sb: any, jobId: string, builderId: string): Promise<boolean> {
+  const { data } = await sb.from('jobs').select('id').eq('id', jobId).eq('builder_id', builderId).single()
+  return Boolean(data)
 }
 
 // ─── Supabase client helper ───────────────────────────────────────────────────

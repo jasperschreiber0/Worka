@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { randomUUID } from 'crypto'
 import { demoImportedRates, type ImportedRate } from '@/lib/rates-import-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 interface RateRow {
   trade_category_id: number
@@ -24,9 +25,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { builder_id, supplier_name, rates } = body
-  if (!builder_id || !rates?.length) {
-    return NextResponse.json({ error: 'builder_id and rates are required' }, { status: 400 })
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const { supplier_name, rates } = body
+  if (!rates?.length) {
+    return NextResponse.json({ error: 'rates are required' }, { status: 400 })
   }
 
   const now = new Date().toISOString()

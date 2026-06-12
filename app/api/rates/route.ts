@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { demoImportedRates } from '@/lib/rates-import-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const builderId = request.nextUrl.searchParams.get('builder_id')
-  if (!builderId) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { createClient } from '@supabase/supabase-js'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,11 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { jobId } = params
 
   // ── Demo fallback ─────────────────────────────────────────────────────────
@@ -46,6 +52,7 @@ export async function GET(
       .from('jobs')
       .select('*, clients(name, email, phone)')
       .eq('id', jobId)
+      .eq('builder_id', builderId)
       .single()
 
     if (jobErr || !job) {

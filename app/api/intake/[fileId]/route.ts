@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import type { ProjectMetadata, SimilarProject, ScopeHint, BuilderEstimationProfile } from '@/lib/types/estimation.types'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // Streaming AI extraction can take several minutes on large plan sets —
 // without this Vercel kills the function mid-stream.
@@ -229,10 +230,17 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { fileId: string } }
 ): Promise<Response> {
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
   const { fileId } = params
   const { searchParams } = new URL(req.url)
   const job_id = searchParams.get('job_id') ?? ''
-  const builder_id = searchParams.get('builder_id') ?? '00000000-0000-0000-0000-000000000001'
   const siblingsParam = searchParams.get('siblings') ?? ''
   const siblingFileIds = siblingsParam ? siblingsParam.split(',').filter(Boolean) : []
 
@@ -319,6 +327,7 @@ export async function GET(
             .from('files')
             .select('*')
             .eq('id', fileId)
+            .eq('builder_id', builder_id)
             .single()
           if (!fileErr) fileRow = data
           await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId).catch(() => {})
@@ -414,7 +423,7 @@ export async function GET(
               continue
             }
             if (!supabase) continue
-            const { data: sibRow } = await supabase.from('files').select('*').eq('id', sibId).single()
+            const { data: sibRow } = await supabase.from('files').select('*').eq('id', sibId).eq('builder_id', builder_id).single()
             if (!sibRow) continue
             const { data: sibData } = await supabase.storage.from('plans').download(sibRow.storage_path)
             if (!sibData) continue

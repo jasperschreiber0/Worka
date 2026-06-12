@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // In-memory demo store: jobId → Set of worker IDs already assigned
 const DEMO_JOB_WORKERS: Record<string, Set<string>> = {
@@ -16,6 +17,11 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { jobId } = params
 
   let body: AssignWorkerBody
@@ -47,6 +53,14 @@ export async function POST(
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { autoRefreshToken: false, persistSession: false } }
     )
+    const { data: ownedJob } = await sb
+      .from('jobs')
+      .select('id')
+      .eq('id', jobId)
+      .eq('builder_id', builderId)
+      .single()
+    if (!ownedJob) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+
     const { error } = await sb
       .from('job_workers')
       .upsert({ job_id: jobId, worker_id: body.worker_id }, { onConflict: 'job_id,worker_id' })

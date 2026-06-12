@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
@@ -37,8 +38,12 @@ function applyState(variation: DemoVariation): DemoVariation {
 // ─── GET /api/variations ──────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest): Promise<NextResponse<VariationsResponse>> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' } as never, { status: 401 })
+  }
+
   const { searchParams } = new URL(request.url)
-  const builderId = searchParams.get('builder_id')
   const jobId = searchParams.get('job_id')
   const status = searchParams.get('status')
 

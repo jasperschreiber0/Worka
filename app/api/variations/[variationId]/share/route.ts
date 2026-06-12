@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── POST /api/variations/[variationId]/share ─────────────────────────────────
 // Returns a client-facing approval link for the variation.
@@ -9,6 +10,11 @@ export async function POST(
   _req: NextRequest,
   { params }: { params: { variationId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { variationId } = params
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://getworka.com'
 

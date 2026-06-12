@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 interface PatchBody {
   builder_id: string
@@ -14,9 +15,11 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   const body = await request.json() as PatchBody
-  const { builder_id, ...updates } = body
-  if (!builder_id) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
+  const { builder_id: _ignored, ...updates } = body
 
   const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -45,8 +48,8 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   const { searchParams } = request.nextUrl
-  const builderId = searchParams.get('builder_id')
-  if (!builderId) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY

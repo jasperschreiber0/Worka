@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 interface ExtractedRate {
   trade_category_id: number
@@ -38,6 +39,11 @@ const DEMO_EXTRACTED: ExtractedRate[] = [
 ]
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   let formData: FormData
   try {
     formData = await request.formData()

@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { File as DBFile, FileType, FileIntakeStatus } from '@/lib/types/database.types'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 export const maxDuration = 60
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_FILE_SIZE = 52428800 // 50 MB
-const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -16,6 +16,12 @@ function detectFileType(filename: string): FileType {
   if (['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'].includes(ext)) return 'image'
   if (ext === 'dwg') return 'dwg'
   return 'other'
+}
+
+/** Strip directory components and characters unsafe for a storage object key. */
+function sanitizeFilename(filename: string): string {
+  const base = filename.split(/[\\/]/).pop() ?? 'upload'
+  return base.replace(/[^a-zA-Z0-9._ -]/g, '_').slice(0, 200) || 'upload'
 }
 
 function uniqueStoragePath(builderId: string, jobId: string, filename: string): string {
@@ -37,15 +43,20 @@ function uniqueStoragePath(builderId: string, jobId: string, filename: string): 
 //   3. Browser GETs /api/intake/[fileId] → AI extraction reads from storage
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  let body: { job_id?: string; builder_id?: string; filename?: string; content_type?: string; size?: number }
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  let body: { job_id?: string; filename?: string; content_type?: string; size?: number }
   try {
     body = await req.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { job_id, builder_id: rawBuilderId, filename, content_type, size } = body
-  const builder_id = rawBuilderId ?? DEMO_BUILDER_ID
+  const { job_id, content_type, size } = body
+  const filename = body.filename ? sanitizeFilename(body.filename) : undefined
 
   if (!job_id) return NextResponse.json({ error: 'job_id is required' }, { status: 400 })
   if (!filename) return NextResponse.json({ error: 'filename is required' }, { status: 400 })
@@ -69,6 +80,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { id: builder_id, email: '', name: builder_id },
         { onConflict: 'id', ignoreDuplicates: true }
       )
+
+      // The job must belong to the authenticated builder
+      const { data: ownedJob } = await supabase
+        .from('jobs')
+        .select('id')
+        .eq('id', job_id)
+        .eq('builder_id', builder_id)
+        .single()
+      if (!ownedJob) {
+        return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+      }
 
       const storagePath = uniqueStoragePath(builder_id, job_id, filename)
 

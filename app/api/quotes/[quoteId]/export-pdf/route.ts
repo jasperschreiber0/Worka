@@ -433,7 +433,7 @@ export async function GET(
     const [{ data: quoteRow }, { data: lineItems }] = await Promise.all([
       sb.from('quotes')
         .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
-        .eq('id', quoteId).single(),
+        .eq('id', quoteId).eq('builder_id', builderId).single(),
       sb.from('quote_line_items')
         .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status')
         .eq('quote_id', quoteId),
@@ -455,7 +455,7 @@ export async function GET(
 
     quote = {
       id: tq.id, job_id: tq.job_id, job_address: address,
-      builder_id: _request.nextUrl.searchParams.get('builder_id') ?? '',
+      builder_id: builderId,
       status: tq.status as DemoQuote['status'], total_cost: tq.total_cost,
       margin_pct: tq.margin_pct, confidence_score: tq.confidence_score,
       version: tq.version, created_at: tq.created_at,

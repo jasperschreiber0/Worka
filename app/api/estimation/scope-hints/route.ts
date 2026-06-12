@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { ScopeHint, ProjectMetadata } from '@/lib/types/estimation.types'
 import { SCOPE_HINTS_BY_TYPE, DEMO_SCOPE_HINTS } from '@/lib/estimation-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── POST /api/estimation/scope-hints ────────────────────────────────────────
 // Returns likely missing scope items for a given project type.
@@ -8,6 +9,11 @@ import { SCOPE_HINTS_BY_TYPE, DEMO_SCOPE_HINTS } from '@/lib/estimation-demo'
 // In demo/no-API mode: returns seeded pattern matching.
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   let body: { project_metadata: ProjectMetadata; description?: string }
   try {
     body = await request.json()

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { CostReconciliationEntry } from '@/lib/types/estimation.types'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 interface ReconcilePayload {
   job_id: string
@@ -22,9 +23,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { job_id, builder_id, quote_id, entries, final_cost, final_margin_pct } = body
-  if (!job_id || !builder_id || !entries?.length) {
-    return NextResponse.json({ error: 'job_id, builder_id, and entries required' }, { status: 400 })
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const { job_id, quote_id, entries, final_cost, final_margin_pct } = body
+  if (!job_id || !entries?.length) {
+    return NextResponse.json({ error: 'job_id and entries required' }, { status: 400 })
   }
 
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
@@ -111,10 +117,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 // Returns historical variance data for a trade category.
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const builderId = request.nextUrl.searchParams.get('builder_id')
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const tradeCategoryId = request.nextUrl.searchParams.get('trade_category_id')
-
-  if (!builderId) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
 
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
     // Return demo variance data

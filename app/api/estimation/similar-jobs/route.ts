@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { ProjectMetadata, SimilarProject } from '@/lib/types/estimation.types'
 import { DEMO_PROJECT_MEMORY } from '@/lib/estimation-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Similarity scoring (structured matching — no embeddings required) ────────
 
@@ -74,9 +75,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { project_metadata, builder_id, limit = 5 } = body
-  if (!project_metadata || !builder_id) {
-    return NextResponse.json({ error: 'project_metadata and builder_id required' }, { status: 400 })
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const { project_metadata, limit = 5 } = body
+  if (!project_metadata) {
+    return NextResponse.json({ error: 'project_metadata required' }, { status: 400 })
   }
 
   const isDemo = !process.env.NEXT_PUBLIC_SUPABASE_URL
