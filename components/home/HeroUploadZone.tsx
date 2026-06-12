@@ -20,6 +20,28 @@ function isAcceptedFile(file: File): boolean {
   return ['pdf', 'dwg', 'jpg', 'jpeg', 'png', 'heic'].includes(ext)
 }
 
+// ─── Stage files in sessionStorage as base64 before redirecting ───────────────
+
+async function stageFilesInSession(files: File[]): Promise<void> {
+  const encoded = await Promise.all(
+    files.map(
+      (file) =>
+        new Promise<{ name: string; type: string; data: string }>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () =>
+            resolve({
+              name: file.name,
+              type: file.type || 'application/octet-stream',
+              data: (reader.result as string).split(',')[1], // base64 only
+            })
+          reader.onerror = reject
+          reader.readAsDataURL(file)
+        })
+    )
+  )
+  sessionStorage.setItem('worka_pending_files', JSON.stringify(encoded))
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function HeroUploadZone() {
@@ -36,14 +58,13 @@ export default function HeroUploadZone() {
   }, [])
 
   const handleFilesSelected = useCallback(
-    (files: FileList | null) => {
+    async (files: FileList | null) => {
       if (!files || files.length === 0) return
-      const valid = Array.from(files).some(isAcceptedFile)
-      if (!valid) return
+      const valid = Array.from(files).filter(isAcceptedFile)
+      if (valid.length === 0) return
       setRedirecting(true)
-      setTimeout(() => {
-        router.push('/chat?action=new_quote')
-      }, 800)
+      await stageFilesInSession(valid)
+      router.push('/chat?action=upload_plans')
     },
     [router]
   )

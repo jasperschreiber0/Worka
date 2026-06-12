@@ -423,8 +423,59 @@ export async function GET(
     quote = DEMO_QUOTE
     items = DEMO_LINE_ITEMS
   } else {
-    // Real Supabase path — not implemented in this session
-    return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!sbUrl || !sbKey) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+
+    const { createClient } = await import('@supabase/supabase-js')
+    const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+
+    const [{ data: quoteRow }, { data: lineItems }] = await Promise.all([
+      sb.from('quotes')
+        .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
+        .eq('id', quoteId).single(),
+      sb.from('quote_line_items')
+        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status')
+        .eq('quote_id', quoteId),
+    ])
+
+    if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+
+    type QuoteRow = { id: string; job_id: string; status: string; total_cost: number; margin_pct: number; confidence_score: number; version: number; created_at: string }
+    type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null }
+
+    const tq = quoteRow as QuoteRow
+    const { data: jobRow } = await sb.from('jobs').select('address').eq('id', tq.job_id).single()
+    const address = (jobRow as { address: string } | null)?.address ?? 'the project'
+
+    // Fetch trade category names
+    const { data: tradeCategories } = await sb.from('trade_categories').select('id, name')
+    const tradeName = (id: number): string =>
+      ((tradeCategories ?? []) as Array<{ id: number; name: string }>).find((t) => t.id === id)?.name ?? `Trade ${id}`
+
+    quote = {
+      id: tq.id, job_id: tq.job_id, job_address: address,
+      builder_id: _request.nextUrl.searchParams.get('builder_id') ?? '',
+      status: tq.status as DemoQuote['status'], total_cost: tq.total_cost,
+      margin_pct: tq.margin_pct, confidence_score: tq.confidence_score,
+      version: tq.version, created_at: tq.created_at,
+    }
+    items = ((lineItems ?? []) as LineItemRow[]).map((li) => ({
+      id: li.id, quote_id: quoteId, trade_category_id: li.trade_category_id,
+      trade_category_name: tradeName(li.trade_category_id),
+      description: li.description, quantity: li.quantity, unit: li.unit,
+      dimensions_string: null,
+      rate: li.rate, total: li.total, is_assumption: li.is_assumption,
+      assumption_status: li.assumption_status as DemoQuoteLineItem['assumption_status'],
+      confidence: 100,
+      pricing_type: 'measured' as const,
+      source_ref: null,
+      margin_pct: 0.15,
+      labour_cost: null,
+      material_cost: null,
+      subcontract_cost: null,
+      plant_cost: null,
+    }))
   }
 
   const html = buildHtmlPage(quote, items)

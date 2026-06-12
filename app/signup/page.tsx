@@ -6,6 +6,17 @@ import Link from 'next/link'
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
 import type { Database } from '@/lib/types/database.types'
 
+const INPUT_STYLE: React.CSSProperties = {
+  width: '100%',
+  backgroundColor: 'var(--bg-elevated)',
+  border: '0.5px solid var(--bg-border)',
+  color: 'var(--text-primary)',
+  borderRadius: 6,
+  padding: '10px 12px',
+  fontSize: 13,
+  outline: 'none',
+}
+
 export default function SignupPage() {
   const router = useRouter()
   const [fullName, setFullName] = useState('')
@@ -24,7 +35,6 @@ export default function SignupPage() {
     setLoading(true)
 
     try {
-      // Demo mode — no Supabase, just redirect
       if (!supabaseUrl) {
         router.push('/chat')
         return
@@ -55,19 +65,24 @@ export default function SignupPage() {
 
   if (done) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center px-4">
-        <div className="w-full max-w-sm bg-white rounded-2xl shadow-md border border-slate-100 px-8 py-8 text-center">
-          <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">
-            <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+      <div className="min-h-screen flex flex-col items-center justify-center px-4" style={{ backgroundColor: 'var(--bg-shell)' }}>
+        <div className="w-full max-w-sm rounded-[10px] px-8 py-8 text-center"
+          style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)' }}>
+          <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4"
+            style={{ backgroundColor: 'rgba(76,175,80,0.15)' }}>
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+              style={{ color: 'var(--status-green)' }} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
             </svg>
           </div>
-          <h1 className="text-xl font-bold text-slate-900 mb-2">Check your email</h1>
-          <p className="text-sm text-slate-500 leading-relaxed mb-6">
-            We sent a confirmation link to <span className="font-semibold text-slate-700">{email}</span>.
+          <h1 className="text-[18px] font-bold mb-2" style={{ color: 'var(--text-primary)' }}>Check your email</h1>
+          <p className="text-[13px] leading-relaxed mb-6" style={{ color: 'var(--text-tertiary)' }}>
+            We sent a confirmation link to <span className="font-semibold" style={{ color: 'var(--text-secondary)' }}>{email}</span>.
             Click it to activate your account.
           </p>
-          <Link href="/login" className="btn-primary w-full py-2.5 text-sm no-underline inline-block text-center">
+          <Link href="/login"
+            className="w-full py-2.5 text-[13px] font-semibold rounded-[6px] no-underline inline-block text-center"
+            style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}>
             Back to sign in
           </Link>
         </div>
@@ -76,127 +91,73 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center px-4">
-      {/* ── Logo ─────────────────────────────────────────────────────────── */}
+    <div className="min-h-screen flex flex-col items-center justify-center px-4" style={{ backgroundColor: 'var(--bg-shell)' }}>
+      {/* Logo */}
       <Link href="/" className="flex items-center gap-2.5 mb-10 no-underline">
-        <div className="w-10 h-10 rounded-xl bg-brand-500 flex items-center justify-center flex-shrink-0">
-          <svg
-            className="w-5 h-5 text-white"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-            aria-hidden="true"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21"
-            />
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+          style={{ backgroundColor: 'var(--orange-primary)' }}>
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            style={{ color: '#fff' }} aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" />
           </svg>
         </div>
-        <span className="text-2xl font-bold text-slate-900 tracking-tight">WorkA</span>
+        <span className="text-[22px] font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>WorkA</span>
       </Link>
 
-      {/* ── Card ─────────────────────────────────────────────────────────── */}
-      <div className="w-full max-w-sm bg-white rounded-2xl shadow-md border border-slate-100 px-8 py-8">
-        <h1 className="text-xl font-bold text-slate-900 mb-1">Create your account</h1>
-        <p className="text-sm text-slate-500 mb-6">Free to start — no credit card needed.</p>
+      {/* Card */}
+      <div className="w-full max-w-sm rounded-[10px] px-8 py-8"
+        style={{ backgroundColor: 'var(--bg-surface)', border: '0.5px solid var(--bg-border)' }}>
+        <h1 className="text-[18px] font-bold mb-1" style={{ color: 'var(--text-primary)' }}>Create your account</h1>
+        <p className="text-[13px] mb-6" style={{ color: 'var(--text-tertiary)' }}>Free to start — no credit card needed.</p>
 
         {/* Demo banner */}
         {!supabaseUrl && (
-          <div className="mb-5 bg-brand-50 border border-brand-200 rounded-lg px-4 py-3">
-            <p className="text-xs font-semibold text-brand-700 mb-0.5">Demo mode</p>
-            <p className="text-xs text-brand-600">
+          <div className="mb-5 rounded-[6px] px-3 py-2.5"
+            style={{ backgroundColor: 'rgba(255,107,43,0.1)', border: '0.5px solid rgba(255,107,43,0.3)' }}>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: 'var(--orange-primary)' }}>Demo mode</p>
+            <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
               Supabase not connected. Submitting will take you straight to the app.
             </p>
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="fullName" className="block text-sm font-medium text-slate-700 mb-1">
-              Your name
-            </label>
-            <input
-              id="fullName"
-              type="text"
-              autoComplete="name"
-              required
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              className="input"
-              placeholder="Dave Nguyen"
-            />
-          </div>
+          {[
+            { id: 'fullName', label: 'Your name', type: 'text', autoComplete: 'name', value: fullName, onChange: setFullName, placeholder: 'Dave Nguyen' },
+            { id: 'companyName', label: 'Business name', type: 'text', autoComplete: 'organization', value: companyName, onChange: setCompanyName, placeholder: 'Nguyen Constructions' },
+            { id: 'email', label: 'Email', type: 'email', autoComplete: 'email', value: email, onChange: setEmail, placeholder: 'dave@nguyenconstructions.com.au' },
+          ].map(({ id, label, type, autoComplete, value, onChange, placeholder }) => (
+            <div key={id}>
+              <label htmlFor={id} className="block text-[12px] font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>{label}</label>
+              <input id={id} type={type} autoComplete={autoComplete} required value={value}
+                onChange={(e) => onChange(e.target.value)} style={INPUT_STYLE} placeholder={placeholder} />
+            </div>
+          ))}
 
           <div>
-            <label htmlFor="companyName" className="block text-sm font-medium text-slate-700 mb-1">
-              Business name
-            </label>
-            <input
-              id="companyName"
-              type="text"
-              autoComplete="organization"
-              required
-              value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
-              className="input"
-              placeholder="Nguyen Constructions"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-slate-700 mb-1">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="input"
-              placeholder="dave@nguyenconstructions.com.au"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-slate-700 mb-1">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="input"
-              placeholder="8+ characters"
-            />
+            <label htmlFor="password" className="block text-[12px] font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Password</label>
+            <input id="password" type="password" autoComplete="new-password" required minLength={8}
+              value={password} onChange={(e) => setPassword(e.target.value)}
+              style={INPUT_STYLE} placeholder="8+ characters" />
           </div>
 
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+            <p className="text-[12px] rounded-[4px] px-3 py-2"
+              style={{ color: 'var(--status-red)', backgroundColor: 'rgba(244,67,54,0.1)', border: '0.5px solid rgba(244,67,54,0.3)' }}>
               {error}
             </p>
           )}
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="btn-primary w-full py-2.5 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-          >
+          <button type="submit" disabled={loading}
+            className="w-full py-2.5 text-[13px] font-semibold rounded-[6px] disabled:opacity-60 disabled:cursor-not-allowed"
+            style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}>
             {loading ? 'Creating account…' : 'Create account'}
           </button>
         </form>
 
-        <p className="mt-5 text-center text-sm text-slate-500">
+        <p className="mt-5 text-center text-[12px]" style={{ color: 'var(--text-tertiary)' }}>
           Already have an account?{' '}
-          <Link href="/login" className="font-semibold text-brand-600 hover:text-brand-700 no-underline">
+          <Link href="/login" className="font-semibold no-underline" style={{ color: 'var(--orange-primary)' }}>
             Sign in
           </Link>
         </p>
