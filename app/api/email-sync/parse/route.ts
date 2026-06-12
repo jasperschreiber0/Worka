@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { addCommEntry } from '@/lib/comms-demo'
@@ -445,12 +446,17 @@ async function logCommunication(
 export async function POST(
   request: NextRequest
 ): Promise<NextResponse<ParseResponse | { error: string }>> {
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   try {
     const body = (await request.json()) as ParseRequestBody
-    const { builder_id, email } = body
+    const { email } = body
 
-    if (!builder_id || !email) {
-      return NextResponse.json({ error: 'builder_id and email are required' }, { status: 400 })
+    if (!email) {
+      return NextResponse.json({ error: 'email is required' }, { status: 400 })
     }
 
     // 1. Job matching

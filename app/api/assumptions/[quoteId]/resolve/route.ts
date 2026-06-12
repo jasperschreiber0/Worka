@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -40,11 +41,16 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  const { assumption_id, resolution, adjusted_quantity, adjusted_unit, builder_id } = body
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
-  if (!assumption_id || !resolution || !builder_id) {
+  const { assumption_id, resolution, adjusted_quantity, adjusted_unit } = body
+
+  if (!assumption_id || !resolution) {
     return NextResponse.json(
-      { error: 'Missing required fields: assumption_id, resolution, builder_id' },
+      { error: 'Missing required fields: assumption_id, resolution' },
       { status: 400 }
     )
   }
@@ -106,7 +112,18 @@ export async function POST(
 
     const now = new Date().toISOString()
 
-    // 1. Update assumptions table
+    // The quote must belong to the authenticated builder
+    const { data: ownedQuote } = await supabase
+      .from('quotes')
+      .select('id')
+      .eq('id', quoteId)
+      .eq('builder_id', builder_id)
+      .single()
+    if (!ownedQuote) {
+      return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
+
+    // 1. Update assumptions table — constrained to this quote
     const { data: assumptionRow, error: assumptionErr } = await supabase
       .from('assumptions')
       .update({
@@ -115,6 +132,7 @@ export async function POST(
         resolved_by: builder_id,
       })
       .eq('id', assumption_id)
+      .eq('quote_id', quoteId)
       .select()
       .single()
 

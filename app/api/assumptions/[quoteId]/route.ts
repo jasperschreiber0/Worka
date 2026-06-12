@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
 import type { AssumptionItem } from '@/lib/assumptions-demo'
 
@@ -20,6 +21,11 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { quoteId } = params
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -63,6 +69,17 @@ export async function GET(
   try {
     const { createClient } = await import('@supabase/supabase-js')
     const supabase = createClient(supabaseUrl!, supabaseKey!)
+
+    // The quote must belong to the authenticated builder
+    const { data: ownedQuote } = await supabase
+      .from('quotes')
+      .select('id')
+      .eq('id', quoteId)
+      .eq('builder_id', builderId)
+      .single()
+    if (!ownedQuote) {
+      return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
 
     // Fetch assumptions with linked line item and trade category
     const { data: rows, error } = await supabase

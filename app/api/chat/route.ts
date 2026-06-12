@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 import { randomUUID } from 'crypto'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import type {
   IntentType,
   Invoice,
@@ -894,10 +895,12 @@ function handleEmailDraft(entities: Record<string, string>): ChatResponse {
 
 // ─── Email Sync Status Handler ────────────────────────────────────────────────
 
-async function handleEmailSyncStatus(builderId: string): Promise<ChatResponse> {
+async function handleEmailSyncStatus(builderId: string, cookieHeader: string): Promise<ChatResponse> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
-    const res = await fetch(`${appUrl}/api/email-sync/status?builder_id=${builderId}`)
+    const res = await fetch(`${appUrl}/api/email-sync/status?builder_id=${builderId}`, {
+      headers: { cookie: cookieHeader },
+    })
     const data = await res.json() as {
       connected: boolean
       provider: 'gmail' | 'outlook' | null
@@ -937,12 +940,12 @@ async function handleEmailSyncStatus(builderId: string): Promise<ChatResponse> {
 
 // ─── Simulate Email Handler ───────────────────────────────────────────────────
 
-async function handleSimulateEmail(builderId: string): Promise<ChatResponse> {
+async function handleSimulateEmail(builderId: string, cookieHeader: string): Promise<ChatResponse> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
     const res = await fetch(`${appUrl}/api/email-sync/simulate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', cookie: cookieHeader },
       body: JSON.stringify({ builder_id: builderId, scenario: 'invoice_query' }),
     })
     const data = await res.json() as {
@@ -1059,9 +1062,16 @@ function handleUnknown(): ChatResponse {
 
 export async function POST(request: NextRequest): Promise<NextResponse<ChatResponse>> {
   try {
+    const builderId = await getAuthenticatedBuilderId()
+    if (!builderId) {
+      return NextResponse.json(
+        { intent: 'unknown', message: 'Unauthorized' },
+        { status: 401 }
+      )
+    }
+
     const body = (await request.json()) as ChatRequestBody
     const message = body.message?.trim()
-    const builderId = body.builder_id ?? '00000000-0000-0000-0000-000000000001'
 
     if (!message) {
       return NextResponse.json(
@@ -1197,7 +1207,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         (lower.includes('gmail') && lower.includes('connected')) ||
         lower === 'email sync status'
       ) {
-        const result = await handleEmailSyncStatus(builderId)
+        const result = await handleEmailSyncStatus(builderId, request.headers.get('cookie') ?? '')
         return NextResponse.json(result)
       }
       // Demo simulate_email: detect "simulate email", "test email sync" etc
@@ -1207,7 +1217,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         lower.includes('simulate email') ||
         lower.includes('test email sync')
       ) {
-        const result = await handleSimulateEmail(builderId)
+        const result = await handleSimulateEmail(builderId, request.headers.get('cookie') ?? '')
         return NextResponse.json(result)
       }
       // Demo margin_query: detect margin/profit/cost overrun keywords
@@ -1341,12 +1351,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     if (classified.intent === 'email_sync_status') {
-      const result = await handleEmailSyncStatus(builderId)
+      const result = await handleEmailSyncStatus(builderId, request.headers.get('cookie') ?? '')
       return NextResponse.json(result)
     }
 
     if (classified.intent === 'simulate_email') {
-      const result = await handleSimulateEmail(builderId)
+      const result = await handleSimulateEmail(builderId, request.headers.get('cookie') ?? '')
       return NextResponse.json(result)
     }
 

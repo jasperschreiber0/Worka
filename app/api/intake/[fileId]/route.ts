@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,11 +48,17 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { fileId: string } }
 ): Promise<Response> {
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
   const { fileId } = params
   const { searchParams } = new URL(req.url)
   const job_id = searchParams.get('job_id') ?? ''
-  const builder_id =
-    searchParams.get('builder_id') ?? '00000000-0000-0000-0000-000000000001'
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -115,6 +122,7 @@ export async function GET(
           .from('files')
           .select('*')
           .eq('id', fileId)
+          .eq('builder_id', builder_id)
           .single()
 
         if (fileErr || !fileRow) {

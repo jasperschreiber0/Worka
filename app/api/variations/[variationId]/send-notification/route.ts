@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_VARIATIONS } from '@/lib/variations-demo'
 import { recordProofEvent } from '@/lib/proof'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SendNotificationRequestBody {
-  builder_id: string
   to: string
   subject: string
   body: string
@@ -27,6 +27,11 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ variationId: string }> }
 ): Promise<NextResponse<SendNotificationResponse | ErrorResponse>> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { variationId } = await params
 
   let body: SendNotificationRequestBody
@@ -40,6 +45,12 @@ export async function POST(
 
   if (!to || !subject || !emailBody) {
     return NextResponse.json({ error: 'Missing required fields: to, subject, body' }, { status: 400 })
+  }
+
+  // Ownership check before anything leaves the building
+  const variation = DEMO_VARIATIONS.find((v) => v.id === variationId && v.builder_id === builderId)
+  if (!variation) {
+    return NextResponse.json({ error: 'Variation not found' }, { status: 404 })
   }
 
   const sentAt = new Date().toISOString()
@@ -80,21 +91,18 @@ export async function POST(
 
   // WorkA Proof: client notification is the evidence that matters in a
   // payment dispute — record that it went out, to whom, and when
-  const variation = DEMO_VARIATIONS.find((v) => v.id === variationId)
-  if (variation) {
-    await recordProofEvent({
-      jobId: variation.job_id,
-      builderId: body.builder_id,
-      eventType: 'variation_notice_sent',
-      description: `Variation approval notice for "${variation.title}" emailed to ${to}`,
-      metadata: {
-        variation_id: variationId,
-        to,
-        subject,
-        communication_id: communicationId,
-      },
-    })
-  }
+  await recordProofEvent({
+    jobId: variation.job_id,
+    builderId,
+    eventType: 'variation_notice_sent',
+    description: `Variation approval notice for "${variation.title}" emailed to ${to}`,
+    metadata: {
+      variation_id: variationId,
+      to,
+      subject,
+      communication_id: communicationId,
+    },
+  })
 
   return NextResponse.json({
     sent: true,

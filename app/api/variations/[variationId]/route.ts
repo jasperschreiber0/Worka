@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
@@ -30,8 +31,13 @@ export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ variationId: string }> }
 ): Promise<NextResponse<VariationResponse | ErrorResponse>> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { variationId } = await params
-  const base = DEMO_VARIATIONS.find((v) => v.id === variationId)
+  const base = DEMO_VARIATIONS.find((v) => v.id === variationId && v.builder_id === builderId)
 
   if (!base) {
     return NextResponse.json({ error: 'Variation not found' }, { status: 404 })

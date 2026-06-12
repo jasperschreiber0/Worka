@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -91,14 +92,15 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { quoteId } = params
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  const isRealMode = Boolean(supabaseUrl && supabaseKey)
-
   // ── Demo mode ──────────────────────────────────────────────────────────────
-  if (!isRealMode || quoteId === 'demo-quote-id') {
+  if (isDemoMode()) {
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
     const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
 
@@ -114,9 +116,12 @@ export async function GET(
   // ── Real mode: Supabase ───────────────────────────────────────────────────
   try {
     const { createClient } = await import('@supabase/supabase-js')
-    const supabase = createClient(supabaseUrl!, supabaseKey!)
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
 
-    // Fetch the quote with job address
+    // Fetch the quote with job address — scoped to the authenticated builder
     const { data: quoteRow, error: quoteErr } = await supabase
       .from('quotes')
       .select(`
@@ -134,6 +139,7 @@ export async function GET(
         )
       `)
       .eq('id', quoteId)
+      .eq('builder_id', builderId)
       .single()
 
     if (quoteErr || !quoteRow) {

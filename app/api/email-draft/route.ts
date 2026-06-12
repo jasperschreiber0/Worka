@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 
@@ -252,12 +253,13 @@ Respond with ONLY valid JSON in this exact format:
 
 export async function POST(request: NextRequest): Promise<NextResponse<EmailDraftResponse | { error: string }>> {
   try {
-    const body = (await request.json()) as EmailDraftRequestBody
-    const { builder_id, job_id, recipient_name, intent_hint = 'general', context } = body
-
-    if (!builder_id) {
-      return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
+    const builderId = await getAuthenticatedBuilderId()
+    if (!builderId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
+
+    const body = (await request.json()) as EmailDraftRequestBody
+    const { job_id, recipient_name, intent_hint = 'general', context } = body
 
     // Load job context
     const jobCtx = job_id ? loadJobContext(job_id) : null

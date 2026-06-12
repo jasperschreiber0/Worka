@@ -4,11 +4,11 @@ import { addCommEntry, demoCommHistory } from '@/lib/comms-demo'
 import { randomUUID } from 'crypto'
 import { requirePermission } from '@/lib/auth/role-guard'
 import { recordProofEvent } from '@/lib/proof'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SendEmailRequestBody {
-  builder_id: string
   job_id: string | null
   to: string
   subject: string
@@ -31,13 +31,18 @@ export async function POST(
   const denied = requirePermission(request, 'send_email')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   try {
     const body = (await request.json()) as SendEmailRequestBody
-    const { builder_id, job_id, to, subject, body: emailBody, linked_variation_id, linked_invoice_id } = body
+    const { job_id, to, subject, body: emailBody, linked_variation_id, linked_invoice_id } = body
 
-    if (!builder_id || !to || !subject || !emailBody) {
+    if (!to || !subject || !emailBody) {
       return NextResponse.json(
-        { error: 'builder_id, to, subject, and body are required' },
+        { error: 'to, subject, and body are required' },
         { status: 400 }
       )
     }

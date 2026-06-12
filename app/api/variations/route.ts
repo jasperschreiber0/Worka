@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
@@ -24,18 +25,18 @@ function applyState(variation: DemoVariation): DemoVariation {
 
 // ─── GET /api/variations ──────────────────────────────────────────────────────
 
-export async function GET(request: NextRequest): Promise<NextResponse<VariationsResponse>> {
+export async function GET(request: NextRequest): Promise<NextResponse<VariationsResponse | { error: string }>> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { searchParams } = new URL(request.url)
-  const builderId = searchParams.get('builder_id')
   const jobId = searchParams.get('job_id')
   const status = searchParams.get('status')
 
-  let variations = DEMO_VARIATIONS.map(applyState)
-
-  // Filter by builder
-  if (builderId) {
-    variations = variations.filter((v) => v.builder_id === builderId)
-  }
+  // Always scoped to the authenticated builder
+  let variations = DEMO_VARIATIONS.map(applyState).filter((v) => v.builder_id === builderId)
 
   // Filter by job
   if (jobId) {

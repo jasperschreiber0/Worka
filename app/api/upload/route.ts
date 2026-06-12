@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { File as DBFile, FileType, FileIntakeStatus } from '@/lib/types/database.types'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -14,9 +15,13 @@ const ACCEPTED_MIME_TYPES = new Set([
   'application/octet-stream',
 ])
 
-const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Strip directory components and characters unsafe for a storage object key. */
+function sanitizeFilename(filename: string): string {
+  const base = filename.split(/[\\/]/).pop() ?? 'upload'
+  return base.replace(/[^a-zA-Z0-9._ -]/g, '_').slice(0, 200) || 'upload'
+}
 
 function detectFileType(filename: string): FileType {
   const ext = filename.split('.').pop()?.toLowerCase() ?? ''
@@ -36,6 +41,11 @@ function isAcceptedMimeType(mimeType: string): boolean {
 // ─── POST /api/upload ─────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   let formData: FormData
   try {
     formData = await req.formData()
@@ -46,7 +56,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Extract fields
   const fileEntry = formData.get('file')
   const job_id = formData.get('job_id')?.toString() ?? ''
-  const builder_id = formData.get('builder_id')?.toString() ?? DEMO_BUILDER_ID
 
   if (!fileEntry || typeof fileEntry === 'string') {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 })
@@ -57,7 +66,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const uploadedFile = fileEntry as globalThis.File
-  const filename = uploadedFile.name
+  const filename = sanitizeFilename(uploadedFile.name)
   const mimeType = uploadedFile.type || 'application/octet-stream'
 
   // Validate file type
@@ -85,6 +94,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     try {
       const { createClient } = await import('@supabase/supabase-js')
       const supabase = createClient(supabaseUrl!, supabaseKey!)
+
+      // The job must belong to the authenticated builder
+      const { data: jobRow } = await supabase
+        .from('jobs')
+        .select('id')
+        .eq('id', job_id)
+        .eq('builder_id', builder_id)
+        .single()
+      if (!jobRow) {
+        return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+      }
 
       const storagePath = `${builder_id}/${job_id}/${filename}`
 
