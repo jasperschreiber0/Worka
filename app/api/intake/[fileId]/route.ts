@@ -246,12 +246,16 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
                 { type: 'text', text: extractionPrompt },
               ]
 
-          const response = await client.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 4096,
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-            messages: [{ role: 'user', content: messageContent }],
-          })
+          const response = await client.messages.create(
+            {
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 4096,
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+              messages: [{ role: 'user', content: messageContent }],
+            },
+            // Hard cap well inside Vercel's 300 s serverless limit
+            { timeout: 220_000 }
+          )
 
           anthropicResponse =
             response.content[0].type === 'text' ? response.content[0].text : ''
