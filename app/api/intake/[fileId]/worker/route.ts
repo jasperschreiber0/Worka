@@ -1192,7 +1192,8 @@ export async function POST(
       total_in_memory: totalInMemory,
     }
 
-    // Write final success record to DB — SSE monitor polls for intake_status='extracted'
+    // Write final success record — two separate updates so a missing migration-016
+    // column (pipeline_stage / intake_result) never blocks the critical status write.
     const { error: extractedErr } = await supabase.from('files').update({
       intake_status: 'extracted',
       quote_id: quoteId,
@@ -1201,23 +1202,28 @@ export async function POST(
       processing_time_ms: Date.now() - pipelineStart,
       failure_stage: null,
       failure_reason: null,
+    }).eq('id', fileId)
+    if (extractedErr) console.error('[intake:worker] status→extracted:', extractedErr.message)
+
+    // Best-effort: write new columns (requires migration 016)
+    await supabase.from('files').update({
       pipeline_stage: 'complete',
       intake_result: completeData as unknown as Record<string, unknown>,
     }).eq('id', fileId)
-    if (extractedErr) console.error('[intake:worker] status→extracted:', extractedErr.message)
 
     return NextResponse.json({ ok: true })
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
     console.error('[intake:worker:unhandled]', { file_id: fileId, error: errMsg, stack: err instanceof Error ? err.stack?.slice(0, 600) : undefined })
     try {
+      // Critical columns first — pipeline_stage is best-effort (requires migration 016)
       await supabase.from('files').update({
         intake_status: 'failed',
         failure_stage: 'AI_EXTRACTION_FAILED',
         failure_reason: `Unhandled pipeline error: ${errMsg.slice(0, 400)}`,
         processing_time_ms: Date.now() - pipelineStart,
-        pipeline_stage: 'AI_EXTRACTION_FAILED',
       }).eq('id', fileId)
+      await supabase.from('files').update({ pipeline_stage: 'AI_EXTRACTION_FAILED' }).eq('id', fileId)
     } catch { /* ignore secondary failure */ }
     return NextResponse.json({ ok: false, error: errMsg }, { status: 500 })
   }

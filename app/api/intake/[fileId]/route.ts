@@ -512,12 +512,17 @@ export async function GET(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const supabase: any = createClient(supabaseUrl!, supabaseKey!)
 
-          // Mark file as queued (idempotent — worker will atomically claim it)
+          // Mark file as queued (idempotent — worker will atomically claim it).
+          // Two separate updates so pipeline_stage (migration 016) never blocks the critical status write.
           await supabase
             .from('files')
-            .update({ intake_status: 'queued', pipeline_stage: 'uploading' })
+            .update({ intake_status: 'queued' })
             .eq('id', fileId)
             .eq('intake_status', 'uploaded')
+          await supabase
+            .from('files')
+            .update({ pipeline_stage: 'uploading' })
+            .eq('id', fileId)
 
           emit('progress', PROGRESS_STAGES[0]) // uploading
 
@@ -554,9 +559,11 @@ export async function GET(
             }
 
             // Poll DB
+            // select('*') tolerates missing columns (e.g. pipeline_stage / intake_result
+            // before migration 016 is applied) — named selects fail if any column is absent.
             const { data: fileRow, error: pollErr } = await supabase
               .from('files')
-              .select('pipeline_stage, intake_status, failure_stage, failure_reason, intake_result')
+              .select('*')
               .eq('id', fileId)
               .single()
 
@@ -565,7 +572,10 @@ export async function GET(
               continue
             }
 
-            const { pipeline_stage, intake_status, failure_stage, failure_reason, intake_result } = fileRow
+            const pipeline_stage: string | null = fileRow.pipeline_stage ?? null
+            const intake_status: string = fileRow.intake_status ?? 'uploaded'
+            const failure_stage: string | null = fileRow.failure_stage ?? null
+            const intake_result: CompleteEvent | null = fileRow.intake_result ?? null
 
             // Detect that worker has started (status changed from queued)
             if (intake_status !== 'uploaded' && intake_status !== 'queued') {
@@ -588,9 +598,15 @@ export async function GET(
               lastStage = pipeline_stage
             }
 
-            // Check for completion
-            if (intake_status === 'extracted' && intake_result) {
-              emit('complete', intake_result as CompleteEvent)
+            // Check for completion — handle missing intake_result (migration 016 not yet applied)
+            if (intake_status === 'extracted') {
+              emit('complete', intake_result ?? {
+                stage: 'complete',
+                message: 'Draft quote ready — open the quote to review.',
+                pct: 100,
+                quote_id: fileRow.quote_id ?? '',
+                assumption_count: 0,
+              })
               controller.close()
               return
             }
