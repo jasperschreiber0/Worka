@@ -1070,7 +1070,12 @@ export async function GET(
         try {
           const scopeRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/estimation/scope-hints`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(process.env.SUPABASE_SERVICE_ROLE_KEY
+                ? { Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}` }
+                : {}),
+            },
             body: JSON.stringify({ project_metadata: projectMetadata }),
           })
           if (scopeRes.ok) {
