@@ -121,6 +121,11 @@ const PROGRESS_STAGES: ProgressEvent[] = [
   { stage: 'building_quote',     message: 'Building draft quote...',                 pct: 96 },
 ]
 
+// Stage name → progress event lookup for SSE monitor
+const STAGE_MAP = new Map<string, ProgressEvent>(
+  PROGRESS_STAGES.map(s => [s.stage, s])
+)
+
 // ─── SSE helpers ──────────────────────────────────────────────────────────────
 
 function sseEvent(encoder: TextEncoder, event: string, data: object): Uint8Array {
@@ -349,9 +354,6 @@ function tryExtractJson(raw: string): ParseResult {
   // Pass 2: replace literal newlines/CR/tabs with spaces — the most common
   // cause of "Expected ',' or ']'" errors in large LLM JSON outputs is a
   // raw newline character embedded inside a string value.
-  // Replacing all whitespace control chars with space preserves JSON structure
-  // (newlines outside strings are just whitespace) and produces valid strings
-  // (losing the newline content is acceptable for construction line item fields).
   try {
     const sanitized = text.replace(/\r\n/g, ' ').replace(/[\r\n\t]/g, ' ')
     const parsed = JSON.parse(sanitized)
@@ -447,7 +449,6 @@ export async function GET(
   const anthropicKey = process.env.ANTHROPIC_API_KEY
 
   // Real mode requires Anthropic key + file data available (via memory cache OR Supabase).
-  // We no longer require Supabase Storage — files are cached in memory at upload time.
   const { getCachedFile } = await import('@/lib/file-cache')
   const hasFileData = Boolean(getCachedFile(fileId)) || Boolean(supabaseUrl && supabaseKey)
   const isRealMode = Boolean(anthropicKey && hasFileData)
@@ -495,7 +496,134 @@ export async function GET(
     })
   }
 
-  // ── Real mode ──────────────────────────────────────────────────────────────
+  // ── Real mode: choose strategy based on Supabase availability ─────────────
+  const hasSupabase = Boolean(supabaseUrl && supabaseKey)
+
+  if (hasSupabase) {
+    // ── Vercel/production mode: fire worker, poll DB for progress ─────────
+    const stream = new ReadableStream({
+      async start(controller) {
+        const emit = (event: string, data: object) => {
+          controller.enqueue(sseEvent(encoder, event, data))
+        }
+
+        try {
+          const { createClient } = await import('@supabase/supabase-js')
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const supabase: any = createClient(supabaseUrl!, supabaseKey!)
+
+          // Mark file as queued (idempotent — worker will atomically claim it)
+          await supabase
+            .from('files')
+            .update({ intake_status: 'queued', pipeline_stage: 'uploading' })
+            .eq('id', fileId)
+            .eq('intake_status', 'uploaded')
+
+          emit('progress', PROGRESS_STAGES[0]) // uploading
+
+          // Fire worker — intentionally not awaited; runs in separate Vercel function invocation
+          const workerUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/intake/${fileId}/worker`
+          fetch(workerUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseKey}`,
+            },
+            body: JSON.stringify({ builder_id, job_id, sibling_file_ids: siblingFileIds }),
+          }).catch((err: Error) => console.error('[intake:worker-trigger-failed]', err.message))
+
+          // ── Poll DB every 2s for pipeline_stage / intake_status changes ──
+          const TIMEOUT_MS = 285_000 // 285s — leave 15s buffer before Vercel's 300s limit
+          const WORKER_START_TIMEOUT_MS = 30_000 // 30s — if worker never starts
+          const POLL_INTERVAL_MS = 2_000
+
+          const startTime = Date.now()
+          let lastStage: string | null = 'uploading'
+          let workerStarted = false
+
+          while (true) {
+            await delay(POLL_INTERVAL_MS)
+
+            const elapsed = Date.now() - startTime
+
+            // Global timeout
+            if (elapsed > TIMEOUT_MS) {
+              emit('error', { message: 'Processing timed out — please try again.', stage: 'AI_EXTRACTION_FAILED' })
+              controller.close()
+              return
+            }
+
+            // Poll DB
+            const { data: fileRow, error: pollErr } = await supabase
+              .from('files')
+              .select('pipeline_stage, intake_status, failure_stage, failure_reason, intake_result')
+              .eq('id', fileId)
+              .single()
+
+            if (pollErr) {
+              console.error('[intake:poll-error]', { file_id: fileId, error: pollErr.message })
+              continue
+            }
+
+            const { pipeline_stage, intake_status, failure_stage, failure_reason, intake_result } = fileRow
+
+            // Detect that worker has started (status changed from queued)
+            if (intake_status !== 'uploaded' && intake_status !== 'queued') {
+              workerStarted = true
+            }
+
+            // Check if worker never started
+            if (!workerStarted && elapsed > WORKER_START_TIMEOUT_MS) {
+              emit('error', { message: 'Processing could not start — please try again.', stage: 'AI_EXTRACTION_FAILED' })
+              controller.close()
+              return
+            }
+
+            // Emit progress when stage name changes
+            if (pipeline_stage && pipeline_stage !== lastStage) {
+              const stageEvent = STAGE_MAP.get(pipeline_stage)
+              if (stageEvent) {
+                emit('progress', stageEvent)
+              }
+              lastStage = pipeline_stage
+            }
+
+            // Check for completion
+            if (intake_status === 'extracted' && intake_result) {
+              emit('complete', intake_result as CompleteEvent)
+              controller.close()
+              return
+            }
+
+            // Check for failure
+            if (intake_status === 'failed') {
+              const failStage = (failure_stage ?? 'AI_EXTRACTION_FAILED') as FailureStage
+              const userMessage = FAILURE_MESSAGES[failStage] ?? 'Processing failed — please try again.'
+              emit('error', { message: userMessage, stage: failStage })
+              controller.close()
+              return
+            }
+          }
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err)
+          console.error('[intake:monitor-unhandled]', { file_id: fileId, error: errMsg })
+          controller.enqueue(sseEvent(encoder, 'error', { message: 'Processing failed — please try again', stage: 'AI_EXTRACTION_FAILED' }))
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+    })
+  }
+
+  // ── Railway/memory-cache mode: inline processing (no Vercel timeout here) ──
+  // This path runs when Supabase is not configured (e.g. Railway with memory cache only).
   const stream = new ReadableStream({
     async start(controller) {
       const pipelineStart = Date.now()
@@ -549,8 +677,8 @@ export async function GET(
         const client = new Anthropic({ apiKey: anthropicKey })
 
         // Supabase is optional — memory cache is the primary file source
-        const hasSupabase = Boolean(supabaseUrl && supabaseKey)
-        if (hasSupabase) {
+        const hasSupabaseInline = Boolean(supabaseUrl && supabaseKey)
+        if (hasSupabaseInline) {
           const { createClient } = await import('@supabase/supabase-js')
           supabase = createClient(supabaseUrl!, supabaseKey!)
         }
@@ -573,7 +701,6 @@ export async function GET(
         emit('progress', PROGRESS_STAGES[1]) // reading
 
         // ── Load primary file — check memory cache first, then Supabase Storage ──
-        const { getCachedFile } = await import('@/lib/file-cache')
         const cached = getCachedFile(fileId)
 
         let base64Data: string
@@ -635,9 +762,6 @@ export async function GET(
         }
 
         // Load sibling files — check memory cache first, then Supabase Storage.
-        // Anthropic caps requests at 32MB total, so budget raw bytes across all
-        // attached documents and skip siblings that don't fit rather than
-        // failing the entire request.
         const MAX_TOTAL_RAW_BYTES = 20 * 1024 * 1024
         let attachedRawBytes = Math.ceil(base64Data.length * 0.75)
         let skippedSiblingCount = 0
@@ -821,7 +945,7 @@ export async function GET(
           }
         }, 2000)
 
-        let anthropicResponse: string
+        let anthropicResponse = ''
         let droppedToPrimaryOnly = false
 
         console.log('[intake:ai-prompt]', {
@@ -1073,9 +1197,7 @@ export async function GET(
                 ],
               }]
             } else {
-              // JSON formatting failure — re-extract with a compact constraint rather
-              // than trying to repair a potentially 27k+ broken response.
-              // Ask for a reduced, compact extraction (max 8 items per trade, no whitespace).
+              // JSON formatting failure — re-extract with a compact constraint
               retryMessages = [{
                 role: 'user',
                 content: [

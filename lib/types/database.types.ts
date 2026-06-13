@@ -27,7 +27,7 @@ export type CommunicationChannel = 'email' | 'sms' | 'chat'
 
 export type FileType = 'pdf' | 'image' | 'dwg' | 'other'
 
-export type FileIntakeStatus = 'uploaded' | 'processing' | 'extracted' | 'failed'
+export type FileIntakeStatus = 'uploaded' | 'queued' | 'processing' | 'extracted' | 'failed'
 
 export type ResolutionType = 'accepted' | 'adjusted' | 'excluded'
 
@@ -248,6 +248,10 @@ export interface File {
   page_count: number | null
   line_item_count: number | null
   processing_time_ms: number | null
+  /** Current pipeline stage name — updated by worker at each step for SSE polling */
+  pipeline_stage: string | null
+  /** Complete event payload written by worker on success — emitted as SSE complete event */
+  intake_result: Record<string, unknown> | null
   created_at: string
 }
 
