@@ -150,6 +150,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     filename,
     file_type: detectFileType(filename),
     intake_status: 'uploaded' as FileIntakeStatus,
+    failure_stage: null,
+    failure_reason: null,
+    extracted_text_length: null,
+    page_count: null,
+    line_item_count: null,
+    processing_time_ms: null,
     created_at: new Date().toISOString(),
   }
 
