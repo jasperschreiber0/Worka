@@ -124,10 +124,13 @@ export async function GET(
         }
 
         // Update status to processing
-        await supabase
+        const { error: processingErr } = await supabase
           .from('files')
           .update({ intake_status: 'processing' })
           .eq('id', fileId)
+        if (processingErr) {
+          console.error('Failed to update file status to processing:', processingErr)
+        }
 
         // Stage: reading
         emit('progress', PROGRESS_STAGES[1])
@@ -139,10 +142,13 @@ export async function GET(
 
         if (downloadErr || !fileData) {
           emit('error', { message: 'Failed to read file from storage' })
-          await supabase
+          const { error: failedErr1 } = await supabase
             .from('files')
             .update({ intake_status: 'failed' })
             .eq('id', fileId)
+          if (failedErr1) {
+            console.error('Failed to update file status to failed (download):', failedErr1)
+          }
           controller.close()
           return
         }
@@ -344,7 +350,13 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
 
         if (quoteErr || !quoteRow) {
           emit('error', { message: 'Failed to create quote' })
-          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+          const { error: failedErr2 } = await supabase
+            .from('files')
+            .update({ intake_status: 'failed' })
+            .eq('id', fileId)
+          if (failedErr2) {
+            console.error('Failed to update file status to failed (quote):', failedErr2)
+          }
           controller.close()
           return
         }
@@ -367,10 +379,24 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
               assumption_status: item.assumption_status ?? null,
             }))
 
-          const { data: insertedItems } = await supabase
+          const { data: insertedItems, error: lineItemsErr } = await supabase
             .from('quote_line_items')
             .insert(lineItemInserts)
             .select()
+
+          if (lineItemsErr) {
+            console.error('Failed to insert line items:', lineItemsErr)
+            emit('error', { message: 'Failed to save quote line items' })
+            const { error: failedErr3 } = await supabase
+              .from('files')
+              .update({ intake_status: 'failed' })
+              .eq('id', fileId)
+            if (failedErr3) {
+              console.error('Failed to update file status to failed (line items):', failedErr3)
+            }
+            controller.close()
+            return
+          }
 
           // Insert assumption records
           if (insertedItems && assumptions.length > 0) {
@@ -387,15 +413,23 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
                 resolved_by: null,
               }
             })
-            await supabase.from('assumptions').insert(assumptionInserts)
+            const { error: assumptionsErr } = await supabase
+              .from('assumptions')
+              .insert(assumptionInserts)
+            if (assumptionsErr) {
+              console.error('Failed to insert assumptions:', assumptionsErr)
+            }
           }
         }
 
         // Update file status to extracted
-        await supabase
+        const { error: extractedErr } = await supabase
           .from('files')
           .update({ intake_status: 'extracted', quote_id: quoteRow.id })
           .eq('id', fileId)
+        if (extractedErr) {
+          console.error('Failed to update file status to extracted:', extractedErr)
+        }
 
         // Calculate assumption count (Gate 1 + 2, not excluded)
         const unresolvedCount = assumptions.filter((a) => a.gate !== 3).length

@@ -65,6 +65,7 @@ export default function IntakeProgress({
     const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}`
     const es = new EventSource(url)
     eventSourceRef.current = es
+    let settled = false
 
     es.addEventListener('progress', (e: MessageEvent) => {
       try {
@@ -111,12 +112,15 @@ export default function IntakeProgress({
 
         setProgress({ stage: 'complete', message: data.message, pct: 100 })
         setIsDone(true)
+        settled = true
         es.close()
 
         setTimeout(() => {
           onComplete(data.quote_id, data.assumption_count)
         }, 1000)
       } catch {
+        if (settled) return
+        settled = true
         setHasError(true)
         es.close()
         onError()
@@ -124,13 +128,16 @@ export default function IntakeProgress({
     })
 
     es.addEventListener('error', () => {
+      if (settled) return
+      settled = true
       setHasError(true)
       es.close()
       onError()
     })
 
     es.onerror = () => {
-      if (es.readyState === EventSource.CLOSED) return
+      if (settled || es.readyState === EventSource.CLOSED) return
+      settled = true
       setHasError(true)
       es.close()
       onError()
