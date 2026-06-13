@@ -330,7 +330,8 @@ export async function GET(
             .eq('builder_id', builder_id)
             .single()
           if (!fileErr) fileRow = data
-          await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId).catch(() => {})
+          const { error: processingErr } = await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId)
+          if (processingErr) console.error('[intake] status→processing:', processingErr.message)
         }
 
         emit('progress', PROGRESS_STAGES[1]) // reading
@@ -359,7 +360,8 @@ export async function GET(
           if (downloadErr || !fileData) {
             const storageMsg = (downloadErr as { message?: string } | null)?.message ?? 'unknown'
             emit('error', { message: `File not found in storage (${storageMsg}). Make sure the Supabase "plans" bucket exists and the file uploaded successfully.` })
-            await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
+            const { error: failedErr1 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+            if (failedErr1) console.error('[intake] status→failed (download):', failedErr1.message)
             controller.close()
             return
           }
@@ -587,7 +589,10 @@ export async function GET(
                   ? 'The AI service is busy right now — please try again in a minute.'
                   : `AI extraction failed: ${aiMsg.slice(0, 180)}`
           emit('error', { message: friendly })
-          if (supabase) await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
+          if (supabase) {
+            const { error: failedErr2 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+            if (failedErr2) console.error('[intake] status→failed (AI):', failedErr2.message)
+          }
           controller.close()
           return
         } finally {
@@ -650,7 +655,10 @@ export async function GET(
         } catch {
           console.error('[intake] Malformed AI response:', anthropicResponse?.slice(0, 200))
           emit('error', { message: 'Could not extract line items from the plans — the PDF may be unclear or image-based.' })
-          if (supabase) await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId).catch(() => {})
+          if (supabase) {
+            const { error: failedErr3 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+            if (failedErr3) console.error('[intake] status→failed (parse):', failedErr3.message)
+          }
           controller.close()
           return
         }
@@ -751,21 +759,25 @@ export async function GET(
                       resolved_by: null,
                     }
                   })
-                  await supabase.from('assumptions').insert(assumptionInserts).catch(() => {})
+                  const { error: assumptionsErr } = await supabase.from('assumptions').insert(assumptionInserts)
+                  if (assumptionsErr) console.error('[intake] assumptions insert:', assumptionsErr.message)
                 }
               }
 
-              await supabase.from('project_memory').upsert({
+              const { error: memErr } = await supabase.from('project_memory').upsert({
                 job_id, builder_id, quote_id: quoteRow.id, status: 'draft', ...projectMetadata,
-              }, { onConflict: 'job_id' }).catch(() => {})
+              }, { onConflict: 'job_id' })
+              if (memErr) console.error('[intake] project_memory upsert:', memErr.message)
 
-              await supabase.from('quotes')
+              const { error: quoteMetaErr } = await supabase.from('quotes')
                 .update({ metadata: { explainability, similar_project_count: similarProjects.length } })
-                .eq('id', quoteRow.id).catch(() => {})
+                .eq('id', quoteRow.id)
+              if (quoteMetaErr) console.error('[intake] quote metadata update:', quoteMetaErr.message)
 
-              await supabase.from('files')
+              const { error: extractedErr } = await supabase.from('files')
                 .update({ intake_status: 'extracted', quote_id: quoteRow.id })
-                .eq('id', fileId).catch(() => {})
+                .eq('id', fileId)
+              if (extractedErr) console.error('[intake] status→extracted:', extractedErr.message)
             }
           } catch {
             // Non-fatal — quote ID already set to memory-based ID
