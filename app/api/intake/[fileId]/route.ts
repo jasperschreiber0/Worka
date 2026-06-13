@@ -32,11 +32,17 @@ interface ExtractionDiag {
   primary_response_length: number
   primary_response_sample: string
   primary_parse: 'success' | 'json_failed' | 'empty_array'
+  primary_parse_error: string | null
+  primary_truncated: boolean
+  primary_had_fence: boolean
   retry_attempted: boolean
   retry_reason?: string
   retry_response_length?: number
   retry_parse?: 'success' | 'json_failed' | 'empty_array'
+  retry_parse_error?: string | null
+  retry_truncated?: boolean
   final_line_items: number
+  used_prefill: boolean
   model: string
   timestamp: string
 }
@@ -51,6 +57,10 @@ type FailureStage =
   | 'NO_TEXT_EXTRACTED'
   | 'DOCUMENT_TOO_SMALL'
   | 'AI_EXTRACTION_FAILED'
+  | 'AI_NO_OUTPUT'
+  | 'AI_INVALID_JSON'
+  | 'AI_SCHEMA_MISMATCH'
+  | 'AI_TRUNCATED_OUTPUT'
   | 'JSON_PARSE_FAILED'
   | 'NO_LINE_ITEMS_FOUND'
 
@@ -62,6 +72,10 @@ const FAILURE_MESSAGES: Record<FailureStage, string> = {
   NO_TEXT_EXTRACTED:       'We couldn\'t extract text from this PDF. It may be a scanned image or low-resolution document.',
   DOCUMENT_TOO_SMALL:      'This file appears too small to be a building plan. Please check you\'ve uploaded the correct document.',
   AI_EXTRACTION_FAILED:    'The document was read successfully, but WorkA couldn\'t identify quoteable building items.',
+  AI_NO_OUTPUT:            'The AI returned an empty response. Please try again.',
+  AI_INVALID_JSON:         'The AI returned malformed JSON on both attempts. Please try again — if it keeps failing, re-export the PDF.',
+  AI_SCHEMA_MISMATCH:      'The AI returned an unexpected data structure. Please try again.',
+  AI_TRUNCATED_OUTPUT:     'The AI response was cut off before completing. Try uploading fewer pages at once.',
   JSON_PARSE_FAILED:       'The AI returned an unexpected response format. Please try again — if it keeps failing, the file may need to be re-exported.',
   NO_LINE_ITEMS_FOUND:     'The document appears valid, but no measurable construction items were detected. Check that the file contains a quantity schedule or annotated plans.',
 }
@@ -196,49 +210,66 @@ ${tradeCategories.map(c => `${c.id}. ${c.name}`).join('\n')}
 
 ${historicalContext ? 'IMPORTANT: Use the historical projects as your benchmark. If your quantities produce a total substantially different from similar completed jobs, re-check your takeoff before finalising.' : ''}
 
-Return ONLY valid JSON:
-{
-  "line_items": [
-    {
-      "trade_category_id": number,
-      "description": string,
-      "quantity": number | null,
-      "unit": string | null,
-      "dimensions_string": string | null,
-      "confidence": number,
-      "subcategory_code": string | null,
-      "pricing_type": "measured" | "pc_allowance" | "provisional_sum",
-      "source_ref": string | null,
-      "labour_cost": number | null,
-      "material_cost": number | null,
-      "subcontract_cost": number | null,
-      "plant_cost": number | null
-    }
-  ],
-  "confidence_summary": "1 sentence overall confidence assessment"
-}`
+STRICT OUTPUT RULE:
+- Output ONLY the JSON object. Nothing before it. Nothing after it.
+- Do NOT use markdown, backticks, or code fences.
+- Do NOT add explanations, headings, or commentary.
+- Start your response with { and end with }
+- All string values must use double quotes (never single quotes).
+- Unknown values must be null — never omit a key.
+- pricing_type must be exactly one of: "measured", "pc_allowance", or "provisional_sum"
+
+Output this exact structure (values are examples — replace with real extracted data):
+{"line_items":[{"trade_category_id":3,"description":"Wall framing — 90mm MGP10 timber studs at 450mm centres","quantity":145.6,"unit":"m²","dimensions_string":"14.2m × 8.6m = 122.1m²","confidence":85,"subcategory_code":"FRAM-WALL","pricing_type":"measured","source_ref":"A3.1","labour_cost":4200,"material_cost":3800,"subcontract_cost":null,"plant_cost":null}],"confidence_summary":"High confidence — quantities scaled directly from dimensioned plans"}`
 }
 
 // ─── JSON extraction helper ───────────────────────────────────────────────────
 
-function tryExtractJson(raw: string): { line_items: unknown[]; confidence_summary: string } | null {
-  if (!raw || raw.length < 10) return null
+interface ParseResult {
+  data: { line_items: unknown[]; confidence_summary: string } | null
+  error: string | null
+  truncated: boolean
+  had_fence: boolean
+}
+
+function tryExtractJson(raw: string): ParseResult {
+  const fail = (error: string, truncated = false, had_fence = false): ParseResult =>
+    ({ data: null, error, truncated, had_fence })
+
+  if (!raw || raw.length < 10) return fail('empty_response')
+
+  let text = raw.trim()
+  let had_fence = false
+
+  // Strip markdown fences (```json ... ``` or ``` ... ```)
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (fence) { text = fence[1].trim(); had_fence = true }
+
+  // Find outermost JSON object boundaries
+  const start = text.indexOf('{')
+  if (start < 0) return fail('no_opening_brace', false, had_fence)
+
+  const end = text.lastIndexOf('}')
+  // Closing brace absent or before opening brace — response was truncated
+  if (end <= start) return fail('truncated_no_closing_brace', true, had_fence)
+
+  text = text.slice(start, end + 1)
+
+  // Strip trailing commas before ] or } — common LLM formatting mistake
+  text = text.replace(/,(\s*[}\]])/g, '$1')
+
   try {
-    let text = raw.trim()
-    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (fence) text = fence[1].trim()
-    const start = text.indexOf('{')
-    const end = text.lastIndexOf('}')
-    if (start < 0 || end <= start) return null
-    text = text.slice(start, end + 1)
     const parsed = JSON.parse(text)
-    if (!parsed || typeof parsed !== 'object') return null
+    if (!parsed || typeof parsed !== 'object') return fail('not_an_object', false, had_fence)
+    const line_items = Array.isArray(parsed.line_items) ? parsed.line_items : []
     return {
-      line_items: Array.isArray(parsed.line_items) ? parsed.line_items : [],
-      confidence_summary: String(parsed.confidence_summary ?? ''),
+      data: { line_items, confidence_summary: String(parsed.confidence_summary ?? '') },
+      error: null,
+      truncated: false,
+      had_fence,
     }
-  } catch {
-    return null
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'json_parse_error', false, had_fence)
   }
 }
 
@@ -656,7 +687,12 @@ export async function GET(
           }
         }, 2000)
 
+        // Assistant prefill forces the model to start mid-JSON, eliminating any
+        // chance of preamble text or markdown fences before the object.
+        const EXTRACTION_PREFILL = '{"line_items":['
+
         let anthropicResponse: string
+        let usedPrefill = false
         let droppedToPrimaryOnly = false
 
         console.log('[intake:ai-prompt]', {
@@ -665,36 +701,47 @@ export async function GET(
           prompt_length: extractionPrompt.length,
           model: 'claude-sonnet-4-6',
           max_tokens: 8192,
+          prefill: true,
         })
 
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const callExtraction = async (blocks: any[]): Promise<string> => {
+          const callExtraction = async (blocks: any[], withPrefill = true): Promise<string> => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const messages: any[] = [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }]
+            if (withPrefill) {
+              messages.push({ role: 'assistant', content: EXTRACTION_PREFILL })
+            }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const response = await (client.messages.create as any)({
               model: 'claude-sonnet-4-6',
               max_tokens: 8192,
-              messages: [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }],
+              messages,
             })
-            const text: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
+            const completion: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
+            // Prepend the prefill so the combined string is valid JSON
+            const text = withPrefill ? EXTRACTION_PREFILL + completion : completion
             console.log('[intake:ai-response]', {
               file_id: fileId,
               input_tokens: response.usage?.input_tokens ?? null,
               output_tokens: response.usage?.output_tokens ?? null,
               response_length: text.length,
               response_sample: text.slice(0, 200),
+              prefill_used: withPrefill,
             })
             return text
           }
 
           try {
-            anthropicResponse = await callExtraction(allDocBlocks)
+            anthropicResponse = await callExtraction(allDocBlocks, true)
+            usedPrefill = true
           } catch (firstErr) {
             const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
             const isTooLarge = /request_too_large|too large|prompt is too long|too long|page limit|100 pages|413/i.test(firstMsg)
             if (isTooLarge && allDocBlocks.length > 1) {
               console.warn('[intake:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg })
-              anthropicResponse = await callExtraction([docBlock])
+              anthropicResponse = await callExtraction([docBlock], true)
+              usedPrefill = true
               droppedToPrimaryOnly = true
             } else {
               throw firstErr
@@ -783,8 +830,12 @@ export async function GET(
           primary_response_length: anthropicResponse?.length ?? 0,
           primary_response_sample: anthropicResponse?.slice(0, 500) ?? '',
           primary_parse: 'json_failed',
+          primary_parse_error: null,
+          primary_truncated: false,
+          primary_had_fence: false,
           retry_attempted: false,
           final_line_items: 0,
+          used_prefill: usedPrefill,
           model: 'claude-sonnet-4-6',
           timestamp: new Date().toISOString(),
         }
@@ -794,6 +845,7 @@ export async function GET(
           doc_blocks: diag.doc_blocks_sent,
           response_length: diag.primary_response_length,
           response_sample: anthropicResponse?.slice(0, 300),
+          used_prefill: usedPrefill,
         })
 
         let lineItems: Array<{
@@ -812,27 +864,41 @@ export async function GET(
           plant_cost?: number | null
         }> = []
         let confidenceSummary = ''
+        let isManualReviewMode = false
 
         // Attempt 1
         const attempt1 = tryExtractJson(anthropicResponse)
-        if (attempt1) {
+        diag.primary_parse_error = attempt1.error
+        diag.primary_truncated = attempt1.truncated
+        diag.primary_had_fence = attempt1.had_fence
+        if (attempt1.data) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          lineItems = attempt1.line_items as any[]
-          confidenceSummary = attempt1.confidence_summary
+          lineItems = attempt1.data.line_items as any[]
+          confidenceSummary = attempt1.data.confidence_summary
           diag.primary_parse = lineItems.length > 0 ? 'success' : 'empty_array'
         }
 
-        console.log('[intake:parse]', { file_id: fileId, attempt: 1, result: diag.primary_parse, line_items: lineItems.length })
+        console.log('[intake:parse]', {
+          file_id: fileId,
+          attempt: 1,
+          result: diag.primary_parse,
+          error: diag.primary_parse_error,
+          truncated: diag.primary_truncated,
+          had_fence: diag.primary_had_fence,
+          line_items: lineItems.length,
+        })
 
         // Attempt 2 — triggered when JSON failed or line_items is empty.
-        // "OCR fallback": when Claude signals it can't read the document, we
-        // re-prompt with an explicit instruction to make professional QS estimates.
         if (diag.primary_parse !== 'success') {
           const isRefusal = /\b(cannot|unable|sorry|don.t see|no text|blank|unreadable|unclear|scanned image|image.only|no content|not possible)\b/i
             .test(anthropicResponse?.slice(0, 600) ?? '')
-          const retryReason = diag.primary_parse === 'json_failed'
-            ? (isRefusal ? 'refusal_detected' : 'json_parse_failed')
-            : 'empty_line_items'
+          const isTruncated = diag.primary_truncated
+
+          const retryReason = isTruncated
+            ? 'truncated_output'
+            : diag.primary_parse === 'json_failed'
+              ? (isRefusal ? 'refusal_detected' : 'json_parse_failed')
+              : 'empty_line_items'
 
           diag.retry_attempted = true
           diag.retry_reason = retryReason
@@ -841,26 +907,48 @@ export async function GET(
             file_id: fileId,
             reason: retryReason,
             primary_length: diag.primary_response_length,
+            primary_error: diag.primary_parse_error,
             primary_sample: anthropicResponse?.slice(0, 400),
           })
 
           try {
-            const retryPrompt = (isRefusal || diag.primary_parse === 'empty_array')
-              ? `This document may be image-based, scanned, or drawing-heavy. As a senior quantity surveyor with 20 years of Australian residential construction experience, produce estimates from what you can observe. You MUST produce line items — set confidence to 30–55 for estimated items so the builder can review them.
+            const retryBlocks = droppedToPrimaryOnly ? [docBlock] : allDocBlocks
 
-Return ONLY valid JSON with no text before or after. Start immediately with {:
-{"line_items": [...], "confidence_summary": "..."}`
-              : `Your previous response could not be parsed as JSON. Output ONLY the JSON object — start with { and end with }. No explanation, no text before or after.`
-
-            // Refusal/empty: fresh request. JSON failure: multi-turn repair.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const retryMessages: any[] = (isRefusal || diag.primary_parse === 'empty_array')
-              ? [{ role: 'user', content: [...(droppedToPrimaryOnly ? [docBlock] : allDocBlocks), { type: 'text', text: extractionPrompt + '\n\n' + retryPrompt }] }]
-              : [
-                  { role: 'user', content: [...(droppedToPrimaryOnly ? [docBlock] : allDocBlocks), { type: 'text', text: extractionPrompt }] },
-                  { role: 'assistant', content: anthropicResponse ?? '' },
-                  { role: 'user', content: retryPrompt },
-                ]
+            let retryMessages: any[]
+
+            if (isTruncated) {
+              // Response was cut off — ask for a compact version with no whitespace
+              retryMessages = [{
+                role: 'user',
+                content: [
+                  ...retryBlocks,
+                  { type: 'text', text: extractionPrompt + '\n\nCRITICAL: Your previous response was truncated. Produce a COMPACT response with no extra whitespace so it fits within the token limit. Output ONLY the JSON object starting with { and ending with }.' },
+                ],
+              }]
+            } else if (isRefusal || diag.primary_parse === 'empty_array') {
+              // Scanned/image doc or empty result — instruct QS estimates
+              retryMessages = [{
+                role: 'user',
+                content: [
+                  ...retryBlocks,
+                  { type: 'text', text: extractionPrompt + '\n\nThis document may be image-based or drawing-heavy. As a senior QS with 20 years experience, produce professional estimates from what you can observe. You MUST produce line items — set confidence to 30–55 for estimated items so the builder can review them. Output ONLY valid JSON starting with {.' },
+                ],
+              }]
+            } else {
+              // JSON formatting failure — multi-turn repair with explicit fix instruction
+              retryMessages = [
+                { role: 'user', content: [...retryBlocks, { type: 'text', text: extractionPrompt }] },
+                { role: 'assistant', content: anthropicResponse ?? '' },
+                { role: 'user', content: 'Your response could not be parsed as JSON. Fix the formatting only — do not change any data values. Output ONLY the corrected JSON object. Start with { and end with }. No backticks, no explanation.' },
+              ]
+            }
+
+            // Use prefill on fresh requests (not multi-turn repair)
+            const retryUsesPrefill = retryMessages.length === 1
+            if (retryUsesPrefill) {
+              retryMessages.push({ role: 'assistant', content: EXTRACTION_PREFILL })
+            }
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const retryResp = await (client.messages.create as any)({
@@ -868,49 +956,76 @@ Return ONLY valid JSON with no text before or after. Start immediately with {:
               max_tokens: 8192,
               messages: retryMessages,
             })
-            const retryText: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
+            const retryCompletion: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
+            const retryText = retryUsesPrefill ? EXTRACTION_PREFILL + retryCompletion : retryCompletion
             diag.retry_response_length = retryText.length
 
             const attempt2 = tryExtractJson(retryText)
-            if (attempt2 && attempt2.line_items.length > 0) {
+            diag.retry_parse_error = attempt2.error
+            diag.retry_truncated = attempt2.truncated
+
+            console.log('[intake:retry-result]', {
+              file_id: fileId,
+              error: attempt2.error,
+              truncated: attempt2.truncated,
+              had_fence: attempt2.had_fence,
+              line_items: attempt2.data?.line_items.length ?? 0,
+              sample: retryText.slice(0, 300),
+            })
+
+            if (attempt2.data && attempt2.data.line_items.length > 0) {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              lineItems = attempt2.line_items as any[]
-              confidenceSummary = attempt2.confidence_summary
+              lineItems = attempt2.data.line_items as any[]
+              confidenceSummary = attempt2.data.confidence_summary
               diag.retry_parse = 'success'
               console.log('[intake:retry-success]', { file_id: fileId, line_items: lineItems.length })
             } else {
-              diag.retry_parse = attempt2 ? 'empty_array' : 'json_failed'
-              console.warn('[intake:retry-failed]', { file_id: fileId, retry_result: diag.retry_parse, retry_sample: retryText.slice(0, 400) })
+              diag.retry_parse = attempt2.data ? 'empty_array' : 'json_failed'
+              console.warn('[intake:retry-failed]', { file_id: fileId, retry_result: diag.retry_parse, retry_error: attempt2.error })
             }
           } catch (retryErr) {
             diag.retry_parse = 'json_failed'
-            console.error('[intake:retry-error]', { file_id: fileId, error: retryErr instanceof Error ? retryErr.message : String(retryErr) })
+            diag.retry_parse_error = retryErr instanceof Error ? retryErr.message : String(retryErr)
+            console.error('[intake:retry-error]', { file_id: fileId, error: diag.retry_parse_error })
           }
         }
 
         diag.final_line_items = lineItems.length
         console.log('[intake:diag]', JSON.stringify(diag))
 
-        // ── Determine failure stage if no usable line items ────────────────────
+        // ── Route to correct failure stage or degrade gracefully ──────────────
         if (lineItems.length === 0) {
+          const bothAttemptsFailed = !diag.retry_attempted
+            ? diag.primary_parse === 'json_failed'
+            : diag.primary_parse === 'json_failed' && diag.retry_parse === 'json_failed'
+
           const responseIsVeryShort = extractedTextLength < 200
           const responseIsScanned = /scanned|image.only|no text|cannot read/i.test(diag.primary_response_sample)
 
-          if (diag.primary_parse === 'json_failed' && (!diag.retry_attempted || diag.retry_parse === 'json_failed')) {
-            // Claude's response was never valid JSON on either attempt
-            if (responseIsVeryShort || responseIsScanned) {
+          if (bothAttemptsFailed) {
+            // Determine the most specific failure stage
+            if (extractedTextLength === 0) {
+              await failWith('AI_NO_OUTPUT', `Model returned empty text, response_len=${extractedTextLength}`, { line_item_count: 0 })
+            } else if (diag.primary_truncated || diag.retry_truncated) {
+              await failWith('AI_TRUNCATED_OUTPUT', `Response truncated, primary_len=${diag.primary_response_length}, retry_len=${diag.retry_response_length ?? 0}`, { line_item_count: 0 })
+            } else if (responseIsVeryShort || responseIsScanned) {
               await failWith('NO_TEXT_EXTRACTED', `Response too short or indicated scanned doc (${extractedTextLength} chars)`, { line_item_count: 0 })
             } else {
-              await failWith('JSON_PARSE_FAILED', `primary=${diag.primary_parse} retry=${diag.retry_parse ?? 'none'}, response_len=${extractedTextLength}`, { line_item_count: 0 })
+              await failWith('AI_INVALID_JSON', `primary_error=${diag.primary_parse_error}, retry_error=${diag.retry_parse_error ?? 'none'}, response_len=${extractedTextLength}`, { line_item_count: 0 })
             }
             return
           }
 
-          if (diag.primary_parse === 'empty_array' && (!diag.retry_attempted || diag.retry_parse !== 'success')) {
-            // JSON was valid but line_items was empty on both attempts
-            await failWith('NO_LINE_ITEMS_FOUND', `Both attempts returned empty line_items array, response_len=${extractedTextLength}`, { line_item_count: 0 })
-            return
-          }
+          // JSON parsed successfully but line_items was empty on both attempts.
+          // Degrade gracefully: create a 0-item draft quote for manual completion
+          // rather than hard-failing the entire intake.
+          isManualReviewMode = true
+          console.warn('[intake:manual-review]', {
+            file_id: fileId,
+            reason: 'both_attempts_empty_line_items',
+            primary_parse: diag.primary_parse,
+            retry_parse: diag.retry_parse,
+          })
         }
 
         const assumptions: Array<{ description: string; gate: number; message: string }> = []
@@ -1050,9 +1165,13 @@ Return ONLY valid JSON with no text before or after. Start immediately with {:
             ? ` Note: ${skippedSiblingCount} file${skippedSiblingCount !== 1 ? 's were' : ' was'} too large to include in the AI analysis.`
             : ''
 
+        const completionMessage = isManualReviewMode
+          ? `Draft quote created — no line items were detected automatically. Open the quote to add items manually.${sizeNote}`
+          : `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.${sizeNote}`
+
         const completeData: CompleteEvent = {
           stage: 'complete',
-          message: `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.${sizeNote}`,
+          message: completionMessage,
           pct: 100,
           quote_id: quoteId,
           assumption_count: unresolvedCount,
