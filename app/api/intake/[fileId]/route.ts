@@ -66,6 +66,7 @@ const FAILURE_MESSAGES: Record<FailureStage, string> = {
   NO_LINE_ITEMS_FOUND:     'The document appears valid, but no measurable construction items were detected. Check that the file contains a quantity schedule or annotated plans.',
 }
 
+
 // ─── Progress stages ──────────────────────────────────────────────────────────
 
 const PROGRESS_STAGES: ProgressEvent[] = [
