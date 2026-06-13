@@ -4,5 +4,9 @@
       "path": "/api/cron/morning-brief",
       "schedule": "45 20 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "app/api/intake/[fileId]/route.ts": { "maxDuration": 300 },
+    "app/api/intake/[fileId]/worker/route.ts": { "maxDuration": 60 }
+  }
 }
