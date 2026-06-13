@@ -26,8 +26,27 @@ interface CompleteEvent {
   total_in_memory?: number
 }
 
+// Document classification — determined from the expanded metadata call (Haiku)
+type DocType =
+  | 'CONSTRUCTION_READY'  // has schedules / quantity data → full extraction
+  | 'SCHEMATIC_ONLY'      // floor plan only, no schedules → inferred items
+  | 'MIXED_CONTENT'       // some structured items, some gaps → partial extraction
+  | 'NON_BUILDING_DOC'    // not a building document at all → early stop
+  | 'LOW_QUALITY_SCAN'    // can't be read reliably → OCR/estimate mode
+  | 'UNKNOWN'             // classification failed → treat as MIXED_CONTENT
+
+interface DocClassification {
+  doc_type: DocType
+  has_schedules: boolean
+  has_dimensions: boolean
+  visible_categories: string[]
+  missing_categories_hint: string[]
+}
+
 interface ExtractionDiag {
   file_id: string
+  doc_type: DocType
+  has_schedules: boolean
   doc_blocks_sent: number
   primary_response_length: number
   primary_response_sample: string
@@ -42,6 +61,8 @@ interface ExtractionDiag {
   retry_parse_error?: string | null
   retry_truncated?: boolean
   final_line_items: number
+  final_inferred_items: number
+  missing_categories: string[]
   used_prefill: boolean
   model: string
   timestamp: string
@@ -63,6 +84,7 @@ type FailureStage =
   | 'AI_TRUNCATED_OUTPUT'
   | 'JSON_PARSE_FAILED'
   | 'NO_LINE_ITEMS_FOUND'
+  | 'NON_BUILDING_DOC'
 
 const FAILURE_MESSAGES: Record<FailureStage, string> = {
   FILE_DOWNLOAD_FAILED:    'We couldn\'t retrieve this file. Please try uploading it again.',
@@ -78,6 +100,7 @@ const FAILURE_MESSAGES: Record<FailureStage, string> = {
   AI_TRUNCATED_OUTPUT:     'The AI response was cut off before completing. Try uploading fewer pages at once.',
   JSON_PARSE_FAILED:       'The AI returned an unexpected response format. Please try again — if it keeps failing, the file may need to be re-exported.',
   NO_LINE_ITEMS_FOUND:     'The document appears valid, but no measurable construction items were detected. Check that the file contains a quantity schedule or annotated plans.',
+  NON_BUILDING_DOC:        'This file doesn\'t appear to be a building or construction document. Please upload construction plans, drawings, or a quantity schedule.',
 }
 
 
@@ -108,22 +131,40 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// ─── Metadata extraction prompt ───────────────────────────────────────────────
+// ─── Metadata + classification prompt ────────────────────────────────────────
+// Runs once on the primary document (Haiku) before the main extraction.
+// Returns both project metadata AND document classification in a single call.
 
-const METADATA_PROMPT = `Analyse these building plans and extract the following project metadata. Return ONLY valid JSON:
-{
-  "job_type": "rear_extension|side_extension|bathroom_reno|kitchen_reno|double_storey|granny_flat|new_build|knockdown_rebuild|full_renovation|deck_pergola|other",
-  "renovation_type": "extension|renovation|new_build|addition|alteration|knockdown_rebuild",
-  "project_summary": "1-2 sentence plain English description of the project",
-  "floor_area_m2": number or null,
-  "storeys": integer or null,
-  "wet_areas": integer or null,
-  "bedrooms": integer or null,
-  "finish_level": "budget|standard|premium|luxury",
-  "construction_type": "timber_frame|steel_frame|double_brick|brick_veneer|other",
-  "region": "NSW|VIC|QLD|SA|WA|TAS|ACT|NT" or null,
-  "suburb": "suburb name if visible" or null
-}`
+const METADATA_PROMPT = `Analyse this building document and return ONLY a JSON object with two sections.
+
+SECTION 1 — Project metadata:
+- job_type: one of rear_extension, side_extension, bathroom_reno, kitchen_reno, double_storey, granny_flat, new_build, knockdown_rebuild, full_renovation, deck_pergola, other
+- renovation_type: one of extension, renovation, new_build, addition, alteration, knockdown_rebuild
+- project_summary: 1-2 sentence plain English description
+- floor_area_m2: number or null
+- storeys: integer or null
+- wet_areas: integer or null
+- bedrooms: integer or null
+- finish_level: one of budget, standard, premium, luxury
+- construction_type: one of timber_frame, steel_frame, double_brick, brick_veneer, other
+- region: one of NSW, VIC, QLD, SA, WA, TAS, ACT, NT — or null
+- suburb: suburb name if visible or null
+
+SECTION 2 — Document classification:
+- doc_type: classify the document as exactly one of:
+  CONSTRUCTION_READY (contains quantity schedules, specifications, or annotated dimensions ready for quoting)
+  SCHEMATIC_ONLY (floor plans / elevations only, no schedules or quantities)
+  MIXED_CONTENT (some scheduled/quantified items plus schematic pages)
+  NON_BUILDING_DOC (not a construction document — e.g. invoice, photo, text document)
+  LOW_QUALITY_SCAN (building document but too blurry or low-resolution to read reliably)
+  UNKNOWN (cannot determine)
+- has_schedules: true if the document contains door/window/finish schedules or quantity lists
+- has_dimensions: true if plans show measured dimensions (e.g. 3600, 4200)
+- visible_categories: array of trade category names that appear to have content (e.g. ["Concrete","Framing","Roofing"])
+- missing_categories_hint: array of trade categories that seem absent but would be expected for this project type
+
+Return ONLY this JSON structure:
+{"job_type":"other","renovation_type":"renovation","project_summary":"description","floor_area_m2":null,"storeys":null,"wet_areas":null,"bedrooms":null,"finish_level":"standard","construction_type":"timber_frame","region":null,"suburb":null,"doc_type":"CONSTRUCTION_READY","has_schedules":false,"has_dimensions":true,"visible_categories":[],"missing_categories_hint":[]}`
 
 // ─── Quantity extraction prompt (memory-enhanced) ─────────────────────────────
 
@@ -131,7 +172,8 @@ function buildExtractionPrompt(
   similarProjects: SimilarProject[],
   builderProfile: BuilderEstimationProfile | null,
   projectSummary: string,
-  documentCount = 1
+  documentCount = 1,
+  docClassification: DocClassification | null = null
 ): string {
   const tradeCategories = [
     { id: 1,  name: 'Earthworks & Site Prep' },
@@ -170,7 +212,27 @@ ${similarProjects.map(p =>
     ? `You have been provided ${documentCount} documents (plans, drawings, schedules). Cross-reference all of them together to produce the most complete and accurate takeoff.`
     : 'You have been provided one document.'
 
-  return `You are a senior quantity surveyor with 20 years of Australian residential construction experience. You are thorough, precise, and never leave a trade category empty if there is any evidence in the plans.
+  // Mode-specific instruction block based on what the document contains
+  const docType = docClassification?.doc_type ?? 'UNKNOWN'
+  const isSchematicOnly = docType === 'SCHEMATIC_ONLY'
+  const missingHint = (docClassification?.missing_categories_hint ?? []).length > 0
+    ? `\nCategories likely missing from these plans: ${docClassification!.missing_categories_hint.join(', ')}.`
+    : ''
+
+  const modeInstructions = isSchematicOnly
+    ? `DOCUMENT TYPE: Schematic / floor plan only — no quantity schedules found.
+Your task: produce inferred professional estimates from layout and dimensions visible in the plans.
+- Set ALL confidence values between 25–55 (these are estimates, not measured quantities)
+- Put all items in "inferred_items" (not "line_items") so the builder knows they need verification
+- Include at minimum: slab/footing, framing, roofing, windows, painting, and any wet areas visible
+- Use dimensions visible in plans to estimate areas; show working in dimensions_string${missingHint}`
+    : `DOCUMENT TYPE: ${docType === 'CONSTRUCTION_READY' ? 'Quantity-ready — extract measured items directly' : 'Mixed content — extract measured items where available, infer the rest'}.
+Your task: produce a complete construction cost takeoff.
+- Put items extracted from schedules/dimensions in "line_items" (confidence 70–100)
+- Put items you must professionally estimate in "inferred_items" (confidence 25–69)
+- List trade categories with no evidence at all in "missing_categories"${missingHint}`
+
+  return `You are a senior quantity surveyor with 20 years of Australian residential construction experience. You ALWAYS produce output — you never return empty arrays.
 
 PROJECT:
 ${projectSummary}
@@ -179,54 +241,55 @@ ${profileContext}
 
 ${docNote}
 
-Your task: produce a complete, accurate construction cost takeoff from the provided documents. This will be used to generate a real builder's quote — accuracy and completeness are critical.
+${modeInstructions}
 
 Instructions:
-1. Read ALL provided documents carefully before extracting quantities.
-2. Extract EVERY measurable item. Do not skip trades because information is partial — use your professional judgement to estimate where plans are unclear, and set confidence accordingly.
-3. For each trade category, produce multiple line items (not just one). A bathroom reno should have separate lines for waterproofing, tiling floor, tiling walls, vanity, toilet, shower screen, tapware, etc.
-4. Use Australian construction rates and terminology (e.g. "m²" not "sf", "LM" not "LF", dollars in AUD).
-5. Where quantities can be calculated from dimensions shown in plans, do the calculation and show the working in dimensions_string.
-6. Never invent quantities you cannot support — set confidence low and note the assumption instead.
-7. Every item that appears in a schedule, legend, or specification must be captured.
+1. Read ALL provided documents before extracting.
+2. NEVER leave both line_items and inferred_items empty. If plans are unclear, make professional estimates and set confidence accordingly.
+3. For each trade, produce multiple items. A bathroom reno needs separate items for waterproofing, tiling, vanity, toilet, shower screen, tapware, etc.
+4. Use Australian terminology (m², lm, ea, m³ — never sf or LF; AUD amounts).
+5. Show dimension calculations in dimensions_string where possible.
+6. Every item in a schedule, legend, or specification must be captured.
 
-For each line item provide:
+For EVERY item (in both line_items and inferred_items) provide:
 - trade_category_id (1–13)
-- description (specific item name — e.g. "Concrete slab — ground floor, 125mm thick" not just "Concrete")
-- quantity (numeric — calculate from dimensions where possible, or null if truly indeterminate)
+- description (specific: "Concrete slab — ground floor 125mm" not "Concrete")
+- quantity (number or null)
 - unit (m², lm, ea, m³, hr — or null)
-- dimensions_string (show the calculation: "14.2m × 8.6m = 122.1m²" — or null)
-- confidence (0–100: 95+=scaled from plans, 70–94=estimated from project type, 40–69=professional assumption, <40=flagged for review)
-- subcategory_code (e.g. "ELEC-POWER", "TILE-FLOOR")
-- pricing_type: "measured" | "pc_allowance" | "provisional_sum"
-- source_ref: drawing/schedule reference (e.g. "A3.1", "Roof Plan", "Door Schedule") or null
-- labour_cost: AUD labour component estimate or null
-- material_cost: AUD materials component estimate or null
-- subcontract_cost: AUD subcontractor component estimate or null
-- plant_cost: AUD plant/equipment component estimate or null
+- dimensions_string ("14.2m × 8.6m = 122.1m²" or null)
+- confidence (0–100)
+- subcategory_code (e.g. "TILE-FLOOR", "FRAM-WALL")
+- pricing_type ("measured", "pc_allowance", or "provisional_sum")
+- source_ref (drawing reference or null)
+- labour_cost (AUD or null)
+- material_cost (AUD or null)
+- subcontract_cost (AUD or null)
+- plant_cost (AUD or null)
 
 Trade categories:
 ${tradeCategories.map(c => `${c.id}. ${c.name}`).join('\n')}
 
-${historicalContext ? 'IMPORTANT: Use the historical projects as your benchmark. If your quantities produce a total substantially different from similar completed jobs, re-check your takeoff before finalising.' : ''}
+${historicalContext ? 'IMPORTANT: Use the historical projects as your benchmark.' : ''}
 
 STRICT OUTPUT RULE:
-- Output ONLY the JSON object. Nothing before it. Nothing after it.
-- Do NOT use markdown, backticks, or code fences.
-- Do NOT add explanations, headings, or commentary.
-- Start your response with { and end with }
-- All string values must use double quotes (never single quotes).
-- Unknown values must be null — never omit a key.
-- pricing_type must be exactly one of: "measured", "pc_allowance", or "provisional_sum"
+- Output ONLY the JSON object. No markdown. No backticks. No explanations.
+- Start with { and end with }
+- All strings use double quotes. Unknown values are null — never omit a key.
+- pricing_type must be exactly: "measured", "pc_allowance", or "provisional_sum"
 
-Output this exact structure (values are examples — replace with real extracted data):
-{"line_items":[{"trade_category_id":3,"description":"Wall framing — 90mm MGP10 timber studs at 450mm centres","quantity":145.6,"unit":"m²","dimensions_string":"14.2m × 8.6m = 122.1m²","confidence":85,"subcategory_code":"FRAM-WALL","pricing_type":"measured","source_ref":"A3.1","labour_cost":4200,"material_cost":3800,"subcontract_cost":null,"plant_cost":null}],"confidence_summary":"High confidence — quantities scaled directly from dimensioned plans"}`
+Output this exact structure:
+{"line_items":[{"trade_category_id":2,"description":"Concrete slab — ground floor 125mm","quantity":112.0,"unit":"m²","dimensions_string":"14.2m × 7.9m = 112.2m²","confidence":88,"subcategory_code":"CONC-SLAB","pricing_type":"measured","source_ref":"A1.0","labour_cost":5600,"material_cost":8400,"subcontract_cost":null,"plant_cost":800}],"inferred_items":[{"trade_category_id":4,"description":"Roof tiling — concrete tiles","quantity":130.0,"unit":"m²","dimensions_string":null,"confidence":42,"subcategory_code":"ROOF-TILE","pricing_type":"provisional_sum","source_ref":null,"labour_cost":null,"material_cost":null,"subcontract_cost":9500,"plant_cost":null}],"missing_categories":["Electrical","Plumbing"],"confidence_summary":"Moderate — slab and framing scaled from plans; roofing and fit-out are professional estimates"}`
 }
 
 // ─── JSON extraction helper ───────────────────────────────────────────────────
 
 interface ParseResult {
-  data: { line_items: unknown[]; confidence_summary: string } | null
+  data: {
+    line_items: unknown[]
+    inferred_items: unknown[]
+    missing_categories: string[]
+    confidence_summary: string
+  } | null
   error: string | null
   truncated: boolean
   had_fence: boolean
@@ -241,16 +304,14 @@ function tryExtractJson(raw: string): ParseResult {
   let text = raw.trim()
   let had_fence = false
 
-  // Strip markdown fences (```json ... ``` or ``` ... ```)
+  // Strip markdown fences
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fence) { text = fence[1].trim(); had_fence = true }
 
-  // Find outermost JSON object boundaries
   const start = text.indexOf('{')
   if (start < 0) return fail('no_opening_brace', false, had_fence)
 
   const end = text.lastIndexOf('}')
-  // Closing brace absent or before opening brace — response was truncated
   if (end <= start) return fail('truncated_no_closing_brace', true, had_fence)
 
   text = text.slice(start, end + 1)
@@ -261,9 +322,15 @@ function tryExtractJson(raw: string): ParseResult {
   try {
     const parsed = JSON.parse(text)
     if (!parsed || typeof parsed !== 'object') return fail('not_an_object', false, had_fence)
-    const line_items = Array.isArray(parsed.line_items) ? parsed.line_items : []
     return {
-      data: { line_items, confidence_summary: String(parsed.confidence_summary ?? '') },
+      data: {
+        line_items: Array.isArray(parsed.line_items) ? parsed.line_items : [],
+        inferred_items: Array.isArray(parsed.inferred_items) ? parsed.inferred_items : [],
+        missing_categories: Array.isArray(parsed.missing_categories)
+          ? parsed.missing_categories.filter((x: unknown) => typeof x === 'string')
+          : [],
+        confidence_summary: String(parsed.confidence_summary ?? ''),
+      },
       error: null,
       truncated: false,
       had_fence,
@@ -591,29 +658,60 @@ export async function GET(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const allDocBlocks: any[] = [docBlock, ...siblingBlocks]
 
-        // ── Step 1: Extract project metadata ─────────────────────────────────
+        // ── Step 1: Extract project metadata + classify document ─────────────
         let projectMetadata: ProjectMetadata = {
           job_type: null, renovation_type: null, project_summary: 'Residential construction project',
           floor_area_m2: null, storeys: null, wet_areas: null, bedrooms: null,
           finish_level: null, construction_type: null, region: null, suburb: null,
         }
 
+        let docClassification: DocClassification = {
+          doc_type: 'UNKNOWN',
+          has_schedules: false,
+          has_dimensions: false,
+          visible_categories: [],
+          missing_categories_hint: [],
+        }
+
         try {
-          // Metadata only needs the primary document — sending the full set
-          // risks blowing the request size limit for a 512-token answer.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const metaResponse = await (client.messages.create as any)({
             model: 'claude-haiku-4-5-20251001',
-            max_tokens: 512,
+            max_tokens: 768,
             messages: [{ role: 'user', content: [docBlock, { type: 'text', text: METADATA_PROMPT }] }],
           })
           const metaText = metaResponse.content[0]?.type === 'text' ? metaResponse.content[0].text : ''
           const metaMatch = metaText.match(/\{[\s\S]*\}/)
           if (metaMatch) {
-            projectMetadata = { ...projectMetadata, ...JSON.parse(metaMatch[0]) }
+            // Strip trailing commas before parsing (Haiku sometimes adds them)
+            const cleaned = metaMatch[0].replace(/,(\s*[}\]])/g, '$1')
+            const parsed = JSON.parse(cleaned)
+            projectMetadata = { ...projectMetadata, ...parsed }
+            docClassification = {
+              doc_type: (parsed.doc_type as DocType) ?? 'UNKNOWN',
+              has_schedules: Boolean(parsed.has_schedules),
+              has_dimensions: Boolean(parsed.has_dimensions),
+              visible_categories: Array.isArray(parsed.visible_categories) ? parsed.visible_categories : [],
+              missing_categories_hint: Array.isArray(parsed.missing_categories_hint) ? parsed.missing_categories_hint : [],
+            }
           }
         } catch {
           // Non-fatal — continue with defaults
+        }
+
+        console.log('[intake:classify]', {
+          file_id: fileId,
+          doc_type: docClassification.doc_type,
+          has_schedules: docClassification.has_schedules,
+          has_dimensions: docClassification.has_dimensions,
+          visible_categories: docClassification.visible_categories,
+          missing_categories_hint: docClassification.missing_categories_hint,
+        })
+
+        // Early exit for documents that are clearly not building docs
+        if (docClassification.doc_type === 'NON_BUILDING_DOC') {
+          await failWith('NON_BUILDING_DOC', `Document classified as NON_BUILDING_DOC by Haiku`)
+          return
         }
 
         // ── Step 2: Retrieve similar historical projects ───────────────────
@@ -673,7 +771,7 @@ export async function GET(
         }
 
         // ── Step 4: Memory-enhanced quantity extraction ────────────────────
-        const extractionPrompt = buildExtractionPrompt(similarProjects, builderProfile, projectMetadata.project_summary, allDocBlocks.length)
+        const extractionPrompt = buildExtractionPrompt(similarProjects, builderProfile, projectMetadata.project_summary, allDocBlocks.length, docClassification)
 
         const stageIndices = [4, 5, 6, 7, 8]
         let stageIdx = 0
@@ -826,6 +924,8 @@ export async function GET(
 
         const diag: ExtractionDiag = {
           file_id: fileId,
+          doc_type: docClassification.doc_type,
+          has_schedules: docClassification.has_schedules,
           doc_blocks_sent: allDocBlocks.length,
           primary_response_length: anthropicResponse?.length ?? 0,
           primary_response_sample: anthropicResponse?.slice(0, 500) ?? '',
@@ -835,6 +935,8 @@ export async function GET(
           primary_had_fence: false,
           retry_attempted: false,
           final_line_items: 0,
+          final_inferred_items: 0,
+          missing_categories: [],
           used_prefill: usedPrefill,
           model: 'claude-sonnet-4-6',
           timestamp: new Date().toISOString(),
@@ -848,7 +950,7 @@ export async function GET(
           used_prefill: usedPrefill,
         })
 
-        let lineItems: Array<{
+        type LineItemRaw = {
           trade_category_id: number
           description: string
           quantity: number | null
@@ -862,9 +964,23 @@ export async function GET(
           material_cost?: number | null
           subcontract_cost?: number | null
           plant_cost?: number | null
-        }> = []
+        }
+
+        let lineItems: LineItemRaw[] = []
+        let inferredItems: LineItemRaw[] = []
+        let missingCategories: string[] = []
         let confidenceSummary = ''
         let isManualReviewMode = false
+
+        const applyParseResult = (data: ParseResult['data']) => {
+          if (!data) return
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          lineItems = data.line_items as any[]
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          inferredItems = data.inferred_items as any[]
+          missingCategories = data.missing_categories
+          confidenceSummary = data.confidence_summary
+        }
 
         // Attempt 1
         const attempt1 = tryExtractJson(anthropicResponse)
@@ -872,10 +988,8 @@ export async function GET(
         diag.primary_truncated = attempt1.truncated
         diag.primary_had_fence = attempt1.had_fence
         if (attempt1.data) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          lineItems = attempt1.data.line_items as any[]
-          confidenceSummary = attempt1.data.confidence_summary
-          diag.primary_parse = lineItems.length > 0 ? 'success' : 'empty_array'
+          applyParseResult(attempt1.data)
+          diag.primary_parse = (lineItems.length + inferredItems.length) > 0 ? 'success' : 'empty_array'
         }
 
         console.log('[intake:parse]', {
@@ -886,6 +1000,8 @@ export async function GET(
           truncated: diag.primary_truncated,
           had_fence: diag.primary_had_fence,
           line_items: lineItems.length,
+          inferred_items: inferredItems.length,
+          missing_categories: missingCategories,
         })
 
         // Attempt 2 — triggered when JSON failed or line_items is empty.
@@ -973,12 +1089,10 @@ export async function GET(
               sample: retryText.slice(0, 300),
             })
 
-            if (attempt2.data && attempt2.data.line_items.length > 0) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              lineItems = attempt2.data.line_items as any[]
-              confidenceSummary = attempt2.data.confidence_summary
+            if (attempt2.data && (attempt2.data.line_items.length > 0 || attempt2.data.inferred_items.length > 0)) {
+              applyParseResult(attempt2.data)
               diag.retry_parse = 'success'
-              console.log('[intake:retry-success]', { file_id: fileId, line_items: lineItems.length })
+              console.log('[intake:retry-success]', { file_id: fileId, line_items: lineItems.length, inferred_items: inferredItems.length })
             } else {
               diag.retry_parse = attempt2.data ? 'empty_array' : 'json_failed'
               console.warn('[intake:retry-failed]', { file_id: fileId, retry_result: diag.retry_parse, retry_error: attempt2.error })
@@ -991,10 +1105,13 @@ export async function GET(
         }
 
         diag.final_line_items = lineItems.length
+        diag.final_inferred_items = inferredItems.length
+        diag.missing_categories = missingCategories
         console.log('[intake:diag]', JSON.stringify(diag))
 
         // ── Route to correct failure stage or degrade gracefully ──────────────
-        if (lineItems.length === 0) {
+        const totalItems = lineItems.length + inferredItems.length
+        if (totalItems === 0) {
           const bothAttemptsFailed = !diag.retry_attempted
             ? diag.primary_parse === 'json_failed'
             : diag.primary_parse === 'json_failed' && diag.retry_parse === 'json_failed'
@@ -1023,14 +1140,22 @@ export async function GET(
           console.warn('[intake:manual-review]', {
             file_id: fileId,
             reason: 'both_attempts_empty_line_items',
+            doc_type: docClassification.doc_type,
             primary_parse: diag.primary_parse,
             retry_parse: diag.retry_parse,
           })
         }
 
+        // Inferred items always become assumptions (low confidence, builder must verify)
+        // and are inserted into line_items with is_assumption=true before validation
+        const allLineItems = [
+          ...lineItems,
+          ...inferredItems.map(item => ({ ...item, _inferred: true })),
+        ]
+
         const assumptions: Array<{ description: string; gate: number; message: string }> = []
 
-        const validatedItems = lineItems.map((item) => {
+        const validatedItems = allLineItems.map((item) => {
           let isAssumption = false
           let assumptionMessage: string | null = null
           let assumptionStatus: 'unresolved' | 'excluded' = 'unresolved'
@@ -1058,7 +1183,7 @@ export async function GET(
         // ── Step 7: Create quote ──────────────────────────────────────────
         emit('progress', PROGRESS_STAGES[11]) // building_quote
 
-        const explainability = buildExplainability(lineItems, similarProjects, projectMetadata)
+        const explainability = buildExplainability(allLineItems, similarProjects, projectMetadata)
         void confidenceSummary // used for future explainability enrichment
 
         // ── Step 7: Persist to DB if Supabase available, otherwise use memory ──
@@ -1143,7 +1268,7 @@ export async function GET(
                 .update({
                   intake_status: 'extracted',
                   quote_id: quoteRow.id,
-                  line_item_count: lineItems.length,
+                  line_item_count: allLineItems.length,
                   extracted_text_length: extractedTextLength || null,
                   processing_time_ms: Date.now() - pipelineStart,
                   failure_stage: null,
@@ -1165,9 +1290,19 @@ export async function GET(
             ? ` Note: ${skippedSiblingCount} file${skippedSiblingCount !== 1 ? 's were' : ' was'} too large to include in the AI analysis.`
             : ''
 
-        const completionMessage = isManualReviewMode
-          ? `Draft quote created — no line items were detected automatically. Open the quote to add items manually.${sizeNote}`
-          : `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.${sizeNote}`
+        // Build a doc-type-aware completion message
+        let completionMessage: string
+        if (isManualReviewMode) {
+          completionMessage = `Draft quote created — no items were detected automatically. Open the quote to add items manually.${sizeNote}`
+        } else if (docClassification.doc_type === 'SCHEMATIC_ONLY') {
+          completionMessage = `We found plans but no measurable schedules — ${inferredItems.length} item${inferredItems.length !== 1 ? 's' : ''} inferred from the floor plan layout. All items need your review before quoting.${sizeNote}`
+        } else if (docClassification.doc_type === 'MIXED_CONTENT' && inferredItems.length > 0) {
+          const measuredNote = lineItems.length > 0 ? `${lineItems.length} measured` : ''
+          const inferredNote = `${inferredItems.length} inferred`
+          completionMessage = `Partial extraction complete — ${[measuredNote, inferredNote].filter(Boolean).join(', ')} item${allLineItems.length !== 1 ? 's' : ''}. ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.${sizeNote}`
+        } else {
+          completionMessage = `Draft quote ready — ${unresolvedCount} assumption${unresolvedCount !== 1 ? 's' : ''} need your review.${sizeNote}`
+        }
 
         const completeData: CompleteEvent = {
           stage: 'complete',
