@@ -242,6 +242,12 @@ export interface File {
   filename: string
   file_type: FileType
   intake_status: FileIntakeStatus
+  failure_stage: string | null
+  failure_reason: string | null
+  extracted_text_length: number | null
+  page_count: number | null
+  line_item_count: number | null
+  processing_time_ms: number | null
   created_at: string
 }
 

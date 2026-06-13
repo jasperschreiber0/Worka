@@ -41,6 +41,31 @@ interface ExtractionDiag {
   timestamp: string
 }
 
+// ─── Failure stages + user-facing messages ────────────────────────────────────
+
+type FailureStage =
+  | 'FILE_DOWNLOAD_FAILED'
+  | 'PDF_PARSE_FAILED'
+  | 'PASSWORD_PROTECTED_PDF'
+  | 'OCR_FAILED'
+  | 'NO_TEXT_EXTRACTED'
+  | 'DOCUMENT_TOO_SMALL'
+  | 'AI_EXTRACTION_FAILED'
+  | 'JSON_PARSE_FAILED'
+  | 'NO_LINE_ITEMS_FOUND'
+
+const FAILURE_MESSAGES: Record<FailureStage, string> = {
+  FILE_DOWNLOAD_FAILED:    'We couldn\'t retrieve this file. Please try uploading it again.',
+  PDF_PARSE_FAILED:        'The file could not be read — it may be corrupt or in an unsupported format.',
+  PASSWORD_PROTECTED_PDF:  'This PDF is password-protected. Remove the password and re-upload.',
+  OCR_FAILED:              'We couldn\'t extract text from this PDF. It may be a scanned image or low-resolution document.',
+  NO_TEXT_EXTRACTED:       'We couldn\'t extract text from this PDF. It may be a scanned image or low-resolution document.',
+  DOCUMENT_TOO_SMALL:      'This file appears too small to be a building plan. Please check you\'ve uploaded the correct document.',
+  AI_EXTRACTION_FAILED:    'The document was read successfully, but WorkA couldn\'t identify quoteable building items.',
+  JSON_PARSE_FAILED:       'The AI returned an unexpected response format. Please try again — if it keeps failing, the file may need to be re-exported.',
+  NO_LINE_ITEMS_FOUND:     'The document appears valid, but no measurable construction items were detected. Check that the file contains a quantity schedule or annotated plans.',
+}
+
 // ─── Progress stages ──────────────────────────────────────────────────────────
 
 const PROGRESS_STAGES: ProgressEvent[] = [
@@ -338,8 +363,48 @@ export async function GET(
   // ── Real mode ──────────────────────────────────────────────────────────────
   const stream = new ReadableStream({
     async start(controller) {
+      const pipelineStart = Date.now()
+
       const emit = (event: string, data: object) => {
         controller.enqueue(sseEvent(encoder, event, data))
+      }
+
+      // Supabase declared here so failWith can capture it via closure
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let supabase: any = null
+
+      // Metrics accumulated during the run — written to DB on both success and failure
+      let extractedTextLength = 0
+
+      // Fail the pipeline at a named stage: logs, updates DB, emits error, closes stream
+      const failWith = async (
+        stage: FailureStage,
+        internalReason: string,
+        extra?: { line_item_count?: number; page_count?: number }
+      ) => {
+        const processingTimeMs = Date.now() - pipelineStart
+        console.error('[intake:fail]', {
+          file_id: fileId,
+          stage,
+          reason: internalReason,
+          processing_time_ms: processingTimeMs,
+          extracted_text_length: extractedTextLength || null,
+          ...extra,
+        })
+        if (supabase) {
+          const { error: dbErr } = await supabase.from('files').update({
+            intake_status: 'failed',
+            failure_stage: stage,
+            failure_reason: internalReason.slice(0, 500),
+            processing_time_ms: processingTimeMs,
+            extracted_text_length: extractedTextLength || null,
+            ...(extra?.line_item_count != null && { line_item_count: extra.line_item_count }),
+            ...(extra?.page_count != null && { page_count: extra.page_count }),
+          }).eq('id', fileId)
+          if (dbErr) console.error('[intake] DB fail-update error:', dbErr.message)
+        }
+        emit('error', { message: FAILURE_MESSAGES[stage], stage })
+        controller.close()
       }
 
       try {
@@ -350,8 +415,6 @@ export async function GET(
 
         // Supabase is optional — memory cache is the primary file source
         const hasSupabase = Boolean(supabaseUrl && supabaseKey)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let supabase: any = null
         if (hasSupabase) {
           const { createClient } = await import('@supabase/supabase-js')
           supabase = createClient(supabaseUrl!, supabaseKey!)
@@ -386,8 +449,7 @@ export async function GET(
           primaryMediaType = cached.mediaType
         } else {
           if (!fileRow) {
-            emit('error', { message: 'File record not found — the upload may not have completed. Please try uploading again.' })
-            controller.close()
+            await failWith('FILE_DOWNLOAD_FAILED', 'File record not found — upload may not have completed')
             return
           }
 
@@ -397,10 +459,7 @@ export async function GET(
 
           if (downloadErr || !fileData) {
             const storageMsg = (downloadErr as { message?: string } | null)?.message ?? 'unknown'
-            emit('error', { message: `File not found in storage (${storageMsg}). Make sure the Supabase "plans" bucket exists and the file uploaded successfully.` })
-            const { error: failedErr1 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
-            if (failedErr1) console.error('[intake] status→failed (download):', failedErr1.message)
-            controller.close()
+            await failWith('FILE_DOWNLOAD_FAILED', `Storage download failed: ${storageMsg}`)
             return
           }
 
@@ -417,11 +476,22 @@ export async function GET(
           || fileRow?.filename?.toLowerCase().endsWith('.csv')
         const mediaType = isPdf ? 'application/pdf' : 'image/jpeg'
 
+        // Reject files that are clearly too small to contain a building plan.
+        // base64 → raw bytes ≈ length × 0.75.  Threshold: 8 KB for PDFs/images.
+        const rawBytes = Math.ceil(base64Data.length * 0.75)
+        console.log('[intake:file]', { file_id: fileId, media_type: detectedMediaType, raw_bytes: rawBytes, is_pdf: isPdf, is_csv: isCsv })
+        if (!isCsv && rawBytes < 8192) {
+          await failWith('DOCUMENT_TOO_SMALL', `File is only ${rawBytes} bytes — too small for a building plan`)
+          return
+        }
+
         // CSV: decode as UTF-8 text and inject as a text block
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let docBlock: any
         if (isCsv) {
           const csvText = Buffer.from(base64Data, 'base64').toString('utf-8')
+          extractedTextLength = csvText.length
+          console.log('[intake:csv]', { file_id: fileId, text_length: extractedTextLength })
           docBlock = { type: 'text', text: `CSV FILE CONTENTS:\n\`\`\`\n${csvText.slice(0, 60000)}\n\`\`\`` }
         } else if (isPdf) {
           docBlock = { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Data } }
@@ -587,6 +657,15 @@ export async function GET(
 
         let anthropicResponse: string
         let droppedToPrimaryOnly = false
+
+        console.log('[intake:ai-prompt]', {
+          file_id: fileId,
+          doc_blocks: allDocBlocks.length,
+          prompt_length: extractionPrompt.length,
+          model: 'claude-sonnet-4-6',
+          max_tokens: 8192,
+        })
+
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const callExtraction = async (blocks: any[]): Promise<string> => {
@@ -596,7 +675,15 @@ export async function GET(
               max_tokens: 8192,
               messages: [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }],
             })
-            return response.content[0]?.type === 'text' ? response.content[0].text : ''
+            const text: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
+            console.log('[intake:ai-response]', {
+              file_id: fileId,
+              input_tokens: response.usage?.input_tokens ?? null,
+              output_tokens: response.usage?.output_tokens ?? null,
+              response_length: text.length,
+              response_sample: text.slice(0, 200),
+            })
+            return text
           }
 
           try {
@@ -605,9 +692,7 @@ export async function GET(
             const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
             const isTooLarge = /request_too_large|too large|prompt is too long|too long|page limit|100 pages|413/i.test(firstMsg)
             if (isTooLarge && allDocBlocks.length > 1) {
-              // Combined documents exceed AI limits — retry with the primary
-              // document only rather than failing the whole intake.
-              console.warn('[intake] Full document set too large, retrying with primary only:', firstMsg)
+              console.warn('[intake:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg })
               anthropicResponse = await callExtraction([docBlock])
               droppedToPrimaryOnly = true
             } else {
@@ -617,25 +702,54 @@ export async function GET(
         } catch (aiErr) {
           clearInterval(stageEmitter)
           const aiMsg = aiErr instanceof Error ? aiErr.message : String(aiErr)
-          console.error('[intake] Anthropic extraction error:', aiMsg)
-          const friendly =
-            /request_too_large|too large|prompt is too long|too long/i.test(aiMsg)
-              ? 'The plans are too large for AI analysis — try uploading fewer or smaller PDFs (key plan sheets only).'
-              : /page/i.test(aiMsg) && /100/.test(aiMsg)
+          console.error('[intake:ai-error]', { file_id: fileId, error: aiMsg })
+
+          const isPasswordProtected = /encrypted|password|locked|security/i.test(aiMsg)
+          const isTooLarge = /request_too_large|too large|prompt is too long|too long/i.test(aiMsg)
+          const isPageLimit = /page.*100|100.*page/i.test(aiMsg)
+          const isRateLimit = /rate.?limit|429|overloaded|529/i.test(aiMsg)
+
+          if (isPasswordProtected) {
+            await failWith('PASSWORD_PROTECTED_PDF', aiMsg)
+          } else if (isTooLarge || isPageLimit) {
+            // Use a more specific message but still AI_EXTRACTION_FAILED stage
+            emit('error', {
+              message: isPageLimit
                 ? 'The PDFs exceed the 100-page AI limit — upload the key plan sheets only.'
-                : /rate.?limit|429|overloaded|529/i.test(aiMsg)
-                  ? 'The AI service is busy right now — please try again in a minute.'
-                  : `AI extraction failed: ${aiMsg.slice(0, 180)}`
-          emit('error', { message: friendly })
-          if (supabase) {
-            const { error: failedErr2 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
-            if (failedErr2) console.error('[intake] status→failed (AI):', failedErr2.message)
+                : 'The plans are too large for AI analysis — try uploading fewer or smaller PDFs.',
+              stage: 'AI_EXTRACTION_FAILED' satisfies FailureStage,
+            })
+            if (supabase) {
+              await supabase.from('files').update({
+                intake_status: 'failed',
+                failure_stage: 'AI_EXTRACTION_FAILED',
+                failure_reason: aiMsg.slice(0, 500),
+                processing_time_ms: Date.now() - pipelineStart,
+              }).eq('id', fileId)
+            }
+            controller.close()
+          } else if (isRateLimit) {
+            emit('error', { message: 'The AI service is busy right now — please try again in a minute.', stage: 'AI_EXTRACTION_FAILED' satisfies FailureStage })
+            if (supabase) {
+              await supabase.from('files').update({
+                intake_status: 'failed',
+                failure_stage: 'AI_EXTRACTION_FAILED',
+                failure_reason: `Rate limit: ${aiMsg.slice(0, 400)}`,
+                processing_time_ms: Date.now() - pipelineStart,
+              }).eq('id', fileId)
+            }
+            controller.close()
+          } else {
+            await failWith('AI_EXTRACTION_FAILED', aiMsg)
           }
-          controller.close()
           return
         } finally {
           clearInterval(stageEmitter)
         }
+
+        // Track response length as proxy for extracted text volume
+        extractedTextLength = anthropicResponse?.length ?? 0
+        console.log('[intake:extracted]', { file_id: fileId, extracted_text_length: extractedTextLength })
 
         for (let i = stageIdx; i < stageIndices.length; i++) {
           emit('progress', PROGRESS_STAGES[stageIndices[i]])
@@ -776,21 +890,26 @@ Return ONLY valid JSON with no text before or after. Start immediately with {:
         diag.final_line_items = lineItems.length
         console.log('[intake:diag]', JSON.stringify(diag))
 
-        // Hard fail only when both attempts produced no parseable JSON at all.
-        // Empty line_items after retry is allowed through — builder gets a 0-item draft.
-        if (lineItems.length === 0 && diag.primary_parse === 'json_failed'
-            && (!diag.retry_attempted || diag.retry_parse === 'json_failed')) {
-          const isScanned = /scanned|image.only|no text|cannot read/i.test(diag.primary_response_sample)
-          const errMsg = isScanned
-            ? 'This appears to be a scanned PDF with no readable text. Upload digital (CAD-exported) plans for best results, or try a higher-quality scan.'
-            : 'Could not extract line items — the file may be corrupt, password-protected, or not a building document.'
-          if (supabase) {
-            const { error: failedErr3 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
-            if (failedErr3) console.error('[intake] status→failed (parse):', failedErr3.message)
+        // ── Determine failure stage if no usable line items ────────────────────
+        if (lineItems.length === 0) {
+          const responseIsVeryShort = extractedTextLength < 200
+          const responseIsScanned = /scanned|image.only|no text|cannot read/i.test(diag.primary_response_sample)
+
+          if (diag.primary_parse === 'json_failed' && (!diag.retry_attempted || diag.retry_parse === 'json_failed')) {
+            // Claude's response was never valid JSON on either attempt
+            if (responseIsVeryShort || responseIsScanned) {
+              await failWith('NO_TEXT_EXTRACTED', `Response too short or indicated scanned doc (${extractedTextLength} chars)`, { line_item_count: 0 })
+            } else {
+              await failWith('JSON_PARSE_FAILED', `primary=${diag.primary_parse} retry=${diag.retry_parse ?? 'none'}, response_len=${extractedTextLength}`, { line_item_count: 0 })
+            }
+            return
           }
-          emit('error', { message: errMsg })
-          controller.close()
-          return
+
+          if (diag.primary_parse === 'empty_array' && (!diag.retry_attempted || diag.retry_parse !== 'success')) {
+            // JSON was valid but line_items was empty on both attempts
+            await failWith('NO_LINE_ITEMS_FOUND', `Both attempts returned empty line_items array, response_len=${extractedTextLength}`, { line_item_count: 0 })
+            return
+          }
         }
 
         const assumptions: Array<{ description: string; gate: number; message: string }> = []
@@ -905,7 +1024,15 @@ Return ONLY valid JSON with no text before or after. Start immediately with {:
               if (quoteMetaErr) console.error('[intake] quote metadata update:', quoteMetaErr.message)
 
               const { error: extractedErr } = await supabase.from('files')
-                .update({ intake_status: 'extracted', quote_id: quoteRow.id })
+                .update({
+                  intake_status: 'extracted',
+                  quote_id: quoteRow.id,
+                  line_item_count: lineItems.length,
+                  extracted_text_length: extractedTextLength || null,
+                  processing_time_ms: Date.now() - pipelineStart,
+                  failure_stage: null,
+                  failure_reason: null,
+                })
                 .eq('id', fileId)
               if (extractedErr) console.error('[intake] status→extracted:', extractedErr.message)
             }
@@ -935,8 +1062,20 @@ Return ONLY valid JSON with no text before or after. Start immediately with {:
         emit('complete', completeData)
         controller.close()
       } catch (err) {
-        console.error('Intake pipeline error:', err)
-        emit('error', { message: 'Processing failed — please try again' })
+        const errMsg = err instanceof Error ? err.message : String(err)
+        console.error('[intake:unhandled]', { file_id: fileId, error: errMsg, stack: err instanceof Error ? err.stack?.slice(0, 600) : undefined })
+        // Best-effort: write a failure record — supabase may be null if error occurred very early
+        try {
+          if (supabase) {
+            await supabase.from('files').update({
+              intake_status: 'failed',
+              failure_stage: 'AI_EXTRACTION_FAILED',
+              failure_reason: `Unhandled pipeline error: ${errMsg.slice(0, 400)}`,
+              processing_time_ms: Date.now() - pipelineStart,
+            }).eq('id', fileId)
+          }
+        } catch { /* ignore secondary failure */ }
+        emit('error', { message: 'Processing failed — please try again', stage: 'AI_EXTRACTION_FAILED' })
         controller.close()
       }
     },
