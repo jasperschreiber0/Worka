@@ -662,7 +662,6 @@ export async function GET(
         // ── Step 6: Parse & validate line items (with retry + OCR fallback) ───
         emit('progress', PROGRESS_STAGES[10]) // validating
 
-        // Structured diagnostics — reported in Vercel logs + stored in quote metadata
         const diag: ExtractionDiag = {
           file_id: fileId,
           doc_blocks_sent: allDocBlocks.length,
@@ -699,7 +698,7 @@ export async function GET(
         }> = []
         let confidenceSummary = ''
 
-        // ── Attempt 1: parse primary response ─────────────────────────────────
+        // Attempt 1
         const attempt1 = tryExtractJson(anthropicResponse)
         if (attempt1) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -708,17 +707,11 @@ export async function GET(
           diag.primary_parse = lineItems.length > 0 ? 'success' : 'empty_array'
         }
 
-        console.log('[intake:parse]', {
-          file_id: fileId,
-          attempt: 1,
-          result: diag.primary_parse,
-          line_items: lineItems.length,
-        })
+        console.log('[intake:parse]', { file_id: fileId, attempt: 1, result: diag.primary_parse, line_items: lineItems.length })
 
-        // ── Attempt 2: retry when JSON failed or line_items is empty ──────────
-        // "OCR fallback": when Claude signals it can't read the document, we re-prompt
-        // with an explicit instruction to make professional estimates — this is equivalent
-        // to falling back to OCR since Claude's API handles all PDF reading internally.
+        // Attempt 2 — triggered when JSON failed or line_items is empty.
+        // "OCR fallback": when Claude signals it can't read the document, we
+        // re-prompt with an explicit instruction to make professional QS estimates.
         if (diag.primary_parse !== 'success') {
           const isRefusal = /\b(cannot|unable|sorry|don.t see|no text|blank|unreadable|unclear|scanned image|image.only|no content|not possible)\b/i
             .test(anthropicResponse?.slice(0, 600) ?? '')
@@ -738,14 +731,13 @@ export async function GET(
 
           try {
             const retryPrompt = (isRefusal || diag.primary_parse === 'empty_array')
-              ? `This document may be image-based, scanned, or a drawing-heavy PDF. As a senior quantity surveyor with 20 years of Australian residential construction experience, produce estimates from what you can observe. Even if you cannot read every dimension, you MUST produce line items — set confidence to 30–55 for estimated items so the builder can review them.
+              ? `This document may be image-based, scanned, or drawing-heavy. As a senior quantity surveyor with 20 years of Australian residential construction experience, produce estimates from what you can observe. You MUST produce line items — set confidence to 30–55 for estimated items so the builder can review them.
 
 Return ONLY valid JSON with no text before or after. Start immediately with {:
 {"line_items": [...], "confidence_summary": "..."}`
               : `Your previous response could not be parsed as JSON. Output ONLY the JSON object — start with { and end with }. No explanation, no text before or after.`
 
-            // Refusal/empty: fresh request with more direct OCR-fallback instruction.
-            // JSON failure: continue the conversation so the model can repair its output.
+            // Refusal/empty: fresh request. JSON failure: multi-turn repair.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const retryMessages: any[] = (isRefusal || diag.primary_parse === 'empty_array')
               ? [{ role: 'user', content: [...(droppedToPrimaryOnly ? [docBlock] : allDocBlocks), { type: 'text', text: extractionPrompt + '\n\n' + retryPrompt }] }]
@@ -773,42 +765,29 @@ Return ONLY valid JSON with no text before or after. Start immediately with {:
               console.log('[intake:retry-success]', { file_id: fileId, line_items: lineItems.length })
             } else {
               diag.retry_parse = attempt2 ? 'empty_array' : 'json_failed'
-              console.warn('[intake:retry-failed]', {
-                file_id: fileId,
-                retry_result: diag.retry_parse,
-                retry_sample: retryText.slice(0, 400),
-              })
+              console.warn('[intake:retry-failed]', { file_id: fileId, retry_result: diag.retry_parse, retry_sample: retryText.slice(0, 400) })
             }
           } catch (retryErr) {
             diag.retry_parse = 'json_failed'
-            console.error('[intake:retry-error]', {
-              file_id: fileId,
-              error: retryErr instanceof Error ? retryErr.message : String(retryErr),
-            })
+            console.error('[intake:retry-error]', { file_id: fileId, error: retryErr instanceof Error ? retryErr.message : String(retryErr) })
           }
         }
 
         diag.final_line_items = lineItems.length
         console.log('[intake:diag]', JSON.stringify(diag))
 
-        // Hard fail only when both attempts produced no usable JSON at all.
-        // An empty line_items array after retry is allowed through — the quote
-        // will be created with zero items and the builder can add them manually.
+        // Hard fail only when both attempts produced no parseable JSON at all.
+        // Empty line_items after retry is allowed through — builder gets a 0-item draft.
         if (lineItems.length === 0 && diag.primary_parse === 'json_failed'
             && (!diag.retry_attempted || diag.retry_parse === 'json_failed')) {
           const isScanned = /scanned|image.only|no text|cannot read/i.test(diag.primary_response_sample)
           const errMsg = isScanned
             ? 'This appears to be a scanned PDF with no readable text. Upload digital (CAD-exported) plans for best results, or try a higher-quality scan.'
             : 'Could not extract line items — the file may be corrupt, password-protected, or not a building document.'
-
           if (supabase) {
-            const { error: failedErr3 } = await supabase
-              .from('files')
-              .update({ intake_status: 'failed' })
-              .eq('id', fileId)
+            const { error: failedErr3 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
             if (failedErr3) console.error('[intake] status→failed (parse):', failedErr3.message)
           }
-
           emit('error', { message: errMsg })
           controller.close()
           return
