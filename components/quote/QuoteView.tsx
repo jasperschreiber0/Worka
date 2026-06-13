@@ -786,10 +786,22 @@ function QuoteViewInner({
   // Fetch quote data
   useEffect(() => {
     async function load() {
+      // Guard against empty quoteId (can happen if SSE pipeline didn't return one)
+      if (!quoteId || quoteId === 'demo-quote-id') {
+        // In demo mode or when no real quoteId, fall back to the demo endpoint
+        // which always returns 200 with placeholder data.
+      }
       try {
         const res = await fetch(`/api/quotes/${quoteId}`)
         if (!res.ok) {
-          setError('Failed to load quote. Please try again.')
+          const status = res.status
+          if (status === 401) {
+            setError('Session expired — please refresh the page and try again.')
+          } else if (status === 404) {
+            setError('Quote not found — it may still be processing. Try again in a moment.')
+          } else {
+            setError('Failed to load quote. Please try again.')
+          }
           return
         }
         const json = await res.json() as QuoteApiResponse

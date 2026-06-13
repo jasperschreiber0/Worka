@@ -528,31 +528,51 @@ export default function ChatInterface({
         ? ` Estimate informed by ${memoryData.similar_projects.length} similar historical project${memoryData.similar_projects.length !== 1 ? 's' : ''}.`
         : ''
 
+      const hasAssumptions = assumptionCount > 0
+      const resolvedQuoteId = quoteId || 'demo-quote-id'
+
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
-        content: `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.${memoryContext}`,
-        alerts: [
-          {
-            priority: 'high',
-            message: `${assumptionCount} item${assumptionCount !== 1 ? 's' : ''} need your input before the quote is ready`,
-            action: 'Review assumptions',
-            entity_id: quoteId,
-            entity_type: 'quote',
-          },
-        ],
+        content: hasAssumptions
+          ? `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.${memoryContext}`
+          : `Draft quote ready for ${jobAddress} — no assumptions to review. You can send it now.${memoryContext}`,
+        alerts: hasAssumptions
+          ? [
+              {
+                priority: 'high' as const,
+                message: `${assumptionCount} item${assumptionCount !== 1 ? 's' : ''} need your input before the quote is ready`,
+                action: 'Review assumptions',
+                entity_id: resolvedQuoteId,
+                entity_type: 'quote',
+              },
+            ]
+          : [
+              {
+                priority: 'low' as const,
+                message: 'Quote is ready — review and send',
+                action: 'View draft quote',
+                entity_id: resolvedQuoteId,
+                entity_type: 'quote',
+              },
+            ],
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])
 
-      // Open assumption review immediately with memory context
-      setReviewingAssumptions({
-        quoteId,
-        jobAddress,
-        similarProjects: memoryData?.similar_projects as import('@/lib/types/estimation.types').SimilarProject[] | undefined,
-        scopeHints: memoryData?.scope_hints as import('@/lib/types/estimation.types').ScopeHint[] | undefined,
-        totalInMemory: memoryData?.total_in_memory,
-      })
+      // Open assumption review immediately with memory context (only if there are assumptions)
+      if (hasAssumptions) {
+        setReviewingAssumptions({
+          quoteId: resolvedQuoteId,
+          jobAddress,
+          similarProjects: memoryData?.similar_projects as import('@/lib/types/estimation.types').SimilarProject[] | undefined,
+          scopeHints: memoryData?.scope_hints as import('@/lib/types/estimation.types').ScopeHint[] | undefined,
+          totalInMemory: memoryData?.total_in_memory,
+        })
+      } else {
+        // No assumptions — open QuoteView directly
+        setViewingQuote({ quoteId: resolvedQuoteId })
+      }
     },
     [uploadPanel.job]
   )
