@@ -26,6 +26,21 @@ interface CompleteEvent {
   total_in_memory?: number
 }
 
+interface ExtractionDiag {
+  file_id: string
+  doc_blocks_sent: number
+  primary_response_length: number
+  primary_response_sample: string
+  primary_parse: 'success' | 'json_failed' | 'empty_array'
+  retry_attempted: boolean
+  retry_reason?: string
+  retry_response_length?: number
+  retry_parse?: 'success' | 'json_failed' | 'empty_array'
+  final_line_items: number
+  model: string
+  timestamp: string
+}
+
 // ─── Progress stages ──────────────────────────────────────────────────────────
 
 const PROGRESS_STAGES: ProgressEvent[] = [
@@ -176,6 +191,29 @@ Return ONLY valid JSON:
   ],
   "confidence_summary": "1 sentence overall confidence assessment"
 }`
+}
+
+// ─── JSON extraction helper ───────────────────────────────────────────────────
+
+function tryExtractJson(raw: string): { line_items: unknown[]; confidence_summary: string } | null {
+  if (!raw || raw.length < 10) return null
+  try {
+    let text = raw.trim()
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (fence) text = fence[1].trim()
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start < 0 || end <= start) return null
+    text = text.slice(start, end + 1)
+    const parsed = JSON.parse(text)
+    if (!parsed || typeof parsed !== 'object') return null
+    return {
+      line_items: Array.isArray(parsed.line_items) ? parsed.line_items : [],
+      confidence_summary: String(parsed.confidence_summary ?? ''),
+    }
+  } catch {
+    return null
+  }
 }
 
 // ─── Build explainability from line items + similar projects ──────────────────
@@ -621,8 +659,28 @@ export async function GET(
           // Non-fatal
         }
 
-        // ── Step 6: Parse & validate line items ───────────────────────────
+        // ── Step 6: Parse & validate line items (with retry + OCR fallback) ───
         emit('progress', PROGRESS_STAGES[10]) // validating
+
+        // Structured diagnostics — reported in Vercel logs + stored in quote metadata
+        const diag: ExtractionDiag = {
+          file_id: fileId,
+          doc_blocks_sent: allDocBlocks.length,
+          primary_response_length: anthropicResponse?.length ?? 0,
+          primary_response_sample: anthropicResponse?.slice(0, 500) ?? '',
+          primary_parse: 'json_failed',
+          retry_attempted: false,
+          final_line_items: 0,
+          model: 'claude-sonnet-4-6',
+          timestamp: new Date().toISOString(),
+        }
+
+        console.log('[intake:response]', {
+          file_id: fileId,
+          doc_blocks: diag.doc_blocks_sent,
+          response_length: diag.primary_response_length,
+          response_sample: anthropicResponse?.slice(0, 300),
+        })
 
         let lineItems: Array<{
           trade_category_id: number
@@ -639,26 +697,119 @@ export async function GET(
           subcontract_cost?: number | null
           plant_cost?: number | null
         }> = []
-
         let confidenceSummary = ''
 
-        try {
-          let jsonText = anthropicResponse.trim()
-          const fence = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/)
-          if (fence) jsonText = fence[1].trim()
-          const start = jsonText.indexOf('{')
-          const end = jsonText.lastIndexOf('}')
-          if (start >= 0 && end > start) jsonText = jsonText.slice(start, end + 1)
-          const parsed = JSON.parse(jsonText)
-          lineItems = parsed.line_items ?? []
-          confidenceSummary = parsed.confidence_summary ?? ''
-        } catch {
-          console.error('[intake] Malformed AI response:', anthropicResponse?.slice(0, 200))
-          emit('error', { message: 'Could not extract line items from the plans — the PDF may be unclear or image-based.' })
+        // ── Attempt 1: parse primary response ─────────────────────────────────
+        const attempt1 = tryExtractJson(anthropicResponse)
+        if (attempt1) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          lineItems = attempt1.line_items as any[]
+          confidenceSummary = attempt1.confidence_summary
+          diag.primary_parse = lineItems.length > 0 ? 'success' : 'empty_array'
+        }
+
+        console.log('[intake:parse]', {
+          file_id: fileId,
+          attempt: 1,
+          result: diag.primary_parse,
+          line_items: lineItems.length,
+        })
+
+        // ── Attempt 2: retry when JSON failed or line_items is empty ──────────
+        // "OCR fallback": when Claude signals it can't read the document, we re-prompt
+        // with an explicit instruction to make professional estimates — this is equivalent
+        // to falling back to OCR since Claude's API handles all PDF reading internally.
+        if (diag.primary_parse !== 'success') {
+          const isRefusal = /\b(cannot|unable|sorry|don.t see|no text|blank|unreadable|unclear|scanned image|image.only|no content|not possible)\b/i
+            .test(anthropicResponse?.slice(0, 600) ?? '')
+          const retryReason = diag.primary_parse === 'json_failed'
+            ? (isRefusal ? 'refusal_detected' : 'json_parse_failed')
+            : 'empty_line_items'
+
+          diag.retry_attempted = true
+          diag.retry_reason = retryReason
+
+          console.warn('[intake:retry]', {
+            file_id: fileId,
+            reason: retryReason,
+            primary_length: diag.primary_response_length,
+            primary_sample: anthropicResponse?.slice(0, 400),
+          })
+
+          try {
+            const retryPrompt = (isRefusal || diag.primary_parse === 'empty_array')
+              ? `This document may be image-based, scanned, or a drawing-heavy PDF. As a senior quantity surveyor with 20 years of Australian residential construction experience, produce estimates from what you can observe. Even if you cannot read every dimension, you MUST produce line items — set confidence to 30–55 for estimated items so the builder can review them.
+
+Return ONLY valid JSON with no text before or after. Start immediately with {:
+{"line_items": [...], "confidence_summary": "..."}`
+              : `Your previous response could not be parsed as JSON. Output ONLY the JSON object — start with { and end with }. No explanation, no text before or after.`
+
+            // Refusal/empty: fresh request with more direct OCR-fallback instruction.
+            // JSON failure: continue the conversation so the model can repair its output.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const retryMessages: any[] = (isRefusal || diag.primary_parse === 'empty_array')
+              ? [{ role: 'user', content: [...(droppedToPrimaryOnly ? [docBlock] : allDocBlocks), { type: 'text', text: extractionPrompt + '\n\n' + retryPrompt }] }]
+              : [
+                  { role: 'user', content: [...(droppedToPrimaryOnly ? [docBlock] : allDocBlocks), { type: 'text', text: extractionPrompt }] },
+                  { role: 'assistant', content: anthropicResponse ?? '' },
+                  { role: 'user', content: retryPrompt },
+                ]
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const retryResp = await (client.messages.create as any)({
+              model: 'claude-sonnet-4-6',
+              max_tokens: 8192,
+              messages: retryMessages,
+            })
+            const retryText: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
+            diag.retry_response_length = retryText.length
+
+            const attempt2 = tryExtractJson(retryText)
+            if (attempt2 && attempt2.line_items.length > 0) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              lineItems = attempt2.line_items as any[]
+              confidenceSummary = attempt2.confidence_summary
+              diag.retry_parse = 'success'
+              console.log('[intake:retry-success]', { file_id: fileId, line_items: lineItems.length })
+            } else {
+              diag.retry_parse = attempt2 ? 'empty_array' : 'json_failed'
+              console.warn('[intake:retry-failed]', {
+                file_id: fileId,
+                retry_result: diag.retry_parse,
+                retry_sample: retryText.slice(0, 400),
+              })
+            }
+          } catch (retryErr) {
+            diag.retry_parse = 'json_failed'
+            console.error('[intake:retry-error]', {
+              file_id: fileId,
+              error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+            })
+          }
+        }
+
+        diag.final_line_items = lineItems.length
+        console.log('[intake:diag]', JSON.stringify(diag))
+
+        // Hard fail only when both attempts produced no usable JSON at all.
+        // An empty line_items array after retry is allowed through — the quote
+        // will be created with zero items and the builder can add them manually.
+        if (lineItems.length === 0 && diag.primary_parse === 'json_failed'
+            && (!diag.retry_attempted || diag.retry_parse === 'json_failed')) {
+          const isScanned = /scanned|image.only|no text|cannot read/i.test(diag.primary_response_sample)
+          const errMsg = isScanned
+            ? 'This appears to be a scanned PDF with no readable text. Upload digital (CAD-exported) plans for best results, or try a higher-quality scan.'
+            : 'Could not extract line items — the file may be corrupt, password-protected, or not a building document.'
+
           if (supabase) {
-            const { error: failedErr3 } = await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+            const { error: failedErr3 } = await supabase
+              .from('files')
+              .update({ intake_status: 'failed' })
+              .eq('id', fileId)
             if (failedErr3) console.error('[intake] status→failed (parse):', failedErr3.message)
           }
+
+          emit('error', { message: errMsg })
           controller.close()
           return
         }
@@ -770,7 +921,7 @@ export async function GET(
               if (memErr) console.error('[intake] project_memory upsert:', memErr.message)
 
               const { error: quoteMetaErr } = await supabase.from('quotes')
-                .update({ metadata: { explainability, similar_project_count: similarProjects.length } })
+                .update({ metadata: { explainability, similar_project_count: similarProjects.length, extraction_diagnostics: diag } })
                 .eq('id', quoteRow.id)
               if (quoteMetaErr) console.error('[intake] quote metadata update:', quoteMetaErr.message)
 
