@@ -63,7 +63,7 @@ interface ExtractionDiag {
   final_line_items: number
   final_inferred_items: number
   missing_categories: string[]
-  used_prefill: boolean
+  used_prefill: false
   model: string
   timestamp: string
 }
@@ -785,12 +785,7 @@ export async function GET(
           }
         }, 2000)
 
-        // Assistant prefill forces the model to start mid-JSON, eliminating any
-        // chance of preamble text or markdown fences before the object.
-        const EXTRACTION_PREFILL = '{"line_items":['
-
         let anthropicResponse: string
-        let usedPrefill = false
         let droppedToPrimaryOnly = false
 
         console.log('[intake:ai-prompt]', {
@@ -799,47 +794,38 @@ export async function GET(
           prompt_length: extractionPrompt.length,
           model: 'claude-sonnet-4-6',
           max_tokens: 8192,
-          prefill: true,
         })
 
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const callExtraction = async (blocks: any[], withPrefill = true): Promise<string> => {
+          const callExtraction = async (blocks: any[]): Promise<string> => {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const messages: any[] = [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }]
-            if (withPrefill) {
-              messages.push({ role: 'assistant', content: EXTRACTION_PREFILL })
-            }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const response = await (client.messages.create as any)({
               model: 'claude-sonnet-4-6',
               max_tokens: 8192,
               messages,
             })
-            const completion: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
-            // Prepend the prefill so the combined string is valid JSON
-            const text = withPrefill ? EXTRACTION_PREFILL + completion : completion
+            const text: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
             console.log('[intake:ai-response]', {
               file_id: fileId,
               input_tokens: response.usage?.input_tokens ?? null,
               output_tokens: response.usage?.output_tokens ?? null,
               response_length: text.length,
               response_sample: text.slice(0, 200),
-              prefill_used: withPrefill,
             })
             return text
           }
 
           try {
-            anthropicResponse = await callExtraction(allDocBlocks, true)
-            usedPrefill = true
+            anthropicResponse = await callExtraction(allDocBlocks)
           } catch (firstErr) {
             const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
             const isTooLarge = /request_too_large|too large|prompt is too long|too long|page limit|100 pages|413/i.test(firstMsg)
             if (isTooLarge && allDocBlocks.length > 1) {
               console.warn('[intake:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg })
-              anthropicResponse = await callExtraction([docBlock], true)
-              usedPrefill = true
+              anthropicResponse = await callExtraction([docBlock])
               droppedToPrimaryOnly = true
             } else {
               throw firstErr
@@ -937,7 +923,7 @@ export async function GET(
           final_line_items: 0,
           final_inferred_items: 0,
           missing_categories: [],
-          used_prefill: usedPrefill,
+          used_prefill: false,
           model: 'claude-sonnet-4-6',
           timestamp: new Date().toISOString(),
         }
@@ -947,7 +933,6 @@ export async function GET(
           doc_blocks: diag.doc_blocks_sent,
           response_length: diag.primary_response_length,
           response_sample: anthropicResponse?.slice(0, 300),
-          used_prefill: usedPrefill,
         })
 
         type LineItemRaw = {
@@ -1060,20 +1045,13 @@ export async function GET(
               ]
             }
 
-            // Use prefill on fresh requests (not multi-turn repair)
-            const retryUsesPrefill = retryMessages.length === 1
-            if (retryUsesPrefill) {
-              retryMessages.push({ role: 'assistant', content: EXTRACTION_PREFILL })
-            }
-
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const retryResp = await (client.messages.create as any)({
               model: 'claude-sonnet-4-6',
               max_tokens: 8192,
               messages: retryMessages,
             })
-            const retryCompletion: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
-            const retryText = retryUsesPrefill ? EXTRACTION_PREFILL + retryCompletion : retryCompletion
+            const retryText: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
             diag.retry_response_length = retryText.length
 
             const attempt2 = tryExtractJson(retryText)
