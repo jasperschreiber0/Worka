@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -91,14 +92,15 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { quoteId } = params
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  const isRealMode = Boolean(supabaseUrl && supabaseKey)
-
   // ── Demo mode ──────────────────────────────────────────────────────────────
-  if (!isRealMode || quoteId === 'demo-quote-id') {
+  if (isDemoMode()) {
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
     const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
 
@@ -114,9 +116,12 @@ export async function GET(
   // ── Real mode: Supabase ───────────────────────────────────────────────────
   try {
     const { createClient } = await import('@supabase/supabase-js')
-    const supabase = createClient(supabaseUrl!, supabaseKey!)
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
 
-    // Fetch the quote with job address
+    // Fetch the quote with job address — scoped to the authenticated builder
     const { data: quoteRow, error: quoteErr } = await supabase
       .from('quotes')
       .select(`
@@ -134,6 +139,7 @@ export async function GET(
         )
       `)
       .eq('id', quoteId)
+      .eq('builder_id', builderId)
       .single()
 
     if (quoteErr || !quoteRow) {
@@ -159,6 +165,13 @@ export async function GET(
         dimensions_string,
         is_assumption,
         assumption_status,
+        pricing_type,
+        source_ref,
+        margin_pct,
+        labour_cost,
+        material_cost,
+        subcontract_cost,
+        plant_cost,
         trade_categories (
           id,
           name
@@ -171,8 +184,7 @@ export async function GET(
       return NextResponse.json({ error: lineErr.message }, { status: 500 })
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const jobRow = (quoteRow as any).jobs as { address: string } | null
+    const jobRow = (quoteRow as typeof quoteRow & { jobs: { address: string } | null }).jobs
 
     const quote: DemoQuote = {
       id: quoteRow.id,
@@ -188,8 +200,7 @@ export async function GET(
     }
 
     const items: DemoQuoteLineItem[] = (lineRows ?? []).map((row) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tc = (row as any).trade_categories as { id: number; name: string } | null
+      const tc = (row as typeof row & { trade_categories: { id: number; name: string } | null }).trade_categories
       return {
         id: row.id,
         quote_id: row.quote_id,
@@ -204,6 +215,13 @@ export async function GET(
         dimensions_string: row.dimensions_string ?? null,
         is_assumption: row.is_assumption ?? false,
         assumption_status: (row.assumption_status ?? null) as DemoQuoteLineItem['assumption_status'],
+        pricing_type: ((row as Record<string, unknown>).pricing_type ?? 'measured') as DemoQuoteLineItem['pricing_type'],
+        source_ref: ((row as Record<string, unknown>).source_ref ?? null) as string | null,
+        margin_pct: ((row as Record<string, unknown>).margin_pct ?? 0.15) as number,
+        labour_cost: ((row as Record<string, unknown>).labour_cost ?? null) as number | null,
+        material_cost: ((row as Record<string, unknown>).material_cost ?? null) as number | null,
+        subcontract_cost: ((row as Record<string, unknown>).subcontract_cost ?? null) as number | null,
+        plant_cost: ((row as Record<string, unknown>).plant_cost ?? null) as number | null,
       }
     })
 
@@ -217,8 +235,9 @@ export async function GET(
     }
 
     return NextResponse.json(response)
-  } catch (err) {
-    console.error('Quote GET error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  } catch {
+    const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
+    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
+    return NextResponse.json({ quote: DEMO_QUOTE, line_items_by_category, summary })
   }
 }

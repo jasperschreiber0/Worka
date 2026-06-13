@@ -49,7 +49,8 @@ const FOCUSABLE_SELECTOR =
 function Spinner() {
   return (
     <svg
-      className="animate-spin h-4 w-4 text-white"
+      className="animate-spin h-4 w-4"
+      style={{ color: 'var(--text-primary)' }}
       xmlns="http://www.w3.org/2000/svg"
       fill="none"
       viewBox="0 0 24 24"
@@ -225,11 +226,14 @@ export default function SendQuoteModal({
     >
       <div
         ref={panelRef}
-        className="w-full max-w-lg bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
-        style={{ maxHeight: 'calc(100vh - 2rem)' }}
+        className="w-full max-w-lg rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        style={{ backgroundColor: 'var(--bg-surface)', maxHeight: 'calc(100vh - 2rem)' }}
       >
         {/* ── Header ─────────────────────────────────────────────────── */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 flex-shrink-0">
+        <div
+          className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+          style={{ borderBottom: '1px solid var(--bg-border)' }}
+        >
           <div className="flex items-center gap-3">
             {(step === 'confirm' || step === 'sending') && (
               <button
@@ -237,7 +241,16 @@ export default function SendQuoteModal({
                 type="button"
                 onClick={() => setStep('draft')}
                 disabled={step === 'sending'}
-                className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-7 h-7 flex items-center justify-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ color: 'var(--text-tertiary)' }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.color = 'var(--text-primary)'
+                  e.currentTarget.style.backgroundColor = 'var(--bg-elevated)'
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.color = 'var(--text-tertiary)'
+                  e.currentTarget.style.backgroundColor = ''
+                }}
                 aria-label="Back to draft"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -245,7 +258,7 @@ export default function SendQuoteModal({
                 </svg>
               </button>
             )}
-            <h2 className="text-sm font-semibold text-slate-900">
+            <h2 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
               {step === 'loading' && 'Preparing draft…'}
               {step === 'draft' && 'Review before sending'}
               {step === 'confirm' || step === 'sending' ? 'Confirm send' : null}
@@ -254,14 +267,23 @@ export default function SendQuoteModal({
           </div>
           <div className="flex items-center gap-3">
             {(step === 'draft' || step === 'confirm') && (
-              <span className="text-xs font-medium text-slate-400">
+              <span className="text-[11px] font-medium" style={{ color: 'var(--text-tertiary)' }}>
                 Step {step === 'draft' ? '1' : '2'} of 2
               </span>
             )}
             <button
               type="button"
               onClick={onClose}
-              className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-full transition-colors"
+              style={{ color: 'var(--text-tertiary)' }}
+              onMouseEnter={e => {
+                e.currentTarget.style.color = 'var(--text-primary)'
+                e.currentTarget.style.backgroundColor = 'var(--bg-elevated)'
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.color = 'var(--text-tertiary)'
+                e.currentTarget.style.backgroundColor = ''
+              }}
               aria-label="Close"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -277,25 +299,28 @@ export default function SendQuoteModal({
           {/* Loading */}
           {step === 'loading' && (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
-              <svg className="animate-spin h-8 w-8 text-brand-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <svg className="animate-spin h-8 w-8" style={{ color: 'var(--orange-primary)' }} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
-              <p className="text-sm text-slate-500">Preparing email draft…</p>
+              <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Preparing email draft…</p>
             </div>
           )}
 
           {/* Error */}
           {step === 'error' && (
             <div className="flex flex-col items-center justify-center py-16 px-6 text-center gap-3">
-              <svg className="w-10 h-10 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <svg className="w-10 h-10" style={{ color: 'var(--status-red)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-              <p className="text-sm text-red-600 font-medium">{loadError}</p>
+              <p className="text-[13px] font-medium" style={{ color: 'var(--status-red)' }}>{loadError}</p>
               <button
                 type="button"
                 onClick={onClose}
-                className="mt-2 px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                className="mt-2 px-4 py-2 text-[13px] font-medium rounded-lg transition-colors"
+                style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
+                onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-elevated)')}
+                onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
               >
                 Close
               </button>
@@ -307,7 +332,7 @@ export default function SendQuoteModal({
             <div className="px-5 py-5 space-y-4">
               {/* To */}
               <div>
-                <label htmlFor="send-to" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label htmlFor="send-to" className="block text-[11px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--text-tertiary)' }}>
                   To
                 </label>
                 <input
@@ -316,23 +341,35 @@ export default function SendQuoteModal({
                   value={draftTo}
                   onChange={(e) => setDraftTo(e.target.value)}
                   placeholder="client@example.com"
-                  className="w-full px-3 py-2 text-sm text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+                  className="w-full px-3 py-2 text-[13px] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--orange-primary)] focus:border-transparent"
+                  style={{
+                    color: 'var(--text-primary)',
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--bg-border)',
+                  }}
                 />
               </div>
 
               {/* Subject */}
               <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label className="block text-[11px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--text-tertiary)' }}>
                   Subject
                 </label>
-                <p className="px-3 py-2 text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg select-text">
+                <p
+                  className="px-3 py-2 text-[13px] rounded-lg select-text"
+                  style={{
+                    color: 'var(--text-secondary)',
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--bg-border)',
+                  }}
+                >
                   {draftSubject}
                 </p>
               </div>
 
               {/* Body */}
               <div>
-                <label htmlFor="send-body" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                <label htmlFor="send-body" className="block text-[11px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--text-tertiary)' }}>
                   Message
                 </label>
                 <textarea
@@ -340,7 +377,12 @@ export default function SendQuoteModal({
                   value={draftBody}
                   onChange={(e) => setDraftBody(e.target.value)}
                   rows={12}
-                  className="w-full px-3 py-2 text-sm text-slate-900 font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent resize-y leading-relaxed"
+                  className="w-full px-3 py-2 text-[13px] font-mono rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--orange-primary)] focus:border-transparent resize-y leading-relaxed"
+                  style={{
+                    color: 'var(--text-primary)',
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--bg-border)',
+                  }}
                 />
               </div>
             </div>
@@ -350,18 +392,21 @@ export default function SendQuoteModal({
           {(step === 'confirm' || step === 'sending') && (
             <div className="px-5 py-6 space-y-5">
               {/* Sending to */}
-              <div className="flex items-center gap-2.5 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <div
+                className="flex items-center gap-2.5 p-3 rounded-lg"
+                style={{ backgroundColor: 'rgba(76,175,80,0.1)', border: '1px solid rgba(76,175,80,0.25)' }}
+              >
+                <svg className="w-5 h-5 flex-shrink-0" style={{ color: 'var(--status-green)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-green-700 uppercase tracking-wide">Sending to</p>
-                  <p className="text-sm font-medium text-green-900 truncate">{draftTo}</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-green)' }}>Sending to</p>
+                  <p className="text-[13px] font-medium truncate" style={{ color: 'var(--status-green)' }}>{draftTo}</p>
                 </div>
               </div>
 
               {/* Explanation */}
-              <div className="space-y-3 text-sm text-slate-600 leading-relaxed">
+              <div className="space-y-3 text-[13px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                 <p>
                   This will send the quote from your WorkA account. The client will receive it immediately.
                 </p>
@@ -371,9 +416,12 @@ export default function SendQuoteModal({
               </div>
 
               {/* Subject preview */}
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Subject</p>
-                <p className="text-sm text-slate-700">{draftSubject}</p>
+              <div
+                className="p-3 rounded-lg"
+                style={{ backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+              >
+                <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--text-tertiary)' }}>Subject</p>
+                <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{draftSubject}</p>
               </div>
             </div>
           )}
@@ -381,11 +429,17 @@ export default function SendQuoteModal({
 
         {/* ── Footer / Actions ────────────────────────────────────────── */}
         {step === 'draft' && (
-          <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{ borderTop: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+          >
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors"
+              style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
+              onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-elevated)')}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
             >
               Cancel
             </button>
@@ -393,7 +447,10 @@ export default function SendQuoteModal({
               type="button"
               onClick={() => setStep('confirm')}
               disabled={!draftTo.trim()}
-              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2 text-[13px] font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}
+              onMouseEnter={e => { if (draftTo.trim()) e.currentTarget.style.opacity = '0.9' }}
+              onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
             >
               Looks good
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
@@ -404,12 +461,18 @@ export default function SendQuoteModal({
         )}
 
         {(step === 'confirm' || step === 'sending') && (
-          <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 flex-shrink-0 bg-white">
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{ borderTop: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+          >
             <button
               type="button"
               onClick={() => setStep('draft')}
               disabled={step === 'sending'}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-4 py-2 text-[13px] font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
+              onMouseEnter={e => { if (step !== 'sending') e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
@@ -420,7 +483,10 @@ export default function SendQuoteModal({
               type="button"
               onClick={handleConfirmSend}
               disabled={step === 'sending'}
-              className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2 text-[13px] font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}
+              onMouseEnter={e => { if (step !== 'sending') e.currentTarget.style.opacity = '0.9' }}
+              onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
             >
               {step === 'sending' ? (
                 <>

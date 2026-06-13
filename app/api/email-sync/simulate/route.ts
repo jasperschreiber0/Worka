@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import type { ParseResponse } from '../parse/route'
 import {
   matchJobToEmail,
@@ -116,11 +117,12 @@ export async function POST(
 ): Promise<NextResponse<ParseResponse | { error: string }>> {
   try {
     const body = (await request.json()) as SimulateRequestBody
-    const { builder_id, scenario } = body
-
+    const builder_id = await getAuthenticatedBuilderId()
     if (!builder_id) {
-      return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
+
+    const { scenario } = body
 
     const validScenarios: SimulateScenario[] = [
       'quote_acceptance',

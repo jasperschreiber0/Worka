@@ -20,13 +20,17 @@ function StepDots({ current, total }: { current: number; total: number }) {
       {Array.from({ length: total }).map((_, i) => (
         <div
           key={i}
-          className={`rounded-full transition-all duration-300 ${
-            i < current
-              ? 'w-2 h-2 bg-brand-400'
+          className="rounded-full transition-all duration-300"
+          style={{
+            width: i === current ? '24px' : '8px',
+            height: '8px',
+            backgroundColor: i < current
+              ? 'var(--orange-primary)'
               : i === current
-              ? 'w-6 h-2 bg-brand-500'
-              : 'w-2 h-2 bg-slate-200'
-          }`}
+              ? 'var(--orange-primary)'
+              : 'var(--bg-border)',
+            opacity: i < current ? 0.6 : 1,
+          }}
         />
       ))}
     </div>
@@ -49,29 +53,32 @@ function StepWelcome({
       <StepDots current={0} total={3} />
 
       <div className="flex-1">
-        <p className="text-xs font-semibold text-brand-600 uppercase tracking-wide mb-2">
+        <p style={{ color: 'var(--orange-primary)' }} className="text-xs font-semibold uppercase tracking-wide mb-2">
           You&apos;ve been invited
         </p>
-        <h1 className="text-2xl font-bold text-slate-900 mb-2 leading-tight">
+        <h1 style={{ color: 'var(--text-primary)' }} className="text-2xl font-bold mb-2 leading-tight">
           Hi {invite.worker_name.split(' ')[0]}!
         </h1>
-        <p className="text-slate-500 text-sm leading-relaxed mb-6">
-          <span className="font-semibold text-slate-700">{invite.builder_name}</span> from{' '}
+        <p style={{ color: 'var(--text-secondary)' }} className="text-sm leading-relaxed mb-6">
+          <span style={{ color: 'var(--text-primary)' }} className="font-semibold">{invite.builder_name}</span> from{' '}
           {invite.builder_company} has added you to their WorkA crew as a{' '}
-          <span className="font-semibold text-slate-700">{invite.role}</span>.
+          <span style={{ color: 'var(--text-primary)' }} className="font-semibold">{invite.role}</span>.
         </p>
 
         {/* Job card */}
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-8">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+        <div
+          style={{ backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+          className="rounded-xl p-4 mb-8"
+        >
+          <p style={{ color: 'var(--text-secondary)' }} className="text-xs font-semibold uppercase tracking-wide mb-1">
             First job
           </p>
-          <p className="text-base font-bold text-slate-900">{invite.job_address}</p>
-          <p className="text-sm text-slate-500">{invite.job_ref}</p>
+          <p style={{ color: 'var(--text-primary)' }} className="text-base font-bold">{invite.job_address}</p>
+          <p style={{ color: 'var(--text-secondary)' }} className="text-sm">{invite.job_ref}</p>
         </div>
 
         <div className="mb-6">
-          <label htmlFor="worker-name" className="block text-sm font-medium text-slate-700 mb-1">
+          <label htmlFor="worker-name" style={{ color: 'var(--text-primary)' }} className="block text-sm font-medium mb-1">
             Confirm your name
           </label>
           <input
@@ -107,15 +114,15 @@ function StepPhone({ onNext }: { onNext: (phone: string) => void }) {
       <StepDots current={1} total={3} />
 
       <div className="flex-1">
-        <h2 className="text-2xl font-bold text-slate-900 mb-2 leading-tight">
+        <h2 style={{ color: 'var(--text-primary)' }} className="text-2xl font-bold mb-2 leading-tight">
           Add your mobile
         </h2>
-        <p className="text-slate-500 text-sm leading-relaxed mb-8">
+        <p style={{ color: 'var(--text-secondary)' }} className="text-sm leading-relaxed mb-8">
           Your builder can reach you when plans change on site. Optional — you can skip this.
         </p>
 
         <div className="mb-6">
-          <label htmlFor="phone" className="block text-sm font-medium text-slate-700 mb-1">
+          <label htmlFor="phone" style={{ color: 'var(--text-primary)' }} className="block text-sm font-medium mb-1">
             Mobile number
           </label>
           <input
@@ -142,7 +149,8 @@ function StepPhone({ onNext }: { onNext: (phone: string) => void }) {
         <button
           type="button"
           onClick={() => onNext('')}
-          className="w-full py-3 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+          className="w-full py-3 text-sm transition-opacity hover:opacity-70"
+          style={{ color: 'var(--text-secondary)' }}
         >
           Skip for now
         </button>
@@ -160,9 +168,13 @@ function StepDone({ name, invite }: { name: string; invite: DemoWorkerInvite }) 
   return (
     <div className="flex flex-col flex-1 items-center justify-center text-center">
       {/* Success icon */}
-      <div className="w-20 h-20 rounded-full bg-green-100 flex items-center justify-center mb-6">
+      <div
+        className="w-20 h-20 rounded-full flex items-center justify-center mb-6"
+        style={{ backgroundColor: 'rgba(76,175,80,0.15)' }}
+      >
         <svg
-          className="w-10 h-10 text-green-600"
+          style={{ color: 'var(--status-green)' }}
+          className="w-10 h-10"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -173,15 +185,15 @@ function StepDone({ name, invite }: { name: string; invite: DemoWorkerInvite }) 
         </svg>
       </div>
 
-      <h2 className="text-2xl font-bold text-slate-900 mb-2">
+      <h2 style={{ color: 'var(--text-primary)' }} className="text-2xl font-bold mb-2">
         You&apos;re in, {firstName}!
       </h2>
-      <p className="text-slate-500 text-sm leading-relaxed mb-2">
+      <p style={{ color: 'var(--text-secondary)' }} className="text-sm leading-relaxed mb-2">
         Welcome to {invite.builder_company}&apos;s crew.
       </p>
-      <p className="text-slate-400 text-sm mb-10">
+      <p style={{ color: 'var(--text-secondary)' }} className="text-sm mb-10">
         Your first site is{' '}
-        <span className="font-semibold text-slate-600">{invite.job_address}</span>.
+        <span style={{ color: 'var(--text-primary)' }} className="font-semibold">{invite.job_address}</span>.
       </p>
 
       <button
@@ -211,12 +223,13 @@ export default function JoinFlow({ invite }: JoinFlowProps) {
   }
 
   return (
-    <div className="min-h-screen bg-white flex flex-col px-6 pt-safe">
+    <div style={{ backgroundColor: 'var(--bg-shell)' }} className="min-h-screen flex flex-col px-6 pt-safe">
       {/* ── Logo bar ────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-2 py-5 mb-6">
         <div className="w-8 h-8 rounded-lg bg-brand-500 flex items-center justify-center">
           <svg
-            className="w-4 h-4 text-white"
+            style={{ color: '#ffffff' }}
+            className="w-4 h-4"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -230,7 +243,7 @@ export default function JoinFlow({ invite }: JoinFlowProps) {
             />
           </svg>
         </div>
-        <span className="text-lg font-bold text-slate-900 tracking-tight">WorkA</span>
+        <span style={{ color: 'var(--text-primary)' }} className="text-lg font-bold tracking-tight">WorkA</span>
       </div>
 
       {/* ── Step content ─────────────────────────────────────────────────── */}

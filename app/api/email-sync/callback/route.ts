@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -76,16 +77,20 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const state = searchParams.get('state')
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
 
-  // Parse state: builder_id:provider
-  if (!state || !state.includes(':')) {
-    return NextResponse.redirect(`${appUrl}/settings/email?error=invalid_state`)
+  // The connection is bound to the builder whose session handles the
+  // callback — never to an identity carried in the (forgeable) state param.
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.redirect(`${appUrl}/login?next=/settings/email`)
   }
 
-  const colonIdx = state.indexOf(':')
-  const builder_id = state.slice(0, colonIdx)
-  const provider = state.slice(colonIdx + 1) as 'gmail' | 'outlook'
+  // State carries only the provider (legacy "builder:provider" still parses)
+  const provider = (state?.includes(':') ? state.slice(state.indexOf(':') + 1) : state) as
+    | 'gmail'
+    | 'outlook'
+    | null
 
-  if (!['gmail', 'outlook'].includes(provider)) {
+  if (!provider || !['gmail', 'outlook'].includes(provider)) {
     return NextResponse.redirect(`${appUrl}/settings/email?error=invalid_provider`)
   }
 

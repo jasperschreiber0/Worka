@@ -1,16 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import type { PermissionRole } from '@/lib/auth/role-guard'
-import OverviewTab from '@/components/job/tabs/OverviewTab'
-import QuoteTab from '@/components/job/tabs/QuoteTab'
-import VariationsTab from '@/components/job/tabs/VariationsTab'
-import InvoicesTab from '@/components/job/tabs/InvoicesTab'
-import FilesTab from '@/components/job/tabs/FilesTab'
-import CommsTab from '@/components/job/tabs/CommsTab'
-import ProofTab from '@/components/job/tabs/ProofTab'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
+import ProofTab from '@/components/job/tabs/ProofTab'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -19,13 +13,6 @@ export interface ActiveJob {
   address: string
   status: string
   client_name?: string
-}
-
-type TabId = 'overview' | 'quote' | 'variations' | 'invoices' | 'files' | 'comms' | 'proof'
-
-interface Tab {
-  id: TabId
-  label: string
 }
 
 export interface JobSnapshotPanelProps {
@@ -39,66 +26,149 @@ export interface JobSnapshotPanelProps {
   onUploadPlans?: (job: ActiveJob) => void
   onAddInvoice?: (jobId: string) => void
   onJobActivated?: (jobId: string) => void
+  onAddTask?: (jobAddress: string) => void
 }
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const TABS: Tab[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'quote', label: 'Quote' },
-  { id: 'variations', label: 'Variations' },
-  { id: 'invoices', label: 'Invoices' },
-  { id: 'files', label: 'Files' },
-  { id: 'comms', label: 'Comms' },
-  { id: 'proof', label: 'Proof' },
-]
-
-function capitalise(str: string): string {
-  if (!str) return str
-  return str.charAt(0).toUpperCase() + str.slice(1)
-}
-
-// ─── Skeleton placeholder ─────────────────────────────────────────────────────
-
-function SkeletonSection() {
-  return (
-    <div className="p-4 space-y-4">
-      {/* Header skeleton */}
-      <div className="h-6 w-32 bg-slate-200 rounded animate-pulse" />
-      {/* Content skeletons */}
-      <div className="space-y-3">
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-4/5 bg-slate-200 rounded animate-pulse" />
-      </div>
-      {/* Second block */}
-      <div className="h-6 w-24 bg-slate-200 rounded animate-pulse mt-6" />
-      <div className="space-y-3">
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-3/4 bg-slate-200 rounded animate-pulse" />
-        <div className="h-4 w-full bg-slate-200 rounded animate-pulse" />
-      </div>
-    </div>
-  )
-}
-
-// ─── Component ────────────────────────────────────────────────────────────────
-
-// ─── Activation modal state ───────────────────────────────────────────────────
 
 interface ActivationModalState {
   isOpen: boolean
   quote: JobSnapshot['quote'] | null
 }
 
-export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', builderId, onViewQuote, onVariationApprove, onComposeEmail, onUploadPlans, onAddInvoice, onJobActivated }: JobSnapshotPanelProps) {
-  const [activeTab, setActiveTab] = useState<TabId>('overview')
+// ─── Count-up hook ────────────────────────────────────────────────────────────
+
+function useCountUp(target: number | null | undefined, duration = 600): number | null {
+  const [value, setValue] = useState<number | null>(null)
+  const frameRef = useRef<number | null>(null)
+  const prevTargetRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (target == null) { setValue(null); return }
+    if (target === prevTargetRef.current) return
+    prevTargetRef.current = target
+
+    const start = Date.now()
+    const from = 0
+    const step = () => {
+      const elapsed = Date.now() - start
+      const progress = Math.min(elapsed / duration, 1)
+      const eased = 1 - Math.pow(1 - progress, 3) // ease-out-cubic
+      setValue(Math.round(from + (target - from) * eased))
+      if (progress < 1) frameRef.current = requestAnimationFrame(step)
+    }
+    frameRef.current = requestAnimationFrame(step)
+    return () => { if (frameRef.current != null) cancelAnimationFrame(frameRef.current) }
+  }, [target, duration])
+
+  return value
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatAUD(amount: number | null | undefined): string {
+  if (amount == null) return '—'
+  return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
+}
+
+function getInitials(name: string): string {
+  return name
+    .split(' ')
+    .map((w) => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase()
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+const SECTION_LABEL_STYLE: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
+  color: 'var(--text-tertiary)',
+  marginBottom: 10,
+}
+
+const HAIRLINE: React.CSSProperties = {
+  borderTop: '0.5px solid var(--bg-border)',
+}
+
+const CARD_STYLE: React.CSSProperties = {
+  backgroundColor: 'var(--bg-elevated)',
+  borderRadius: 6,
+  padding: '10px 12px',
+}
+
+function SectionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={SECTION_LABEL_STYLE}>{label}</div>
+      {children}
+    </div>
+  )
+}
+
+function SkeletonPanel() {
+  return (
+    <div style={{ padding: '16px' }}>
+      {[1, 2, 3].map((i) => (
+        <div key={i} style={{ marginBottom: 24 }}>
+          <div style={{ height: 10, width: 64, borderRadius: 4, backgroundColor: 'var(--bg-elevated)', marginBottom: 10 }} className="animate-pulse" />
+          <div style={{ ...CARD_STYLE, padding: '12px' }}>
+            <div style={{ height: 14, borderRadius: 4, backgroundColor: 'var(--bg-border)', marginBottom: 8 }} className="animate-pulse" />
+            <div style={{ height: 14, width: '70%', borderRadius: 4, backgroundColor: 'var(--bg-border)' }} className="animate-pulse" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ─── Aggregate pulse (no-job state) ──────────────────────────────────────────
+
+interface AggregatePulse {
+  active_jobs: number
+  pipeline_value: number
+  overdue_invoice_total: number
+  pending_variations: number
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export default function JobSnapshotPanel({
+  job,
+  onClose,
+  onViewQuote,
+  onComposeEmail,
+  onUploadPlans,
+  onJobActivated,
+  onAddTask,
+}: JobSnapshotPanelProps) {
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [activationModal, setActivationModal] = useState<ActivationModalState>({ isOpen: false, quote: null })
   const [activatedJobStatus, setActivatedJobStatus] = useState<string | null>(null)
+  const [pulse, setPulse] = useState<AggregatePulse | null>(null)
 
-  // Fetch snapshot when job changes
+  // Fetch aggregate pulse once for the no-job empty state
+  useEffect(() => {
+    if (pulse) return
+    fetch('/api/dashboard')
+      .then(r => r.json())
+      .then((data: { stats?: { active_jobs?: number; pipeline_value?: number; overdue_invoice_total?: number; pending_variations?: number } }) => {
+        if (data.stats) {
+          setPulse({
+            active_jobs: data.stats.active_jobs ?? 0,
+            pipeline_value: data.stats.pipeline_value ?? 0,
+            overdue_invoice_total: data.stats.overdue_invoice_total ?? 0,
+            pending_variations: data.stats.pending_variations ?? 0,
+          })
+        }
+      })
+      .catch(() => {/* silent */})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     if (!job) {
       setSnapshot(null)
@@ -116,199 +186,628 @@ export default function JobSnapshotPanel({ job, onClose, userRole = 'owner', bui
       })
   }, [job?.id])
 
-  // Reset to overview tab when job changes
   useEffect(() => {
-    setActiveTab('overview')
     setActivatedJobStatus(null)
   }, [job?.id])
 
-  // Handler: open activation modal from QuoteTab
-  const handleActivateJob = useCallback((quoteId: string) => {
-    if (!snapshot) return
-    const quote = snapshot.quote
-    if (!quote || quote.id !== quoteId) return
-    setActivationModal({ isOpen: true, quote })
-  }, [snapshot])
+  const handleActivated = useCallback(
+    (result: ActivationResult) => {
+      setActivationModal({ isOpen: false, quote: null })
+      setActivatedJobStatus('active')
+      setSnapshot((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          job: { ...prev.job, status: 'active' },
+          quote: prev.quote ? { ...prev.quote, status: 'approved' } : prev.quote,
+        }
+      })
+      onJobActivated?.(result.job.id)
+    },
+    [onJobActivated],
+  )
 
-  // Handler: job was activated successfully
-  const handleActivated = useCallback((result: ActivationResult) => {
-    setActivationModal({ isOpen: false, quote: null })
-    setActivatedJobStatus('active')
-    // Update the snapshot's job status locally so the header badge updates
-    setSnapshot((prev) => {
-      if (!prev) return prev
-      return {
-        ...prev,
-        job: { ...prev.job, status: 'active' },
-        quote: prev.quote
-          ? { ...prev.quote, status: 'approved' }
-          : prev.quote,
-      }
-    })
-    onJobActivated?.(result.job.id)
-  }, [onJobActivated])
+  // ── Derived data ──────────────────────────────────────────────────────────
 
-  // Render the active tab content
-  function renderTabContent() {
-    if (loading || !snapshot) {
-      return <SkeletonSection />
-    }
+  const displayStatus = activatedJobStatus ?? job?.status ?? ''
 
-    switch (activeTab) {
-      case 'overview':
-        return <OverviewTab overview={snapshot.overview} job={snapshot.job} />
-      case 'quote':
-        return (
-          <QuoteTab
-            quote={snapshot.quote}
-            onViewQuote={onViewQuote ?? (() => {})}
-            onActivateJob={handleActivateJob}
-          />
-        )
-      case 'variations':
-        return (
-          <VariationsTab
-            variations={snapshot.variations}
-            jobAddress={snapshot.job.address}
-            userRole={userRole}
-            builderId={builderId}
-            onApprove={onVariationApprove}
-            onReject={() => {}}
-          />
-        )
-      case 'invoices':
-        return (
-          <InvoicesTab
-            invoices={snapshot.invoices}
-            onAddInvoice={job && onAddInvoice ? () => onAddInvoice(job.id) : undefined}
-          />
-        )
-      case 'files':
-        return (
-          <FilesTab
-            files={snapshot.files}
-            onUploadPlans={job && onUploadPlans ? () => onUploadPlans(job) : undefined}
-          />
-        )
-      case 'comms':
-        return (
-          <CommsTab
-            comms={snapshot.comms}
-            onComposeEmail={job && onComposeEmail ? () => onComposeEmail(job.id) : undefined}
-          />
-        )
-      case 'proof':
-        return job ? <ProofTab jobId={job.id} /> : <SkeletonSection />
-      default:
-        return <SkeletonSection />
-    }
-  }
+  const statusColor =
+    displayStatus === 'active'
+      ? 'var(--status-green)'
+      : displayStatus === 'quoted'
+        ? 'var(--status-blue)'
+        : displayStatus === 'quoting'
+          ? 'var(--status-amber)'
+          : 'var(--text-secondary)'
+
+  const statusBg =
+    displayStatus === 'active'
+      ? 'rgba(76,175,80,0.12)'
+      : displayStatus === 'quoted'
+        ? 'rgba(33,150,243,0.12)'
+        : displayStatus === 'quoting'
+          ? 'rgba(255,152,0,0.12)'
+          : 'var(--bg-elevated)'
+
+  const pendingVariations = snapshot?.variations.filter((v) => v.status === 'pending') ?? []
+  const overdueInvoices = snapshot?.invoices.filter((i) => i.status === 'overdue') ?? []
+  const hasPending = pendingVariations.length > 0 || overdueInvoices.length > 0
+
+  const paidSentInvoiceTotal = (snapshot?.invoices ?? [])
+    .filter((i) => i.status === 'paid' || i.status === 'sent')
+    .reduce((sum, i) => sum + i.amount, 0)
+
+  const variationsTotal = (snapshot?.variations ?? []).reduce((sum, v) => sum + v.amount, 0)
+
+  const quoteTotalCost = snapshot?.quote?.total_cost ?? null
+
+  const invoicedPct =
+    quoteTotalCost && quoteTotalCost > 0 ? Math.min(100, Math.round((paidSentInvoiceTotal / quoteTotalCost) * 100)) : null
+
+  const recentComms = (snapshot?.comms.messages ?? []).slice(0, 3)
+
+  // Animated count-up for financial figures
+  const animatedContract = useCountUp(quoteTotalCost)
+  const animatedInvoiced = useCountUp(paidSentInvoiceTotal)
+  const animatedVariations = useCountUp(variationsTotal > 0 ? variationsTotal : null)
+
+  const STAGES = ['Quoting', 'Quoted', 'Active', 'Complete']
+  const stageMap: Record<string, number> = { quoting: 0, quoted: 1, active: 2, complete: 3, archived: 3 }
+  const currentStageIndex = stageMap[displayStatus] ?? 0
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  const actions: { label: string; handler: () => void }[] = []
+  if (onComposeEmail && job) actions.push({ label: 'Compose email', handler: () => onComposeEmail(job.id) })
+  if (onViewQuote && snapshot?.quote?.id) actions.push({ label: 'View quote', handler: () => onViewQuote(snapshot.quote!.id!) })
+  if (onUploadPlans && job) actions.push({ label: 'Upload plans', handler: () => onUploadPlans(job) })
+  if (onAddTask && job) actions.push({ label: 'Add task', handler: () => onAddTask(job.address) })
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-full">
-      {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 px-4 pt-4 pb-3 border-b border-slate-200 bg-white">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-slate-900 truncate">
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', backgroundColor: 'var(--bg-shell)' }}>
+      {/* ── HEADER ─────────────────────────────────────────────────────────── */}
+      <div
+        style={{
+          flexShrink: 0,
+          padding: '14px 16px 12px',
+          borderBottom: '0.5px solid var(--bg-border)',
+          backgroundColor: 'var(--bg-shell)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            {/* Eyebrow */}
+            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-tertiary)', marginBottom: 4 }}>
+              Job Snapshot
+            </div>
+            {/* Address */}
+            <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.2, marginBottom: 4 }}>
               {job?.address ?? 'No job selected'}
-            </h2>
-            <p className="text-sm text-slate-500 mt-0.5">
-              {job ? (
+            </div>
+            {/* Subtitle row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {job && (
                 <>
-                  {(() => {
-                    const displayStatus = activatedJobStatus ?? job.status
-                    return (
-                      <span
-                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium mr-1.5 ${
-                          displayStatus === 'active'
-                            ? 'bg-green-100 text-green-700'
-                            : displayStatus === 'quoted'
-                              ? 'bg-blue-100 text-blue-700'
-                              : displayStatus === 'quoting'
-                                ? 'bg-amber-100 text-amber-700'
-                                : 'bg-slate-100 text-slate-600'
-                        }`}
-                      >
-                        {capitalise(displayStatus)}
-                      </span>
-                    )
-                  })()}
-                  {job.client_name && <span>{job.client_name} job</span>}
+                  <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                    {[snapshot?.job.job_type, snapshot?.job.job_ref].filter(Boolean).join(' · ') || displayStatus}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      backgroundColor: statusBg,
+                      color: statusColor,
+                    }}
+                  >
+                    {displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1)}
+                  </span>
                 </>
-              ) : (
-                'Ask about a job to see details here'
               )}
-            </p>
+            </div>
           </div>
+          {/* Close button */}
           <button
             type="button"
             onClick={onClose}
-            className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
             aria-label="Close job snapshot"
+            style={{
+              flexShrink: 0,
+              width: 28,
+              height: 28,
+              borderRadius: 6,
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--text-tertiary)',
+            }}
+            onMouseOver={(e) => {
+              e.currentTarget.style.color = 'var(--text-secondary)'
+              e.currentTarget.style.backgroundColor = 'var(--bg-elevated)'
+            }}
+            onMouseOut={(e) => {
+              e.currentTarget.style.color = 'var(--text-tertiary)'
+              e.currentTarget.style.backgroundColor = 'transparent'
+            }}
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-              aria-hidden="true"
-            >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
       </div>
 
-      {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 border-b border-slate-200 bg-white px-4">
-        <div className="flex gap-0 overflow-x-auto scrollbar-hide -mb-px">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex-shrink-0 px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
-                activeTab === tab.id
-                  ? 'border-brand-500 text-brand-600'
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Content ─────────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto bg-slate-50">
-        {job ? (
-          renderTabContent()
-        ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
-            <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
-              <svg
-                className="w-6 h-6 text-slate-400"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                aria-hidden="true"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21"
-                />
-              </svg>
+      {/* ── SCROLLABLE BODY ─────────────────────────────────────────────────── */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px', paddingBottom: 0 }}>
+        {!job ? (
+          <div style={{ padding: '8px 0' }}>
+            {/* Aggregate pulse — shown when no job is in context */}
+            <div style={SECTION_LABEL_STYLE}>Today&apos;s Pulse</div>
+            {pulse ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 24 }}>
+                {[
+                  { label: 'Active jobs', value: String(pulse.active_jobs), color: 'var(--text-primary)' },
+                  {
+                    label: 'Pipeline',
+                    value: pulse.pipeline_value >= 1000
+                      ? `$${Math.round(pulse.pipeline_value / 1000)}k`
+                      : formatAUD(pulse.pipeline_value),
+                    color: 'var(--text-primary)',
+                  },
+                  {
+                    label: 'Overdue',
+                    value: pulse.overdue_invoice_total > 0
+                      ? `$${Math.round(pulse.overdue_invoice_total / 1000)}k`
+                      : '—',
+                    color: pulse.overdue_invoice_total > 0 ? 'var(--status-red)' : 'var(--text-tertiary)',
+                  },
+                  {
+                    label: 'Variations',
+                    value: pulse.pending_variations > 0 ? String(pulse.pending_variations) : '—',
+                    color: pulse.pending_variations > 0 ? 'var(--status-amber)' : 'var(--text-tertiary)',
+                  },
+                ].map(stat => (
+                  <div key={stat.label} style={{ ...CARD_STYLE, textAlign: 'center', padding: '12px 8px' }}>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: stat.color, lineHeight: 1 }}>{stat.value}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{stat.label}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ ...CARD_STYLE, height: 80, marginBottom: 24 }} className="animate-pulse" />
+            )}
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', textAlign: 'center', lineHeight: 1.6 }}>
+              Ask WorkA about a job to see its details here — or tap any job in chat.
             </div>
-            <p className="text-sm text-slate-500">Ask about a specific job to see its details here.</p>
           </div>
+        ) : loading ? (
+          <SkeletonPanel />
+        ) : !snapshot ? (
+          <div style={{ textAlign: 'center', padding: '48px 16px', color: 'var(--text-tertiary)', fontSize: 13 }}>
+            Job details not available yet.
+          </div>
+        ) : (
+          <>
+            {/* ── 1. CLIENT ───────────────────────────────────────────────── */}
+            {snapshot.job.client_name && (
+              <SectionGroup label="Client">
+                <div style={{ ...CARD_STYLE, display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {/* Avatar */}
+                  <div
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: '50%',
+                      backgroundColor: '#2c3e50',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: '#ffffff',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {getInitials(snapshot.job.client_name)}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{snapshot.job.client_name}</div>
+                    {snapshot.job.client_email && (
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                          <rect x="2" y="4" width="20" height="16" rx="2" />
+                          <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+                        </svg>
+                        {snapshot.job.client_email}
+                      </div>
+                    )}
+                    {snapshot.job.client_phone && (
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                          <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.72 12 19.79 19.79 0 0 1 1.61 3.39 2 2 0 0 1 3.58 1.21h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 5.59 5.59l1.24-1.24a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 21.58 15z" />
+                        </svg>
+                        {snapshot.job.client_phone}
+                      </div>
+                    )}
+                    {/* Feature 15: Last contact date */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Last contact</span>
+                      {snapshot.comms.messages.length > 0 ? (
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{snapshot.comms.messages[0].timestamp}</span>
+                      ) : (
+                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>No contact yet</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </SectionGroup>
+            )}
+
+            {/* ── 2. FINANCIALS — hidden when no financial data exists yet ── */}
+            {(quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
+            <SectionGroup label="Financials">
+              <div style={CARD_STYLE}>
+                {/* Contract row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Contract</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedContract)}</span>
+                </div>
+                {/* Variations row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Variations</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: variationsTotal > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>
+                    {animatedVariations != null ? formatAUD(animatedVariations) : '—'}
+                  </span>
+                </div>
+                {/* Invoiced row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: quoteTotalCost ? 12 : 0 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoiced</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedInvoiced)}</span>
+                </div>
+                {/* Feature 18: Margin health */}
+                {quoteTotalCost != null && quoteTotalCost > 0 && snapshot.overview.spend_to_date != null && (() => {
+                  const marginPct = (quoteTotalCost - snapshot.overview.spend_to_date) / quoteTotalCost * 100
+                  const marginColor = marginPct >= 15 ? 'var(--status-green)' : marginPct >= 8 ? 'var(--status-amber)' : 'var(--status-red)'
+                  const marginLabel = marginPct >= 15 ? 'Healthy' : marginPct >= 8 ? 'Watch' : 'At risk'
+                  return (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Margin</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 12, fontWeight: 500, color: marginColor }}>{Math.round(marginPct)}%</span>
+                        <span style={{ fontSize: 10, fontWeight: 600, color: marginColor, backgroundColor: 'transparent', border: `1px solid ${marginColor}`, borderRadius: 4, padding: '1px 5px' }}>{marginLabel}</span>
+                      </div>
+                    </div>
+                  )
+                })()}
+                {/* Progress bar */}
+                {quoteTotalCost != null && quoteTotalCost > 0 && (
+                  <>
+                    <div
+                      style={{
+                        height: 3,
+                        borderRadius: 2,
+                        backgroundColor: 'var(--bg-border)',
+                        overflow: 'hidden',
+                        marginBottom: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: '100%',
+                          width: `${invoicedPct ?? 0}%`,
+                          backgroundColor: 'var(--orange-primary)',
+                          borderRadius: 2,
+                        }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{invoicedPct ?? 0}% invoiced</span>
+                      <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>
+                        {formatAUD(quoteTotalCost - paidSentInvoiceTotal)} remaining
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </SectionGroup>
+            ) : null}
+
+            {/* ── 3. TIMELINE ─────────────────────────────────────────────── */}
+            <SectionGroup label="Timeline">
+              <div style={{ ...CARD_STYLE, display: 'flex', gap: 0, marginBottom: (['quoting', 'quoted', 'active'].includes(displayStatus)) ? 8 : 0 }}>
+                {STAGES.map((stage, idx) => {
+                  const isComplete = idx < currentStageIndex
+                  const isCurrent = idx === currentStageIndex
+                  const isPending = idx > currentStageIndex
+                  return (
+                    <div key={stage} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative' }}>
+                      {/* Connector line */}
+                      {idx < STAGES.length - 1 && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 4,
+                            left: '50%',
+                            width: '100%',
+                            height: 1,
+                            backgroundColor: isComplete || isCurrent ? 'var(--orange-primary)' : 'var(--bg-border)',
+                            opacity: isComplete ? 0.5 : isCurrent ? 1 : 1,
+                          }}
+                        />
+                      )}
+                      {/* Dot */}
+                      <div
+                        style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: '50%',
+                          backgroundColor: isComplete
+                            ? 'var(--status-green)'
+                            : isCurrent
+                              ? 'var(--orange-primary)'
+                              : 'transparent',
+                          border: isPending ? '1px solid var(--bg-border)' : 'none',
+                          position: 'relative',
+                          zIndex: 1,
+                          marginBottom: 6,
+                        }}
+                      />
+                      {/* Label */}
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: isCurrent ? 500 : 400,
+                          color: isComplete
+                            ? 'var(--text-secondary)'
+                            : isCurrent
+                              ? 'var(--text-primary)'
+                              : 'var(--bg-ghost, var(--text-tertiary))',
+                          textAlign: 'center',
+                        }}
+                      >
+                        {stage}
+                      </span>
+                      {isCurrent && (
+                        <span style={{ fontSize: 10, color: 'var(--orange-primary)', marginTop: 2 }}>← now</span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              {/* Next milestone callout — actionable label with timing */}
+              {(['quoting', 'quoted', 'active'] as string[]).includes(displayStatus) && (() => {
+                let nextLabel: string
+                let timing: string | null = null
+                if (displayStatus === 'quoting') {
+                  // If no quote exists yet, show upload CTA instead
+                  if (!snapshot?.quote && onUploadPlans && job) {
+                    return (
+                      <div style={{ padding: '4px 2px 8px' }}>
+                        <button
+                          type="button"
+                          onClick={() => onUploadPlans(job)}
+                          style={{
+                            width: '100%',
+                            padding: '10px 14px',
+                            backgroundColor: 'var(--orange-primary)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 8,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                          }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                          </svg>
+                          Upload plans to start quote
+                        </button>
+                      </div>
+                    )
+                  }
+                  nextLabel = 'Send quote'
+                  const qDeadline = snapshot?.job.quote_deadline
+                  if (qDeadline) {
+                    timing = qDeadline
+                  }
+                } else if (displayStatus === 'quoted') {
+                  nextLabel = 'Awaiting client approval'
+                  timing = snapshot?.quote?.sent_at ? `Sent ${snapshot.quote.sent_at}` : null
+                } else {
+                  // Active — find next unpaid invoice
+                  const nextInvoice = (snapshot?.invoices ?? []).find(i => i.status === 'sent' || i.status === 'draft')
+                  nextLabel = nextInvoice ? formatAUD(nextInvoice.amount) + ' invoice due' : 'Next invoice milestone'
+                  timing = nextInvoice?.due_date ?? null
+                }
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px' }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: 'var(--orange-primary)', flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{nextLabel}</span>
+                    {timing && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{timing}</span>}
+                  </div>
+                )
+              })()}
+            </SectionGroup>
+
+            {/* ── 4. PENDING ACTIONS ──────────────────────────────────────── */}
+            {hasPending && (
+              <SectionGroup label="Pending">
+                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
+                  {pendingVariations.map((v, idx) => (
+                    <div
+                      key={v.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '8px 12px',
+                        borderTop: idx === 0 ? 'none' : '0.5px solid var(--bg-border)',
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginRight: 6 }}>{v.variation_ref ?? 'VAR'}</span>
+                        <span style={{ fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {v.title}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', marginLeft: 8, flexShrink: 0 }}>{formatAUD(v.amount)}</span>
+                    </div>
+                  ))}
+                  {overdueInvoices.map((inv, idx) => (
+                    <div
+                      key={inv.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '8px 12px',
+                        borderTop: (pendingVariations.length > 0 || idx > 0) ? '0.5px solid var(--bg-border)' : 'none',
+                      }}
+                    >
+                      <div>
+                        <span style={{ fontSize: 10, color: 'var(--status-amber)', marginRight: 6 }}>OVERDUE</span>
+                        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoice due {inv.due_date}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', marginLeft: 8, flexShrink: 0 }}>{formatAUD(inv.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+              </SectionGroup>
+            )}
+
+            {/* ── 5. CREW ON SITE ─────────────────────────────────────────── */}
+            {snapshot.workers.length > 0 && (
+              <SectionGroup label="Crew on site">
+                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
+                  {snapshot.workers.map((w, idx) => (
+                    <div
+                      key={w.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '7px 12px',
+                        borderTop: idx === 0 ? 'none' : '0.5px solid var(--bg-border)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {/* Pulsing dot — workers are on the clock */}
+                        <span
+                          className="pulse-dot"
+                          style={{ backgroundColor: 'var(--status-green)', color: 'var(--status-green)' }}
+                          title="On site"
+                          aria-label="On site"
+                        />
+                        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{w.name}</span>
+                      </div>
+                      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{w.role}</span>
+                    </div>
+                  ))}
+                </div>
+              </SectionGroup>
+            )}
+
+            {/* ── 6. RECENT COMMS ─────────────────────────────────────────── */}
+            {recentComms.length > 0 && (
+              <SectionGroup label="Comms">
+                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
+                  {recentComms.map((msg, idx) => (
+                    <div
+                      key={msg.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 10,
+                        padding: '8px 12px',
+                        borderTop: idx === 0 ? 'none' : '0.5px solid var(--bg-border)',
+                      }}
+                    >
+                      {/* Dot */}
+                      <div
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          backgroundColor: idx === 0 ? 'var(--status-green)' : 'var(--text-tertiary)',
+                          marginTop: 3,
+                          flexShrink: 0,
+                        }}
+                      />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {msg.subject ?? msg.preview}
+                        </div>
+                        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 2 }}>{msg.timestamp}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </SectionGroup>
+            )}
+
+            {/* ── 7. PROOF TRAIL ──────────────────────────────────────────── */}
+            {job && (
+              <SectionGroup label="Proof trail">
+                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
+                  <ProofTab jobId={job.id} />
+                </div>
+              </SectionGroup>
+            )}
+
+            {/* Bottom spacing before sticky footer */}
+            <div style={{ height: 64 }} />
+          </>
         )}
       </div>
 
-      {/* ── Activation Modal ─────────────────────────────────────────────────── */}
+      {/* ── STICKY FOOTER ACTIONS ────────────────────────────────────────────── */}
+      {job && actions.length > 0 && (
+        <div
+          style={{
+            flexShrink: 0,
+            ...HAIRLINE,
+            backgroundColor: 'var(--bg-shell)',
+            padding: '10px 16px',
+            display: 'flex',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}
+        >
+          {actions.slice(0, 4).map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={action.handler}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                fontSize: 12,
+                color: 'var(--orange-primary)',
+                fontWeight: 500,
+              }}
+              onMouseOver={(e) => { e.currentTarget.style.opacity = '0.75' }}
+              onMouseOut={(e) => { e.currentTarget.style.opacity = '1' }}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── ACTIVATION MODAL ─────────────────────────────────────────────────── */}
       {activationModal.isOpen && activationModal.quote && job && (
         <ActivationModal
           isOpen={activationModal.isOpen}

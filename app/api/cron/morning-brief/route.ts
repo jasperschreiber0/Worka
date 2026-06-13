@@ -50,7 +50,13 @@ async function sendBriefEmail(resendApiKey: string, to: string, subject: string,
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   // ── Auth guard ─────────────────────────────────────────────────────────────
+  // Fail closed: when Supabase is configured (real builders, real emails) the
+  // endpoint requires a matching CRON_SECRET — a missing secret means no run.
   const cronSecret = process.env.CRON_SECRET
+  const isRealMode = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL)
+  if (isRealMode && !cronSecret) {
+    return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
+  }
   if (cronSecret && request.headers.get('authorization') !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }

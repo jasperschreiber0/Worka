@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,9 +48,7 @@ function relativeDate(isoString: string): string {
 export async function GET(
   request: NextRequest
 ): Promise<NextResponse<EmailSyncStatusResponse>> {
-  const { searchParams } = new URL(request.url)
-  const builder_id = searchParams.get('builder_id')
-
+  const builder_id = await getAuthenticatedBuilderId()
   if (!builder_id) {
     return NextResponse.json({
       connected: false,
@@ -59,7 +58,7 @@ export async function GET(
       is_active: false,
       emails_processed_today: 0,
       jobs_matched_today: 0,
-    })
+    }, { status: 401 })
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL

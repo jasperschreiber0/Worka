@@ -50,11 +50,18 @@ export const DEMO_ASSUMPTIONS: AssumptionItem[] = [
   },
 ]
 
-export const demoResolutionState = new Map<
-  string,
-  {
-    resolution_type: 'unresolved' | 'accepted' | 'adjusted' | 'excluded'
-    adjusted_quantity?: number
-    adjusted_unit?: string
-  }
->()
+type DemoResolution = {
+  resolution_type: 'unresolved' | 'accepted' | 'adjusted' | 'excluded'
+  adjusted_quantity?: number
+  adjusted_unit?: string
+}
+
+// Kept on globalThis so every route bundle shares one map — Next.js can give
+// each route its own module instance, which would silently fork the state.
+const globalForAssumptions = globalThis as unknown as {
+  __workaDemoResolutionState?: Map<string, DemoResolution>
+}
+
+export const demoResolutionState: Map<string, DemoResolution> =
+  globalForAssumptions.__workaDemoResolutionState ??
+  (globalForAssumptions.__workaDemoResolutionState = new Map())

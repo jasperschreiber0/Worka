@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE } from '@/lib/quote-demo'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
-
-interface ReviseRequestBody {
-  builder_id: string
-}
 
 // ─── Response shape ───────────────────────────────────────────────────────────
 
@@ -20,18 +17,12 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { quoteId } = params
-
-  let body: ReviseRequestBody
-  try {
-    body = await request.json() as ReviseRequestBody
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
-  }
-
-  if (!body.builder_id) {
-    return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
-  }
 
   if (quoteId === 'demo-quote-id') {
     // Demo mode: return a mock new version

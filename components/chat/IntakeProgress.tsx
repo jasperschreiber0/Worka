@@ -9,8 +9,9 @@ export interface IntakeProgressProps {
   jobId: string
   builderId: string
   filename: string
-  onComplete: (quoteId: string, assumptionCount: number) => void
-  onError: () => void
+  additionalFileIds?: string[]
+  onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
+  onError: (message?: string) => void
 }
 
 interface ProgressState {
@@ -30,11 +31,13 @@ const STAGE_LABELS: Record<string, string> = {
   uploading: 'Uploading plans',
   reading: 'Reading file',
   analysing: 'Analysing with AI',
+  retrieving_memory: 'Searching historical projects',
   extracting_site: 'Site works & concrete',
   extracting_framing: 'Framing quantities',
   extracting_roofing: 'Roofing',
   extracting_fitout: 'Fit-out & finishes',
-  extracting_electrical: 'Electrical & prelims',
+  extracting_elec: 'Electrical & prelims',
+  scope_intelligence: 'Scope intelligence',
   validating: 'Quantity validation',
   building_quote: 'Building draft quote',
 }
@@ -46,6 +49,7 @@ export default function IntakeProgress({
   jobId,
   builderId,
   filename,
+  additionalFileIds,
   onComplete,
   onError,
 }: IntakeProgressProps) {
@@ -57,15 +61,28 @@ export default function IntakeProgress({
   const [completedStages, setCompletedStages] = useState<CompletedStage[]>([])
   const [isDone, setIsDone] = useState(false)
   const [hasError, setHasError] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
 
   useEffect(() => {
-    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}`
+    const siblings = additionalFileIds && additionalFileIds.length > 0
+      ? `&siblings=${encodeURIComponent(additionalFileIds.join(','))}`
+      : ''
+    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}`
     const es = new EventSource(url)
     eventSourceRef.current = es
     let settled = false
+
+    const failOnce = (message?: string) => {
+      if (settled) return
+      settled = true
+      setHasError(true)
+      if (message) setErrorMessage(message)
+      es.close()
+      onError(message)
+    }
 
     es.addEventListener('progress', (e: MessageEvent) => {
       try {
@@ -97,6 +114,9 @@ export default function IntakeProgress({
           pct: number
           quote_id: string
           assumption_count: number
+          similar_projects?: unknown[]
+          scope_hints?: unknown[]
+          total_in_memory?: number
         }
 
         // Move last active stage to completed
@@ -116,34 +136,35 @@ export default function IntakeProgress({
         es.close()
 
         setTimeout(() => {
-          onComplete(data.quote_id, data.assumption_count)
+          onComplete(data.quote_id, data.assumption_count, {
+            similar_projects: data.similar_projects,
+            scope_hints: data.scope_hints,
+            total_in_memory: data.total_in_memory,
+          })
         }, 1000)
       } catch {
-        if (settled) return
-        settled = true
-        setHasError(true)
-        es.close()
-        onError()
+        failOnce()
       }
     })
 
-    es.addEventListener('error', () => {
-      if (settled) return
-      settled = true
-      setHasError(true)
-      es.close()
-      onError()
+    // Handles both server-emitted `event: error` (has .data) and
+    // EventSource connection failures (no .data).
+    es.addEventListener('error', (e: Event) => {
+      let message: string | undefined
+      const data = (e as MessageEvent).data as string | undefined
+      if (data) {
+        try { message = (JSON.parse(data) as { message?: string }).message } catch { /* ignore */ }
+      }
+      failOnce(message)
     })
 
     es.onerror = () => {
-      if (settled || es.readyState === EventSource.CLOSED) return
-      settled = true
-      setHasError(true)
-      es.close()
-      onError()
+      if (es.readyState === EventSource.CLOSED) return
+      failOnce()
     }
 
     return () => {
+      settled = true
       es.close()
     }
   }, [fileId, jobId, builderId, onComplete, onError])
@@ -151,9 +172,9 @@ export default function IntakeProgress({
   // ── Error state ────────────────────────────────────────────────────────────
   if (hasError) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-5 space-y-2">
+      <div className="rounded-xl border border-[rgba(244,67,54,0.3)] bg-[rgba(244,67,54,0.08)] px-4 py-5 space-y-2">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 rounded-full bg-[rgba(244,67,54,0.15)] flex items-center justify-center flex-shrink-0">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path
                 d="M8 5v3M8 11h.01M14 8A6 6 0 112 8a6 6 0 0112 0z"
@@ -164,10 +185,10 @@ export default function IntakeProgress({
               />
             </svg>
           </div>
-          <p className="text-sm font-semibold text-red-700">Processing failed</p>
+          <p className="text-sm font-semibold text-[#f44336]">Processing failed</p>
         </div>
-        <p className="text-sm text-red-600 pl-10">
-          Could not process <span className="font-medium">{filename}</span>. Please try again.
+        <p className="text-sm text-[#f44336] pl-10">
+          {errorMessage ?? <>Could not process <span className="font-medium">{filename}</span>. Please try again.</>}
         </p>
       </div>
     )
@@ -175,17 +196,17 @@ export default function IntakeProgress({
 
   // ── Main progress UI ───────────────────────────────────────────────────────
   return (
-    <div className="rounded-xl border border-slate-200 bg-white px-4 py-5 space-y-4">
+    <div className="rounded-xl border border-[#2e2e2e] bg-[#222222] px-4 py-5 space-y-4">
       {/* File name row */}
       <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-md bg-brand-50 border border-brand-100 flex items-center justify-center flex-shrink-0">
+        <div className="w-8 h-8 rounded-md bg-[rgba(255,107,43,0.13)] border border-[rgba(255,107,43,0.2)] flex items-center justify-center flex-shrink-0">
           <svg
             width="14"
             height="14"
             viewBox="0 0 24 24"
             fill="none"
             aria-hidden="true"
-            className="text-brand-500"
+            className="text-[#ff6b2b]"
           >
             <path
               d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
@@ -203,14 +224,19 @@ export default function IntakeProgress({
             />
           </svg>
         </div>
-        <p className="text-sm font-medium text-slate-800 truncate min-w-0">{filename}</p>
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium text-[#e0e0e0] truncate">{filename}</p>
+          {additionalFileIds && additionalFileIds.length > 0 && (
+            <p className="text-[11px] text-[#555555] mt-0.5">+ {additionalFileIds.length} more file{additionalFileIds.length !== 1 ? 's' : ''}</p>
+          )}
+        </div>
       </div>
 
       {/* Progress bar */}
       <div className="space-y-1.5">
-        <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+        <div className="h-2 w-full rounded-full bg-[#2a2a2a] overflow-hidden">
           <div
-            className="h-full rounded-full bg-brand-500 transition-all duration-500"
+            className="h-full rounded-full bg-[#ff6b2b] transition-all duration-500"
             style={{ width: `${progress.pct}%` }}
             role="progressbar"
             aria-valuenow={progress.pct}
@@ -220,27 +246,27 @@ export default function IntakeProgress({
           />
         </div>
         <div className="flex items-center justify-between">
-          <p className="text-xs text-slate-500 font-medium">{progress.pct}%</p>
+          <p className="text-[11px] text-[#555555] font-medium">{progress.pct}%</p>
         </div>
       </div>
 
       {/* Current stage message */}
       {!isDone ? (
-        <p className="text-sm font-semibold text-brand-600">{progress.message}</p>
+        <p className="text-[13px] font-semibold text-[#ff6b2b]">{progress.message}</p>
       ) : (
         <div className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+          <div className="w-5 h-5 rounded-full bg-[rgba(76,175,80,0.15)] flex items-center justify-center flex-shrink-0">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
               <path
                 d="M1.5 5L3.75 7.5L8.5 2.5"
-                stroke="#16a34a"
+                stroke="#4caf50"
                 strokeWidth="1.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
             </svg>
           </div>
-          <p className="text-sm font-semibold text-green-700">{progress.message}</p>
+          <p className="text-[13px] font-semibold text-[#4caf50]">{progress.message}</p>
         </div>
       )}
 
@@ -250,7 +276,7 @@ export default function IntakeProgress({
           {completedStages.map((s) => (
             <li
               key={s.stage}
-              className="flex items-center gap-2 text-sm text-slate-500 animate-fade-in"
+              className="flex items-center gap-2 text-[12px] text-[#555555] animate-fade-in"
             >
               <svg
                 width="12"
@@ -262,7 +288,7 @@ export default function IntakeProgress({
               >
                 <path
                   d="M2 6l2.5 2.5L10 3"
-                  stroke="#6366f1"
+                  stroke="#4caf50"
                   strokeWidth="1.5"
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -274,7 +300,7 @@ export default function IntakeProgress({
 
           {/* Active stage indicator */}
           {!isDone && (
-            <li className="flex items-center gap-2 text-sm font-semibold text-brand-500">
+            <li className="flex items-center gap-2 text-sm font-semibold text-[#ff6b2b]">
               <svg
                 width="12"
                 height="12"
