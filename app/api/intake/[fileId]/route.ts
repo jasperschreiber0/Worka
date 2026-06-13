@@ -276,6 +276,9 @@ STRICT OUTPUT RULE:
 - Start with { and end with }
 - All strings use double quotes. Unknown values are null — never omit a key.
 - pricing_type must be exactly: "measured", "pc_allowance", or "provisional_sum"
+- Maximum 12 items per trade category. If a trade has more, keep the 12 highest-value items and discard the rest.
+- Description strings must not contain newline characters — use a single line of text only.
+- Do not repeat items that are functionally identical — merge them into one with a combined quantity.
 
 Output this exact structure:
 {"line_items":[{"trade_category_id":2,"description":"Concrete slab — ground floor 125mm","quantity":112.0,"unit":"m²","dimensions_string":"14.2m × 7.9m = 112.2m²","confidence":88,"subcategory_code":"CONC-SLAB","pricing_type":"measured","source_ref":"A1.0","labour_cost":5600,"material_cost":8400,"subcontract_cost":null,"plant_cost":800}],"inferred_items":[{"trade_category_id":4,"description":"Roof tiling — concrete tiles","quantity":130.0,"unit":"m²","dimensions_string":null,"confidence":42,"subcategory_code":"ROOF-TILE","pricing_type":"provisional_sum","source_ref":null,"labour_cost":null,"material_cost":null,"subcontract_cost":9500,"plant_cost":null}],"missing_categories":["Electrical","Plumbing"],"confidence_summary":"Moderate — slab and framing scaled from plans; roofing and fit-out are professional estimates"}`
@@ -319,25 +322,58 @@ function tryExtractJson(raw: string): ParseResult {
   // Strip trailing commas before ] or } — common LLM formatting mistake
   text = text.replace(/,(\s*[}\]])/g, '$1')
 
+  const buildData = (parsed: Record<string, unknown>) => ({
+    line_items: Array.isArray(parsed.line_items) ? parsed.line_items : [],
+    inferred_items: Array.isArray(parsed.inferred_items) ? parsed.inferred_items : [],
+    missing_categories: Array.isArray(parsed.missing_categories)
+      ? parsed.missing_categories.filter((x: unknown) => typeof x === 'string')
+      : [],
+    confidence_summary: String(parsed.confidence_summary ?? ''),
+  })
+
+  // Pass 1: standard parse
   try {
     const parsed = JSON.parse(text)
-    if (!parsed || typeof parsed !== 'object') return fail('not_an_object', false, had_fence)
-    return {
-      data: {
-        line_items: Array.isArray(parsed.line_items) ? parsed.line_items : [],
-        inferred_items: Array.isArray(parsed.inferred_items) ? parsed.inferred_items : [],
-        missing_categories: Array.isArray(parsed.missing_categories)
-          ? parsed.missing_categories.filter((x: unknown) => typeof x === 'string')
-          : [],
-        confidence_summary: String(parsed.confidence_summary ?? ''),
-      },
-      error: null,
-      truncated: false,
-      had_fence,
+    if (parsed && typeof parsed === 'object') {
+      return { data: buildData(parsed as Record<string, unknown>), error: null, truncated: false, had_fence }
     }
-  } catch (e) {
-    return fail(e instanceof Error ? e.message : 'json_parse_error', false, had_fence)
+  } catch (e1) {
+    const parseError = e1 instanceof Error ? e1.message : 'json_parse_error'
+    console.warn('[intake:json-sanitize]', { pass: 1, error: parseError, text_length: text.length, sample_near_error: (() => {
+      const m = parseError.match(/position (\d+)/)
+      if (m) { const pos = parseInt(m[1]); return text.slice(Math.max(0, pos - 80), pos + 80) }
+      return text.slice(-200)
+    })() })
   }
+
+  // Pass 2: replace literal newlines/CR/tabs with spaces — the most common
+  // cause of "Expected ',' or ']'" errors in large LLM JSON outputs is a
+  // raw newline character embedded inside a string value.
+  // Replacing all whitespace control chars with space preserves JSON structure
+  // (newlines outside strings are just whitespace) and produces valid strings
+  // (losing the newline content is acceptable for construction line item fields).
+  try {
+    const sanitized = text.replace(/\r\n/g, ' ').replace(/[\r\n\t]/g, ' ')
+    const parsed = JSON.parse(sanitized)
+    if (parsed && typeof parsed === 'object') {
+      console.warn('[intake:json-sanitize]', { pass: 2, recovered: true })
+      return { data: buildData(parsed as Record<string, unknown>), error: null, truncated: false, had_fence }
+    }
+  } catch { /* fall through to pass 3 */ }
+
+  // Pass 3: strip all ASCII control characters except space, then try once more
+  try {
+    const sanitized = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').replace(/[\r\n\t]/g, ' ')
+    const parsed = JSON.parse(sanitized)
+    if (parsed && typeof parsed === 'object') {
+      console.warn('[intake:json-sanitize]', { pass: 3, recovered: true })
+      return { data: buildData(parsed as Record<string, unknown>), error: null, truncated: false, had_fence }
+    }
+  } catch (e3) {
+    return fail(e3 instanceof Error ? e3.message : 'json_parse_error', false, had_fence)
+  }
+
+  return fail('json_parse_error', false, had_fence)
 }
 
 // ─── Build explainability from line items + similar projects ──────────────────
@@ -1037,12 +1073,16 @@ export async function GET(
                 ],
               }]
             } else {
-              // JSON formatting failure — multi-turn repair with explicit fix instruction
-              retryMessages = [
-                { role: 'user', content: [...retryBlocks, { type: 'text', text: extractionPrompt }] },
-                { role: 'assistant', content: anthropicResponse ?? '' },
-                { role: 'user', content: 'Your response could not be parsed as JSON. Fix the formatting only — do not change any data values. Output ONLY the corrected JSON object. Start with { and end with }. No backticks, no explanation.' },
-              ]
+              // JSON formatting failure — re-extract with a compact constraint rather
+              // than trying to repair a potentially 27k+ broken response.
+              // Ask for a reduced, compact extraction (max 8 items per trade, no whitespace).
+              retryMessages = [{
+                role: 'user',
+                content: [
+                  ...retryBlocks,
+                  { type: 'text', text: extractionPrompt + '\n\nPREVIOUS ATTEMPT FAILED JSON VALIDATION. Re-extract with these ADDITIONAL constraints:\n- Maximum 8 items per trade category (keep highest-value only)\n- No newline characters anywhere in string values\n- Compact JSON (no extra whitespace)\n- Output ONLY valid JSON starting with { and ending with }' },
+                ],
+              }]
             }
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
