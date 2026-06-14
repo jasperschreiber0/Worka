@@ -614,11 +614,14 @@ export async function POST(
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metaResponse = await (client.messages.create as any)({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 768,
-        messages: [{ role: 'user', content: [docBlock, { type: 'text', text: METADATA_PROMPT }] }],
-      })
+      const metaResponse = await (client.messages.create as any)(
+        {
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 768,
+          messages: [{ role: 'user', content: [docBlock, { type: 'text', text: METADATA_PROMPT }] }],
+        },
+        { timeout: 30_000 } // Haiku metadata call — 30s hard cap
+      )
       const metaText = metaResponse.content[0]?.type === 'text' ? metaResponse.content[0].text : ''
       const metaMatch = metaText.match(/\{[\s\S]*\}/)
       if (metaMatch) {
@@ -731,17 +734,25 @@ export async function POST(
       max_tokens: 8192,
     })
 
+    // Time budget: Vercel hard limit is 300s. Metadata call gets 30s.
+    // Primary extraction gets 200s; if time is tight skip the retry.
+    const budgetMs = 200_000
+    const extractionStart = Date.now()
+
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const callExtraction = async (blocks: any[]): Promise<string> => {
+      const callExtraction = async (blocks: any[], timeoutMs: number): Promise<string> => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const messages: any[] = [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }]
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const response = await (client.messages.create as any)({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 8192,
-          messages,
-        })
+        const response = await (client.messages.create as any)(
+          {
+            model: 'claude-sonnet-4-6',
+            max_tokens: 8192,
+            messages,
+          },
+          { timeout: timeoutMs }
+        )
         const text: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
         console.log('[intake:worker:ai-response]', {
           file_id: fileId,
@@ -754,13 +765,14 @@ export async function POST(
       }
 
       try {
-        anthropicResponse = await callExtraction(allDocBlocks)
+        anthropicResponse = await callExtraction(allDocBlocks, budgetMs)
       } catch (firstErr) {
         const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
         const isTooLarge = /request_too_large|too large|prompt is too long|too long|page limit|100 pages|413/i.test(firstMsg)
         if (isTooLarge && allDocBlocks.length > 1) {
-          console.warn('[intake:worker:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg })
-          anthropicResponse = await callExtraction([docBlock])
+          const remainingMs = budgetMs - (Date.now() - extractionStart)
+          console.warn('[intake:worker:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg, remaining_ms: remainingMs })
+          anthropicResponse = await callExtraction([docBlock], Math.max(remainingMs, 60_000))
           droppedToPrimaryOnly = true
         } else {
           throw firstErr
@@ -928,12 +940,27 @@ export async function POST(
       diag.retry_attempted = true
       diag.retry_reason = retryReason
 
+      // Skip retry if we are within 60s of Vercel's 300s limit — better to
+      // return partial results than to time out with nothing.
+      const elapsedMs = Date.now() - pipelineStart
+      const retryBudgetMs = 270_000 - elapsedMs // 270s total budget (30s safety margin)
+      if (retryBudgetMs < 60_000) {
+        console.warn('[intake:worker:retry-skipped]', {
+          file_id: fileId,
+          reason: 'insufficient_time_budget',
+          elapsed_ms: elapsedMs,
+          retry_budget_ms: retryBudgetMs,
+        })
+        diag.retry_attempted = false
+        // Fall through with whatever partial results we have
+      } else {
       console.warn('[intake:worker:retry]', {
         file_id: fileId,
         reason: retryReason,
         primary_length: diag.primary_response_length,
         primary_error: diag.primary_parse_error,
         primary_sample: anthropicResponse?.slice(0, 400),
+        retry_budget_ms: retryBudgetMs,
       })
 
       try {
@@ -969,11 +996,14 @@ export async function POST(
         }
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const retryResp = await (client.messages.create as any)({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 8192,
-          messages: retryMessages,
-        })
+        const retryResp = await (client.messages.create as any)(
+          {
+            model: 'claude-sonnet-4-6',
+            max_tokens: 8192,
+            messages: retryMessages,
+          },
+          { timeout: Math.max(retryBudgetMs, 60_000) }
+        )
         const retryText: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
         diag.retry_response_length = retryText.length
 
@@ -1003,6 +1033,7 @@ export async function POST(
         diag.retry_parse_error = retryErr instanceof Error ? retryErr.message : String(retryErr)
         console.error('[intake:worker:retry-error]', { file_id: fileId, error: diag.retry_parse_error })
       }
+      } // end: else (retry budget available)
     }
 
     diag.final_line_items = lineItems.length

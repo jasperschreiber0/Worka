@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import DeploymentGuard from '@/components/DeploymentGuard'
 
 export const metadata: Metadata = {
   title: {
@@ -38,7 +39,10 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-screen antialiased">{children}</body>
+      <body className="min-h-screen antialiased">
+        <DeploymentGuard />
+        {children}
+      </body>
     </html>
   )
 }
