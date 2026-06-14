@@ -1132,7 +1132,18 @@ export async function POST(
     })
 
     // ── Step 7: Create quote ──────────────────────────────────────────
-    await updateStage('building_quote')
+    // Wrap all DB writes in a 45s timeout — if Supabase is slow the worker
+    // must still complete before Vercel's 300s ceiling.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const withDbTimeout = (promise: Promise<any>, label: string): Promise<any> =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`DB timeout: ${label}`)), 45_000)
+        ),
+      ])
+
+    await withDbTimeout(updateStage('building_quote'), 'updateStage(building_quote)')
 
     const explainability = buildExplainability(allLineItems, similarProjects, projectMetadata)
     void confidenceSummary
@@ -1140,9 +1151,8 @@ export async function POST(
     let quoteId = `quote-${fileId.slice(0, 8)}`
 
     try {
-      const { data: quoteRow, error: quoteErr } = await supabase
-        .from('quotes')
-        .insert({
+      const { data: quoteRow, error: quoteErr } = await withDbTimeout(
+        supabase.from('quotes').insert({
           job_id,
           builder_id,
           status: 'draft',
@@ -1150,9 +1160,9 @@ export async function POST(
           margin_pct: null,
           confidence_score: null,
           version: 1,
-        })
-        .select()
-        .single()
+        }).select().single(),
+        'quotes.insert'
+      )
 
       if (!quoteErr && quoteRow) {
         quoteId = quoteRow.id
@@ -1181,10 +1191,10 @@ export async function POST(
               plant_cost: item.plant_cost ?? null,
             }))
 
-          const { data: insertedItems } = await supabase
-            .from('quote_line_items')
-            .insert(lineItemInserts)
-            .select()
+          const { data: insertedItems } = await withDbTimeout(
+            supabase.from('quote_line_items').insert(lineItemInserts).select(),
+            'quote_line_items.insert'
+          )
 
           if (insertedItems && assumptions.length > 0) {
             const assumptionInserts = assumptions.map(a => {
@@ -1198,15 +1208,20 @@ export async function POST(
                 resolved_by: null,
               }
             })
-            const { error: assumptionsErr } = await supabase.from('assumptions').insert(assumptionInserts)
-            if (assumptionsErr) console.error('[intake:worker] assumptions insert:', assumptionsErr.message)
+            const { error: assumptionsErr } = await withDbTimeout(
+              supabase.from('assumptions').insert(assumptionInserts),
+              'assumptions.insert'
+            )
+            if (assumptionsErr) console.error('[intake:worker] assumptions insert:', (assumptionsErr as { message?: string }).message)
           }
         }
 
-        const { error: memErr } = await supabase.from('project_memory').upsert({
-          job_id, builder_id, quote_id: quoteRow.id, status: 'draft', ...projectMetadata,
-        }, { onConflict: 'job_id' })
-        if (memErr) console.error('[intake:worker] project_memory upsert:', memErr.message)
+        withDbTimeout(
+          supabase.from('project_memory').upsert({
+            job_id, builder_id, quote_id: quoteRow.id, status: 'draft', ...projectMetadata,
+          }, { onConflict: 'job_id' }),
+          'project_memory.upsert'
+        ).catch((memErr: Error) => console.error('[intake:worker] project_memory upsert:', memErr.message))
       }
     } catch {
       // Non-fatal — quoteId stays as memory-based ID
@@ -1247,22 +1262,28 @@ export async function POST(
 
     // Write final success record — two separate updates so a missing migration-016
     // column (pipeline_stage / intake_result) never blocks the critical status write.
-    const { error: extractedErr } = await supabase.from('files').update({
-      intake_status: 'extracted',
-      quote_id: quoteId,
-      line_item_count: allLineItems.length,
-      extracted_text_length: extractedTextLength || null,
-      processing_time_ms: Date.now() - pipelineStart,
-      failure_stage: null,
-      failure_reason: null,
-    }).eq('id', fileId)
-    if (extractedErr) console.error('[intake:worker] status→extracted:', extractedErr.message)
+    const { error: extractedErr } = await withDbTimeout(
+      supabase.from('files').update({
+        intake_status: 'extracted',
+        quote_id: quoteId,
+        line_item_count: allLineItems.length,
+        extracted_text_length: extractedTextLength || null,
+        processing_time_ms: Date.now() - pipelineStart,
+        failure_stage: null,
+        failure_reason: null,
+      }).eq('id', fileId),
+      'files.update(extracted)'
+    )
+    if (extractedErr) console.error('[intake:worker] status→extracted:', (extractedErr as { message?: string }).message)
 
     // Best-effort: write new columns (requires migration 016)
-    await supabase.from('files').update({
-      pipeline_stage: 'complete',
-      intake_result: completeData as unknown as Record<string, unknown>,
-    }).eq('id', fileId)
+    withDbTimeout(
+      supabase.from('files').update({
+        pipeline_stage: 'complete',
+        intake_result: completeData as unknown as Record<string, unknown>,
+      }).eq('id', fileId),
+      'files.update(pipeline_stage)'
+    ).catch(() => { /* non-fatal */ })
 
     return NextResponse.json({ ok: true })
   } catch (err) {
