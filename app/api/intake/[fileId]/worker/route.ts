@@ -43,6 +43,8 @@ const EXTRACT_TOOL_SCHEMA = {
     },
     line_items: {
       type: 'array',
+      minItems: 1,
+      description: 'REQUIRED — must contain at least 5 items. If the document is schematic-only or unclear, produce professional QS estimates and set confidence to 30–45.',
       items: {
         type: 'object',
         properties: {
@@ -441,8 +443,8 @@ Use the extract_estimate tool to return your results.`
     if (rawLineItems.length === 0) {
       // Retry with an even more explicit prompt before giving up
       const elapsedMs = Date.now() - pipelineStart
-      const retryBudget = 270_000 - elapsedMs
-      if (retryBudget > 60_000) {
+      const retryBudget = 290_000 - elapsedMs
+      if (retryBudget > 30_000) {
         console.warn('[intake:worker:retry-empty]', { file_id: fileId, doc_type: extractResult.doc_type, budget_ms: retryBudget })
         try {
           const retryBlocks = droppedToPrimaryOnly ? [docBlock] : allDocBlocks
@@ -462,7 +464,7 @@ Use the extract_estimate tool to return your results.`
                 ],
               }],
             },
-            { timeout: Math.min(retryBudget, 90_000) }
+            { timeout: Math.min(retryBudget, 60_000) }
           )
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const retryBlock = retryResponse.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')
