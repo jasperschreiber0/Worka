@@ -101,11 +101,11 @@ Return ONLY valid JSON:
 
     const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
 
-    // Extract JSON — handle both bare JSON and markdown code blocks
+    // Extract JSON (handles bare JSON and markdown fences)
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return NextResponse.json({ error: 'Could not extract rates from PDF' }, { status: 422 })
 
-    // Repair truncated JSON: if the response was cut off mid-array, close it
+    // Repair truncated JSON
     let rawJson = jsonMatch[0]
     if (!rawJson.trimEnd().endsWith('}')) {
       const lastClose = rawJson.lastIndexOf('}')
@@ -114,22 +114,59 @@ Return ONLY valid JSON:
       }
     }
 
-    // Sanitize: strip trailing commas, ASCII control chars, and Unicode line
-    // separators (U+2028, U+2029) that Claude sometimes emits inside strings.
-    rawJson = rawJson
-      .replace(/,(\s*[}\]])/g, '$1')
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-      .replace(/[\r\n\t\u2028\u2029]/g, ' ')
+    // Multi-pass sanitization to handle common LLM output defects.
+    // Each pass targets a different class of malformed output.
+    const baseClean = (s: string) => s
+      .replace(/,(\s*[}\]])/g, '$1')               // trailing commas
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '') // ASCII control chars
+      .replace(/[\r\n\t\u2028\u2029]/g, ' ')    // literal newlines/tabs/Unicode line seps
 
-    const parsed = JSON.parse(rawJson) as { rates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> }
+    type ParsedRates = { rates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> }
+    let parsed: ParsedRates | null = null
 
-    const rates: ExtractedRate[] = (parsed.rates ?? []).map((r) => ({
+    // Pass 1: standard clean
+    try { parsed = JSON.parse(baseClean(rawJson)) } catch { /* fall through */ }
+
+    // Pass 2: escape stray backslashes (e.g. "90x45 \nailed" in descriptions)
+    if (!parsed) {
+      try {
+        const s = baseClean(rawJson).replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
+        parsed = JSON.parse(s)
+      } catch { /* fall through */ }
+    }
+
+    // Pass 3: replace smart/curly quotes with straight quotes
+    if (!parsed) {
+      try {
+        const s = baseClean(rawJson)
+          .replace(/[\u2018\u2019]/g, "'")
+          .replace(/[\u201C\u201D]/g, '"')
+        parsed = JSON.parse(s)
+      } catch (e3) {
+        const msg = e3 instanceof Error ? e3.message : String(e3)
+        const posMatch = msg.match(/position (\d+)/)
+        if (posMatch) {
+          const pos = parseInt(posMatch[1])
+          console.error('[extract-pdf] JSON parse failed at position', pos,
+            '| context:', rawJson.slice(Math.max(0, pos - 100), pos + 100))
+        }
+        console.error('[extract-pdf] all sanitization passes failed:', msg)
+        return NextResponse.json(
+          { error: 'Could not extract rates from this PDF. Please try again or re-export the PDF.' },
+          { status: 422 }
+        )
+      }
+    }
+
+    type RateRow = { trade_category_id: number; description: string; unit: string; rate: number }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rates: ExtractedRate[] = ((parsed as any)?.rates ?? []).map((r: RateRow) => ({
       trade_category_id: r.trade_category_id,
       trade_category_name: TRADE_CATEGORIES.find((c) => c.id === r.trade_category_id)?.name ?? 'Unknown',
       description: r.description,
       unit: r.unit,
       rate: r.rate,
-    })).filter((r) => r.rate > 0 && r.description)
+    })).filter((r: ExtractedRate) => r.rate > 0 && r.description)
 
     return NextResponse.json({ rates })
   } catch (err) {
