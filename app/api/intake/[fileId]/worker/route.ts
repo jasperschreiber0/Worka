@@ -445,6 +445,10 @@ export async function POST(
 
   const pipelineStart = Date.now()
 
+  // Step-marker logger — emits before every await so the last log line = exact hang point
+  const w = (step: string) =>
+    console.log('[W]', step, { file_id: fileId, elapsed_ms: Date.now() - pipelineStart })
+
   // Helper: update pipeline_stage in DB for SSE monitor polling.
   // Non-blocking — resolves after 8s so a slow Supabase write never stalls the pipeline.
   const updateStage = (stage: string): Promise<void> =>
@@ -497,7 +501,7 @@ export async function POST(
     // Fetch file record from DB — 8s cap; non-fatal if slow (cached file will be used)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let fileRow: any = null
-    try {
+    w('file-record:fetch'); try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fileRecordResult: any = await Promise.race([
         supabase.from('files').select('*').eq('id', fileId).eq('builder_id', builder_id).single(),
@@ -506,7 +510,7 @@ export async function POST(
       if (!fileRecordResult?.error) fileRow = fileRecordResult?.data
     } catch { /* non-fatal — will fail at download step if fileRow is null */ }
 
-    await updateStage('reading')
+    w('updateStage:reading'); await updateStage('reading')
 
     // ── Load primary file — check memory cache first, then Supabase Storage ──
     const { getCachedFile } = await import('@/lib/file-cache')
@@ -524,7 +528,7 @@ export async function POST(
         return NextResponse.json({ ok: false })
       }
 
-      // 60s timeout on storage download — large PDFs from Supabase can be slow,
+      w('storage:download:start'); // 60s timeout on storage download — large PDFs from Supabase can be slow,
       // but hanging indefinitely would burn the entire Vercel 300s budget.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const downloadResult: any = await Promise.race([
@@ -534,7 +538,7 @@ export async function POST(
         ),
       ])
 
-      const { data: fileData, error: downloadErr } = downloadResult as { data: Blob | null; error: { message: string } | null }
+      w('storage:download:done'); const { data: fileData, error: downloadErr } = downloadResult as { data: Blob | null; error: { message: string } | null }
 
       if (downloadErr || !fileData) {
         const storageMsg = (downloadErr as { message?: string } | null)?.message ?? 'unknown'
@@ -547,7 +551,7 @@ export async function POST(
       primaryMediaType = fileRow?.file_type === 'pdf' ? 'application/pdf' : 'image/jpeg'
     }
 
-    await updateStage('analysing')
+    w('updateStage:analysing'); await updateStage('analysing')
 
     const detectedMediaType = cached?.mediaType ?? primaryMediaType ?? ''
     const isPdf = detectedMediaType.includes('pdf') || fileRow?.file_type === 'pdf'
@@ -661,7 +665,7 @@ export async function POST(
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metaResponse = await (client.messages.create as any)(
+      w('ai:metadata:start'); const metaResponse = await (client.messages.create as any)(
         {
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 768,
@@ -669,7 +673,7 @@ export async function POST(
         },
         { timeout: 30_000 } // Haiku metadata call — 30s hard cap
       )
-      const metaText = metaResponse.content[0]?.type === 'text' ? metaResponse.content[0].text : ''
+      w('ai:metadata:done'); const metaText = metaResponse.content[0]?.type === 'text' ? metaResponse.content[0].text : ''
       const metaMatch = metaText.match(/\{[\s\S]*\}/)
       if (metaMatch) {
         const cleaned = metaMatch[0].replace(/,(\s*[}\]])/g, '$1')
@@ -703,19 +707,19 @@ export async function POST(
     }
 
     // ── Step 2: Retrieve similar historical projects ───────────────────
-    await updateStage('retrieving_memory')
+    w('updateStage:retrieving_memory'); await updateStage('retrieving_memory')
 
     let similarProjects: SimilarProject[] = []
     let totalInMemory = 0
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const memResult: any = await Promise.race([
+      w('db:project_memory:start'); const memResult: any = await Promise.race([
         supabase.from('project_memory').select('*').eq('builder_id', builder_id)
           .in('status', ['completed', 'active']).order('completed_at', { ascending: false }).limit(50),
         new Promise((resolve) => setTimeout(() => resolve({ data: null }), 10_000)),
       ])
-      const memoryRows = memResult?.data
+      w('db:project_memory:done'); const memoryRows = memResult?.data
 
       totalInMemory = memoryRows?.length ?? 0
 
@@ -748,11 +752,11 @@ export async function POST(
     let builderProfile: BuilderEstimationProfile | null = null
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const profileResult: any = await Promise.race([
+      w('db:builder_profile:start'); const profileResult: any = await Promise.race([
         supabase.from('builder_estimation_profiles').select('*').eq('builder_id', builder_id).single(),
         new Promise((resolve) => setTimeout(() => resolve({ data: null, error: null }), 10_000)),
       ])
-      builderProfile = profileResult?.data as BuilderEstimationProfile | null
+      w('db:builder_profile:done'); builderProfile = profileResult?.data as BuilderEstimationProfile | null
     } catch {
       // Non-fatal
     }
@@ -872,7 +876,7 @@ export async function POST(
 
     let scopeHints: ScopeHint[] = []
     try {
-      const scopeRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/estimation/scope-hints`, {
+      w('fetch:scope-hints:start'); const scopeRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/estimation/scope-hints`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -882,7 +886,7 @@ export async function POST(
         },
         body: JSON.stringify({ project_metadata: projectMetadata }),
       })
-      if (scopeRes.ok) {
+      w('fetch:scope-hints:done'); if (scopeRes.ok) {
         const scopeData = await scopeRes.json()
         scopeHints = scopeData.scope_hints ?? []
       }
@@ -891,7 +895,7 @@ export async function POST(
     }
 
     // ── Step 6: Parse & validate line items (with retry + OCR fallback) ───
-    await updateStage('validating')
+    w('updateStage:validating'); await updateStage('validating')
 
     const diag: ExtractionDiag = {
       file_id: fileId,
@@ -1170,7 +1174,7 @@ export async function POST(
         ),
       ])
 
-    await withDbTimeout(updateStage('building_quote'), 'updateStage(building_quote)')
+    w('updateStage:building_quote'); await withDbTimeout(updateStage('building_quote'), 'updateStage(building_quote)')
 
     const explainability = buildExplainability(allLineItems, similarProjects, projectMetadata)
     void confidenceSummary
@@ -1178,7 +1182,7 @@ export async function POST(
     let quoteId = `quote-${fileId.slice(0, 8)}`
 
     try {
-      const { data: quoteRow, error: quoteErr } = await withDbTimeout(
+      w('db:quote:insert:start'); const { data: quoteRow, error: quoteErr } = await withDbTimeout(
         supabase.from('quotes').insert({
           job_id,
           builder_id,
@@ -1218,7 +1222,7 @@ export async function POST(
               plant_cost: item.plant_cost ?? null,
             }))
 
-          const { data: insertedItems } = await withDbTimeout(
+          w('db:line_items:insert:start'); const { data: insertedItems } = await withDbTimeout(
             supabase.from('quote_line_items').insert(lineItemInserts).select(),
             'quote_line_items.insert'
           )
@@ -1235,7 +1239,7 @@ export async function POST(
                 resolved_by: null,
               }
             })
-            const { error: assumptionsErr } = await withDbTimeout(
+            w('db:assumptions:insert:start'); const { error: assumptionsErr } = await withDbTimeout(
               supabase.from('assumptions').insert(assumptionInserts),
               'assumptions.insert'
             )
@@ -1289,7 +1293,7 @@ export async function POST(
 
     // Write final success record — two separate updates so a missing migration-016
     // column (pipeline_stage / intake_result) never blocks the critical status write.
-    const { error: extractedErr } = await withDbTimeout(
+    w('db:files:update:extracted:start'); const { error: extractedErr } = await withDbTimeout(
       supabase.from('files').update({
         intake_status: 'extracted',
         quote_id: quoteId,
