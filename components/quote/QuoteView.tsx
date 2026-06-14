@@ -213,6 +213,7 @@ function PricingTypeTag({ type }: { type: DemoQuoteLineItem['pricing_type'] }) {
 // ─── Line item row ────────────────────────────────────────────────────────────
 
 interface LineItemRowProps {
+  key?: string | number
   item: DemoQuoteLineItem
 }
 
@@ -409,6 +410,7 @@ function PcPsRegister({ items }: PcPsRegisterProps) {
 // ─── Category section ─────────────────────────────────────────────────────────
 
 interface CategorySectionProps {
+  key?: string | number
   group: LineItemsByCategory
   isExpanded: boolean
   onToggle: () => void
@@ -751,7 +753,7 @@ function QuoteViewInner({
         handleClose()
       }
       if (e.key === 'Tab' && panelRef.current) {
-        const focusable = Array.from(
+        const focusable = Array.from<HTMLElement>(
           panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
         ).filter((el) => !el.hasAttribute('disabled'))
         if (focusable.length === 0) return

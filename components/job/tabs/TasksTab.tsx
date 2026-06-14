@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useState } from 'react'
 import type { JobTask, JobWorkerRef } from '@/lib/job-snapshot-demo'
 

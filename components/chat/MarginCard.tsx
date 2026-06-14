@@ -1,5 +1,7 @@
 'use client'
 
+import React from 'react'
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface MarginJob {
@@ -36,7 +38,7 @@ function marginStatus(pct: number): { label: string; pill: string; bar: string }
 
 // ─── Single job row ───────────────────────────────────────────────────────────
 
-function MarginRow({ job, onOpenJob }: { job: MarginJob; onOpenJob?: (id: string) => void }) {
+function MarginRow({ job, onOpenJob }: { key?: string | number; job: MarginJob; onOpenJob?: (id: string) => void }) {
   const status = marginStatus(job.margin_percent)
   const isNegative = job.margin_amount < 0
   const barWidth = Math.min(100, Math.max(0, Math.abs(job.margin_percent) / 30 * 100))

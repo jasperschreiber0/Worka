@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 
 interface FilesTabProps {

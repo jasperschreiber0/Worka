@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import IntakeProgress from './IntakeProgress'

@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { AssumptionItem } from '@/lib/assumptions-demo'
@@ -73,6 +73,7 @@ const selectStyle: React.CSSProperties = {
 // ─── Card component for a single assumption ───────────────────────────────────
 
 interface AssumptionCardProps {
+  key?: string | number
   assumption: AssumptionItem
   index: number
   total: number
@@ -570,7 +571,7 @@ function AssumptionReviewInner({
         handleDismiss()
       }
       if (e.key === 'Tab' && panelRef.current) {
-        const focusable = Array.from(
+        const focusable = Array.from<HTMLElement>(
           panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
         ).filter((el) => !el.hasAttribute('disabled'))
         if (focusable.length === 0) return

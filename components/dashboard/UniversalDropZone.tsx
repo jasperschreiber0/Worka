@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useState, useRef, useCallback, type DragEvent } from 'react'
 import { useRouter } from 'next/navigation'
 import type { ClassificationResult } from '@/app/api/classify-document/route'
@@ -19,8 +19,11 @@ const TYPE_LABELS: Record<ClassificationResult['type'], string> = {
   unknown: 'Document',
 }
 
+// Derive DocType from the record keys so indexing never produces an implicit any
+type DocType = ClassificationResult['type']
+
 // Map each document type to CSS var colors
-const TYPE_COLORS: Record<ClassificationResult['type'], { color: string; bg: string }> = {
+const TYPE_COLORS: Record<DocType, { color: string; bg: string }> = {
   plan: { color: 'var(--status-blue)', bg: 'rgba(59, 130, 246, 0.12)' },
   receipt: { color: 'var(--status-green)', bg: 'rgba(34, 197, 94, 0.12)' },
   supplier_quote: { color: 'var(--orange-primary)', bg: 'rgba(255, 107, 43, 0.12)' },
@@ -263,11 +266,11 @@ export default function UniversalDropZone({ onJobOpen }: UniversalDropZoneProps)
                 <span
                   className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
                   style={{
-                    color: TYPE_COLORS[result.type].color,
-                    background: TYPE_COLORS[result.type].bg,
+                    color: TYPE_COLORS[result.type as keyof typeof TYPE_COLORS].color,
+                    background: TYPE_COLORS[result.type as keyof typeof TYPE_COLORS].bg,
                   }}
                 >
-                  {TYPE_LABELS[result.type]}
+                  {TYPE_LABELS[result.type as keyof typeof TYPE_LABELS]}
                 </span>
                 {result.confidence >= 80 && (
                   <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>

@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import type { StateChange } from '@/app/api/chat/route'
 
 function StatusIcon({ status }: { status: StateChange['status'] }) {

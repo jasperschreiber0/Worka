@@ -176,7 +176,7 @@ export default function VariationNotificationModal({
       }
 
       if (e.key === 'Tab' && panelRef.current) {
-        const focusable = Array.from(
+        const focusable = Array.from<HTMLElement>(
           panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
         )
         if (focusable.length === 0) return

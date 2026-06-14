@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import type { PermissionRole } from '@/lib/auth/role-guard'
@@ -99,7 +99,7 @@ const CARD_STYLE: React.CSSProperties = {
   padding: '10px 12px',
 }
 
-function SectionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function SectionGroup({ label, children }: { label: string; children?: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 24 }}>
       <div style={SECTION_LABEL_STYLE}>{label}</div>

@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useEffect, useState } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import { proofEventColour, type DemoProofEvent, type ProofEventColour } from '@/lib/activation-demo'
@@ -32,7 +32,7 @@ function capitalise(str: string): string {
 
 // ─── Section wrapper ──────────────────────────────────────────────────────────
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+function Section({ label, children }: { label: string; children?: React.ReactNode }) {
   return (
     <div className="space-y-1.5">
       <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--text-tertiary)' }}>{label}</p>

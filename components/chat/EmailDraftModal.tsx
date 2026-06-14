@@ -173,7 +173,7 @@ export default function EmailDraftModal({
       if (e.key === 'Tab' && panelRef.current) {
         const focusable = Array.from(
           panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
-        )
+        ) as HTMLElement[]
         if (focusable.length === 0) return
         const first = focusable[0]
         const last = focusable[focusable.length - 1]

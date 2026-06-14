@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { Worker } from '@/lib/types/database.types'
@@ -74,7 +74,7 @@ function WorkerModalInner({ isOpen, onClose, worker, inviteUrl }: WorkerModalPro
       }
       // Focus trap: Tab / Shift+Tab cycles within modal
       if (e.key === 'Tab' && modalRef.current) {
-        const focusable = Array.from(
+        const focusable = Array.from<HTMLElement>(
           modalRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
         ).filter((el) => !el.hasAttribute('disabled'))
 

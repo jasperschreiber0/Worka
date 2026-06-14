@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useState, useCallback } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import { hasPermission, type PermissionRole } from '@/lib/auth/role-guard'

@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import type { DashboardActivity } from '@/app/api/dashboard/route'
 
 interface RecentActivityFeedProps {

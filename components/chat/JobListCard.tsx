@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import type { JobListItem } from '@/app/api/chat/route'
 
 interface JobListCardProps {

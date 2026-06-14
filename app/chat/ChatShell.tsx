@@ -1,5 +1,5 @@
 'use client'
-
+import React from 'react'
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import ChatInterface, { type PendingEmailDraft } from '@/components/chat/ChatInterface'
@@ -189,7 +189,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
       files.map(async (file) => {
         try {
           const fd = new FormData()
-          fd.append('file', file)
+          fd.append('file', file as File)
           const res = await fetch('/api/classify-document', { method: 'POST', body: fd })
           if (!res.ok) throw new Error('classify failed')
           const result = await res.json() as { type: string; summary?: string }

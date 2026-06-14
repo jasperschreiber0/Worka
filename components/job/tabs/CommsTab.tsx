@@ -42,7 +42,7 @@ function proofEventIcon(type: string): string {
   }
 }
 
-function ProofEventRow({ event }: { event: ProofEvent }) {
+function ProofEventRow({ event }: { key?: string | number; event: ProofEvent }) {
   return (
     <li className="flex items-start gap-3">
       <div className="flex-shrink-0 w-5 text-center text-[13px] leading-tight pt-0.5" aria-hidden="true">

@@ -1,5 +1,6 @@
 'use client'
 
+import React from 'react'
 import MorningBriefCard, { type Alert } from './MorningBriefCard'
 import DuplicateWarning from './DuplicateWarning'
 import VariationCard, { type VariationCardVariation } from './VariationCard'
@@ -105,6 +106,7 @@ export interface Message {
 }
 
 interface ChatMessageProps {
+  key?: string | number
   message: Message
   builderId?: string
   onOpenJob?: (jobId: string) => void
@@ -164,7 +166,7 @@ function UserAvatar() {
 
 // ─── Message wrapper ──────────────────────────────────────────────────────────
 
-function MsgRow({ avatar, label, timestamp, children }: { avatar: React.ReactNode; label: string; timestamp: Date; children: React.ReactNode }) {
+function MsgRow({ avatar, label, timestamp, children }: { avatar: React.ReactNode; label: string; timestamp: Date; children?: React.ReactNode }) {
   return (
     <div className="flex items-start gap-2.5 mb-[14px] group animate-slide-up" role="listitem">
       {avatar}
