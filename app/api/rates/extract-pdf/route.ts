@@ -68,17 +68,35 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const { default: Anthropic } = await import('@anthropic-ai/sdk')
     const client = new Anthropic({ apiKey: anthropicKey })
 
-    const systemPrompt = `You are reviewing an Australian builder's quote or invoice PDF.
-Extract every line item that has a unit rate (price per unit).
-Only include items where you can determine a reliable unit rate. Skip lump-sum items with no quantity.
-For the unit rate: if only a total is shown, divide total by quantity to get the unit rate.`
+    const systemPrompt = `You are reviewing an Australian residential builder's document — this may be a supplier invoice, a trade quote, or a builder's own estimation/cost breakdown spreadsheet exported as PDF.
 
-    const userPrompt = `Extract all line items with unit rates from this document.
-Map each item to a trade_category_id (1-13):
-1=Earthworks & Site Prep, 2=Concrete, 3=Framing & Structural, 4=Roofing,
-5=Windows & External Doors, 6=External Cladding, 7=Insulation, 8=Internal Linings,
-9=Joinery & Cabinetry, 10=Painting, 11=Plumbing, 12=Electrical, 13=Tiling & Finishes
+Australian builder estimation documents typically have columns: Description | Quantity | Unit | Rate | Total (or similar). Extract the unit rate directly from the Rate column. If no Rate column exists but Quantity and Total are present, calculate: rate = Total ÷ Quantity.
 
+Rules:
+- Extract every line item that has a quantity and a rate (or from which a rate can be calculated).
+- Include items from ALL sections: Preliminaries, Site Prep, Concrete, Framing, Roofing, Cladding, Insulation, Linings, Joinery, Painting, Plumbing, Electrical, Tiling, Building Labour, Fit-out, etc.
+- Do NOT skip items just because they are in a section labelled "Preliminaries" or "Building Labour" — map them to the closest trade category.
+- Skip only true lump-sum items where no quantity or rate exists at all (just a single dollar amount with no breakdown).
+- Units may be: m², lm, m, ea, hr, wk, allow, item, set, lot — include all.`
+
+    const userPrompt = `Extract all line items with unit rates from this Australian builder document.
+
+Map each item to the closest trade_category_id (1-13):
+1=Earthworks & Site Prep (includes site toilets, skip bins, scaffolding, site establishment, fencing, surveying)
+2=Concrete (slabs, footings, piers, formwork, reinforcement)
+3=Framing & Structural (timber frames, roof trusses, steel beams, LVL, structural posts)
+4=Roofing (roof sheets, tiles, gutters, downpipes, fascia, sarking, ridge caps)
+5=Windows & External Doors (windows, sliding doors, entry doors, skylights, garage doors)
+6=External Cladding (FC cladding, weatherboard, render, cavity battens, wraps/membranes, brickwork)
+7=Insulation (wall batts, ceiling batts, underfloor insulation)
+8=Internal Linings (plasterboard, cornice, set, acoustic batts, internal doors, skirting)
+9=Joinery & Cabinetry (kitchen, bathroom vanities, laundry, wardrobes, benchtops)
+10=Painting (internal and external painting, sealer, undercoat)
+11=Plumbing (rough-in, fixtures, hot water, drainage, stormwater)
+12=Electrical (power points, lights, switchboard, rough-in, data)
+13=Tiling & Finishes (floor tiles, wall tiles, waterproofing, floor coverings, carpet)
+
+If an item spans multiple categories, pick the best single match.
 Use the extract_rates tool to return your results.`
 
     // Tool use forces Claude to return schema-validated JSON — no parsing needed.
