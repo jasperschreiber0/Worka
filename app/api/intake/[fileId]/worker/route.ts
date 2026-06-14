@@ -457,26 +457,30 @@ Use the extract_estimate tool to return your results.`
         console.warn('[intake:worker:retry-empty]', { file_id: fileId, doc_type: extractResult.doc_type, budget_ms: retryBudget })
         try {
           const retryBlocks = droppedToPrimaryOnly ? [docBlock] : allDocBlocks
+          const retryText = userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence to 30–45 for estimated items. The builder needs a starting point, not an empty quote.'
+          // Use runExtraction so the AbortController timeout applies — direct
+          // client.messages.create calls have no timeout and will hang until Vercel kills at 300s.
+          const retryController = new AbortController()
+          const retryTimer = setTimeout(() => retryController.abort(), Math.min(retryBudget, 60_000))
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const retryResponse: any = await (client.messages.create as any)(
-            {
-              model: 'claude-sonnet-4-6',
-              max_tokens: 8192,
-              system: systemPrompt,
-              tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
-              tool_choice: { type: 'tool', name: 'extract_estimate' },
-              messages: [{
-                role: 'user',
-                content: [
-                  ...retryBlocks,
-                  { type: 'text', text: userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence to 30–45 for estimated items. The builder needs a starting point, not an empty quote.' },
-                ],
-              }],
-            },
-            { timeout: Math.min(retryBudget, 60_000) }
-          )
+          let retryResponse: any
+          try {
+            retryResponse = await (client.messages.create as any)(
+              {
+                model: 'claude-sonnet-4-6',
+                max_tokens: 8192,
+                system: systemPrompt,
+                tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
+                tool_choice: { type: 'tool', name: 'extract_estimate' },
+                messages: [{ role: 'user', content: [...retryBlocks, { type: 'text', text: retryText }] }],
+              },
+              { signal: retryController.signal }
+            )
+          } finally {
+            clearTimeout(retryTimer)
+          }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const retryBlock = retryResponse.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')
+          const retryBlock = retryResponse?.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')
           if (retryBlock?.input?.line_items?.length > 0) {
             extractResult = retryBlock.input
             rawLineItems = extractResult.line_items ?? []
