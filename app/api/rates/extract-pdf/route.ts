@@ -68,112 +68,90 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const { default: Anthropic } = await import('@anthropic-ai/sdk')
     const client = new Anthropic({ apiKey: anthropicKey })
 
-    const prompt = `You are reviewing an Australian builder's quote or invoice PDF.
-
-Extract every line item that has a unit rate (price per unit). For each item return:
-- trade_category_id: map to one of these categories (1-13):
-  1=Earthworks & Site Prep, 2=Concrete, 3=Framing & Structural, 4=Roofing,
-  5=Windows & External Doors, 6=External Cladding, 7=Insulation, 8=Internal Linings,
-  9=Joinery & Cabinetry, 10=Painting, 11=Plumbing, 12=Electrical, 13=Tiling & Finishes
-- description: the line item name (string)
-- unit: the unit of measure — m², lm, ea, m³, hr, etc. (string)
-- rate: the unit rate in AUD excluding GST (number, not a total — divide total by qty if needed)
-
+    const systemPrompt = `You are reviewing an Australian builder's quote or invoice PDF.
+Extract every line item that has a unit rate (price per unit).
 Only include items where you can determine a reliable unit rate. Skip lump-sum items with no quantity.
+For the unit rate: if only a total is shown, divide total by quantity to get the unit rate.`
 
-Return ONLY valid JSON:
-{"rates": [{"trade_category_id": number, "description": string, "unit": string, "rate": number}]}`
+    const userPrompt = `Extract all line items with unit rates from this document.
+Map each item to a trade_category_id (1-13):
+1=Earthworks & Site Prep, 2=Concrete, 3=Framing & Structural, 4=Roofing,
+5=Windows & External Doors, 6=External Cladding, 7=Insulation, 8=Internal Linings,
+9=Joinery & Cabinetry, 10=Painting, 11=Plumbing, 12=Electrical, 13=Tiling & Finishes
 
+Use the extract_rates tool to return your results.`
+
+    // Tool use forces Claude to return schema-validated JSON — no parsing needed.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const response = await (client.messages.create as any)({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 4096,
+      system: systemPrompt,
+      tools: [
+        {
+          name: 'extract_rates',
+          description: 'Return all extracted unit rates from the document',
+          input_schema: {
+            type: 'object',
+            properties: {
+              rates: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    trade_category_id: { type: 'integer', minimum: 1, maximum: 13 },
+                    description:       { type: 'string' },
+                    unit:              { type: 'string' },
+                    rate:              { type: 'number', exclusiveMinimum: 0 },
+                  },
+                  required: ['trade_category_id', 'description', 'unit', 'rate'],
+                },
+              },
+            },
+            required: ['rates'],
+          },
+        },
+      ],
+      tool_choice: { type: 'tool', name: 'extract_rates' },
       messages: [
         {
           role: 'user',
           content: [
             { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
-            { type: 'text', text: prompt },
+            { type: 'text', text: userPrompt },
           ],
         },
       ],
     })
 
-    const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
-
-    // Extract JSON (handles bare JSON and markdown fences)
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return NextResponse.json({ error: 'Could not extract rates from PDF' }, { status: 422 })
-
-    // Repair truncated JSON
-    let rawJson = jsonMatch[0]
-    if (!rawJson.trimEnd().endsWith('}')) {
-      const lastClose = rawJson.lastIndexOf('}')
-      if (lastClose > 0) {
-        rawJson = rawJson.slice(0, lastClose + 1) + ']}'
-      }
-    }
-
-    // Multi-pass sanitization to handle common LLM output defects.
-    // Each pass targets a different class of malformed output.
-    const baseClean = (s: string) => s
-      .replace(/,(\s*[}\]])/g, '$1')               // trailing commas
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '') // ASCII control chars
-      .replace(/[\r\n\t\u2028\u2029]/g, ' ')    // literal newlines/tabs/Unicode line seps
-
-    type ParsedRates = { rates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> }
-    let parsed: ParsedRates | null = null
-
-    // Pass 1: standard clean
-    try { parsed = JSON.parse(baseClean(rawJson)) } catch { /* fall through */ }
-
-    // Pass 2: escape stray backslashes (e.g. "90x45 \nailed" in descriptions)
-    if (!parsed) {
-      try {
-        const s = baseClean(rawJson).replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
-        parsed = JSON.parse(s)
-      } catch { /* fall through */ }
-    }
-
-    // Pass 3: replace smart/curly quotes with straight quotes
-    if (!parsed) {
-      try {
-        const s = baseClean(rawJson)
-          .replace(/[\u2018\u2019]/g, "'")
-          .replace(/[\u201C\u201D]/g, '"')
-        parsed = JSON.parse(s)
-      } catch (e3) {
-        const msg = e3 instanceof Error ? e3.message : String(e3)
-        const posMatch = msg.match(/position (\d+)/)
-        if (posMatch) {
-          const pos = parseInt(posMatch[1])
-          console.error('[extract-pdf] JSON parse failed at position', pos,
-            '| context:', rawJson.slice(Math.max(0, pos - 100), pos + 100))
-        }
-        console.error('[extract-pdf] all sanitization passes failed:', msg)
-        return NextResponse.json(
-          { error: 'Could not extract rates from this PDF. Please try again or re-export the PDF.' },
-          { status: 422 }
-        )
-      }
-    }
-
-    type RateRow = { trade_category_id: number; description: string; unit: string; rate: number }
+    // Tool use response: find the tool_use block and read its validated input directly
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rates: ExtractedRate[] = ((parsed as any)?.rates ?? []).map((r: RateRow) => ({
-      trade_category_id: r.trade_category_id,
-      trade_category_name: TRADE_CATEGORIES.find((c) => c.id === r.trade_category_id)?.name ?? 'Unknown',
-      description: r.description,
-      unit: r.unit,
-      rate: r.rate,
-    })).filter((r: ExtractedRate) => r.rate > 0 && r.description)
+    const toolBlock = response.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_rates')
+    if (!toolBlock) {
+      console.error('[extract-pdf] no tool_use block in response', JSON.stringify(response.content?.map((b: any) => b.type)))
+      return NextResponse.json({ error: 'Could not extract rates from this PDF.' }, { status: 422 })
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawRates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> = (toolBlock.input as any)?.rates ?? []
+
+    const rates: ExtractedRate[] = rawRates
+      .filter((r) => r.rate > 0 && r.description && r.trade_category_id >= 1 && r.trade_category_id <= 13)
+      .map((r) => ({
+        trade_category_id: r.trade_category_id,
+        trade_category_name: TRADE_CATEGORIES.find((c) => c.id === r.trade_category_id)?.name ?? 'Unknown',
+        description: r.description,
+        unit: r.unit,
+        rate: r.rate,
+      }))
 
     return NextResponse.json({ rates })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[extract-pdf] Error:', message)
-    return NextResponse.json({ error: 'Could not extract rates from this PDF — the file may contain unsupported formatting. Please try again or re-export the PDF.' }, { status: 500 })
+    return NextResponse.json({ error: 'Could not extract rates from this PDF. Please try again or re-export the PDF.' }, { status: 500 })
   }
 }
+
 
 export const maxDuration = 60
