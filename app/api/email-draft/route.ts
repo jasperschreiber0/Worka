@@ -155,14 +155,18 @@ ${businessName}`
   }
 
   // general
-  const subject = `${jobAddress} — update`
-  const body = `Hi ${clientName},
+  const subjectLabel = ctx ? jobAddress : 'Project update'
+  const subject = `${subjectLabel} — following up`
+  const greeting = clientName !== 'there' ? `Hi ${clientName},` : 'Hi,'
+  const projectRef = ctx ? `the work at ${jobAddress}` : 'your project'
+  const body = `${greeting}
 
-${builderName} here. Just wanted to reach out regarding ${jobAddress}.
+I wanted to follow up regarding ${projectRef}. Please let me know if you have any questions or if there is anything you would like to discuss.
 
+Kind regards,
 ${builderName}
 ${businessName}`
-  return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress }
+  return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: ctx?.job_address ?? null }
 }
 
 // ─── AI-generated draft ───────────────────────────────────────────────────────
@@ -201,6 +205,8 @@ ${ctx.latest_variation_amount != null ? `Variation amount: $${ctx.latest_variati
     general: 'general outreach regarding the project',
   }
 
+  const hasContext = Boolean(ctx)
+
   const prompt = `You are helping an Australian residential builder named ${builderName} from ${businessName} draft a professional email to a client.
 
 Job context:
@@ -211,12 +217,16 @@ ${contextMessage ? `Additional context from builder: ${contextMessage}` : ''}
 
 Write a professional, clear email that:
 - Is courteous and professional — never use slang, colloquialisms, or casual greetings like "G'day", "Mate", "Hey", "Hi there"
-- Opens with "Hi [First Name]," using the actual client first name from context — never "Dear Client," or generic openers
-- References the specific job address and client name from the context
+${hasContext
+  ? `- Opens with "Hi ${clientName}," using the client first name`
+  : `- Opens with "Hi [name]," — but since no client name is available, use "Hi," on its own`}
+${hasContext
+  ? `- References the specific job at ${jobAddress} and the client's name`
+  : `- Does not invent a job address or client name — write around the unknown details naturally`}
 - States the purpose clearly in the first sentence
 - Is concise — 3–5 sentences for follow-ups, slightly longer for detailed matters
 - Uses correct Australian English spelling (not US English)
-- Includes a subject line that clearly describes the email topic
+- Includes a specific subject line (not "your project — update" — make it descriptive of the actual email purpose)
 - Signs off professionally with "Kind regards," or "Regards," followed by: ${builderName}\n${businessName}
 - Never uses exclamation marks
 
@@ -277,12 +287,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
       intent_hint,
     }
 
-    // Try AI draft if API key available AND we have job context
-    // Without job context the AI produces a generic, useless email — use fallback instead
     const apiKey = process.env.ANTHROPIC_API_KEY
     let draft: EmailDraft
 
-    if (apiKey && jobCtx) {
+    if (apiKey) {
       const anthropic = new Anthropic({ apiKey })
       draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic)
     } else {
