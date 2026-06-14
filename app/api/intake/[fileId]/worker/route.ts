@@ -333,23 +333,25 @@ export async function POST(
     w('updateStage:extracting_site'); await updateStage('extracting_site')
 
     const docCount = allDocBlocks.length
-    const systemPrompt = `You are a senior quantity surveyor with 20 years of Australian residential construction experience. You are reviewing ${docCount > 1 ? `${docCount} documents` : 'a document'} for a residential construction project.
+    const systemPrompt = `You are a senior quantity surveyor with 20 years of Australian residential construction experience. You are reviewing ${docCount > 1 ? `${docCount} documents` : 'a document'} for an Australian residential construction project.
 
-Your task: produce a complete construction cost takeoff and project assessment in one pass.
+Your task: produce a COMPLETE construction cost takeoff. You MUST always produce line items — an empty response is never acceptable.
 
-Rules:
-- Read ALL provided documents before responding. Cross-reference them.
-- Always produce output — never return empty line_items unless there is genuinely no construction content at all.
-- If plans are schematic-only (no schedules), produce professional estimates from visible dimensions and layout. Set confidence 30–55 for estimated items.
-- If documents contain quantity schedules or dimension annotations, extract measured items. Set confidence 70–100.
-- Use Australian units: m², lm, m, m³, ea, hr, wk. Never sf or LF.
-- Descriptions must be specific: "Concrete slab — 125mm ground floor" not "Concrete".
-- For each item, set pricing_type: measured (has dimensions/qty), pc_allowance (prime cost), or provisional_sum (TBD by others).${memoryContextBlock}${profileContext}`
+CRITICAL RULES:
+1. ALWAYS produce at least 5–10 line_items. Never return an empty array.
+2. If the document contains a quantity schedule, extract every line item with a quantity and rate.
+3. If the document is schematic plans only (floor plans, elevations), produce professional QS estimates from visible dimensions and layout. A senior QS estimates even from floor plans — this is your core skill.
+4. If you cannot read the document clearly, produce conservative professional estimates for a typical residential project of this type. Set confidence to 25–40 for anything estimated without clear data.
+5. Descriptions must be specific: "Concrete slab — 125mm ground floor" not "Concrete".
+6. Use Australian units: m², lm, m, m³, ea, hr, wk. Never sf or LF.
+7. Set pricing_type: measured (extracted from schedule/dimensions), pc_allowance (prime cost), or provisional_sum (TBD by others).${memoryContextBlock}${profileContext}`
 
     const userText = `Extract a complete quantity takeoff from the provided construction document${docCount > 1 ? 's' : ''}.
 
-Trade categories:
+Trade categories (include items from ALL relevant categories):
 ${TRADE_CATEGORIES.map(c => `${c.id}. ${c.name} — ${c.examples}`).join('\n')}
+
+Remember: you MUST return at least 5 line_items. If the document is unclear, estimate professionally — never return empty line_items.
 
 Use the extract_estimate tool to return your results.`
 
@@ -422,10 +424,11 @@ Use the extract_estimate tool to return your results.`
       return NextResponse.json({ ok: false })
     }
 
-    const projectMetadata = extractResult.project ?? {}
+    // NOTE: extractResult may be replaced by the empty-retry block below — read these after
+    let projectMetadata = extractResult.project ?? {}
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawLineItems: any[] = extractResult.line_items ?? []
-    const missingCategories: string[] = extractResult.missing_categories ?? []
+    let rawLineItems: any[] = extractResult.line_items ?? []
+    let missingCategories: string[] = extractResult.missing_categories ?? []
 
     console.log('[intake:worker:items]', {
       file_id: fileId,
@@ -436,8 +439,51 @@ Use the extract_estimate tool to return your results.`
     })
 
     if (rawLineItems.length === 0) {
-      await failWith('NO_LINE_ITEMS_FOUND', `doc_type=${extractResult.doc_type}, summary=${extractResult.confidence_summary}`)
-      return NextResponse.json({ ok: false })
+      // Retry with an even more explicit prompt before giving up
+      const elapsedMs = Date.now() - pipelineStart
+      const retryBudget = 270_000 - elapsedMs
+      if (retryBudget > 60_000) {
+        console.warn('[intake:worker:retry-empty]', { file_id: fileId, doc_type: extractResult.doc_type, budget_ms: retryBudget })
+        try {
+          const retryBlocks = droppedToPrimaryOnly ? [docBlock] : allDocBlocks
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const retryResponse: any = await (client.messages.create as any)(
+            {
+              model: 'claude-sonnet-4-6',
+              max_tokens: 8192,
+              system: systemPrompt,
+              tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
+              tool_choice: { type: 'tool', name: 'extract_estimate' },
+              messages: [{
+                role: 'user',
+                content: [
+                  ...retryBlocks,
+                  { type: 'text', text: userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence to 30–45 for estimated items. The builder needs a starting point, not an empty quote.' },
+                ],
+              }],
+            },
+            { timeout: Math.min(retryBudget, 90_000) }
+          )
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const retryBlock = retryResponse.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')
+          if (retryBlock?.input?.line_items?.length > 0) {
+            extractResult = retryBlock.input
+            rawLineItems = extractResult.line_items ?? []
+            missingCategories = extractResult.missing_categories ?? []
+            projectMetadata = extractResult.project ?? projectMetadata
+            console.log('[intake:worker:retry-empty:success]', { file_id: fileId, items: rawLineItems.length })
+          } else {
+            await failWith('NO_LINE_ITEMS_FOUND', `Both attempts returned empty line_items. doc_type=${extractResult.doc_type}`)
+            return NextResponse.json({ ok: false })
+          }
+        } catch (retryErr) {
+          await failWith('NO_LINE_ITEMS_FOUND', `Retry failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`)
+          return NextResponse.json({ ok: false })
+        }
+      } else {
+        await failWith('NO_LINE_ITEMS_FOUND', `doc_type=${extractResult.doc_type}, summary=${extractResult.confidence_summary}`)
+        return NextResponse.json({ ok: false })
+      }
     }
 
     // ── Scope intelligence ─────────────────────────────────────────────────
