@@ -422,25 +422,36 @@ export async function POST(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase: any = createClient(supabaseUrl, supabaseKey)
 
-  // 4. Idempotency check + atomic start
-  const { data: claimedRow } = await supabase
-    .from('files')
-    .update({ intake_status: 'processing', pipeline_stage: 'reading' })
-    .eq('id', fileId)
-    .in('intake_status', ['uploaded', 'queued'])
-    .select()
-    .single()
+  // 4. Idempotency check + atomic start — 10s hard cap so Supabase flakiness
+  //    never hangs the entire Vercel function before work even begins.
+  const t0 = Date.now()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const claimResult: any = await Promise.race([
+    supabase.from('files')
+      .update({ intake_status: 'processing', pipeline_stage: 'reading' })
+      .eq('id', fileId)
+      .in('intake_status', ['uploaded', 'queued'])
+      .select()
+      .single(),
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ data: null, error: new Error('claim timeout after 10s') }), 10_000)
+    ),
+  ])
+  console.log('[intake:worker:claim]', { file_id: fileId, elapsed_ms: Date.now() - t0, claimed: !!claimResult?.data })
 
-  if (!claimedRow) {
+  if (!claimResult?.data) {
     return NextResponse.json({ ok: true, skipped: true })
   }
 
   const pipelineStart = Date.now()
 
-  // Helper: update pipeline_stage in DB for SSE monitor polling
-  const updateStage = async (stage: string) => {
-    await supabase.from('files').update({ pipeline_stage: stage }).eq('id', fileId)
-  }
+  // Helper: update pipeline_stage in DB for SSE monitor polling.
+  // Non-blocking — resolves after 8s so a slow Supabase write never stalls the pipeline.
+  const updateStage = (stage: string): Promise<void> =>
+    Promise.race([
+      supabase.from('files').update({ pipeline_stage: stage }).eq('id', fileId).then(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
+    ])
 
   // Helper: write failure record to DB (no SSE)
   const failWith = async (
@@ -456,15 +467,18 @@ export async function POST(
       processing_time_ms: processingTimeMs,
       ...extra,
     })
-    await supabase.from('files').update({
-      intake_status: 'failed',
-      failure_stage: stage,
-      failure_reason: internalReason.slice(0, 500),
-      processing_time_ms: processingTimeMs,
-      pipeline_stage: stage,
-      ...(extra?.line_item_count != null && { line_item_count: extra.line_item_count }),
-      ...(extra?.page_count != null && { page_count: extra.page_count }),
-    }).eq('id', fileId)
+    await Promise.race([
+      supabase.from('files').update({
+        intake_status: 'failed',
+        failure_stage: stage,
+        failure_reason: internalReason.slice(0, 500),
+        processing_time_ms: processingTimeMs,
+        pipeline_stage: stage,
+        ...(extra?.line_item_count != null && { line_item_count: extra.line_item_count }),
+        ...(extra?.page_count != null && { page_count: extra.page_count }),
+      }).eq('id', fileId),
+      new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+    ])
   }
 
   const anthropicKey = process.env.ANTHROPIC_API_KEY
@@ -480,16 +494,17 @@ export async function POST(
     const Anthropic = (await import('@anthropic-ai/sdk')).default
     const client = new Anthropic({ apiKey: anthropicKey })
 
-    // Fetch file record from DB
+    // Fetch file record from DB — 8s cap; non-fatal if slow (cached file will be used)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let fileRow: any = null
-    const { data, error: fileErr } = await supabase
-      .from('files')
-      .select('*')
-      .eq('id', fileId)
-      .eq('builder_id', builder_id)
-      .single()
-    if (!fileErr) fileRow = data
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fileRecordResult: any = await Promise.race([
+        supabase.from('files').select('*').eq('id', fileId).eq('builder_id', builder_id).single(),
+        new Promise((resolve) => setTimeout(() => resolve({ data: null, error: new Error('file record timeout') }), 8_000)),
+      ])
+      if (!fileRecordResult?.error) fileRow = fileRecordResult?.data
+    } catch { /* non-fatal — will fail at download step if fileRow is null */ }
 
     await updateStage('reading')
 
@@ -593,10 +608,20 @@ export async function POST(
           )
           continue
         }
-        const { data: sibRow } = await supabase.from('files').select('*').eq('id', sibId).eq('builder_id', builder_id).single()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sibRowResult: any = await Promise.race([
+          supabase.from('files').select('*').eq('id', sibId).eq('builder_id', builder_id).single(),
+          new Promise((resolve) => setTimeout(() => resolve({ data: null, error: null }), 8_000)),
+        ])
+        const sibRow = sibRowResult?.data
         if (!sibRow) continue
-        const { data: sibData } = await supabase.storage.from('plans').download(sibRow.storage_path)
-        if (!sibData) continue
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sibDownloadResult: any = await Promise.race([
+          supabase.storage.from('plans').download(sibRow.storage_path),
+          new Promise((resolve) => setTimeout(() => resolve({ data: null, error: null }), 30_000)),
+        ])
+        const sibData = sibDownloadResult?.data
+        if (!sibData) { skippedSiblingCount++; continue }
         const sibBuffer = await sibData.arrayBuffer()
         if (attachedRawBytes + sibBuffer.byteLength > MAX_TOTAL_RAW_BYTES) {
           skippedSiblingCount++
@@ -684,13 +709,13 @@ export async function POST(
     let totalInMemory = 0
 
     try {
-      const { data: memoryRows } = await supabase
-        .from('project_memory')
-        .select('*')
-        .eq('builder_id', builder_id)
-        .in('status', ['completed', 'active'])
-        .order('completed_at', { ascending: false })
-        .limit(50)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const memResult: any = await Promise.race([
+        supabase.from('project_memory').select('*').eq('builder_id', builder_id)
+          .in('status', ['completed', 'active']).order('completed_at', { ascending: false }).limit(50),
+        new Promise((resolve) => setTimeout(() => resolve({ data: null }), 10_000)),
+      ])
+      const memoryRows = memResult?.data
 
       totalInMemory = memoryRows?.length ?? 0
 
@@ -748,12 +773,14 @@ export async function POST(
     let anthropicResponse = ''
     let droppedToPrimaryOnly = false
 
+    const preExtractionMs = Date.now() - pipelineStart
     console.log('[intake:worker:ai-prompt]', {
       file_id: fileId,
       doc_blocks: allDocBlocks.length,
       prompt_length: extractionPrompt.length,
       model: 'claude-sonnet-4-6',
       max_tokens: 8192,
+      elapsed_ms: preExtractionMs,
     })
 
     // Time budget: Vercel hard limit is 300s. Metadata call gets 30s.
