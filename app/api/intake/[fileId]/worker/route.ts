@@ -367,8 +367,10 @@ Use the extract_estimate tool to return your results.`
       timeoutMs: number
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ): Promise<any> => {
+      // Promise.race is the hard outer cap — the SDK timeout param alone is
+      // unreliable for large PDF uploads where request transmission itself is slow.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response: any = await (client.messages.create as any)(
+      const apiCall = (client.messages.create as any)(
         {
           model: 'claude-sonnet-4-6',
           max_tokens: 8192,
@@ -379,6 +381,13 @@ Use the extract_estimate tool to return your results.`
         },
         { timeout: timeoutMs }
       )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response: any = await Promise.race([
+        apiCall,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`extraction hard timeout after ${timeoutMs}ms`)), timeoutMs)
+        ),
+      ])
       console.log('[intake:worker:ai]', {
         file_id: fileId,
         doc_blocks: blocks.length,
@@ -391,7 +400,7 @@ Use the extract_estimate tool to return your results.`
 
     try {
       w('ai:extract:start')
-      extractResult = await runExtraction(allDocBlocks, 240_000)
+      extractResult = await runExtraction(allDocBlocks, 180_000)
       w('ai:extract:done')
     } catch (firstErr) {
       const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
@@ -402,7 +411,7 @@ Use the extract_estimate tool to return your results.`
         try {
           w('ai:extract:retry')
           const remainingMs = 290_000 - (Date.now() - pipelineStart)
-          extractResult = await runExtraction([docBlock], Math.min(remainingMs, 120_000))
+          extractResult = await runExtraction([docBlock], Math.min(remainingMs, 80_000))
           droppedToPrimaryOnly = true
           w('ai:extract:retry:done')
         } catch (retryErr) {
