@@ -181,7 +181,8 @@ export async function GET(
       .order('trade_category_id', { ascending: true })
 
     if (lineErr) {
-      return NextResponse.json({ error: lineErr.message }, { status: 500 })
+      console.error('[quotes:get] line items fetch error:', lineErr.message, { quoteId })
+      return NextResponse.json({ error: 'Failed to load quote line items. Please try again.' }, { status: 500 })
     }
 
     const jobRow = (quoteRow as typeof quoteRow & { jobs: { address: string } | null }).jobs
@@ -235,9 +236,9 @@ export async function GET(
     }
 
     return NextResponse.json(response)
-  } catch {
-    const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
-    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
-    return NextResponse.json({ quote: DEMO_QUOTE, line_items_by_category, summary })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[quotes:get] unhandled error:', msg, { quoteId: params.quoteId })
+    return NextResponse.json({ error: 'Failed to load quote. Please try again.' }, { status: 500 })
   }
 }

@@ -1199,11 +1199,6 @@ export async function POST(
           job_id, builder_id, quote_id: quoteRow.id, status: 'draft', ...projectMetadata,
         }, { onConflict: 'job_id' })
         if (memErr) console.error('[intake:worker] project_memory upsert:', memErr.message)
-
-        const { error: quoteMetaErr } = await supabase.from('quotes')
-          .update({ metadata: { explainability, similar_project_count: similarProjects.length, extraction_diagnostics: diag } })
-          .eq('id', quoteRow.id)
-        if (quoteMetaErr) console.error('[intake:worker] quote metadata update:', quoteMetaErr.message)
       }
     } catch {
       // Non-fatal — quoteId stays as memory-based ID
