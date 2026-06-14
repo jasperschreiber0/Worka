@@ -1,5 +1,10 @@
 import { NextRequest } from 'next/server'
 
+// Vercel: allow up to 300s (Pro limit) so large PDFs don't hit the 60s default ceiling.
+// Without this, the function is killed mid-Anthropic-request and the SDK's internal retry
+// produces "Retry timed out: Request was aborted." on a dead runtime.
+export const maxDuration = 300
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ProgressEvent {
@@ -103,7 +108,9 @@ export async function GET(
         controller.enqueue(sseEvent(encoder, event, data))
       }
 
+      let intakeStart = Date.now()
       try {
+        intakeStart = Date.now()
         // Stage: uploading
         emit('progress', PROGRESS_STAGES[0])
 
@@ -157,7 +164,10 @@ export async function GET(
         const mediaType = isPdf ? 'application/pdf' : 'image/jpeg'
 
         const Anthropic = (await import('@anthropic-ai/sdk')).default
-        const client = new Anthropic({ apiKey: anthropicKey })
+        // maxRetries: 0 — the SDK's internal retry inherits the already-dying runtime
+        // when Vercel kills the function, producing "Retry timed out: Request was aborted."
+        // We control retries at the route level instead.
+        const client = new Anthropic({ apiKey: anthropicKey, maxRetries: 0 })
 
         // Trade categories aligned with CLAUDE.md
         const tradeCategories = [
@@ -219,42 +229,93 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
           }
         }, 2000)
 
+        const fileSizeBytes = fileBuffer.byteLength
         let anthropicResponse: string
+        let aiDurationMs: number | null = null
+        let retryCount = 0
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const messageContent: any[] = isPdf
+          ? [
+              {
+                type: 'document',
+                source: {
+                  type: 'base64',
+                  media_type: 'application/pdf',
+                  data: base64Data,
+                },
+              },
+              { type: 'text', text: extractionPrompt },
+            ]
+          : [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/jpeg',
+                  data: base64Data,
+                },
+              },
+              { type: 'text', text: extractionPrompt },
+            ]
+
+        // 250s budget leaves 50s headroom inside the 300s maxDuration ceiling.
+        // Using a fresh AbortController per attempt so retries get a clean signal.
+        const AI_TIMEOUT_MS = 250_000
+        const MAX_AI_RETRIES = 1
+
         try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const messageContent: any[] = isPdf
-            ? [
-                {
-                  type: 'document',
-                  source: {
-                    type: 'base64',
-                    media_type: 'application/pdf',
-                    data: base64Data,
-                  },
-                },
-                { type: 'text', text: extractionPrompt },
-              ]
-            : [
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: 'image/jpeg',
-                    data: base64Data,
-                  },
-                },
-                { type: 'text', text: extractionPrompt },
-              ]
+          let lastError: unknown
+          while (retryCount <= MAX_AI_RETRIES) {
+            const aiStart = Date.now()
+            const abortController = new AbortController()
+            const timeoutHandle = setTimeout(() => abortController.abort(), AI_TIMEOUT_MS)
 
-          const response = await client.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 4096,
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-            messages: [{ role: 'user', content: messageContent }],
-          })
-
-          anthropicResponse =
-            response.content[0].type === 'text' ? response.content[0].text : ''
+            try {
+              const response = await client.messages.create(
+                {
+                  model: 'claude-sonnet-4-20250514',
+                  max_tokens: 4096,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+                  messages: [{ role: 'user', content: messageContent }],
+                },
+                { signal: abortController.signal }
+              )
+              aiDurationMs = Date.now() - aiStart
+              anthropicResponse =
+                response.content[0].type === 'text' ? response.content[0].text : ''
+              console.log(JSON.stringify({
+                event: 'intake:ai:success',
+                file_id: fileId,
+                file_size_bytes: fileSizeBytes,
+                ai_duration_ms: aiDurationMs,
+                retry_count: retryCount,
+                elapsed_ms: Date.now() - intakeStart,
+              }))
+              break
+            } catch (err) {
+              aiDurationMs = Date.now() - aiStart
+              lastError = err
+              const isAbort = err instanceof Error && err.name === 'AbortError'
+              console.error(JSON.stringify({
+                event: 'intake:ai:fail',
+                file_id: fileId,
+                file_size_bytes: fileSizeBytes,
+                ai_duration_ms: aiDurationMs,
+                retry_count: retryCount,
+                abort_source: isAbort ? 'timeout_controller' : 'sdk_or_network',
+                error: err instanceof Error ? err.message : String(err),
+                elapsed_ms: Date.now() - intakeStart,
+              }))
+              if (retryCount >= MAX_AI_RETRIES) throw lastError
+              retryCount++
+              // fresh controller for the retry — never reuse an aborted signal
+            } finally {
+              clearTimeout(timeoutHandle)
+            }
+          }
+          // anthropicResponse is guaranteed assigned if loop exited without throw
+          anthropicResponse = anthropicResponse!
         } finally {
           clearInterval(stageEmitter)
         }
@@ -410,8 +471,26 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
         emit('complete', completeData)
         controller.close()
       } catch (err) {
-        console.error('Intake pipeline error:', err)
-        emit('error', { message: 'Processing failed — please try again' })
+        const isAbort = err instanceof Error && err.name === 'AbortError'
+        console.error(JSON.stringify({
+          event: 'intake:worker:fail',
+          file_id: fileId,
+          stage: 'AI_EXTRACTION_FAILED',
+          reason: err instanceof Error ? err.message : String(err),
+          abort_source: isAbort ? 'timeout_controller' : 'sdk_or_network',
+          elapsed_ms: Date.now() - (intakeStart ?? 0),
+        }))
+        // Reset file to 'failed' so it doesn't stay stuck at 'processing' forever
+        try {
+          const { createClient } = await import('@supabase/supabase-js')
+          const supabase = createClient(supabaseUrl!, supabaseKey!)
+          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+        } catch { /* best-effort */ }
+        emit('error', {
+          message: isAbort
+            ? 'Extraction timed out — the file may be too large. Please try a smaller PDF.'
+            : 'Processing failed — please try again',
+        })
         controller.close()
       }
     },
