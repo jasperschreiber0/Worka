@@ -722,12 +722,12 @@ export async function POST(
     // ── Step 3: Fetch builder profile ─────────────────────────────────
     let builderProfile: BuilderEstimationProfile | null = null
     try {
-      const { data: profileRow } = await supabase
-        .from('builder_estimation_profiles')
-        .select('*')
-        .eq('builder_id', builder_id)
-        .single()
-      builderProfile = profileRow as BuilderEstimationProfile | null
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const profileResult: any = await Promise.race([
+        supabase.from('builder_estimation_profiles').select('*').eq('builder_id', builder_id).single(),
+        new Promise((resolve) => setTimeout(() => resolve({ data: null, error: null }), 10_000)),
+      ])
+      builderProfile = profileResult?.data as BuilderEstimationProfile | null
     } catch {
       // Non-fatal
     }
@@ -794,7 +794,7 @@ export async function POST(
         if (isTooLarge && allDocBlocks.length > 1) {
           const remainingMs = budgetMs - (Date.now() - extractionStart)
           console.warn('[intake:worker:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg, remaining_ms: remainingMs })
-          anthropicResponse = await callExtraction([docBlock], Math.max(remainingMs, 60_000))
+          anthropicResponse = await callExtraction([docBlock], Math.min(remainingMs, 60_000))
           droppedToPrimaryOnly = true
         } else {
           throw firstErr
