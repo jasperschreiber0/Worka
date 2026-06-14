@@ -1321,14 +1321,21 @@ export async function POST(
     const errMsg = err instanceof Error ? err.message : String(err)
     console.error('[intake:worker:unhandled]', { file_id: fileId, error: errMsg, stack: err instanceof Error ? err.stack?.slice(0, 600) : undefined })
     try {
-      // Critical columns first — pipeline_stage is best-effort (requires migration 016)
-      await supabase.from('files').update({
-        intake_status: 'failed',
-        failure_stage: 'AI_EXTRACTION_FAILED',
-        failure_reason: `Unhandled pipeline error: ${errMsg.slice(0, 400)}`,
-        processing_time_ms: Date.now() - pipelineStart,
-      }).eq('id', fileId)
-      await supabase.from('files').update({ pipeline_stage: 'AI_EXTRACTION_FAILED' }).eq('id', fileId)
+      // Both writes get a 10s hard cap — if the outer handler itself hangs here,
+      // Vercel will kill the function and the file stays 'processing' forever (stuck at 90%).
+      await Promise.race([
+        supabase.from('files').update({
+          intake_status: 'failed',
+          failure_stage: 'AI_EXTRACTION_FAILED',
+          failure_reason: `Unhandled pipeline error: ${errMsg.slice(0, 400)}`,
+          processing_time_ms: Date.now() - pipelineStart,
+        }).eq('id', fileId),
+        new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+      ])
+      await Promise.race([
+        supabase.from('files').update({ pipeline_stage: 'AI_EXTRACTION_FAILED' }).eq('id', fileId),
+        new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+      ])
     } catch { /* ignore secondary failure */ }
     return NextResponse.json({ ok: false, error: errMsg }, { status: 500 })
   }
