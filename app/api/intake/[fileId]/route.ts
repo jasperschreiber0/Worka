@@ -539,8 +539,8 @@ export async function GET(
 
           // ── Poll DB every 2s for pipeline_stage / intake_status changes ──
           const TIMEOUT_MS = 285_000 // 285s — leave 15s buffer before Vercel's 300s limit
-          const WORKER_START_TIMEOUT_MS = 30_000 // 30s — if worker never starts
-          const STUCK_STAGE_TIMEOUT_MS = 90_000  // 90s — if stage hasn't changed, worker is dead
+          const WORKER_START_TIMEOUT_MS = 30_000  // 30s — if worker never starts
+          const STUCK_STAGE_TIMEOUT_MS = 240_000  // 240s — AI extraction can take 150-200s on large PDFs
           const POLL_INTERVAL_MS = 2_000
 
           const startTime = Date.now()
