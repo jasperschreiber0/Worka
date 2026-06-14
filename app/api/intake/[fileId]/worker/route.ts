@@ -367,35 +367,35 @@ Use the extract_estimate tool to return your results.`
       timeoutMs: number
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ): Promise<any> => {
-      // Promise.race is the hard outer cap — the SDK timeout param alone is
-      // unreliable for large PDF uploads where request transmission itself is slow.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const apiCall = (client.messages.create as any)(
-        {
-          model: 'claude-sonnet-4-6',
-          max_tokens: 8192,
-          system: systemPrompt,
-          tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
-          tool_choice: { type: 'tool', name: 'extract_estimate' },
-          messages: [{ role: 'user', content: [...blocks, { type: 'text', text: userText }] }],
-        },
-        { timeout: timeoutMs }
-      )
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response: any = await Promise.race([
-        apiCall,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`extraction hard timeout after ${timeoutMs}ms`)), timeoutMs)
-        ),
-      ])
-      console.log('[intake:worker:ai]', {
-        file_id: fileId,
-        doc_blocks: blocks.length,
-        input_tokens: response.usage?.input_tokens,
-        output_tokens: response.usage?.output_tokens,
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return response.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')?.input ?? null
+      // AbortController actually closes the HTTP socket when the timer fires.
+      // Promise.race alone doesn't cancel the in-flight request, leaving the
+      // connection open and keeping the Vercel function alive past our timeout.
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response: any = await (client.messages.create as any)(
+          {
+            model: 'claude-sonnet-4-6',
+            max_tokens: 8192,
+            system: systemPrompt,
+            tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
+            tool_choice: { type: 'tool', name: 'extract_estimate' },
+            messages: [{ role: 'user', content: [...blocks, { type: 'text', text: userText }] }],
+          },
+          { signal: controller.signal }
+        )
+        console.log('[intake:worker:ai]', {
+          file_id: fileId,
+          doc_blocks: blocks.length,
+          input_tokens: response.usage?.input_tokens,
+          output_tokens: response.usage?.output_tokens,
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return response.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')?.input ?? null
+      } finally {
+        clearTimeout(timer)
+      }
     }
 
     try {
