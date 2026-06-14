@@ -540,10 +540,12 @@ export async function GET(
           // ── Poll DB every 2s for pipeline_stage / intake_status changes ──
           const TIMEOUT_MS = 285_000 // 285s — leave 15s buffer before Vercel's 300s limit
           const WORKER_START_TIMEOUT_MS = 30_000 // 30s — if worker never starts
+          const STUCK_STAGE_TIMEOUT_MS = 90_000  // 90s — if stage hasn't changed, worker is dead
           const POLL_INTERVAL_MS = 2_000
 
           const startTime = Date.now()
           let lastStage: string | null = 'uploading'
+          let lastStageChangedAt = Date.now()
           let workerStarted = false
 
           while (true) {
@@ -580,6 +582,33 @@ export async function GET(
             // Detect that worker has started (status changed from queued)
             if (intake_status !== 'uploaded' && intake_status !== 'queued') {
               workerStarted = true
+            }
+
+            // Track when stage last changed
+            if (pipeline_stage !== lastStage) {
+              lastStageChangedAt = Date.now()
+            }
+
+            // Stuck-file guard: worker is 'processing' but stage hasn't moved in 90s —
+            // the worker died mid-run (timeout/crash). Reset the file so the builder can retry.
+            if (
+              workerStarted &&
+              intake_status === 'processing' &&
+              Date.now() - lastStageChangedAt > STUCK_STAGE_TIMEOUT_MS
+            ) {
+              console.error('[intake:stuck-file-reset]', {
+                file_id: fileId,
+                last_stage: pipeline_stage,
+                stuck_for_ms: Date.now() - lastStageChangedAt,
+              })
+              await supabase
+                .from('files')
+                .update({ intake_status: 'uploaded', pipeline_stage: null, failure_stage: null })
+                .eq('id', fileId)
+                .eq('intake_status', 'processing')
+              emit('error', { message: 'Processing stalled — please try uploading again.', stage: 'AI_EXTRACTION_FAILED' })
+              controller.close()
+              return
             }
 
             // Check if worker never started
