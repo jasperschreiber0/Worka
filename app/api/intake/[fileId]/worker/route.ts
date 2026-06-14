@@ -325,8 +325,22 @@ function tryExtractJson(raw: string): ParseResult {
       console.warn('[intake:json-sanitize]', { pass: 3, recovered: true })
       return { data: buildData(parsed as Record<string, unknown>), error: null, truncated: false, had_fence }
     }
-  } catch (e3) {
-    return fail(e3 instanceof Error ? e3.message : 'json_parse_error', false, had_fence)
+  } catch { /* fall through to pass 4 */ }
+
+  // Pass 4: strip Unicode line separators (U+2028/U+2029) which JSON.parse rejects.
+  // These slip through passes 2-3 because they are above the ASCII range.
+  // Also used for any other exotic whitespace Claude emits inside string values.
+  try {
+    const sanitized = text
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u2028\u2029]/g, '')
+      .replace(/[\r\n\t]/g, ' ')
+    const parsed = JSON.parse(sanitized)
+    if (parsed && typeof parsed === 'object') {
+      console.warn('[intake:json-sanitize]', { pass: 4, recovered: true })
+      return { data: buildData(parsed as Record<string, unknown>), error: null, truncated: false, had_fence }
+    }
+  } catch (e4) {
+    return fail(e4 instanceof Error ? e4.message : 'json_parse_error', false, had_fence)
   }
 
   return fail('json_parse_error', false, had_fence)

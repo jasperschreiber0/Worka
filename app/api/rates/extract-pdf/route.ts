@@ -108,12 +108,18 @@ Return ONLY valid JSON:
     // Repair truncated JSON: if the response was cut off mid-array, close it
     let rawJson = jsonMatch[0]
     if (!rawJson.trimEnd().endsWith('}')) {
-      // Find last complete object boundary and close the structure
       const lastClose = rawJson.lastIndexOf('}')
       if (lastClose > 0) {
         rawJson = rawJson.slice(0, lastClose + 1) + ']}'
       }
     }
+
+    // Sanitize: strip trailing commas, ASCII control chars, and Unicode line
+    // separators (U+2028, U+2029) that Claude sometimes emits inside strings.
+    rawJson = rawJson
+      .replace(/,(\s*[}\]])/g, '$1')
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+      .replace(/[\r\n\t\u2028\u2029]/g, ' ')
 
     const parsed = JSON.parse(rawJson) as { rates: Array<{ trade_category_id: number; description: string; unit: string; rate: number }> }
 
@@ -129,8 +135,7 @@ Return ONLY valid JSON:
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[extract-pdf] Error:', message)
-    // Surface the real error so it's visible in the UI during debugging
-    return NextResponse.json({ error: `PDF extraction failed: ${message}` }, { status: 500 })
+    return NextResponse.json({ error: 'Could not extract rates from this PDF — the file may contain unsupported formatting. Please try again or re-export the PDF.' }, { status: 500 })
   }
 }
 
