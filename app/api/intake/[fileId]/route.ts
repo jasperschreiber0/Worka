@@ -719,7 +719,9 @@ export async function GET(
         emit('progress', PROGRESS_STAGES[0]) // uploading
 
         const Anthropic = (await import('@anthropic-ai/sdk')).default
-        const client = new Anthropic({ apiKey: anthropicKey })
+        // maxRetries: 0 — the SDK's built-in retries re-use an already-aborted
+        // signal, producing "Retry failed: Request was aborted" → NO_LINE_ITEMS_FOUND.
+        const client = new Anthropic({ apiKey: anthropicKey, maxRetries: 0 })
 
         // Supabase is optional — memory cache is the primary file source
         const hasSupabaseInline = Boolean(supabaseUrl && supabaseKey)
@@ -1508,6 +1510,18 @@ export async function GET(
         controller.close()
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
+        const isAbort =
+          (err instanceof Error && err.name === 'AbortError') ||
+          errMsg.toLowerCase().includes('aborted') ||
+          errMsg.toLowerCase().includes('abort')
+
+        if (isAbort) {
+          console.error('[intake:aborted]', { file_id: fileId, error: errMsg })
+          emit('error', { message: 'Upload connection dropped — please re-upload the file.', stage: 'aborted', reason: 'abort_timeout' })
+          controller.close()
+          return
+        }
+
         console.error('[intake:unhandled]', { file_id: fileId, error: errMsg, stack: err instanceof Error ? err.stack?.slice(0, 600) : undefined })
         // Best-effort: write a failure record — supabase may be null if error occurred very early
         try {
