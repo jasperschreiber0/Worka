@@ -164,7 +164,9 @@ export async function POST(
 
   try {
     const Anthropic = (await import('@anthropic-ai/sdk')).default
-    const client = new Anthropic({ apiKey: anthropicKey })
+    // maxRetries: 0 — SDK retries re-use an already-aborted signal, producing
+    // "Retry failed: Request was aborted" when our AbortController fires.
+    const client = new Anthropic({ apiKey: anthropicKey, maxRetries: 0 })
 
     // ── Load primary file ──────────────────────────────────────────────────
     w('updateStage:reading'); await updateStage('reading')
@@ -364,7 +366,8 @@ Use the extract_estimate tool to return your results.`
     const runExtraction = async (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       blocks: any[],
-      timeoutMs: number
+      timeoutMs: number,
+      userTextOverride?: string
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ): Promise<any> => {
       // AbortController actually closes the HTTP socket when the timer fires.
@@ -381,7 +384,7 @@ Use the extract_estimate tool to return your results.`
             system: systemPrompt,
             tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
             tool_choice: { type: 'tool', name: 'extract_estimate' },
-            messages: [{ role: 'user', content: [...blocks, { type: 'text', text: userText }] }],
+            messages: [{ role: 'user', content: [...blocks, { type: 'text', text: userTextOverride ?? userText }] }],
           },
           { signal: controller.signal }
         )
@@ -458,31 +461,13 @@ Use the extract_estimate tool to return your results.`
         try {
           const retryBlocks = droppedToPrimaryOnly ? [docBlock] : allDocBlocks
           const retryText = userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence to 30–45 for estimated items. The builder needs a starting point, not an empty quote.'
-          // Use runExtraction so the AbortController timeout applies — direct
-          // client.messages.create calls have no timeout and will hang until Vercel kills at 300s.
-          const retryController = new AbortController()
-          const retryTimer = setTimeout(() => retryController.abort(), Math.min(retryBudget, 60_000))
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let retryResponse: any
-          try {
-            retryResponse = await (client.messages.create as any)(
-              {
-                model: 'claude-sonnet-4-6',
-                max_tokens: 8192,
-                system: systemPrompt,
-                tools: [{ name: 'extract_estimate', description: 'Return the complete quantity takeoff and project assessment', input_schema: EXTRACT_TOOL_SCHEMA }],
-                tool_choice: { type: 'tool', name: 'extract_estimate' },
-                messages: [{ role: 'user', content: [...retryBlocks, { type: 'text', text: retryText }] }],
-              },
-              { signal: retryController.signal }
-            )
-          } finally {
-            clearTimeout(retryTimer)
-          }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const retryBlock = retryResponse?.content?.find((b: any) => b.type === 'tool_use' && b.name === 'extract_estimate')
-          if (retryBlock?.input?.line_items?.length > 0) {
-            extractResult = retryBlock.input
+          const retryTimeoutMs = Math.min(retryBudget, 60_000)
+          // Reuse runExtraction — it owns the AbortController and clears it correctly.
+          // Never call client.messages.create directly: the SDK's built-in retries will
+          // re-fire on an aborted signal and produce "Retry failed: Request was aborted".
+          const retryResult = await runExtraction(retryBlocks, retryTimeoutMs, retryText)
+          if (retryResult?.line_items?.length > 0) {
+            extractResult = retryResult
             rawLineItems = extractResult.line_items ?? []
             missingCategories = extractResult.missing_categories ?? []
             projectMetadata = extractResult.project ?? projectMetadata
@@ -492,7 +477,10 @@ Use the extract_estimate tool to return your results.`
             return NextResponse.json({ ok: false })
           }
         } catch (retryErr) {
-          await failWith('NO_LINE_ITEMS_FOUND', `Retry failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`)
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr)
+          const isAbort = (retryErr instanceof Error && retryErr.name === 'AbortError') || retryMsg.toLowerCase().includes('aborted')
+          // Abort = infrastructure timeout, not a content failure — don't mask as NO_LINE_ITEMS_FOUND
+          await failWith(isAbort ? 'AI_EXTRACTION_FAILED' : 'NO_LINE_ITEMS_FOUND', `Retry ${isAbort ? 'timed out' : 'failed'}: ${retryMsg}`)
           return NextResponse.json({ ok: false })
         }
       } else {
