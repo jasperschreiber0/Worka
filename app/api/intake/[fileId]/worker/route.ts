@@ -509,9 +509,17 @@ export async function POST(
         return NextResponse.json({ ok: false })
       }
 
-      const { data: fileData, error: downloadErr } = await supabase.storage
-        .from('plans')
-        .download(fileRow.storage_path)
+      // 60s timeout on storage download — large PDFs from Supabase can be slow,
+      // but hanging indefinitely would burn the entire Vercel 300s budget.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const downloadResult: any = await Promise.race([
+        supabase.storage.from('plans').download(fileRow.storage_path),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Storage download timed out after 60s')), 60_000)
+        ),
+      ])
+
+      const { data: fileData, error: downloadErr } = downloadResult as { data: Blob | null; error: { message: string } | null }
 
       if (downloadErr || !fileData) {
         const storageMsg = (downloadErr as { message?: string } | null)?.message ?? 'unknown'
@@ -1016,7 +1024,7 @@ export async function POST(
             max_tokens: 8192,
             messages: retryMessages,
           },
-          { timeout: Math.max(retryBudgetMs, 60_000) }
+          { timeout: Math.min(retryBudgetMs, 60_000) }
         )
         const retryText: string = retryResp.content[0]?.type === 'text' ? retryResp.content[0].text : ''
         diag.retry_response_length = retryText.length
