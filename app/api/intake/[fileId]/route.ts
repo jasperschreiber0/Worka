@@ -1,9 +1,28 @@
 import { NextRequest } from 'next/server'
 
-// Vercel: allow up to 300s (Pro limit) so large PDFs don't hit the 60s default ceiling.
-// Without this, the function is killed mid-Anthropic-request and the SDK's internal retry
-// produces "Retry timed out: Request was aborted." on a dead runtime.
+// Vercel Pro ceiling. The AI extraction budget (below) is sized to fit two
+// attempts comfortably inside this limit. Do not lower without recalculating.
 export const maxDuration = 300
+
+// ─── Timing constants ─────────────────────────────────────────────────────────
+//
+// Budget math (all values in ms):
+//   maxDuration       = 300 000
+//   PRE_AI_OVERHEAD   =  30 000  (DB read, Supabase download, base64 encode)
+//   POST_AI_OVERHEAD  =  10 000  (DB writes, SSE complete event)
+//   VERCEL_MARGIN     =  10 000  (safety gap before hard kill)
+//   Available for AI  = 300 000 - 30 000 - 10 000 - 10 000 = 250 000
+//
+//   With 1 retry allowed, each attempt is capped at 110 000ms so that:
+//     attempt1 (110s) + attempt2 (110s) + overhead (50s) = 270s < 300s
+//
+//   If there is insufficient remaining budget for a second attempt the retry
+//   is skipped, preventing Vercel from killing the runtime mid-attempt.
+
+const FUNCTION_BUDGET_MS = 280_000   // 280s — 20s inside the 300s hard ceiling
+const AI_TIMEOUT_MS      = 110_000   // 110s max per attempt
+const MIN_RETRY_BUDGET   =  30_000   // don't start a retry with <30s remaining
+const MAX_AI_RETRIES     = 1
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -108,9 +127,8 @@ export async function GET(
         controller.enqueue(sseEvent(encoder, event, data))
       }
 
-      let intakeStart = Date.now()
+      const intakeStart = Date.now()
       try {
-        intakeStart = Date.now()
         // Stage: uploading
         emit('progress', PROGRESS_STAGES[0])
 
@@ -161,12 +179,12 @@ export async function GET(
         const fileBuffer = await fileData.arrayBuffer()
         const base64Data = Buffer.from(fileBuffer).toString('base64')
         const isPdf = fileRow.file_type === 'pdf'
-        const mediaType = isPdf ? 'application/pdf' : 'image/jpeg'
+        const fileSizeBytes = fileBuffer.byteLength
 
         const Anthropic = (await import('@anthropic-ai/sdk')).default
-        // maxRetries: 0 — the SDK's internal retry inherits the already-dying runtime
-        // when Vercel kills the function, producing "Retry timed out: Request was aborted."
-        // We control retries at the route level instead.
+        // maxRetries: 0 — SDK retries inherit a dying runtime when Vercel kills the
+        // function, producing "Retry timed out: Request was aborted." We manage
+        // retries at the route level instead with budget-aware timeouts (see below).
         const client = new Anthropic({ apiKey: anthropicKey, maxRetries: 0 })
 
         // Trade categories aligned with CLAUDE.md
@@ -217,11 +235,9 @@ Return a JSON object:
 
 Return ONLY valid JSON. No explanation, no markdown fences.`
 
-        // Emit extraction stages as we process
+        // Emit extraction stages while Anthropic processes (cosmetic progress)
         const extractionStages = [3, 4, 5, 6, 7] // indices into PROGRESS_STAGES
         let stageIndex = 0
-
-        // We emit each stage while Anthropic processes
         const stageEmitter = setInterval(() => {
           if (stageIndex < extractionStages.length) {
             emit('progress', PROGRESS_STAGES[extractionStages[stageIndex]])
@@ -229,10 +245,15 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
           }
         }, 2000)
 
-        const fileSizeBytes = fileBuffer.byteLength
-        let anthropicResponse: string
-        let aiDurationMs: number | null = null
-        let retryCount = 0
+        // SSE heartbeat: keeps the connection visible to browsers and proxies during
+        // the silent period after stage emissions end but before Claude responds.
+        // Without this, a TCP-level stall produces a frozen progress bar with no
+        // error and no timeout — the builder must reload the page.
+        const heartbeat = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(': heartbeat\n\n'))
+          } catch { /* stream already closed */ }
+        }, 15_000)
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const messageContent: any[] = isPdf
@@ -259,17 +280,37 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
               { type: 'text', text: extractionPrompt },
             ]
 
-        // 250s budget leaves 50s headroom inside the 300s maxDuration ceiling.
-        // Using a fresh AbortController per attempt so retries get a clean signal.
-        const AI_TIMEOUT_MS = 250_000
-        const MAX_AI_RETRIES = 1
+        let anthropicResponse: string
+        let aiDurationMs: number | null = null
+        let retryCount = 0
 
         try {
           let lastError: unknown
           while (retryCount <= MAX_AI_RETRIES) {
             const aiStart = Date.now()
+
+            // Budget-aware timeout: cap this attempt to whatever time remains inside
+            // FUNCTION_BUDGET_MS. If remaining time is too short to be useful, skip
+            // the retry rather than starting an attempt that Vercel will hard-kill —
+            // a Vercel kill prevents the error event and DB reset from reaching the
+            // client/database, producing silent failures and stuck 'processing' rows.
+            const elapsed = Date.now() - intakeStart
+            const remaining = FUNCTION_BUDGET_MS - elapsed
+            if (remaining < MIN_RETRY_BUDGET) {
+              console.error(JSON.stringify({
+                event: 'intake:ai:budget_exhausted',
+                file_id: fileId,
+                file_size_bytes: fileSizeBytes,
+                retry_count: retryCount,
+                remaining_ms: remaining,
+                elapsed_ms: elapsed,
+              }))
+              throw lastError ?? new Error('Insufficient time budget for AI attempt')
+            }
+
+            const attemptTimeout = Math.min(AI_TIMEOUT_MS, remaining - 15_000)
             const abortController = new AbortController()
-            const timeoutHandle = setTimeout(() => abortController.abort(), AI_TIMEOUT_MS)
+            const timeoutHandle = setTimeout(() => abortController.abort(), attemptTimeout)
 
             try {
               const response = await client.messages.create(
@@ -289,6 +330,7 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
                 file_id: fileId,
                 file_size_bytes: fileSizeBytes,
                 ai_duration_ms: aiDurationMs,
+                attempt_timeout_ms: attemptTimeout,
                 retry_count: retryCount,
                 elapsed_ms: Date.now() - intakeStart,
               }))
@@ -302,12 +344,20 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
                 file_id: fileId,
                 file_size_bytes: fileSizeBytes,
                 ai_duration_ms: aiDurationMs,
+                attempt_timeout_ms: attemptTimeout,
                 retry_count: retryCount,
+                // 'timeout_controller' = our AbortController fired (file too large or
+                //   network stall). 'sdk_or_network' = transient error worth retrying.
+                // If Vercel kills the runtime, this catch never runs — the function
+                //   is dead. budget_exhausted (above) prevents that scenario.
                 abort_source: isAbort ? 'timeout_controller' : 'sdk_or_network',
                 error: err instanceof Error ? err.message : String(err),
                 elapsed_ms: Date.now() - intakeStart,
               }))
               if (retryCount >= MAX_AI_RETRIES) throw lastError
+              // Only retry transient errors, not timeout aborts — a file that timed out
+              // on attempt 1 will time out on attempt 2 for the same reason.
+              if (isAbort) throw lastError
               retryCount++
               // fresh controller for the retry — never reuse an aborted signal
             } finally {
@@ -318,6 +368,7 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
           anthropicResponse = anthropicResponse!
         } finally {
           clearInterval(stageEmitter)
+          clearInterval(heartbeat)
         }
 
         // Ensure all extraction stages emitted
@@ -472,20 +523,23 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
         controller.close()
       } catch (err) {
         const isAbort = err instanceof Error && err.name === 'AbortError'
+        const totalElapsed = Date.now() - intakeStart
         console.error(JSON.stringify({
           event: 'intake:worker:fail',
           file_id: fileId,
           stage: 'AI_EXTRACTION_FAILED',
           reason: err instanceof Error ? err.message : String(err),
           abort_source: isAbort ? 'timeout_controller' : 'sdk_or_network',
-          elapsed_ms: Date.now() - (intakeStart ?? 0),
+          elapsed_ms: totalElapsed,
         }))
-        // Reset file to 'failed' so it doesn't stay stuck at 'processing' forever
+        // Reset file to 'failed' so it doesn't stay stuck at 'processing' forever.
+        // supabase is declared inside the try block so we re-create here. This is
+        // intentional — the try block's supabase is out of scope.
         try {
           const { createClient } = await import('@supabase/supabase-js')
-          const supabase = createClient(supabaseUrl!, supabaseKey!)
-          await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
-        } catch { /* best-effort */ }
+          const failureClient = createClient(supabaseUrl!, supabaseKey!)
+          await failureClient.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
+        } catch { /* best-effort — if Vercel already killed the runtime this won't run */ }
         emit('error', {
           message: isAbort
             ? 'Extraction timed out — the file may be too large. Please try a smaller PDF.'
