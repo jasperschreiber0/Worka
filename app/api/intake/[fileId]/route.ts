@@ -7,6 +7,22 @@ import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
+// ─── Timing budget ────────────────────────────────────────────────────────────
+//
+//   maxDuration       = 300 000 ms (Vercel Pro ceiling)
+//   PRE_AI_OVERHEAD   =  60 000 ms (classify + memory + profile + file fetch)
+//   POST_AI_OVERHEAD  =  15 000 ms (scope hints + DB writes + SSE complete)
+//   VERCEL_MARGIN     =  15 000 ms (safety gap before hard kill)
+//   Budget per call   = 300 000 - 60 000 - 15 000 - 15 000 = 210 000 ms
+//
+// Without an explicit AbortController the SDK has no per-call timeout.
+// If the Vercel ceiling fires first the runtime is killed, the catch block
+// never runs, error events are never sent, and files stay stuck at 'processing'.
+
+const FUNCTION_BUDGET_MS = 280_000  // 280s — 20s inside the Vercel ceiling
+const AI_TIMEOUT_MS      = 210_000  // 210s max per individual AI call
+const MIN_CALL_BUDGET    =  20_000  // skip a call if less than this remains
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ProgressEvent {
@@ -1005,15 +1021,14 @@ export async function GET(
 
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const callExtraction = async (blocks: any[]): Promise<string> => {
+          const callExtraction = async (blocks: any[], signal?: AbortSignal): Promise<string> => {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const messages: any[] = [{ role: 'user', content: [...blocks, { type: 'text', text: extractionPrompt }] }]
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const response = await (client.messages.create as any)({
-              model: 'claude-sonnet-4-6',
-              max_tokens: 8192,
-              messages,
-            })
+            const response = await (client.messages.create as any)(
+              { model: 'claude-sonnet-4-6', max_tokens: 8192, messages },
+              signal ? { signal } : undefined
+            )
             const text: string = response.content[0]?.type === 'text' ? response.content[0].text : ''
             console.log('[intake:ai-response]', {
               file_id: fileId,
@@ -1025,15 +1040,44 @@ export async function GET(
             return text
           }
 
+          // Budget-aware AbortController: cap each AI call so total runtime stays
+          // inside FUNCTION_BUDGET_MS. If the Vercel ceiling fires instead, the
+          // runtime is dead and catch/emit/DB-reset cannot run → files stay stuck.
+          const makeSignal = (): { signal: AbortSignal; clear: () => void } => {
+            const elapsed = Date.now() - pipelineStart
+            const remaining = FUNCTION_BUDGET_MS - elapsed
+            const timeout = Math.min(AI_TIMEOUT_MS, Math.max(remaining - 15_000, 10_000))
+            const ac = new AbortController()
+            const handle = setTimeout(() => ac.abort(), timeout)
+            console.log('[intake:ai-budget]', { file_id: fileId, elapsed_ms: elapsed, timeout_ms: timeout })
+            return { signal: ac.signal, clear: () => clearTimeout(handle) }
+          }
+
           try {
-            anthropicResponse = await callExtraction(allDocBlocks)
+            const { signal, clear } = makeSignal()
+            const elapsed = Date.now() - pipelineStart
+            if (FUNCTION_BUDGET_MS - elapsed < MIN_CALL_BUDGET) {
+              throw new Error('Insufficient time budget — skipping AI call')
+            }
+            try {
+              anthropicResponse = await callExtraction(allDocBlocks, signal)
+            } finally {
+              clear()
+            }
           } catch (firstErr) {
             const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
             const isTooLarge = /request_too_large|too large|prompt is too long|too long|page limit|100 pages|413/i.test(firstMsg)
-            if (isTooLarge && allDocBlocks.length > 1) {
+            // Only retry with primary-only for size errors — not for timeouts (same file = same outcome)
+            const isAbortTimeout = firstErr instanceof Error && firstErr.name === 'AbortError'
+            if (isTooLarge && allDocBlocks.length > 1 && !isAbortTimeout) {
               console.warn('[intake:ai-fallback]', { file_id: fileId, reason: 'too_large', retrying_with: 'primary_only', error: firstMsg })
-              anthropicResponse = await callExtraction([docBlock])
-              droppedToPrimaryOnly = true
+              const { signal: sig2, clear: clear2 } = makeSignal()
+              try {
+                anthropicResponse = await callExtraction([docBlock], sig2)
+                droppedToPrimaryOnly = true
+              } finally {
+                clear2()
+              }
             } else {
               throw firstErr
             }
