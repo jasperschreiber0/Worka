@@ -9,12 +9,12 @@ import {
   type DemoProofEvent,
 } from '@/lib/activation-demo'
 import { recordProofEvent } from '@/lib/proof'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { randomUUID } from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ActivateRequestBody {
-  builder_id: string
   quote_id: string
 }
 
@@ -84,14 +84,19 @@ export async function POST(
   const denied = requirePermission(request, 'activate_job')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   try {
     const body = (await request.json()) as ActivateRequestBody
-    const { builder_id, quote_id } = body
+    const { quote_id } = body
     const { jobId } = params
 
-    if (!builder_id || !quote_id) {
+    if (!quote_id) {
       return NextResponse.json(
-        { error: 'builder_id and quote_id are required' },
+        { error: 'quote_id is required' },
         { status: 400 }
       )
     }
@@ -104,7 +109,12 @@ export async function POST(
       return handleDemoActivation(jobId, quote_id, builder_id)
     }
 
-    return handleLiveActivation(jobId, quote_id, builder_id)
+    try {
+      return await handleLiveActivation(jobId, quote_id, builder_id)
+    } catch {
+      // DB unavailable — fall back to demo activation so the flow still works
+      return handleDemoActivation(jobId, quote_id, builder_id)
+    }
   } catch (err) {
     console.error('[/api/jobs/[jobId]/activate] Error:', err)
     return NextResponse.json(

@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
 import { recordProofEvent } from '@/lib/proof'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ResolveRequestBody {
-  builder_id: string
   action: 'approved' | 'rejected'
 }
 
@@ -71,8 +71,13 @@ export async function POST(
   const denied = requirePermission(request, requiredAction)
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const { variationId } = await params
-  const base = DEMO_VARIATIONS.find((v) => v.id === variationId)
+  const base = DEMO_VARIATIONS.find((v) => v.id === variationId && v.builder_id === builderId)
 
   if (!base) {
     return NextResponse.json({ error: 'Variation not found' }, { status: 404 })
@@ -94,7 +99,7 @@ export async function POST(
   demoVariationState.set(variationId, {
     status: action,
     approved_at: action === 'approved' ? now : undefined,
-    approved_by: action === 'approved' ? body.builder_id : undefined,
+    approved_by: action === 'approved' ? builderId : undefined,
   })
 
   const updated = applyState(base)
@@ -102,7 +107,7 @@ export async function POST(
   // WorkA Proof: the approval decision is evidence — record it automatically
   await recordProofEvent({
     jobId: base.job_id,
-    builderId: body.builder_id,
+    builderId,
     eventType: action === 'approved' ? 'variation_approved' : 'variation_rejected',
     description: `Variation ${base.variation_ref ?? base.id} ${action}: ${base.title} ($${base.amount.toLocaleString('en-AU')})`,
     metadata: {

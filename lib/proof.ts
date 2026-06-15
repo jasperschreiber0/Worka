@@ -145,11 +145,11 @@ export function verifyProofChain(events: ProofEvent[]): ProofChainStatus {
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
 /**
- * All proof events for a job, most recent first.
+ * All proof events for a job, most recent first, scoped to the owning builder.
  * Demo: merges activation events, seed history, and the live proof log.
  * Real: reads the proof_events table.
  */
-export async function getJobProofEvents(jobId: string): Promise<ProofEvent[]> {
+export async function getJobProofEvents(jobId: string, builderId: string): Promise<ProofEvent[]> {
   if (isRealMode()) {
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -160,6 +160,7 @@ export async function getJobProofEvents(jobId: string): Promise<ProofEvent[]> {
       .from('proof_events')
       .select('id, job_id, event_type, description, metadata, created_at')
       .eq('job_id', jobId)
+      .eq('builder_id', builderId)
       .order('created_at', { ascending: false })
 
     if (error) {

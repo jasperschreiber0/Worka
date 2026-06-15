@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers'
 import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'
+import { createClient } from '@supabase/supabase-js'
 import type { Database } from '@/lib/types/database.types'
 
 export interface SessionUser {
@@ -41,6 +42,19 @@ export async function getSessionUser(): Promise<SessionUser> {
 
     const meta = session.user.user_metadata as { full_name?: string; company_name?: string }
     const fullName = meta.full_name ?? session.user.email?.split('@')[0] ?? 'Builder'
+
+    // Ensure builders row exists — migration 008 trigger only fires for new signups,
+    // so backfill silently for any user who signed up before 008 was applied.
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (serviceKey && process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, serviceKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      })
+      await admin.from('builders').upsert(
+        { id: session.user.id, email: session.user.email ?? '', name: fullName, business_name: meta.company_name ?? null },
+        { onConflict: 'id', ignoreDuplicates: true }
+      )
+    }
 
     return {
       id: session.user.id,

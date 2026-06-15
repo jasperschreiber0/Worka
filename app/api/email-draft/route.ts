@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 
@@ -154,14 +155,18 @@ ${businessName}`
   }
 
   // general
-  const subject = `${jobAddress} — update`
-  const body = `Hi ${clientName},
+  const subjectLabel = ctx ? jobAddress : 'Project update'
+  const subject = `${subjectLabel} — following up`
+  const greeting = clientName !== 'there' ? `Hi ${clientName},` : 'Hi,'
+  const projectRef = ctx ? `the work at ${jobAddress}` : 'your project'
+  const body = `${greeting}
 
-${builderName} here. Just wanted to reach out regarding ${jobAddress}.
+I wanted to follow up regarding ${projectRef}. Please let me know if you have any questions or if there is anything you would like to discuss.
 
+Kind regards,
 ${builderName}
 ${businessName}`
-  return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress }
+  return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: ctx?.job_address ?? null }
 }
 
 // ─── AI-generated draft ───────────────────────────────────────────────────────
@@ -200,6 +205,8 @@ ${ctx.latest_variation_amount != null ? `Variation amount: $${ctx.latest_variati
     general: 'general outreach regarding the project',
   }
 
+  const hasContext = Boolean(ctx)
+
   const prompt = `You are helping an Australian residential builder named ${builderName} from ${businessName} draft a professional email to a client.
 
 Job context:
@@ -208,12 +215,23 @@ ${contextBlock}
 Email purpose: ${intentContext[intentHint]}
 ${contextMessage ? `Additional context from builder: ${contextMessage}` : ''}
 
-Write a brief, professional email that:
-- Sounds like a tradie builder — professional but not overly corporate
-- References the specific job address
-- Gets to the point quickly
-- Uses Australian English
-- Includes a subject line
+Write a professional, clear email that:
+- Is courteous and professional — never use slang, colloquialisms, or casual greetings like "G'day", "Mate", "Hey", "Hi there"
+${hasContext
+  ? `- Opens with "Hi ${clientName}," using the client first name`
+  : `- Opens with "Hi [name]," — but since no client name is available, use "Hi," on its own`}
+${hasContext
+  ? `- References the specific job at ${jobAddress} and the client's name`
+  : `- Does not invent a job address or client name — write around the unknown details naturally`}
+- States the purpose clearly in the first sentence
+- Is concise — 3–5 sentences for follow-ups, slightly longer for detailed matters
+- Uses correct Australian English spelling (not US English)
+- Includes a specific subject line (not "your project — update" — make it descriptive of the actual email purpose)
+- Signs off professionally with "Kind regards," or "Regards," followed by: ${builderName}\n${businessName}
+- Never uses exclamation marks
+
+IMPORTANT: Do NOT use square bracket placeholders like [Client Name], [Job Address], [Phone Number] etc.
+Use the actual values from the job context. If a value is unknown, omit that detail entirely rather than using a placeholder.
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -252,12 +270,13 @@ Respond with ONLY valid JSON in this exact format:
 
 export async function POST(request: NextRequest): Promise<NextResponse<EmailDraftResponse | { error: string }>> {
   try {
-    const body = (await request.json()) as EmailDraftRequestBody
-    const { builder_id, job_id, recipient_name, intent_hint = 'general', context } = body
-
-    if (!builder_id) {
-      return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
+    const builderId = await getAuthenticatedBuilderId()
+    if (!builderId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
+
+    const body = (await request.json()) as EmailDraftRequestBody
+    const { job_id, recipient_name, intent_hint = 'general', context } = body
 
     // Load job context
     const jobCtx = job_id ? loadJobContext(job_id) : null
@@ -268,7 +287,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
       intent_hint,
     }
 
-    // Try AI draft if API key available
     const apiKey = process.env.ANTHROPIC_API_KEY
     let draft: EmailDraft
 

@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface DisconnectRequestBody {
-  builder_id: string
-}
 
 interface DisconnectResponse {
   disconnected: boolean
@@ -16,13 +13,12 @@ interface DisconnectResponse {
 export async function POST(
   request: NextRequest
 ): Promise<NextResponse<DisconnectResponse | { error: string }>> {
-  try {
-    const body = (await request.json()) as DisconnectRequestBody
-    const { builder_id } = body
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
-    if (!builder_id) {
-      return NextResponse.json({ error: 'builder_id is required' }, { status: 400 })
-    }
+  try {
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
