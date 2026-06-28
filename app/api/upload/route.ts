@@ -158,6 +158,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     processing_time_ms: null,
     pipeline_stage: null,
     intake_result: null,
+    intake_stage: null,
+    intake_pct: null,
+    intake_assumption_count: null,
     created_at: new Date().toISOString(),
   }
 

@@ -248,10 +248,11 @@ export interface File {
   page_count: number | null
   line_item_count: number | null
   processing_time_ms: number | null
-  /** Current pipeline stage name — updated by worker at each step for SSE polling */
   pipeline_stage: string | null
-  /** Complete event payload written by worker on success — emitted as SSE complete event */
   intake_result: Record<string, unknown> | null
+  intake_stage: string | null
+  intake_pct: number | null
+  intake_assumption_count: number | null
   created_at: string
 }
 
