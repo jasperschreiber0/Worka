@@ -220,6 +220,9 @@ export interface File {
   filename: string
   file_type: FileType
   intake_status: FileIntakeStatus
+  intake_stage: string | null
+  intake_pct: number | null
+  intake_assumption_count: number | null
   created_at: string
 }
 

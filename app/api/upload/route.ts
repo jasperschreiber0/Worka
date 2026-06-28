@@ -151,6 +151,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     filename,
     file_type: detectFileType(filename),
     intake_status: 'uploaded' as FileIntakeStatus,
+    intake_stage: null,
+    intake_pct: null,
+    intake_assumption_count: null,
     created_at: new Date().toISOString(),
   }
 
