@@ -103,7 +103,7 @@ export async function GET(
   }
 
   // ── Real mode: trigger edge function then poll DB ──────────────────────────
-  const edgeFnUrl = `${supabaseUrl}/functions/v1/intake-pipeline`
+  const edgeFnUrl = `${supabaseUrl}/functions/v1/smooth-responder`
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
   const stream = new ReadableStream({
