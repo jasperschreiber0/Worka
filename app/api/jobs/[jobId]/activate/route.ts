@@ -309,8 +309,13 @@ async function handleLiveActivation(
   // 4. Update quote status to approved
   await supabase
     .from('quotes')
-    .update({ status: 'approved' })
+    .update({ status: 'approved', approved_at: new Date().toISOString() })
     .eq('id', quoteId)
+
+  // 4b. Tier 1 rate learning — fold this accepted quote's rates into
+  // builder_learned_rates (best-effort, never blocks activation)
+  const { captureLearnedRates } = await import('@/lib/pricing')
+  await captureLearnedRates(supabase, quoteId)
 
   // 5. Generate and insert milestones
   const milestones = generateMilestones(jobId, quote.total_cost)

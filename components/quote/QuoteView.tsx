@@ -30,6 +30,8 @@ interface LineItemsByCategory {
 interface QuoteSummary {
   total_cost: number
   margin_pct: number
+  /** total_cost marked up by margin_pct — what the client is quoted */
+  client_price: number
   confidence_score: number
   unresolved_count: number
   assumption_count: number
@@ -541,14 +543,20 @@ function SummaryCard({ summary }: SummaryCardProps) {
       </div>
       <div style={{ backgroundColor: 'var(--bg-surface)' }}>
         <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)' }}>
-          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Total cost</span>
-          <span className="text-[13px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Cost (before margin)</span>
+          <span className="text-[13px] font-semibold tabular-nums" style={{ color: 'var(--text-secondary)' }}>
             {formatCurrency(summary.total_cost)}
           </span>
         </div>
         <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)' }}>
           <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Margin</span>
           <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{summary.margin_pct}%</span>
+        </div>
+        <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-elevated)' }}>
+          <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>Client price</span>
+          <span className="text-[14px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+            {formatCurrency(summary.client_price ?? summary.total_cost)}
+          </span>
         </div>
         <div
           className="flex items-center justify-between px-4 py-2.5"

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { applyMargin } from '@/lib/pricing'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -17,6 +18,8 @@ interface SendRequestBody {
 interface QuoteSummaryForDraft {
   total_cost: number
   margin_pct: number
+  /** total_cost marked up by margin — the figure quoted to the client */
+  client_price: number
   line_count: number
   address: string
 }
@@ -182,9 +185,11 @@ export async function POST(
     }))
 
     const activeItemsDb = items.filter((i) => i.assumption_status !== 'excluded' && i.total !== null)
+    // The client is quoted cost + margin — raw cost never leaves the builder
+    const clientPriceDb = applyMargin(quote.total_cost, quote.margin_pct)
     const emailBodyDb = buildEmailBody({
       clientName: resolvedClientName, address: quote.job_address,
-      totalCost: quote.total_cost, lineCount: activeItemsDb.length,
+      totalCost: clientPriceDb, lineCount: activeItemsDb.length,
       builderName: resolvedBuilderName, businessName: resolvedBusinessName,
       customMessage: body.message,
     })
@@ -192,7 +197,7 @@ export async function POST(
       to: resolvedClientEmail || 'client@example.com',
       subject: `Quote for ${quote.job_address} — ${resolvedBusinessName}`,
       body: emailBodyDb,
-      quote_summary: { total_cost: quote.total_cost, margin_pct: quote.margin_pct, line_count: activeItemsDb.length, address: quote.job_address },
+      quote_summary: { total_cost: quote.total_cost, margin_pct: quote.margin_pct, client_price: clientPriceDb, line_count: activeItemsDb.length, address: quote.job_address },
     }
     return NextResponse.json({ draft: draftDb, requires_confirmation: true } as SendResponse)
   }
@@ -221,10 +226,13 @@ export async function POST(
   const builderName = 'Dave Nguyen'
   const businessName = 'Nguyen Building Co.'
 
+  // The client is quoted cost + margin — raw cost never leaves the builder
+  const clientPrice = applyMargin(quote.total_cost, quote.margin_pct)
+
   const emailBody = buildEmailBody({
     clientName,
     address,
-    totalCost: quote.total_cost,
+    totalCost: clientPrice,
     lineCount,
     builderName,
     businessName,
@@ -238,6 +246,7 @@ export async function POST(
     quote_summary: {
       total_cost: quote.total_cost,
       margin_pct: quote.margin_pct,
+      client_price: clientPrice,
       line_count: lineCount,
       address,
     },

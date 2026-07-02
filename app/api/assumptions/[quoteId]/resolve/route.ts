@@ -177,22 +177,45 @@ export async function POST(
         .update(lineItemUpdate)
         .eq('id', assumptionRow.line_item_id)
 
-      // Recalculate quote totals from all non-excluded line items
-      const { data: activeItems } = await supabase
-        .from('quote_line_items')
-        .select('total, confidence')
-        .eq('quote_id', quoteId)
-        .neq('assumption_status', 'excluded')
+      // If the item is still unpriced (e.g. Gate 1 — unit was missing and has
+      // now been supplied), try to resolve a rate via the 5-tier hierarchy
+      if (resolution !== 'excluded') {
+        const { data: li } = await supabase
+          .from('quote_line_items')
+          .select('id, trade_category_id, description, quantity, unit, rate')
+          .eq('id', assumptionRow.line_item_id)
+          .single()
 
-      if (activeItems) {
-        const newTotal = activeItems.reduce((sum, item) => sum + (item.total ?? 0), 0)
-        const confidences = activeItems.map(i => i.confidence ?? 100).filter(c => c > 0)
-        const newConfidence = confidences.length > 0 ? Math.min(...confidences) : 0
-        await supabase
-          .from('quotes')
-          .update({ total_cost: newTotal, confidence_score: newConfidence })
-          .eq('id', quoteId)
+        if (li && li.rate === null && li.quantity !== null && li.unit) {
+          const { data: builderRow } = await supabase
+            .from('builders')
+            .select('state')
+            .eq('id', builder_id)
+            .single()
+
+          const { priceLineItems } = await import('@/lib/pricing')
+          const [priced] = await priceLineItems(
+            supabase,
+            builder_id,
+            builderRow?.state ?? null,
+            [li]
+          )
+
+          if (priced.rate !== null) {
+            await supabase
+              .from('quote_line_items')
+              .update({ rate: priced.rate, total: priced.total })
+              .eq('id', li.id)
+          }
+        }
       }
+
+      // Recalculate quote totals from the current line items. (The previous
+      // inline version used .neq('assumption_status', 'excluded'), which in
+      // PostgREST also drops rows where the status is NULL — every normal
+      // line item — so totals only counted assumption items.)
+      const { recomputeQuoteTotals } = await import('@/lib/pricing')
+      await recomputeQuoteTotals(supabase, quoteId)
     }
 
     // 3. Check if all assumptions for this quote are resolved

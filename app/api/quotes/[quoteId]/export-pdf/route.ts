@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import { applyMargin } from '@/lib/pricing'
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
@@ -95,8 +96,17 @@ function renderCategorySection(group: CategoryGroup): string {
 // ─── Build the full HTML page ─────────────────────────────────────────────────
 
 function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
-  const groups = groupByCategory(items)
+  // This document is CLIENT-FACING: every amount is marked up by the
+  // builder's margin. Raw cost rates never leave the builder's screen.
+  const markedUpItems = items.map((item) => ({
+    ...item,
+    rate: item.rate !== null ? applyMargin(item.rate, quote.margin_pct) : null,
+    total: item.total !== null ? applyMargin(item.total, quote.margin_pct) : null,
+  }))
+
+  const groups = groupByCategory(markedUpItems)
   const categorySections = groups.map(renderCategorySection).join('')
+  const grandTotal = groups.reduce((sum, g) => sum + g.category_total, 0)
 
   const businessName = 'Nguyen Building Co.'
   const builderName = 'Dave Nguyen'
@@ -385,9 +395,8 @@ function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
   <!-- Grand total -->
   <div class="total-row">
     <div class="total-box">
-      <div class="total-label">Total project cost</div>
-      <div class="total-amount">${formatCurrency(quote.total_cost)}</div>
-      <div class="total-margin">Includes ${quote.margin_pct}% builder margin</div>
+      <div class="total-label">Total project price</div>
+      <div class="total-amount">${formatCurrency(grandTotal)}</div>
     </div>
   </div>
 

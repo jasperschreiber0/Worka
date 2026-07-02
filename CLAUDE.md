@@ -260,6 +260,7 @@ interface Alert {
 | `GET /api/jobs/[jobId]/proof` | WorkA Proof trail for a job + hash-chain status |
 | `GET /api/jobs/[jobId]/proof/export` | Download the Proof Pack (plain-text evidence document) |
 | `GET /api/cron/morning-brief` | Vercel Cron target — emails the daily brief to every builder (guarded by `CRON_SECRET`) |
+| `GET /api/cron/network-rates` | Vercel Cron target — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`) |
 
 ---
 
@@ -308,13 +309,17 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 1. `builder_learned_rates` — auto-captured from accepted quotes
 2. `builder_rate_preferences` — manual builder override
 3. `builder_supplier_rates` — imported price lists
-4. `cost_rates` — 360+ platform defaults (seeded migration 002), state-aware
+4. `cost_rates` — 630 platform defaults (seeded migration 017), state-aware
 5. `network_rate_aggregates` — anonymised P50 across all builders
+
+**Estimation engine** — `lib/pricing.ts`. The intake edge function only extracts quantities; pricing happens Next.js-side. `ensureQuotePriced()` runs when the intake poller sees extraction complete (and lazily from the quote GET as backfill): it matches line items to a `line_item_key` (token overlap within trade category + unit compatibility + construction-slang synonyms) and resolves rates through the 5-tier hierarchy. `recomputeQuoteTotals()` must be called after any line-item mutation. `captureLearnedRates()` runs on job activation (quote approval) to feed Tier 1; the nightly `network-rates` cron aggregates learned rates into Tier 5. All pricing is best-effort — an unpriceable item keeps `rate = null` and is excluded from totals rather than failing the pipeline. Quote `confidence_score` = lowest included line-item confidence.
+
+**Margin rule** — `quotes.total_cost` is the builder's internal cost basis. Anything a client sees (send email, PDF export, quote summary `client_price`) must be marked up via `applyMargin(cost, margin_pct)`. Raw cost rates and margin percentage never appear in client-facing output.
 
 **Migrations** (apply in order via `supabase db push`):
 ```
 001_initial_schema.sql        — all tables, RLS, 13 trade categories
-002_seed_data.sql             — 360+ cost rates
+002_seed_data.sql             — demo builder, workers, clients, jobs
 003_storage_bucket.sql        — Supabase Storage bucket
 004_email_sync.sql            — email_sync_state table
 005_job_activation.sql        — job_milestones, invoice_schedule, proof_events
@@ -331,6 +336,11 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 subcontract_cost, plant_cost, pricing_type
                                 (measured/pc_allowance/provisional_sum), source_ref,
                                 margin_pct; trigger enforces 0% margin on provisional_sum rows
+013_storage_csv_support.sql   — CSV uploads in storage bucket
+014_estimate_fields.sql       — estimate fields on quotes
+015_intake_diagnostics.sql    — intake diagnostic columns on files
+016_pipeline_stage.sql        — intake_stage / intake_pct on files
+017_cost_rates_seed.sql       — 630 platform cost rates (70 national + 8 state variants)
 ```
 
 ### Quote line item — key columns

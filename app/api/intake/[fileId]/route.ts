@@ -173,6 +173,18 @@ export async function GET(
           }
 
           if (row.intake_status === 'extracted' && row.quote_id) {
+            // The edge function only extracts quantities — resolve rates and
+            // quote totals through the 5-tier hierarchy before completing.
+            // Idempotent, best-effort: a pricing failure never blocks intake.
+            try {
+              const { createClient } = await import('@supabase/supabase-js')
+              const { ensureQuotePriced } = await import('@/lib/pricing')
+              const supabase = createClient(supabaseUrl!, supabaseKey!)
+              await ensureQuotePriced(supabase, row.quote_id)
+            } catch (pricingErr) {
+              console.error('Intake pricing error:', pricingErr)
+            }
+
             const count = row.intake_assumption_count ?? 0
             const completeData: CompleteEvent = {
               stage: 'complete',

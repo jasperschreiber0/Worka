@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { applyMargin, ensureQuotePriced } from '@/lib/pricing'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -17,6 +18,8 @@ interface LineItemsByCategory {
 interface QuoteSummary {
   total_cost: number
   margin_pct: number
+  /** total_cost marked up by margin_pct — what the client is quoted */
+  client_price: number
   confidence_score: number
   unresolved_count: number
   assumption_count: number
@@ -79,6 +82,7 @@ function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[]): QuoteSumm
   return {
     total_cost: quote.total_cost,
     margin_pct: quote.margin_pct,
+    client_price: applyMargin(quote.total_cost, quote.margin_pct),
     confidence_score: quote.confidence_score,
     unresolved_count,
     assumption_count,
@@ -147,6 +151,24 @@ export async function GET(
         { error: quoteErr?.message ?? 'Quote not found' },
         { status: 404 }
       )
+    }
+
+    // Backfill: quotes created before pricing ran (or where the intake poller
+    // dropped) still have no rates — price them on first view
+    if (quoteRow.total_cost === null) {
+      const wasPriced = await ensureQuotePriced(supabase, quoteId)
+      if (wasPriced) {
+        const { data: repriced } = await supabase
+          .from('quotes')
+          .select('total_cost, margin_pct, confidence_score')
+          .eq('id', quoteId)
+          .single()
+        if (repriced) {
+          quoteRow.total_cost = repriced.total_cost
+          quoteRow.margin_pct = repriced.margin_pct
+          quoteRow.confidence_score = repriced.confidence_score
+        }
+      }
     }
 
     // Fetch line items with trade categories
