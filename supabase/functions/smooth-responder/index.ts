@@ -53,6 +53,19 @@ const TRADE_CATEGORIES = [
   { id: 13, name: 'Preliminaries'          },
 ]
 
+// Base64-encode an ArrayBuffer in chunks. Spreading a whole multi-MB byte
+// array into String.fromCharCode(...) overflows the call stack
+// (RangeError: Maximum call stack size exceeded), so process it in slices.
+function toBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  const CHUNK = 0x8000 // 32K args per call — safely under the stack limit
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
+}
+
 // ─── Pipeline ─────────────────────────────────────────────────────────────────
 
 async function runPipeline(
@@ -105,7 +118,7 @@ async function runPipeline(
     await setStage(2)
 
     const fileBuffer = await fileData.arrayBuffer()
-    const base64Data = btoa(String.fromCharCode(...new Uint8Array(fileBuffer)))
+    const base64Data = toBase64(fileBuffer)
     const isPdf = fileRow.file_type === 'pdf'
 
     const extractionPrompt = `You are a quantity surveyor AI for Australian residential construction.
