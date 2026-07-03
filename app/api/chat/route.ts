@@ -3103,8 +3103,25 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 
     const anthropic = new Anthropic({ apiKey })
 
-    // Extract all actions from the message
-    const actions = await extractActions(message, anthropic)
+    // Extract all actions from the message. If the Claude call fails (bad key,
+    // no credits, rate limit, outage), fall back to keyword routing rather than
+    // 500ing — a provider outage must not take the whole chat down.
+    let actions: ExtractedAction[]
+    try {
+      actions = await extractActions(message, anthropic)
+    } catch (err) {
+      console.error(
+        '[/api/chat] Action extraction failed — falling back to keyword routing:',
+        err
+      )
+      const fallback = await routeDemoMessage(
+        message,
+        builderId,
+        forceCreate,
+        request.headers.get('cookie') ?? ''
+      )
+      return NextResponse.json(fallback)
+    }
 
     const ctx: OrchestrationContext = {
       builder_id: builderId,
