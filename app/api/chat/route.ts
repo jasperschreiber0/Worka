@@ -383,7 +383,7 @@ async function extractActions(
   const todayIso = new Date().toISOString().split('T')[0]
   const systemPrompt = EXTRACT_ACTIONS_PROMPT.replace(/REPLACE_TODAY/g, todayIso)
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     max_tokens: 512,
     system: systemPrompt,
     messages: [{ role: 'user', content: message }],
@@ -2449,7 +2449,7 @@ Rules:
   const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
   try {
     const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 500,
       system: systemPrompt,
       messages: [{ role: 'user', content: message }],
