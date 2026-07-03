@@ -89,48 +89,78 @@ export default function ActivationModal({
     >
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-slate-900/50"
+        className="absolute inset-0"
+        style={{ background: 'rgba(0,0,0,0.6)' }}
         onClick={onClose}
         aria-hidden="true"
       />
 
       {/* Panel */}
-      <div className="relative z-10 w-full max-w-md bg-white rounded-xl shadow-xl overflow-hidden">
+      <div
+        className="relative z-10 w-full max-w-md rounded-xl shadow-xl overflow-hidden"
+        style={{ background: 'var(--bg-surface)' }}
+      >
         {/* Header */}
-        <div className="px-6 pt-6 pb-4 border-b border-slate-100">
-          <h2 id="activation-modal-title" className="text-base font-semibold text-slate-900">
+        <div
+          className="px-6 pt-6 pb-4 border-b"
+          style={{ borderColor: 'var(--bg-border)' }}
+        >
+          <h2
+            id="activation-modal-title"
+            className="text-base font-semibold"
+            style={{ color: 'var(--text-primary)' }}
+          >
             Activate job
           </h2>
-          <p className="text-sm text-slate-500 mt-0.5 truncate">{job.address}</p>
+          <p className="text-sm mt-0.5 truncate" style={{ color: 'var(--text-tertiary)' }}>
+            {job.address}
+          </p>
         </div>
 
         {/* Body */}
         <div className="px-6 py-5 space-y-5">
           {/* Contract value */}
           <div>
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">
+            <p
+              className="text-xs font-semibold uppercase tracking-wide mb-1"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
               Contract value
             </p>
-            <p className="text-2xl font-bold text-slate-900">{formatCurrency(quote.total_cost)}</p>
+            <p className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
+              {formatCurrency(quote.total_cost)}
+            </p>
           </div>
 
           {/* What WorkA will create */}
           <div className="space-y-4">
-            <p className="text-sm font-semibold text-slate-700">WorkA will create:</p>
+            <p className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+              WorkA will create:
+            </p>
 
             {/* Milestones */}
             <div className="flex items-start gap-3">
               <span
-                className="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full bg-green-100 flex items-center justify-center"
+                className="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center"
+                style={{ background: 'rgba(76,175,80,0.15)' }}
                 aria-hidden="true"
               >
-                <svg className="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <svg
+                  className="w-3 h-3"
+                  style={{ color: 'var(--status-green)' }}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2.5}
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                 </svg>
               </span>
               <div>
-                <p className="text-sm font-medium text-slate-800">8 project milestones</p>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                  8 project milestones
+                </p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
                   Contract signing through to final inspection — spread over 17 weeks
                 </p>
               </div>
@@ -139,20 +169,34 @@ export default function ActivationModal({
             {/* Invoice schedule */}
             <div className="flex items-start gap-3">
               <span
-                className="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full bg-green-100 flex items-center justify-center"
+                className="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center"
+                style={{ background: 'rgba(76,175,80,0.15)' }}
                 aria-hidden="true"
               >
-                <svg className="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <svg
+                  className="w-3 h-3"
+                  style={{ color: 'var(--status-green)' }}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2.5}
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                 </svg>
               </span>
               <div>
-                <p className="text-sm font-medium text-slate-800">5-stage invoice schedule</p>
+                <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                  5-stage invoice schedule
+                </p>
                 <div className="mt-1.5 space-y-1">
                   {scheduleItems.map((item) => (
                     <div key={item.id} className="flex items-center justify-between">
-                      <span className="text-xs text-slate-500">{item.label} ({item.percentage}%)</span>
-                      <span className="text-xs font-medium text-slate-700">{formatCurrency(item.amount)}</span>
+                      <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                        {item.label} ({item.percentage}%)
+                      </span>
+                      <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+                        {formatCurrency(item.amount)}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -162,16 +206,26 @@ export default function ActivationModal({
             {/* Proof feed */}
             <div className="flex items-start gap-3">
               <span
-                className="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full bg-green-100 flex items-center justify-center"
+                className="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center"
+                style={{ background: 'rgba(76,175,80,0.15)' }}
                 aria-hidden="true"
               >
-                <svg className="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <svg
+                  className="w-3 h-3"
+                  style={{ color: 'var(--status-green)' }}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2.5}
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                 </svg>
               </span>
               <div>
-                <p className="text-sm font-medium text-slate-800">Proof feed starts now</p>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                  Proof feed starts now
+                </p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
                   Every variation, approval, and communication is logged automatically.
                 </p>
               </div>
@@ -179,16 +233,28 @@ export default function ActivationModal({
           </div>
 
           {/* Warning banner */}
-          <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2.5">
-            <p className="text-xs text-amber-800">
+          <div
+            className="rounded-md px-3 py-2.5"
+            style={{
+              background: 'rgba(255,152,0,0.1)',
+              border: '0.5px solid var(--bg-border)',
+            }}
+          >
+            <p className="text-xs" style={{ color: 'var(--status-amber)' }}>
               Activation is irreversible — the job moves to <strong>active</strong> and cannot go back to quoted.
             </p>
           </div>
 
           {/* Error */}
           {error && (
-            <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2">
-              <p className="text-xs text-red-700">{error}</p>
+            <div
+              className="rounded-md px-3 py-2"
+              style={{
+                background: 'rgba(244,67,54,0.1)',
+                border: '0.5px solid var(--bg-border)',
+              }}
+            >
+              <p className="text-xs" style={{ color: 'var(--status-red)' }}>{error}</p>
             </div>
           )}
         </div>
@@ -199,7 +265,8 @@ export default function ActivationModal({
             type="button"
             onClick={onClose}
             disabled={loading}
-            className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors disabled:opacity-50"
+            className="px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+            style={{ color: 'var(--text-secondary)' }}
           >
             Cancel
           </button>
@@ -207,7 +274,8 @@ export default function ActivationModal({
             type="button"
             onClick={() => void handleActivate()}
             disabled={loading}
-            className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-brand-500 text-white text-sm font-semibold hover:bg-brand-600 transition-colors disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+            className="inline-flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+            style={{ background: 'var(--orange-primary)', color: '#fff' }}
           >
             {loading ? (
               <>

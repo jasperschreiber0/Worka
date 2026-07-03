@@ -1,0 +1,515 @@
+// ─── WorkA Estimation Engine ───────────────────────────────────────────────────
+// Resolves a rate for each extracted quote line item using the 5-tier rate
+// hierarchy (first match wins):
+//   Tier 1: builder_learned_rates      — auto-captured from accepted quotes
+//   Tier 2: builder_rate_preferences   — manual builder override
+//   Tier 3: builder_supplier_rates     — imported price lists
+//   Tier 4: cost_rates                 — platform defaults, state-aware
+//   Tier 5: network_rate_aggregates    — anonymised P50 across all builders
+//
+// Pricing is best-effort: a line item that cannot be matched to a rate keeps
+// rate = null / total = null and is simply not counted in the quote total.
+
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+export const DEFAULT_MARGIN_PCT = 18
+
+export type RateSource = 'learned' | 'preference' | 'supplier' | 'platform' | 'network'
+
+export interface PriceableItem {
+  trade_category_id: number
+  description: string
+  quantity: number | null
+  unit: string | null
+}
+
+export interface ResolvedRate {
+  rate: number
+  unit: string
+  source: RateSource
+  line_item_key: string
+}
+
+// ─── Unit normalisation ───────────────────────────────────────────────────────
+
+const UNIT_ALIASES: Record<string, string> = {
+  'm2': 'm2', 'sqm': 'm2', 'm²': 'm2', 'sq m': 'm2', 'sq.m': 'm2',
+  'square metres': 'm2', 'square meters': 'm2',
+  'lm': 'lm', 'm': 'lm', 'lin m': 'lm', 'linear m': 'lm',
+  'linear metres': 'lm', 'metres': 'lm', 'meters': 'lm',
+  'm3': 'm3', 'm³': 'm3', 'cum': 'm3', 'cubic metres': 'm3', 'cubic meters': 'm3',
+  'each': 'each', 'ea': 'each', 'no': 'each', 'no.': 'each', 'item': 'each',
+  'items': 'each', 'unit': 'each', 'units': 'each', 'point': 'each', 'points': 'each',
+  'lot': 'lot', 'ls': 'lot', 'lump sum': 'lot', 'allowance': 'lot',
+  'week': 'weeks', 'weeks': 'weeks', 'wk': 'weeks', 'wks': 'weeks',
+  'hour': 'hours', 'hours': 'hours', 'hr': 'hours', 'hrs': 'hours',
+}
+
+export function normalizeUnit(unit: string | null): string | null {
+  if (!unit) return null
+  const key = unit.trim().toLowerCase()
+  return UNIT_ALIASES[key] ?? key
+}
+
+// ─── Description → line_item_key matching ─────────────────────────────────────
+
+const STOP_WORDS = new Set([
+  'and', 'the', 'of', 'to', 'for', 'with', 'a', 'an', 'in', 'on', 'per', 'inc', 'incl',
+])
+
+// Australian construction vocabulary — maps common trade slang and variants
+// to the canonical token used in the platform rate catalogue. Applied after
+// singularisation, so plural forms resolve too.
+const TOKEN_SYNONYMS: Record<string, string> = {
+  'colourbond': 'colorbond',
+  'gyprock': 'plasterboard',
+  'drywall': 'plasterboard',
+  'plaster': 'plasterboard',
+  'powerpoint': 'gpo',
+  'outlet': 'gpo',
+  'socket': 'gpo',
+  'downlight': 'light',
+  'excavate': 'excavation',
+  'digging': 'excavation',
+  'earthwork': 'excavation',
+  'concreting': 'concrete',
+  'painting': 'paint',
+  'tiling': 'tile',
+  'lino': 'vinyl',
+  'linoleum': 'vinyl',
+  'floorboard': 'timber',
+  'hardwood': 'timber',
+  'electric': 'electrical',
+  'sparky': 'electrical',
+  'kitchenette': 'kitchen',
+  'robe': 'wardrobe',
+  'guttering': 'gutter',
+  'wc': 'toilet',
+  'loo': 'toilet',
+  'lavatory': 'toilet',
+  'bricklaying': 'brick',
+  'brickwork': 'brick',
+  'scaffold': 'scaffolding',
+}
+
+function tokenize(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const raw of text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+    if (raw.length < 2 || STOP_WORDS.has(raw)) continue
+    // Crude singularisation so "tiles" matches "tile", "gutters" matches "gutter"
+    const singular = raw.length > 3 && raw.endsWith('s') ? raw.slice(0, -1) : raw
+    const canonical = TOKEN_SYNONYMS[singular] ?? singular
+    out.add(canonical)
+  }
+  return out
+}
+
+interface CatalogueEntry {
+  line_item_key: string
+  trade_category_id: number
+  description: string
+  unit: string
+  tokens: Set<string>
+}
+
+/**
+ * Match a line item description to a catalogue line_item_key.
+ * Requires same trade category and a compatible unit; scores by token overlap.
+ */
+function matchLineItemKey(
+  item: PriceableItem,
+  catalogue: CatalogueEntry[]
+): string | null {
+  const itemTokens = tokenize(item.description)
+  const itemUnit = normalizeUnit(item.unit)
+  if (itemTokens.size === 0) return null
+
+  let bestKey: string | null = null
+  let bestScore = 0
+
+  for (const entry of catalogue) {
+    if (entry.trade_category_id !== item.trade_category_id) continue
+    // A rate in a different unit cannot price this quantity
+    if (itemUnit && normalizeUnit(entry.unit) !== itemUnit) continue
+
+    let score = 0
+    entry.tokens.forEach((token) => {
+      if (itemTokens.has(token)) score++
+    })
+    if (score > bestScore) {
+      bestScore = score
+      bestKey = entry.line_item_key
+    }
+  }
+
+  return bestScore >= 1 ? bestKey : null
+}
+
+// ─── Rate resolution (5-tier hierarchy) ───────────────────────────────────────
+
+interface RateRow {
+  line_item_key: string
+  rate: number
+  unit: string
+}
+
+interface StateRateRow extends RateRow {
+  state: string | null
+}
+
+interface NetworkRateRow {
+  line_item_key: string
+  state: string | null
+  rate_p50: number | null
+}
+
+interface RateContext {
+  learned: RateRow[]
+  preferences: RateRow[]
+  supplier: RateRow[]
+  platform: StateRateRow[]
+  network: NetworkRateRow[]
+  catalogue: CatalogueEntry[]
+  builderState: string | null
+}
+
+async function loadRateContext(
+  supabase: SupabaseClient,
+  builderId: string,
+  builderState: string | null
+): Promise<RateContext> {
+  const stateFilter = builderState ? `state.is.null,state.eq.${builderState}` : 'state.is.null'
+
+  const [learnedRes, prefRes, supplierRes, platformRes, networkRes] = await Promise.all([
+    supabase.from('builder_learned_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
+    supabase.from('builder_rate_preferences').select('line_item_key, rate, unit').eq('builder_id', builderId),
+    supabase.from('builder_supplier_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
+    supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state').or(stateFilter),
+    supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50').or(stateFilter),
+  ])
+
+  const platform = (platformRes.data ?? []) as Array<StateRateRow & { trade_category_id: number; description: string }>
+
+  // The matching catalogue is built from national default rows (state IS NULL)
+  const catalogue: CatalogueEntry[] = platform
+    .filter((row) => row.state === null)
+    .map((row) => ({
+      line_item_key: row.line_item_key,
+      trade_category_id: row.trade_category_id,
+      description: row.description,
+      unit: row.unit,
+      tokens: tokenize(row.description),
+    }))
+
+  return {
+    learned: (learnedRes.data ?? []) as RateRow[],
+    preferences: (prefRes.data ?? []) as RateRow[],
+    supplier: (supplierRes.data ?? []) as RateRow[],
+    platform,
+    network: (networkRes.data ?? []) as NetworkRateRow[],
+    catalogue,
+    builderState,
+  }
+}
+
+function resolveRateForKey(
+  key: string,
+  itemUnit: string | null,
+  ctx: RateContext
+): ResolvedRate | null {
+  const unitMatches = (rateUnit: string) =>
+    !itemUnit || normalizeUnit(rateUnit) === itemUnit
+
+  // Tier 1: learned
+  const learned = ctx.learned.find((r) => r.line_item_key === key && unitMatches(r.unit))
+  if (learned) return { rate: learned.rate, unit: learned.unit, source: 'learned', line_item_key: key }
+
+  // Tier 2: preference
+  const pref = ctx.preferences.find((r) => r.line_item_key === key && unitMatches(r.unit))
+  if (pref) return { rate: pref.rate, unit: pref.unit, source: 'preference', line_item_key: key }
+
+  // Tier 3: supplier (cheapest compatible rate across imported lists)
+  const supplierRates = ctx.supplier.filter((r) => r.line_item_key === key && unitMatches(r.unit))
+  if (supplierRates.length > 0) {
+    const cheapest = supplierRates.reduce((a, b) => (b.rate < a.rate ? b : a))
+    return { rate: cheapest.rate, unit: cheapest.unit, source: 'supplier', line_item_key: key }
+  }
+
+  // Tier 4: platform defaults — state-specific first, national fallback
+  const platformRates = ctx.platform.filter((r) => r.line_item_key === key && unitMatches(r.unit))
+  const stateRate = platformRates.find((r) => r.state !== null && r.state === ctx.builderState)
+  const nationalRate = platformRates.find((r) => r.state === null)
+  const platformRate = stateRate ?? nationalRate
+  if (platformRate) {
+    return { rate: platformRate.rate, unit: platformRate.unit, source: 'platform', line_item_key: key }
+  }
+
+  // Tier 5: network P50 — state-specific first, national fallback
+  const networkRates = ctx.network.filter((r) => r.line_item_key === key && r.rate_p50 !== null)
+  const networkRate =
+    networkRates.find((r) => r.state !== null && r.state === ctx.builderState) ??
+    networkRates.find((r) => r.state === null)
+  if (networkRate && networkRate.rate_p50 !== null) {
+    return { rate: networkRate.rate_p50, unit: itemUnit ?? 'each', source: 'network', line_item_key: key }
+  }
+
+  return null
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/**
+ * Client-facing price: internal cost marked up by the builder's margin.
+ * Everything a client sees (quote view, PDF, email) must use this — raw cost
+ * rates are internal data and never leave the builder's screen unmarked.
+ */
+export function applyMargin(cost: number, marginPct: number): number {
+  return round2(cost * (1 + marginPct / 100))
+}
+
+/**
+ * Price a batch of extracted line items. Returns each item with rate and total
+ * filled in where a rate could be resolved (null otherwise — never throws).
+ */
+export async function priceLineItems<T extends PriceableItem>(
+  supabase: SupabaseClient,
+  builderId: string,
+  builderState: string | null,
+  items: T[]
+): Promise<Array<T & { rate: number | null; total: number | null }>> {
+  let ctx: RateContext
+  try {
+    ctx = await loadRateContext(supabase, builderId, builderState)
+  } catch (err) {
+    console.error('priceLineItems: failed to load rate context', err)
+    return items.map((item) => ({ ...item, rate: null, total: null }))
+  }
+
+  return items.map((item) => {
+    // No unit means the quantity cannot be safely priced — the builder must
+    // resolve the assumption first (never invent quantities)
+    if (!item.unit) {
+      return { ...item, rate: null, total: null }
+    }
+
+    const key = matchLineItemKey(item, ctx.catalogue)
+    const resolved = key ? resolveRateForKey(key, normalizeUnit(item.unit), ctx) : null
+
+    const rate = resolved?.rate ?? null
+    const total =
+      rate !== null && item.quantity !== null && item.quantity > 0
+        ? round2(item.quantity * rate)
+        : null
+
+    return { ...item, rate, total }
+  })
+}
+
+/**
+ * Quote-level totals from line items. Excluded items never count.
+ * Confidence is the LOWEST included line item confidence — the weakest link
+ * drives the score, one bad extraction cannot be hidden.
+ */
+export function computeQuoteTotals(
+  items: Array<{
+    total: number | null
+    confidence: number | null
+    assumption_status: string | null
+  }>
+): { total_cost: number; confidence_score: number } {
+  const included = items.filter((i) => i.assumption_status !== 'excluded')
+  const total_cost = round2(included.reduce((sum, i) => sum + (i.total ?? 0), 0))
+  const confidences = included
+    .map((i) => i.confidence)
+    .filter((c): c is number => c !== null)
+  const confidence_score = confidences.length > 0 ? Math.min(...confidences) : 0
+  return { total_cost, confidence_score }
+}
+
+/**
+ * Price a quote that extraction left unpriced. The intake edge function only
+ * extracts quantities; this runs afterwards (from the intake SSE poller when
+ * extraction completes, and lazily from the quote GET as a backfill) to
+ * resolve rates and totals. Idempotent: a quote with a non-null total_cost is
+ * left untouched, and line items that already carry a rate keep it.
+ * Best-effort: never throws. Returns true when pricing was applied.
+ */
+export async function ensureQuotePriced(
+  supabase: SupabaseClient,
+  quoteId: string
+): Promise<boolean> {
+  try {
+    const { data: quote } = await supabase
+      .from('quotes')
+      .select('id, builder_id, total_cost, margin_pct')
+      .eq('id', quoteId)
+      .single()
+    if (!quote || quote.total_cost !== null) return false
+
+    const { data: items } = await supabase
+      .from('quote_line_items')
+      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status')
+      .eq('quote_id', quoteId)
+    if (!items || items.length === 0) return false
+
+    const { data: builderRow } = await supabase
+      .from('builders')
+      .select('state')
+      .eq('id', quote.builder_id)
+      .single()
+
+    const unpriced = items.filter((i) => i.rate === null)
+    const priced = await priceLineItems(
+      supabase,
+      quote.builder_id,
+      builderRow?.state ?? null,
+      unpriced
+    )
+
+    for (let i = 0; i < priced.length; i++) {
+      if (priced[i].rate !== null) {
+        await supabase
+          .from('quote_line_items')
+          .update({ rate: priced[i].rate, total: priced[i].total })
+          .eq('id', unpriced[i].id)
+      }
+    }
+
+    // Merge priced values back for the totals computation
+    const pricedById = new Map(priced.map((p, i) => [unpriced[i].id, p]))
+    const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
+    const { total_cost, confidence_score } = computeQuoteTotals(finalItems)
+
+    await supabase
+      .from('quotes')
+      .update({
+        total_cost,
+        confidence_score,
+        margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT,
+      })
+      .eq('id', quoteId)
+
+    return true
+  } catch (err) {
+    console.error('ensureQuotePriced failed:', err)
+    return false
+  }
+}
+
+/**
+ * Re-derive quotes.total_cost / confidence_score from the current line items.
+ * Called after any line item mutation (assumption resolved, quantity adjusted).
+ * Best-effort: never throws.
+ */
+export async function recomputeQuoteTotals(
+  supabase: SupabaseClient,
+  quoteId: string
+): Promise<void> {
+  try {
+    const { data: items } = await supabase
+      .from('quote_line_items')
+      .select('total, confidence, assumption_status')
+      .eq('quote_id', quoteId)
+
+    if (!items) return
+
+    const { total_cost, confidence_score } = computeQuoteTotals(items)
+
+    const { data: quote } = await supabase
+      .from('quotes')
+      .select('margin_pct')
+      .eq('id', quoteId)
+      .single()
+
+    await supabase
+      .from('quotes')
+      .update({
+        total_cost,
+        confidence_score,
+        margin_pct: quote?.margin_pct ?? DEFAULT_MARGIN_PCT,
+      })
+      .eq('id', quoteId)
+  } catch (err) {
+    console.error('recomputeQuoteTotals failed:', err)
+  }
+}
+
+/**
+ * Tier 1 capture: when a quote is approved, fold its priced line items into
+ * builder_learned_rates (running average keyed by line_item_key).
+ * Best-effort: never throws — learning must not break the approval action.
+ */
+export async function captureLearnedRates(
+  supabase: SupabaseClient,
+  quoteId: string
+): Promise<void> {
+  try {
+    const { data: quote } = await supabase
+      .from('quotes')
+      .select('builder_id')
+      .eq('id', quoteId)
+      .single()
+    if (!quote) return
+
+    const { data: items } = await supabase
+      .from('quote_line_items')
+      .select('trade_category_id, description, unit, rate, assumption_status')
+      .eq('quote_id', quoteId)
+    if (!items) return
+
+    // Re-use the platform catalogue to key each line item
+    const { data: catalogueRows } = await supabase
+      .from('cost_rates')
+      .select('line_item_key, trade_category_id, description, unit')
+      .is('state', null)
+
+    const catalogue: CatalogueEntry[] = (catalogueRows ?? []).map((row) => ({
+      line_item_key: row.line_item_key,
+      trade_category_id: row.trade_category_id,
+      description: row.description,
+      unit: row.unit,
+      tokens: tokenize(row.description),
+    }))
+
+    for (const item of items) {
+      if (item.rate === null || item.assumption_status === 'excluded') continue
+      const key = matchLineItemKey(
+        { ...item, quantity: null },
+        catalogue
+      )
+      if (!key || !item.unit) continue
+
+      const { data: existing } = await supabase
+        .from('builder_learned_rates')
+        .select('id, rate, sample_count')
+        .eq('builder_id', quote.builder_id)
+        .eq('line_item_key', key)
+        .maybeSingle()
+
+      if (existing) {
+        const nextCount = existing.sample_count + 1
+        const nextRate = round2(
+          (existing.rate * existing.sample_count + item.rate) / nextCount
+        )
+        await supabase
+          .from('builder_learned_rates')
+          .update({ rate: nextRate, sample_count: nextCount, updated_at: new Date().toISOString() })
+          .eq('id', existing.id)
+      } else {
+        await supabase.from('builder_learned_rates').insert({
+          builder_id: quote.builder_id,
+          line_item_key: key,
+          rate: item.rate,
+          unit: item.unit,
+          sample_count: 1,
+        })
+      }
+    }
+  } catch (err) {
+    console.error('captureLearnedRates failed:', err)
+  }
+}

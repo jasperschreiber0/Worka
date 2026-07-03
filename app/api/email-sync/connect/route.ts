@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -16,9 +17,16 @@ interface DemoModeResponse {
 export async function GET(
   request: NextRequest
 ): Promise<NextResponse<ConnectResponse | DemoModeResponse>> {
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json(
+      { demo_mode: true, message: 'Unauthorized' },
+      { status: 401 }
+    )
+  }
+
   const { searchParams } = new URL(request.url)
   const provider = searchParams.get('provider') as 'gmail' | 'outlook' | null
-  const builder_id = searchParams.get('builder_id')
 
   if (!provider || !['gmail', 'outlook'].includes(provider)) {
     return NextResponse.json(
@@ -27,16 +35,11 @@ export async function GET(
     )
   }
 
-  if (!builder_id) {
-    return NextResponse.json(
-      { demo_mode: true, message: 'builder_id is required.' },
-      { status: 400 }
-    )
-  }
-
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
   const redirectUri = `${appUrl}/api/email-sync/callback`
-  const state = `${builder_id}:${provider}`
+  // builder identity is re-derived from the session in the callback — state
+  // only carries the provider so it can't be used to bind another account
+  const state = provider
 
   if (provider === 'gmail') {
     const googleClientId = process.env.GOOGLE_CLIENT_ID

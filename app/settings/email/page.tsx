@@ -62,13 +62,14 @@ function EmailSettingsContent() {
   const showDemoBanner = !bannerDismissed && connected === 'demo'
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen" style={{ background: 'var(--bg-shell)' }}>
       {/* ── Header ────────────────────────────────────────────────────── */}
-      <header className="bg-white border-b border-slate-200">
+      <header style={{ background: 'var(--bg-surface)', borderBottom: '1px solid var(--bg-border)' }}>
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
           <Link
             href="/"
-            className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+            className="flex items-center gap-1.5 text-sm transition-colors"
+            style={{ color: 'var(--text-secondary)' }}
           >
             <svg
               className="w-4 h-4"
@@ -88,9 +89,10 @@ function EmailSettingsContent() {
       <main className="max-w-2xl mx-auto px-4 py-8">
         {/* ── Success banners ────────────────────────────────────────── */}
         {showSuccessBanner && (
-          <div className="mb-6 flex items-start gap-3 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
+          <div className="mb-6 flex items-start gap-3 rounded-xl px-4 py-3" style={{ background: 'rgba(76,175,80,0.15)', border: '1px solid rgba(76,175,80,0.3)' }}>
             <svg
-              className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5"
+              className="w-5 h-5 flex-shrink-0 mt-0.5"
+              style={{ color: 'var(--status-green)' }}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -100,13 +102,14 @@ function EmailSettingsContent() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-green-800">
+              <p className="text-sm font-medium" style={{ color: 'var(--status-green)' }}>
                 Gmail connected — WorkA is now monitoring your inbox.
               </p>
             </div>
             <button
               onClick={() => setBannerDismissed(true)}
-              className="flex-shrink-0 text-green-500 hover:text-green-700"
+              className="flex-shrink-0 transition-colors"
+              style={{ color: 'var(--status-green)' }}
               aria-label="Dismiss"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -117,9 +120,10 @@ function EmailSettingsContent() {
         )}
 
         {showDemoBanner && (
-          <div className="mb-6 flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+          <div className="mb-6 flex items-start gap-3 rounded-xl px-4 py-3" style={{ background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.2)' }}>
             <svg
-              className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5"
+              className="w-5 h-5 flex-shrink-0 mt-0.5"
+              style={{ color: 'var(--status-amber)' }}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -133,16 +137,17 @@ function EmailSettingsContent() {
               />
             </svg>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-amber-800">
+              <p className="text-sm font-medium" style={{ color: 'var(--status-amber)' }}>
                 Demo mode — connect OAuth credentials to enable real email sync.
               </p>
-              <p className="mt-0.5 text-xs text-amber-700">
-                See <code className="font-mono bg-amber-100 rounded px-1">.env.local.example</code> for setup instructions.
+              <p className="mt-0.5 text-xs" style={{ color: 'var(--status-amber)' }}>
+                See <code className="font-mono rounded px-1" style={{ background: 'rgba(255,152,0,0.15)' }}>.env.local.example</code> for setup instructions.
               </p>
             </div>
             <button
               onClick={() => setBannerDismissed(true)}
-              className="flex-shrink-0 text-amber-500 hover:text-amber-700"
+              className="flex-shrink-0 transition-colors"
+              style={{ color: 'var(--status-amber)' }}
               aria-label="Dismiss"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -154,29 +159,32 @@ function EmailSettingsContent() {
 
         {/* ── Page title ─────────────────────────────────────────────── */}
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-slate-900">Email sync</h1>
-          <p className="mt-1.5 text-slate-600">
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Email sync</h1>
+          <p className="mt-1.5" style={{ color: 'var(--text-secondary)' }}>
             Connect your inbox so WorkA can monitor job-related emails and draft responses.
           </p>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm" style={{ color: 'var(--text-secondary)' }}>
             WorkA only reads emails related to your active jobs. It never touches personal emails.
           </p>
         </div>
 
         {/* ── Connect section ────────────────────────────────────────── */}
         <section className="mb-6">
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-tertiary)' }}>
             Connect your inbox
           </h2>
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden divide-y divide-slate-100">
+          <div className="rounded-xl overflow-hidden" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
             {/* Gmail */}
             <button
               onClick={() => handleConnect('gmail')}
               disabled={connecting !== null}
-              className="w-full flex items-center gap-4 px-5 py-4 text-left hover:bg-slate-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed group"
+              className="w-full flex items-center gap-4 px-5 py-4 text-left transition-colors disabled:opacity-60 disabled:cursor-not-allowed group"
             >
               {/* Google G icon */}
-              <span className="flex-shrink-0 w-9 h-9 rounded-lg bg-white border border-slate-200 flex items-center justify-center shadow-sm group-hover:shadow transition-shadow">
+              <span
+                className="flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+              >
                 <svg className="w-5 h-5" viewBox="0 0 24 24" aria-hidden="true">
                   <path
                     d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -198,11 +206,11 @@ function EmailSettingsContent() {
               </span>
 
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-slate-900">Connect Gmail</p>
-                <p className="text-xs text-slate-500 mt-0.5">Read-only access to job-related threads</p>
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Connect Gmail</p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>Read-only access to job-related threads</p>
               </div>
 
-              <span className="flex-shrink-0 text-slate-400 group-hover:text-slate-600 transition-colors">
+              <span className="flex-shrink-0 transition-colors" style={{ color: 'var(--text-tertiary)' }}>
                 {connecting === 'gmail' ? (
                   <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -220,10 +228,14 @@ function EmailSettingsContent() {
             <button
               onClick={() => handleConnect('outlook')}
               disabled={connecting !== null}
-              className="w-full flex items-center gap-4 px-5 py-4 text-left hover:bg-slate-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed group"
+              className="w-full flex items-center gap-4 px-5 py-4 text-left transition-colors disabled:opacity-60 disabled:cursor-not-allowed group"
+              style={{ borderTop: '1px solid var(--bg-border)' }}
             >
               {/* Microsoft icon */}
-              <span className="flex-shrink-0 w-9 h-9 rounded-lg bg-white border border-slate-200 flex items-center justify-center shadow-sm group-hover:shadow transition-shadow">
+              <span
+                className="flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+              >
                 <svg className="w-5 h-5" viewBox="0 0 23 23" aria-hidden="true">
                   <rect x="1" y="1" width="10" height="10" fill="#f25022" />
                   <rect x="12" y="1" width="10" height="10" fill="#7fba00" />
@@ -233,11 +245,11 @@ function EmailSettingsContent() {
               </span>
 
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-slate-900">Connect Outlook</p>
-                <p className="text-xs text-slate-500 mt-0.5">Microsoft 365 and Outlook.com</p>
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Connect Outlook</p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>Microsoft 365 and Outlook.com</p>
               </div>
 
-              <span className="flex-shrink-0 text-slate-400 group-hover:text-slate-600 transition-colors">
+              <span className="flex-shrink-0 transition-colors" style={{ color: 'var(--text-tertiary)' }}>
                 {connecting === 'outlook' ? (
                   <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -255,10 +267,10 @@ function EmailSettingsContent() {
 
         {/* ── What WorkA monitors ────────────────────────────────────── */}
         <section className="mb-6">
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-tertiary)' }}>
             What WorkA monitors
           </h2>
-          <div className="bg-white rounded-xl border border-slate-200 px-5 py-4">
+          <div className="rounded-xl px-5 py-4" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
             <ul className="space-y-2.5">
               {[
                 'Client replies to quotes',
@@ -267,10 +279,11 @@ function EmailSettingsContent() {
                 'Emails mentioning your job sites',
                 'New quote requests',
               ].map((item) => (
-                <li key={item} className="flex items-center gap-3 text-sm text-slate-700">
-                  <span className="flex-shrink-0 w-5 h-5 rounded-full bg-green-100 flex items-center justify-center">
+                <li key={item} className="flex items-center gap-3 text-sm" style={{ color: 'var(--text-primary)' }}>
+                  <span className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: 'rgba(76,175,80,0.15)' }}>
                     <svg
-                      className="w-3 h-3 text-green-600"
+                      className="w-3 h-3"
+                      style={{ color: 'var(--status-green)' }}
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"
@@ -284,17 +297,18 @@ function EmailSettingsContent() {
                 </li>
               ))}
 
-              <li className="pt-1 border-t border-slate-100" />
+              <li className="pt-1" style={{ borderTop: '1px solid var(--bg-border)' }} />
 
               {[
                 'Personal emails',
                 'Newsletters and marketing',
                 'Emails older than 90 days',
               ].map((item) => (
-                <li key={item} className="flex items-center gap-3 text-sm text-slate-400">
-                  <span className="flex-shrink-0 w-5 h-5 rounded-full bg-slate-100 flex items-center justify-center">
+                <li key={item} className="flex items-center gap-3 text-sm" style={{ color: 'var(--text-tertiary)' }}>
+                  <span className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: 'var(--bg-elevated)' }}>
                     <svg
-                      className="w-3 h-3 text-slate-400"
+                      className="w-3 h-3"
+                      style={{ color: 'var(--text-tertiary)' }}
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"
@@ -312,9 +326,9 @@ function EmailSettingsContent() {
         </section>
 
         {/* ── Approval notice ────────────────────────────────────────── */}
-        <div className="bg-slate-100 rounded-xl px-5 py-4">
-          <p className="text-sm text-slate-600">
-            <span className="font-semibold text-slate-700">WorkA never sends without your approval.</span>{' '}
+        <div className="rounded-xl px-5 py-4" style={{ background: 'var(--bg-elevated)' }}>
+          <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+            <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>WorkA never sends without your approval.</span>{' '}
             Every reply is drafted for your review first. You stay in control of every communication.
           </p>
         </div>
@@ -329,8 +343,8 @@ export default function EmailSettingsPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-          <div className="text-sm text-slate-400">Loading…</div>
+        <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-shell)' }}>
+          <div className="text-sm" style={{ color: 'var(--text-tertiary)' }}>Loading…</div>
         </div>
       }
     >

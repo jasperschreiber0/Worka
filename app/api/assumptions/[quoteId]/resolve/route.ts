@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -40,11 +41,16 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  const { assumption_id, resolution, adjusted_quantity, adjusted_unit, builder_id } = body
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
-  if (!assumption_id || !resolution || !builder_id) {
+  const { assumption_id, resolution, adjusted_quantity, adjusted_unit } = body
+
+  if (!assumption_id || !resolution) {
     return NextResponse.json(
-      { error: 'Missing required fields: assumption_id, resolution, builder_id' },
+      { error: 'Missing required fields: assumption_id, resolution' },
       { status: 400 }
     )
   }
@@ -106,7 +112,18 @@ export async function POST(
 
     const now = new Date().toISOString()
 
-    // 1. Update assumptions table
+    // The quote must belong to the authenticated builder
+    const { data: ownedQuote } = await supabase
+      .from('quotes')
+      .select('id')
+      .eq('id', quoteId)
+      .eq('builder_id', builder_id)
+      .single()
+    if (!ownedQuote) {
+      return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
+
+    // 1. Update assumptions table — constrained to this quote
     const { data: assumptionRow, error: assumptionErr } = await supabase
       .from('assumptions')
       .update({
@@ -115,6 +132,7 @@ export async function POST(
         resolved_by: builder_id,
       })
       .eq('id', assumption_id)
+      .eq('quote_id', quoteId)
       .select()
       .single()
 
@@ -158,6 +176,46 @@ export async function POST(
         .from('quote_line_items')
         .update(lineItemUpdate)
         .eq('id', assumptionRow.line_item_id)
+
+      // If the item is still unpriced (e.g. Gate 1 — unit was missing and has
+      // now been supplied), try to resolve a rate via the 5-tier hierarchy
+      if (resolution !== 'excluded') {
+        const { data: li } = await supabase
+          .from('quote_line_items')
+          .select('id, trade_category_id, description, quantity, unit, rate')
+          .eq('id', assumptionRow.line_item_id)
+          .single()
+
+        if (li && li.rate === null && li.quantity !== null && li.unit) {
+          const { data: builderRow } = await supabase
+            .from('builders')
+            .select('state')
+            .eq('id', builder_id)
+            .single()
+
+          const { priceLineItems } = await import('@/lib/pricing')
+          const [priced] = await priceLineItems(
+            supabase,
+            builder_id,
+            builderRow?.state ?? null,
+            [li]
+          )
+
+          if (priced.rate !== null) {
+            await supabase
+              .from('quote_line_items')
+              .update({ rate: priced.rate, total: priced.total })
+              .eq('id', li.id)
+          }
+        }
+      }
+
+      // Recalculate quote totals from the current line items. (The previous
+      // inline version used .neq('assumption_status', 'excluded'), which in
+      // PostgREST also drops rows where the status is NULL — every normal
+      // line item — so totals only counted assumption items.)
+      const { recomputeQuoteTotals } = await import('@/lib/pricing')
+      await recomputeQuoteTotals(supabase, quoteId)
     }
 
     // 3. Check if all assumptions for this quote are resolved
@@ -202,8 +260,26 @@ export async function POST(
     }
 
     return NextResponse.json(response)
-  } catch (err) {
-    console.error('Assumptions resolve error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  } catch {
+    // DB unavailable — fall through to demo handler
+    const assumption = DEMO_ASSUMPTIONS.find((a) => a.id === assumption_id)
+    if (!assumption) {
+      return NextResponse.json({ error: 'Assumption not found' }, { status: 404 })
+    }
+    demoResolutionState.set(assumption_id, {
+      resolution_type: resolution,
+      adjusted_quantity,
+      adjusted_unit,
+    })
+    const allResolved = DEMO_ASSUMPTIONS.every((a) => {
+      const state = demoResolutionState.get(a.id)
+      return state !== undefined && state.resolution_type !== 'unresolved'
+    })
+    return NextResponse.json({
+      resolved: true,
+      assumption: { id: assumption_id, resolution_type: resolution, resolved_at: new Date().toISOString(), resolved_by: builder_id },
+      all_resolved: allResolved,
+      quote_status: allResolved ? 'pending_review' : 'draft',
+    } satisfies ResolveResponse)
   }
 }

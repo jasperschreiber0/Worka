@@ -6,74 +6,217 @@
   :root {
     --background: 253 248 240;   /* brand-50 */
     --foreground: 61 28 11;      /* brand-950 */
+
+    /* ── Dark design system tokens ────────────────────────────────────── */
+    --bg-shell: #1a1a1a;
+    --bg-surface: #222222;
+    --bg-elevated: #2a2a2a;
+    --bg-border: #2e2e2e;
+    --text-primary: #e0e0e0;
+    --text-secondary: #999999;
+    --text-tertiary: #555555;
+    --text-ghost: #333333;
+    --orange-primary: #ff6b2b;
+    --orange-subtle: rgba(255, 107, 43, 0.13);
+    --status-green: #4caf50;
+    --status-amber: #ff9800;
+    --status-red: #f44336;
+    --status-blue: #2196f3;
+    --pill-awaiting-bg: rgba(255, 152, 0, 0.15);
+    --pill-awaiting-text: #ff9800;
+    --pill-awaiting-border: rgba(255, 152, 0, 0.3);
   }
 
   html {
-    font-family: Inter, system-ui, -apple-system, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   body {
-    @apply bg-white text-slate-900;
+    background-color: var(--bg-shell);
+    color: var(--text-primary);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
   }
 
   * {
-    @apply border-slate-200;
+    border-color: var(--bg-border);
+  }
+}
+
+@layer base {
+  /* Global interactive feedback — all clickable elements */
+  button, [role="button"] {
+    cursor: pointer;
+    transition: opacity 0.12s ease, background-color 0.12s ease, transform 0.08s ease;
+  }
+
+  button:hover:not(:disabled), [role="button"]:hover {
+    opacity: 0.85;
+  }
+
+  button:active:not(:disabled), [role="button"]:active {
+    transform: scale(0.97);
+    opacity: 0.7;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  /* Ensure pointer cursor on anything interactive */
+  a, [role="tab"], [role="menuitem"], [tabindex="0"][role="button"] {
+    cursor: pointer;
   }
 }
 
 @layer utilities {
   @keyframes fade-in {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
+
+  /* ── Message slide-up ────────────────────────────────────────────── */
+  @keyframes slide-up-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-slide-up { animation: slide-up-in 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards; }
+
+  /* ── Typing dots ─────────────────────────────────────────────────── */
+  @keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+  .typing-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background-color: var(--orange-primary);
+    animation: typing-bounce 1.2s ease infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.18s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+  /* ── Worker / status pulse dot ───────────────────────────────────── */
+  @keyframes pulse-ring {
+    0% { transform: scale(1); opacity: 0.8; }
+    70% { transform: scale(2.6); opacity: 0; }
+    100% { transform: scale(2.6); opacity: 0; }
+  }
+  .pulse-dot {
+    position: relative;
+    display: inline-block;
+    width: 7px; height: 7px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .pulse-dot::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse-ring 2s ease-out infinite;
   }
 
-  .animate-fade-in {
-    animation: fade-in 0.3s ease-out forwards;
+  /* ── Amber slow pulse (overdue alerts) ──────────────────────────── */
+  @keyframes amber-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
+  .animate-amber-pulse { animation: amber-pulse 2.2s ease-in-out infinite; }
+
+  /* ── Count-up shimmer (numbers loading in) ──────────────────────── */
+  @keyframes shimmer-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-number-in { animation: shimmer-in 0.4s ease-out forwards; }
+
+  /* ── Dark system utility classes ──────────────────────────────────── */
+  .section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-tertiary);
+  }
+
+  .value-amber { color: var(--status-amber); }
+  .value-orange { color: var(--orange-primary); }
+  .value-red { color: var(--status-red); }
+  .value-green { color: var(--status-green); }
 }
 
 @layer components {
   .btn-primary {
-    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-semibold text-white bg-brand-500 hover:bg-brand-600 active:bg-brand-700 transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-semibold text-white transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    background-color: var(--orange-primary);
+    focus-ring-color: var(--orange-primary);
+  }
+
+  .btn-primary:hover {
+    background-color: #e85a1a;
   }
 
   .btn-secondary {
-    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-semibold text-brand-700 bg-brand-50 border border-brand-200 hover:bg-brand-100 active:bg-brand-200 transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-semibold transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    color: var(--text-secondary);
+    background-color: var(--bg-elevated);
+    border: 0.5px solid var(--bg-border);
+  }
+
+  .btn-secondary:hover {
+    background-color: var(--bg-border);
+    color: var(--text-primary);
   }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-slate-300 focus:ring-offset-2;
+    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-medium transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2;
+    color: var(--text-secondary);
+  }
+
+  .btn-ghost:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-elevated);
   }
 
   .card {
-    @apply bg-white rounded-lg border border-slate-200 shadow-sm;
+    border-radius: 6px;
+    background-color: var(--bg-surface);
+    border: 0.5px solid var(--bg-border);
   }
 
   .input {
-    @apply block w-full rounded border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent transition-shadow duration-150;
+    @apply block w-full px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:border-transparent transition-shadow duration-150;
+    background-color: var(--bg-elevated);
+    border: 0.5px solid var(--bg-border);
+    color: var(--text-primary);
+    border-radius: 6px;
+  }
+
+  .input::placeholder {
+    color: var(--text-ghost);
   }
 
   .label {
-    @apply block text-sm font-medium text-slate-700 mb-1;
+    @apply block text-sm font-medium mb-1;
+    color: var(--text-secondary);
   }
 
   .badge-high {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-red-100 text-red-800;
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    background-color: rgba(244, 67, 54, 0.15);
+    color: var(--status-red);
   }
 
   .badge-medium {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-amber-100 text-amber-800;
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    background-color: var(--pill-awaiting-bg);
+    color: var(--status-amber);
   }
 
   .badge-low {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-slate-100 text-slate-700;
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    background-color: var(--bg-elevated);
+    color: var(--text-secondary);
   }
 }

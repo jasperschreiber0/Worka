@@ -27,7 +27,7 @@ export type CommunicationChannel = 'email' | 'sms' | 'chat'
 
 export type FileType = 'pdf' | 'image' | 'dwg' | 'other'
 
-export type FileIntakeStatus = 'uploaded' | 'processing' | 'extracted' | 'failed'
+export type FileIntakeStatus = 'uploaded' | 'queued' | 'processing' | 'extracted' | 'failed'
 
 export type ResolutionType = 'accepted' | 'adjusted' | 'excluded'
 
@@ -81,8 +81,17 @@ export interface Job {
   status: JobStatus
   job_type: string | null
   notes: string | null
+  budget_estimate: number | null
+  scope_notes: string | null
+  quote_deadline: string | null   // ISO date: "YYYY-MM-DD"
+  client_deadline: string | null  // ISO date: "YYYY-MM-DD"
   created_at: string
   updated_at: string
+}
+
+export interface StateChange {
+  status: 'saved' | 'found' | 'warning' | 'blocked' | 'info'
+  label: string
 }
 
 export interface Quote {
@@ -100,6 +109,8 @@ export interface Quote {
   approved_at: string | null
 }
 
+export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
+
 export interface QuoteLineItem {
   id: string
   quote_id: string
@@ -116,6 +127,17 @@ export interface QuoteLineItem {
   is_assumption: boolean
   assumption_status: AssumptionStatus | null
   created_at: string
+  /** Cost split columns */
+  labour_cost: number | null
+  material_cost: number | null
+  subcontract_cost: number | null
+  plant_cost: number | null
+  /** measured | pc_allowance | provisional_sum */
+  pricing_type: PricingType
+  /** Drawing reference e.g. "A3.1", "SK-04" */
+  source_ref: string | null
+  /** Per-line margin rate (0–1). PS items always 0. */
+  margin_pct: number
 }
 
 export interface CostRate {
@@ -220,6 +242,17 @@ export interface File {
   filename: string
   file_type: FileType
   intake_status: FileIntakeStatus
+  failure_stage: string | null
+  failure_reason: string | null
+  extracted_text_length: number | null
+  page_count: number | null
+  line_item_count: number | null
+  processing_time_ms: number | null
+  pipeline_stage: string | null
+  intake_result: Record<string, unknown> | null
+  intake_stage: string | null
+  intake_pct: number | null
+  intake_assumption_count: number | null
   created_at: string
 }
 
@@ -356,6 +389,47 @@ export type IntentType =
   | 'variation'
   | 'invoice'
   | 'unknown'
+
+// ─── Multi-action extraction types ───────────────────────────────────────────
+
+export type ActionType =
+  | 'morning_brief'
+  | 'add_worker'
+  | 'create_job'
+  | 'job_query'
+  | 'variation'
+  | 'invoice'
+  | 'email_draft'
+  | 'email_sync_status'
+  | 'simulate_email'
+  | 'margin_query'
+  | 'open_upload_panel'
+  | 'review_assumptions'
+  | 'update_job_context'
+  | 'add_task'
+  | 'upload_rates'
+  | 'client_lookup'
+  | 'meeting_prep'
+  | 'payment_risk'
+  | 'conflict_detected'
+  | 'worker_onboarding'
+  | 'roadmap'
+  | 'team_notifications'
+  | 'approve_quote'
+  | 'end_of_day'
+  | 'task_help'
+  | 'unknown'
+
+export interface ExtractedAction {
+  type: ActionType
+  entities: Record<string, string>
+  confidence: number
+}
+
+export interface ExtractActionsResponse {
+  actions: ExtractedAction[]
+  raw_context: Record<string, string>
+}
 
 export interface ClassifyIntentRequest {
   message: string
