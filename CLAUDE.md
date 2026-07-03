@@ -289,7 +289,7 @@ All use Deno + ESM. Deployed to Supabase; called from Next.js API routes via `fe
 | `create-worker` | 2 (Decision) | Creates worker row + generates invite URL |
 | `create-job` | 2 (Decision) | Duplicate-checks address, creates job |
 
-**Model used in edge functions**: `claude-sonnet-4-20250514`
+**Model used in edge functions**: `claude-sonnet-4-6`
 
 ---
 
