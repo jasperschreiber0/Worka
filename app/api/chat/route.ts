@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { ANTHROPIC_MODEL } from '@/lib/anthropic'
 import { createClient } from '@supabase/supabase-js'
 import { randomUUID } from 'crypto'
 import type {
@@ -170,7 +171,7 @@ async function classifyIntent(
   anthropic: Anthropic
 ): Promise<ClassifyResult> {
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: ANTHROPIC_MODEL,
     max_tokens: 256,
     system: `You are an intent classifier for WorkA, an AI operations manager for Australian residential builders.
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { ANTHROPIC_MODEL } from '@/lib/anthropic'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { addCommEntry } from '@/lib/comms-demo'
 import { createClient } from '@supabase/supabase-js'
@@ -276,7 +277,7 @@ Respond ONLY with valid JSON:
 }`
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: ANTHROPIC_MODEL,
     max_tokens: 128,
     messages: [{ role: 'user', content: prompt }],
   })

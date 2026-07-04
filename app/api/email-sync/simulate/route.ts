@@ -8,6 +8,7 @@ import {
   DEMO_MATCHABLE_JOBS,
 } from '../parse/route'
 import Anthropic from '@anthropic-ai/sdk'
+import { ANTHROPIC_MODEL } from '@/lib/anthropic'
 import type { EmailIntent } from '../parse/route'
 
 // ─── Demo email scenarios ─────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ Respond ONLY with valid JSON:
 }`
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: ANTHROPIC_MODEL,
     max_tokens: 128,
     messages: [{ role: 'user', content: prompt }],
   })

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { ANTHROPIC_MODEL } from '@/lib/anthropic'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -222,7 +223,7 @@ Respond with ONLY valid JSON in this exact format:
 }`
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: ANTHROPIC_MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
   })
