@@ -311,7 +311,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL')
   const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY')
+  // Trim so a secret stored with a trailing newline/whitespace doesn't produce
+  // a spurious `401 invalid x-api-key` from Anthropic. Still required — an
+  // empty/undefined key falls through to the 500 guard below.
+  const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY')?.trim()
 
   if (!supabaseUrl || !supabaseKey || !anthropicKey) {
     return new Response(JSON.stringify({ error: 'Missing environment variables' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
