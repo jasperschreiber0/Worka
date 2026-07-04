@@ -19,7 +19,7 @@ No test suite exists yet. Type-check is the primary correctness gate.
 
 ## Git Rules
 
-- **Always commit directly to `main`** — Railway auto-deploys from main to getworka.com
+- **Always commit directly to `main`** — Vercel auto-deploys from `main` to getworka.com
 - When given a feature branch, develop there then merge to main before finishing
 - Run `npm run type-check` before every commit; fix all new errors (pre-existing module-not-found errors from missing node_modules are acceptable)
 - Push with `git push -u origin <branch>` or `git push origin main`
