@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server'
+import { ANTHROPIC_MODEL } from '@/lib/anthropic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -247,7 +248,7 @@ Return ONLY valid JSON. No explanation, no markdown fences.`
               ]
 
           const response = await client.messages.create({
-            model: 'claude-sonnet-4-20250514',
+            model: ANTHROPIC_MODEL,
             max_tokens: 4096,
             // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
             messages: [{ role: 'user', content: messageContent }],
