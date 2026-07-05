@@ -12,6 +12,7 @@ type FailureStage =
   | 'NO_LINE_ITEMS_FOUND'
   | 'NON_BUILDING_DOC'
   | 'PASSWORD_PROTECTED_PDF'
+  | 'DB_WRITE_FAILED'
 
 // ─── Tool schema ───────────────────────────────────────────────────────────────
 
@@ -587,10 +588,55 @@ Use the extract_estimate tool to return your results.`
 
         if (lineItemInserts.length > 0) {
           w('db:line_items:insert')
-          const { data: insertedItems } = await withDbTimeout(
+          let { data: insertedItems, error: insertErr } = await withDbTimeout(
             supabase.from('quote_line_items').insert(lineItemInserts).select(),
             'quote_line_items.insert'
           )
+
+          // The migration-012 columns (pricing_type, source_ref, margin_pct and
+          // the cost splits) may not exist on a behind-schema DB. Rather than
+          // silently producing an empty $0 quote, retry with the base columns
+          // that predate migration 012 so the extracted scope still lands.
+          const missingColumn =
+            insertErr != null &&
+            (((insertErr as { code?: string }).code === '42703') ||
+              /does not exist/i.test((insertErr as { message?: string }).message ?? ''))
+          if (missingColumn) {
+            console.warn(
+              '[intake:worker] quote_line_items is missing migration-012 columns — retrying with base columns. Apply migration 012 to restore source_ref/pricing_type/cost splits.',
+              { file_id: fileId, error: (insertErr as { message?: string }).message }
+            )
+            const baseInserts = lineItemInserts.map((li) => ({
+              quote_id: li.quote_id,
+              trade_category_id: li.trade_category_id,
+              description: li.description,
+              quantity: li.quantity,
+              unit: li.unit,
+              rate: li.rate,
+              total: li.total,
+              confidence: li.confidence,
+              dimensions_string: li.dimensions_string,
+              is_assumption: li.is_assumption,
+              assumption_status: li.assumption_status,
+            }))
+            const retry = await withDbTimeout(
+              supabase.from('quote_line_items').insert(baseInserts).select(),
+              'quote_line_items.insert(base)'
+            )
+            insertedItems = retry.data
+            insertErr = retry.error
+          }
+
+          // A failed insert must never masquerade as a finished quote. Surface it
+          // and mark the file failed instead of presenting an empty $0 draft.
+          if (insertErr || !insertedItems || insertedItems.length === 0) {
+            const reason = insertErr
+              ? `Line items could not be saved: ${(insertErr as { message?: string }).message ?? 'unknown error'}`
+              : 'Extraction produced no saved line items'
+            console.error('[intake:worker] line_items insert failed', { file_id: fileId, reason })
+            await failWith('DB_WRITE_FAILED', reason)
+            return NextResponse.json({ ok: false, error: reason }, { status: 500 })
+          }
 
           if (insertedItems && assumptions.length > 0) {
             const assumptionInserts = assumptions.map(a => {
