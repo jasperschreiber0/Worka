@@ -1363,6 +1363,9 @@ export default function ChatInterface({
         </div>
 
         <div className="flex items-center gap-2">
+          <Link href="/estimate" className="text-[13px] font-medium px-2.5 py-1 rounded-[4px] transition-colors" style={{ color: 'var(--text-secondary)' }}>
+            Estimate
+          </Link>
           <Link href="/settings/rates" className="text-[13px] font-medium px-2.5 py-1 rounded-[4px] transition-colors" style={{ color: 'var(--text-secondary)' }}>
             Rates
           </Link>

@@ -1,69 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { ProjectMetadata, SimilarProject } from '@/lib/types/estimation.types'
 import { DEMO_PROJECT_MEMORY } from '@/lib/estimation-demo'
+import { scoreProject } from '@/lib/estimation-engine'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-
-// ─── Similarity scoring (structured matching — no embeddings required) ────────
-
-function scoreProject(candidate: SimilarProject, query: ProjectMetadata): { score: number; reasons: string[] } {
-  let score = 0
-  const reasons: string[] = []
-
-  // Job type (30pts)
-  if (candidate.job_type && candidate.job_type === query.job_type) {
-    score += 30
-    reasons.push('Same job type')
-  } else if (candidate.job_type && query.job_type) {
-    // Partial credit for related types
-    const related: Record<string, string[]> = {
-      rear_extension: ['side_extension', 'full_renovation'],
-      side_extension: ['rear_extension'],
-      full_renovation: ['rear_extension', 'kitchen_reno', 'bathroom_reno'],
-    }
-    if (related[query.job_type]?.includes(candidate.job_type)) {
-      score += 12
-      reasons.push('Related job type')
-    }
-  }
-
-  // Floor area (20pts)
-  if (candidate.floor_area_m2 && query.floor_area_m2) {
-    const pctDiff = Math.abs(candidate.floor_area_m2 - query.floor_area_m2) / query.floor_area_m2
-    if (pctDiff < 0.1) { score += 20; reasons.push('Very similar floor area') }
-    else if (pctDiff < 0.2) { score += 15; reasons.push(`Similar floor area (${pctDiff > 0 ? '+' : ''}${Math.round(pctDiff * 100)}%)`) }
-    else if (pctDiff < 0.35) { score += 8; reasons.push(`Floor area within 35%`) }
-  }
-
-  // Region (15pts)
-  if (candidate.region && candidate.region === query.region) {
-    score += 15; reasons.push('Same state')
-  } else if (candidate.region && query.region) {
-    score += 4; reasons.push('Different state')
-  }
-
-  // Finish level (15pts)
-  if (candidate.finish_level === query.finish_level) {
-    score += 15; reasons.push('Same finish level')
-  } else if (candidate.finish_level && query.finish_level) {
-    const levels = ['budget', 'standard', 'premium', 'luxury']
-    const diff = Math.abs(levels.indexOf(candidate.finish_level) - levels.indexOf(query.finish_level))
-    if (diff === 1) { score += 8; reasons.push('Adjacent finish level') }
-  }
-
-  // Wet areas (10pts)
-  if (candidate.wet_areas !== null && query.wet_areas !== null) {
-    const diff = Math.abs((candidate.wet_areas ?? 0) - (query.wet_areas ?? 0))
-    if (diff === 0) { score += 10; reasons.push('Same wet area count') }
-    else if (diff === 1) { score += 5; reasons.push('Wet areas within 1') }
-  }
-
-  // Storeys (10pts)
-  if (candidate.storeys !== null && query.storeys !== null) {
-    if (candidate.storeys === query.storeys) { score += 10; reasons.push('Same number of storeys') }
-  }
-
-  return { score: Math.min(score, 100), reasons }
-}
 
 // ─── POST /api/estimation/similar-jobs ────────────────────────────────────────
 
