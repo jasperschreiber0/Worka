@@ -222,4 +222,49 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 }
 
+// ─── PATCH — correct a stored job's floor area (or total) ─────────────────────
+// Floor area is the softest input the estimator relies on — a builder confirming
+// or filling it in immediately sharpens every estimate that draws on this job.
+
+export async function PATCH(request: NextRequest): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  let body: { id?: string; floor_area_m2?: number | null; total_cost?: number | null }
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+  }
+  if (!body.id) return NextResponse.json({ error: 'id required' }, { status: 400 })
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const patch: Record<string, any> = {}
+  if (body.floor_area_m2 !== undefined) {
+    if (body.floor_area_m2 !== null && (!(body.floor_area_m2 > 0))) {
+      return NextResponse.json({ error: 'Floor area must be a positive number.' }, { status: 400 })
+    }
+    patch.floor_area_m2 = body.floor_area_m2
+  }
+  if (typeof body.total_cost === 'number' && body.total_cost > 0) patch.quoted_cost = body.total_cost
+  if (Object.keys(patch).length === 0) return NextResponse.json({ error: 'Nothing to update.' }, { status: 400 })
+
+  // Demo rows aren't persisted — the client keeps the correction for the session.
+  if (isDemo()) return NextResponse.json({ ok: true, demo: true })
+
+  try {
+    const { createClient } = await import('@supabase/supabase-js')
+    const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+    const { error } = await sb.from('project_memory').update(patch).eq('id', body.id).eq('builder_id', builderId)
+    if (error) {
+      console.error('[history:patch]', error.message)
+      return NextResponse.json({ error: 'Could not save the change. Please try again.' }, { status: 500 })
+    }
+    return NextResponse.json({ ok: true })
+  } catch (err) {
+    console.error('[history:patch]', err)
+    return NextResponse.json({ error: 'Could not save the change. Please try again.' }, { status: 500 })
+  }
+}
+
 export const maxDuration = 60

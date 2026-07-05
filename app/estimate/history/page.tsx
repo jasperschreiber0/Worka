@@ -26,7 +26,31 @@ export default function HistoryPage() {
   const [busy, setBusy] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
+  const [editId, setEditId] = useState<string | null>(null)
+  const [editVal, setEditVal] = useState('')
+  const [savingId, setSavingId] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  async function saveArea(id: string) {
+    const area = Number(editVal)
+    if (!area || area <= 0) { setEditId(null); return }
+    setSavingId(id)
+    try {
+      const res = await fetch('/api/estimation/history', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, floor_area_m2: area }),
+      })
+      if (res.ok) {
+        setRecords((prev) => prev.map((r) =>
+          r.id === id
+            ? { ...r, floor_area_m2: area, cost_per_m2: r.total_cost ? Math.round(r.total_cost / area) : null }
+            : r
+        ))
+      }
+    } catch { /* leave the row unchanged */ }
+    finally { setSavingId(null); setEditId(null) }
+  }
 
   useEffect(() => {
     fetch('/api/estimation/history')
@@ -131,7 +155,7 @@ export default function HistoryPage() {
             </div>
             <div className="grid gap-2.5">
               {records.map((r) => (
-                <div key={r.id} className="rounded-xl px-4 py-3" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
+                <div key={r.id} className="rounded-xl px-4 py-3" style={{ background: 'var(--bg-surface)', border: `1px solid ${r.floor_area_m2 == null ? 'rgba(255,152,0,0.35)' : 'var(--bg-border)'}` }}>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
                       {titleize(r.job_type)}{r.region ? ` · ${r.region}` : ''}
@@ -140,11 +164,35 @@ export default function HistoryPage() {
                       {r.total_cost != null ? aud(r.total_cost) : '—'}
                     </span>
                   </div>
-                  <div className="flex items-center gap-3 mt-1 text-xs tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
-                    {r.floor_area_m2 != null && <span>{r.floor_area_m2.toLocaleString()} m²</span>}
+                  <div className="flex items-center gap-3 mt-1.5 text-xs tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
+                    {editId === r.id ? (
+                      <span className="flex items-center gap-1.5">
+                        <input
+                          autoFocus type="number" inputMode="numeric" value={editVal} placeholder="m²"
+                          onChange={(e) => setEditVal(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') saveArea(r.id); if (e.key === 'Escape') setEditId(null) }}
+                          style={{ width: 72, background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)', color: 'var(--text-primary)', borderRadius: 6, padding: '2px 7px', fontSize: 12 }}
+                        />
+                        <button onClick={() => saveArea(r.id)} disabled={savingId === r.id} className="font-medium" style={{ color: 'var(--orange-primary)' }}>
+                          {savingId === r.id ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => setEditId(null)} style={{ color: 'var(--text-tertiary)' }}>Cancel</button>
+                      </span>
+                    ) : r.floor_area_m2 != null ? (
+                      <button onClick={() => { setEditId(r.id); setEditVal(String(r.floor_area_m2)) }} className="hover:underline" style={{ color: 'var(--text-tertiary)' }}>
+                        {r.floor_area_m2.toLocaleString()} m²
+                      </button>
+                    ) : (
+                      <button onClick={() => { setEditId(r.id); setEditVal('') }} className="font-medium hover:underline" style={{ color: 'var(--status-amber)' }}>
+                        + Add floor area
+                      </button>
+                    )}
                     {r.cost_per_m2 != null && <span>{aud(r.cost_per_m2)}/m²</span>}
                     {r.finish_level && <span>{titleize(r.finish_level)}</span>}
                   </div>
+                  {r.floor_area_m2 == null && editId !== r.id && (
+                    <p className="text-xs mt-1" style={{ color: 'var(--status-amber)' }}>Add the floor area to use this job in estimates.</p>
+                  )}
                   {r.project_summary && (
                     <p className="text-xs mt-1.5 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>{r.project_summary}</p>
                   )}
