@@ -65,6 +65,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const fileBuffer = await file.arrayBuffer()
     const base64Data = Buffer.from(fileBuffer).toString('base64')
 
+    // Attach the PDF's text layer as the authoritative source for numbers — the
+    // vision model alone routinely misreads column-aligned rate tables (returns
+    // no rates from a real builder's estimate). Best-effort: '' for image-only
+    // scans, in which case the model reads the rendered document as before.
+    const { extractPdfText, hasUsableText, buildTextLayerBlock } = await import('@/lib/pdf-text')
+    const textLayer = await Promise.race([
+      extractPdfText(base64Data),
+      new Promise<string>((resolve) => setTimeout(() => resolve(''), 15_000)),
+    ])
+
     const { default: Anthropic } = await import('@anthropic-ai/sdk')
     const client = new Anthropic({ apiKey: anthropicKey })
 
@@ -136,6 +146,7 @@ Use the extract_rates tool to return your results.`
           role: 'user',
           content: [
             { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
+            ...(hasUsableText(textLayer) ? [buildTextLayerBlock(textLayer)] : []),
             { type: 'text', text: userPrompt },
           ],
         },

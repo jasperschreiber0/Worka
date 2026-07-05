@@ -267,6 +267,25 @@ export async function POST(
       docBlock = { type: 'image', source: { type: 'base64', media_type: primaryMediaType ?? 'image/jpeg', data: base64Data } }
     }
 
+    // Extract the primary PDF's text layer and attach it as the authoritative
+    // source for numbers — fixes column-aligned price tables the vision model
+    // misreads (the empty / $0 quote on a priced trade breakdown). Best-effort
+    // and time-boxed: image-only PDFs return '' and the pipeline is unaffected.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const primaryBlocks: any[] = [docBlock]
+    if (isPdf) {
+      w('pdf:text-layer')
+      const { extractPdfText, hasUsableText, buildTextLayerBlock } = await import('@/lib/pdf-text')
+      const primaryText: string = await Promise.race([
+        extractPdfText(base64Data),
+        new Promise<string>((resolve) => setTimeout(() => resolve(''), 15_000)),
+      ])
+      if (hasUsableText(primaryText)) {
+        primaryBlocks.push(buildTextLayerBlock(primaryText))
+        console.log('[intake:worker:text-layer]', { file_id: fileId, chars: primaryText.length })
+      }
+    }
+
     // ── Load sibling files ─────────────────────────────────────────────────
     const MAX_TOTAL_BYTES = 20 * 1024 * 1024
     let attachedBytes = rawBytes
@@ -320,7 +339,7 @@ export async function POST(
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const allDocBlocks: any[] = [docBlock, ...siblingBlocks]
+    const allDocBlocks: any[] = [...primaryBlocks, ...siblingBlocks]
 
     // ── Retrieve memory context (non-blocking) ────────────────────────────
     w('updateStage:retrieving_memory'); await updateStage('retrieving_memory')
@@ -450,7 +469,7 @@ Use the extract_estimate tool to return your results.`
         try {
           w('ai:extract:retry')
           const remainingMs = 290_000 - (Date.now() - pipelineStart)
-          extractResult = await runExtraction([docBlock], Math.min(remainingMs, 80_000))
+          extractResult = await runExtraction(primaryBlocks, Math.min(remainingMs, 80_000))
           droppedToPrimaryOnly = true
           w('ai:extract:retry:done')
         } catch (retryErr) {
@@ -495,7 +514,7 @@ Use the extract_estimate tool to return your results.`
       if (retryBudget > 30_000) {
         console.warn('[intake:worker:retry-empty]', { file_id: fileId, doc_type: extractResult.doc_type, budget_ms: retryBudget })
         try {
-          const retryBlocks = droppedToPrimaryOnly ? [docBlock] : allDocBlocks
+          const retryBlocks = droppedToPrimaryOnly ? primaryBlocks : allDocBlocks
           const retryText = userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence to 30–45 for estimated items. The builder needs a starting point, not an empty quote.'
           const retryTimeoutMs = Math.min(retryBudget, 60_000)
           // Reuse runExtraction — it owns the AbortController and clears it correctly.
