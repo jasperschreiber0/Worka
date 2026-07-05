@@ -14,6 +14,38 @@ type FailureStage =
   | 'PASSWORD_PROTECTED_PDF'
   | 'DB_WRITE_FAILED'
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/**
+ * Hybrid pricing — derive a stored rate/total from prices printed in a priced
+ * document (builder's estimate, BOQ, trade breakdown). Only positive printed
+ * values count as document-priced; a blank / $0.00 line stays unpriced so the
+ * 5-tier rate engine can fall back to it (ensureQuotePriced only re-prices rows
+ * whose rate is null). Returns { rate: null, total: null } for drawings and
+ * unpriced lines. Prices are the builder's COST basis — margin is applied on top
+ * downstream, never baked in here.
+ */
+function deriveDocPrice(
+  rate: unknown,
+  lineTotal: unknown,
+  quantity: number | null
+): { rate: number | null; total: number | null } {
+  const r = typeof rate === 'number' && isFinite(rate) && rate > 0 ? rate : null
+  const lt = typeof lineTotal === 'number' && isFinite(lineTotal) && lineTotal > 0 ? lineTotal : null
+  if (r === null && lt === null) return { rate: null, total: null }
+
+  const qty = quantity !== null && quantity > 0 ? quantity : null
+  // Prefer an explicit printed line total; otherwise derive it from rate × qty.
+  let total = lt ?? (r !== null && qty !== null ? round2(r * qty) : r)
+  let unitRate = r ?? (lt !== null && qty !== null ? round2(lt / qty) : lt)
+  // A printed total with no usable quantity is a lump sum — store it as the rate too.
+  if (unitRate === null) unitRate = total
+  if (total === null) total = unitRate
+  return { rate: unitRate, total }
+}
+
 // ─── Tool schema ───────────────────────────────────────────────────────────────
 
 const EXTRACT_TOOL_SCHEMA = {
@@ -57,6 +89,8 @@ const EXTRACT_TOOL_SCHEMA = {
           confidence:         { type: 'integer', minimum: 0, maximum: 100 },
           pricing_type:       { type: 'string', enum: ['measured', 'pc_allowance', 'provisional_sum'] },
           source_ref:         { type: ['string', 'null'] },
+          rate:               { type: ['number', 'null'], description: 'Printed unit COST rate if the document is a priced quote/estimate/BOQ/trade breakdown (exclude margin & GST). null for drawings or unpriced lines.' },
+          line_total:         { type: ['number', 'null'], description: 'Printed line COST total/amount if shown (exclude margin & GST). null for drawings or unpriced lines.' },
           labour_cost:        { type: ['number', 'null'] },
           material_cost:      { type: ['number', 'null'] },
           subcontract_cost:   { type: ['number', 'null'] },
@@ -349,7 +383,8 @@ CRITICAL RULES:
 4. If you cannot read the document clearly, produce conservative professional estimates for a typical residential project of this type. Set confidence to 25–40 for anything estimated without clear data.
 5. Descriptions must be specific: "Concrete slab — 125mm ground floor" not "Concrete".
 6. Use Australian units: m², lm, m, m³, ea, hr, wk. Never sf or LF.
-7. Set pricing_type: measured (extracted from schedule/dimensions), pc_allowance (prime cost), or provisional_sum (TBD by others).${memoryContextBlock}${profileContext}`
+7. Set pricing_type: measured (extracted from schedule/dimensions), pc_allowance (prime cost), or provisional_sum (TBD by others).
+8. PRICED DOCUMENTS: If the document is a builder's estimate, quote, bill of quantities, or trade breakdown that shows prices, extract each line's printed unit rate into "rate" and its printed line total into "line_total". These must be COST figures — exclude any margin/builder's fee and GST (use the pre-margin subtotal amounts, not the marked-up or GST-inclusive totals). For drawings, plans, or lines with no printed price (blank or $0.00), leave rate and line_total null so they can be estimated from rates instead.${memoryContextBlock}${profileContext}`
 
     const userText = `Extract a complete quantity takeoff from the provided construction document${docCount > 1 ? 's' : ''}.
 
@@ -514,15 +549,21 @@ Use the extract_estimate tool to return your results.`
       .filter((item) => item.trade_category_id >= 1 && item.trade_category_id <= 13)
       .map((item) => {
         const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
+        // A printed price means the line is already costed from the document —
+        // no unit or plan measurement is needed, so exempt it from Gates 1 & 2
+        // just like PC/PS allowances.
+        const docPrice = deriveDocPrice(item.rate, item.line_total, item.quantity ?? null)
+        const hasDocPrice = docPrice.total !== null
+        const measureExempt = isAllowance || hasDocPrice
         let isAssumption = false
         let assumptionMessage: string | null = null
         let assumptionStatus: 'unresolved' | 'excluded' = 'unresolved'
 
-        if (!item.unit && !isAllowance) {
+        if (!item.unit && !measureExempt) {
           isAssumption = true
           assumptionMessage = `Quantity unit not specified — confirm unit for ${item.description}`
           assumptions.push({ description: item.description, gate: 1, message: assumptionMessage })
-        } else if (item.quantity != null && !item.dimensions_string && !isAllowance) {
+        } else if (item.quantity != null && !item.dimensions_string && !measureExempt) {
           isAssumption = true
           assumptionMessage = `Quantity unverified from plans — confirm ${item.quantity} ${item.unit} for ${item.description}`
           assumptions.push({ description: item.description, gate: 2, message: assumptionMessage })
@@ -533,7 +574,13 @@ Use the extract_estimate tool to return your results.`
           assumptions.push({ description: item.description, gate: 3, message: assumptionMessage })
         }
 
-        return { ...item, is_assumption: isAssumption, assumption_status: isAssumption ? assumptionStatus : null }
+        return {
+          ...item,
+          is_assumption: isAssumption,
+          assumption_status: isAssumption ? assumptionStatus : null,
+          _docRate: docPrice.rate,
+          _docTotal: docPrice.total,
+        }
       })
 
     // ── DB writes — all guarded with 45s timeout ──────────────────────────
@@ -571,8 +618,10 @@ Use the extract_estimate tool to return your results.`
             description: item.description,
             quantity: item.quantity ?? null,
             unit: item.unit ?? null,
-            rate: null,
-            total: null,
+            // Hybrid pricing: a printed price from the document lands here; a null
+            // rate defers the line to the 5-tier rate engine (ensureQuotePriced).
+            rate: item._docRate ?? null,
+            total: item._docTotal ?? null,
             confidence: item.confidence ?? 50,
             dimensions_string: item.dimensions_string ?? null,
             is_assumption: item.is_assumption,
