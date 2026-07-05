@@ -171,10 +171,33 @@ export async function GET(
       }
     }
 
-    // Fetch line items with trade categories
-    const { data: lineRows, error: lineErr } = await supabase
-      .from('quote_line_items')
-      .select(`
+    // Fetch line items with trade categories.
+    //
+    // The migration-012 columns (pricing_type, source_ref, margin_pct, and the
+    // cost splits) may not exist yet on databases where that migration hasn't
+    // been applied. Try the enriched select first, and if Postgres reports a
+    // missing column, fall back to the base columns that predate migration 012.
+    // The mapping below reads every migration-012 field defensively (`?? default`),
+    // so a base-only row degrades cleanly.
+    const BASE_LINE_COLUMNS = `
+        id,
+        quote_id,
+        trade_category_id,
+        description,
+        quantity,
+        unit,
+        rate,
+        total,
+        confidence,
+        dimensions_string,
+        is_assumption,
+        assumption_status,
+        trade_categories (
+          id,
+          name
+        )
+      `
+    const ENRICHED_LINE_COLUMNS = `
         id,
         quote_id,
         trade_category_id,
@@ -198,9 +221,30 @@ export async function GET(
           id,
           name
         )
-      `)
+      `
+
+    let { data: lineRows, error: lineErr } = await supabase
+      .from('quote_line_items')
+      .select(ENRICHED_LINE_COLUMNS)
       .eq('quote_id', quoteId)
       .order('trade_category_id', { ascending: true })
+
+    // Postgres error 42703 = undefined_column. Some client versions only surface
+    // it in the message, so match on either signal before retrying.
+    const isMissingColumn =
+      lineErr != null &&
+      ((lineErr as { code?: string }).code === '42703' ||
+        /does not exist/i.test(lineErr.message))
+
+    if (isMissingColumn) {
+      const fallback = await supabase
+        .from('quote_line_items')
+        .select(BASE_LINE_COLUMNS)
+        .eq('quote_id', quoteId)
+        .order('trade_category_id', { ascending: true })
+      lineRows = fallback.data as typeof lineRows
+      lineErr = fallback.error
+    }
 
     if (lineErr) {
       console.error('[quotes:get] line items fetch error:', lineErr.message, { quoteId })
