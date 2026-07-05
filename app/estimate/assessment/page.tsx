@@ -3,17 +3,27 @@ import React, { useEffect, useState, Suspense } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import ProjectAssessmentCard from '@/components/estimation/ProjectAssessmentCard'
-import type { ProjectAssessment } from '@/lib/estimation-reasoning'
+import ClarifyingQuestions, { type QuestionItem } from '@/components/estimation/ClarifyingQuestions'
+import IndicativeBanner from '@/components/estimation/IndicativeBanner'
+import type { ProjectAssessment, ClarificationStatus } from '@/lib/estimation-reasoning'
 
 // ─── Project assessment page ──────────────────────────────────────────────────
-// The reason-first stage surfaced. In demo mode this shows the 16 Alfred St
-// worked example; with ?job_id= it loads a stored assessment for that job.
+// The reason-first stage (Stage 1) + the clarifying-questions step (Stage 2).
+// In demo mode this shows the 16 Alfred St worked example; with ?job_id= it loads
+// a stored assessment. When indicative, a visible budget-range banner sits on top.
+
+interface QuestionState {
+  questions: QuestionItem[]
+  clarification_status: ClarificationStatus
+  is_indicative: boolean
+}
 
 function AssessmentView() {
   const searchParams = useSearchParams()
   const jobId = searchParams.get('job_id')
 
   const [assessment, setAssessment] = useState<ProjectAssessment | null>(null)
+  const [questionState, setQuestionState] = useState<QuestionState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -24,14 +34,22 @@ function AssessmentView() {
       setError(null)
       try {
         const qs = jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''
-        const res = await fetch(`/api/estimation/assess${qs}`)
-        const data = (await res.json()) as { assessment?: ProjectAssessment | null; error?: string }
+        const [assessRes, questionsRes] = await Promise.all([
+          fetch(`/api/estimation/assess${qs}`),
+          fetch(`/api/estimation/questions${qs}`),
+        ])
+        const assessData = (await assessRes.json()) as { assessment?: ProjectAssessment | null; error?: string }
         if (cancelled) return
-        if (!res.ok) {
-          setError(data.error ?? 'Could not load the assessment.')
+        if (!assessRes.ok) {
+          setError(assessData.error ?? 'Could not load the assessment.')
           return
         }
-        setAssessment(data.assessment ?? null)
+        setAssessment(assessData.assessment ?? null)
+
+        if (questionsRes.ok) {
+          const qData = (await questionsRes.json()) as QuestionState
+          if (!cancelled) setQuestionState(qData)
+        }
       } catch {
         if (!cancelled) setError('Could not load the assessment.')
       } finally {
@@ -43,6 +61,8 @@ function AssessmentView() {
       cancelled = true
     }
   }, [jobId])
+
+  const isIndicative = questionState?.is_indicative ?? true
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-shell)' }}>
@@ -86,7 +106,26 @@ function AssessmentView() {
           </div>
         )}
 
-        {!loading && !error && assessment && <ProjectAssessmentCard assessment={assessment} />}
+        {!loading && !error && assessment && (
+          <div className="grid gap-4">
+            {isIndicative && (
+              <IndicativeBanner reason={assessment.scope.estimate_type_justification} />
+            )}
+
+            <ProjectAssessmentCard assessment={assessment} showOpenQuestions={!questionState} />
+
+            {questionState && questionState.questions.length > 0 && (
+              <ClarifyingQuestions
+                jobId={jobId}
+                questions={questionState.questions}
+                status={questionState.clarification_status}
+                onDecision={({ is_indicative, clarification_status }) =>
+                  setQuestionState((s: QuestionState | null) => (s ? { ...s, is_indicative, clarification_status } : s))
+                }
+              />
+            )}
+          </div>
+        )}
       </main>
     </div>
   )

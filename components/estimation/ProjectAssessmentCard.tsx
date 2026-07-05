@@ -19,6 +19,9 @@ import {
 
 interface Props {
   assessment: ProjectAssessment
+  /** when false, the read-only open-questions section is omitted — the page
+   *  renders the interactive ClarifyingQuestions panel instead (Stage 2) */
+  showOpenQuestions?: boolean
 }
 
 // ── shared styles ────────────────────────────────────────────────────────────
@@ -79,7 +82,7 @@ function Bullets({ items, accent = 'var(--orange-primary)' }: { items: string[];
 
 // ── component ────────────────────────────────────────────────────────────────
 
-export default function ProjectAssessmentCard({ assessment }: Props) {
+export default function ProjectAssessmentCard({ assessment, showOpenQuestions = true }: Props) {
   const { scope, documents, open_questions } = assessment
   const failedDocs = documents.filter((d) => d.extraction_status === 'failed')
 
@@ -285,7 +288,7 @@ export default function ProjectAssessmentCard({ assessment }: Props) {
       )}
 
       {/* ── Open questions ───────────────────────────────────────────────── */}
-      {open_questions.length > 0 && <OpenQuestions questions={open_questions} />}
+      {showOpenQuestions && open_questions.length > 0 && <OpenQuestions questions={open_questions} />}
     </div>
   )
 }

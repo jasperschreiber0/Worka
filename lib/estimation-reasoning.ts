@@ -159,6 +159,33 @@ export interface OpenQuestion {
   question: string
   /** drawing/schedule reference the question comes from — quote it, don't paraphrase */
   source_reference: string | null
+  /** present once persisted (Stage 2) — the row id, resolved flag and answer */
+  id?: string
+  resolved?: boolean
+  answer?: string | null
+}
+
+// ─── Clarifying-questions step (Stage 2) ──────────────────────────────────────
+
+export type ClarificationStatus = 'pending' | 'skipped' | 'answered'
+
+/** The question groups whose gaps materially move cost — used to decide whether
+ *  an estimate can leave budget-range. */
+export const ESSENTIAL_QUESTION_GROUPS: OpenQuestionGroup[] = ['missing_documents', 'unselected_finishes']
+
+/** An estimate stays "Indicative / Budget-Range Only" (a visible watermark on
+ *  every output) when the builder skipped the questions, when structural/spec/
+ *  selection gaps keep the recommendation at Budget/Preliminary, or when
+ *  essential questions remain unresolved. */
+export function computeIsIndicative(input: {
+  clarificationStatus: ClarificationStatus
+  recommendedEstimateType: EstimateType
+  essentialUnresolved: number
+}): boolean {
+  if (input.clarificationStatus === 'skipped') return true
+  if (input.recommendedEstimateType === 'Budget/Preliminary') return true
+  if (input.essentialUnresolved > 0) return true
+  return false
 }
 
 export interface ScopeReasoning {
