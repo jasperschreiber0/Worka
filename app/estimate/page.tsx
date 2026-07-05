@@ -116,6 +116,10 @@ export default function EstimatePage() {
           <p className="mt-1.5" style={{ color: 'var(--text-secondary)' }}>
             A ballpark from your own history — grounded in the jobs you&rsquo;ve actually delivered, with the working shown.
           </p>
+          <Link href="/estimate/history" className="inline-flex items-center gap-1 text-sm font-medium mt-2" style={{ color: 'var(--orange-primary)' }}>
+            Add past jobs to sharpen this
+            <span aria-hidden="true">→</span>
+          </Link>
         </div>
 
         {/* ── Input form ─────────────────────────────────────────────── */}
