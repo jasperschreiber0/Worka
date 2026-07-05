@@ -5,7 +5,9 @@ import { useSearchParams } from 'next/navigation'
 import ProjectAssessmentCard from '@/components/estimation/ProjectAssessmentCard'
 import ClarifyingQuestions, { type QuestionItem } from '@/components/estimation/ClarifyingQuestions'
 import IndicativeBanner from '@/components/estimation/IndicativeBanner'
+import EstimateView from '@/components/estimation/EstimateView'
 import type { ProjectAssessment, ClarificationStatus } from '@/lib/estimation-reasoning'
+import type { GeneratedEstimate } from '@/lib/estimate-generation'
 
 // ─── Project assessment page ──────────────────────────────────────────────────
 // The reason-first stage (Stage 1) + the clarifying-questions step (Stage 2).
@@ -26,6 +28,32 @@ function AssessmentView() {
   const [questionState, setQuestionState] = useState<QuestionState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const [estimate, setEstimate] = useState<GeneratedEstimate | null>(null)
+  const [generating, setGenerating] = useState(false)
+  const [genError, setGenError] = useState<string | null>(null)
+
+  async function generateEstimate() {
+    setGenerating(true)
+    setGenError(null)
+    try {
+      const res = await fetch('/api/estimation/estimate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId, pricing_mode: 'market' }),
+      })
+      const data = (await res.json()) as { estimate?: GeneratedEstimate; error?: string }
+      if (!res.ok || !data.estimate) {
+        setGenError(data.error ?? 'Could not generate the estimate.')
+        return
+      }
+      setEstimate(data.estimate)
+    } catch {
+      setGenError('Could not generate the estimate.')
+    } finally {
+      setGenerating(false)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -124,6 +152,35 @@ function AssessmentView() {
                 }
               />
             )}
+
+            {/* Generate estimate */}
+            {!estimate && (
+              <div className="rounded-2xl p-5 flex items-center justify-between gap-4 flex-wrap" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Ready to price</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                    Generate the line-item estimate — provisional sums for unreadable scope, PC allowances for open
+                    selections, {isIndicative ? 'labelled indicative.' : 'firm where the docs support it.'}
+                  </p>
+                </div>
+                <button
+                  onClick={generateEstimate}
+                  disabled={generating}
+                  className="text-sm font-semibold rounded-xl px-5 py-2.5 transition-opacity disabled:opacity-50 flex-shrink-0"
+                  style={{ color: '#fff', background: 'var(--orange-primary)' }}
+                >
+                  {generating ? 'Generating…' : 'Generate estimate'}
+                </button>
+              </div>
+            )}
+
+            {genError && (
+              <div className="rounded-xl px-4 py-3" style={{ background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(255,152,0,0.2)' }}>
+                <p className="text-sm" style={{ color: 'var(--status-amber)' }}>{genError}</p>
+              </div>
+            )}
+
+            {estimate && <EstimateView estimate={estimate} />}
           </div>
         )}
       </main>
