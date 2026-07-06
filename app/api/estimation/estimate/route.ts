@@ -34,8 +34,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const builderId = await getAuthenticatedBuilderId()
   if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const requestedMode: PricingMode = body.pricing_mode === 'user_supplied' ? 'user_supplied' : 'market'
+
   if (isDemoMode()) {
-    return NextResponse.json({ estimate: buildDemoEstimate(), demo: true })
+    return NextResponse.json({ estimate: buildDemoEstimate(requestedMode), demo: true })
   }
 
   const jobId = body.job_id
@@ -47,7 +49,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!supabaseUrl || !supabaseKey) return NextResponse.json({ error: 'Supabase not configured' }, { status: 500 })
   if (!anthropicKey) return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 })
 
-  const pricingMode: PricingMode = body.pricing_mode === 'user_supplied' ? 'user_supplied' : 'market'
+  const pricingMode: PricingMode = requestedMode
 
   try {
     const { createClient } = await import('@supabase/supabase-js')
@@ -66,8 +68,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const documentAuthors: string[] = (docRows ?? []).map((d: any) => d.author).filter((a: unknown): a is string => Boolean(a))
 
     // ── Generate line items ──────────────────────────────────────────────────
-    const { items, confidenceSummary } = await generateEstimateItems(anthropicKey, [], scopeSummary, pricingMode)
+    const gen = await generateEstimateItems(anthropicKey, [], scopeSummary, pricingMode)
+    let items = gen.items
+    const confidenceSummary = gen.confidenceSummary
     if (items.length === 0) return NextResponse.json({ error: 'Estimate generation produced no line items.' }, { status: 502 })
+
+    // ── User-supplied rate library — match line-by-line, flag unmatched ──────
+    let rateMatch
+    if (pricingMode === 'user_supplied') {
+      const { applyRateLibrary } = await import('@/lib/rate-library')
+      const library = await loadRateLibrary(supabase, builderId)
+      const res = applyRateLibrary(items, library)
+      items = res.items
+      rateMatch = { matched: res.matched, unmatched: res.unmatched, unmatched_items: res.unmatched_items }
+    }
 
     // ── Guards ───────────────────────────────────────────────────────────────
     const guardWarnings = runGuards({
@@ -85,6 +99,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       guardWarnings,
       branding: { company_name: null, contact: null },
       confidenceSummary,
+      rateMatch,
       demo: false,
     })
 
@@ -200,6 +215,31 @@ function buildScopeSummary(scope: any): string {
     parts.push('Risks/gaps (price affected scope as provisional):\n' + scope.risks.map((r: string) => `- ${r}`).join('\n'))
   }
   return parts.join('\n\n')
+}
+
+// Load the builder's rate library from their stored supplier rates + manual
+// preferences (the same rows the 5-tier engine reads). Description/unit/trade
+// columns are best-effort — the matcher tolerates nulls.
+async function loadRateLibrary(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  builderId: string
+): Promise<import('@/lib/rate-library').RateLibraryEntry[]> {
+  const [{ data: supplier }, { data: prefs }] = await Promise.all([
+    supabase.from('builder_supplier_rates').select('*').eq('builder_id', builderId),
+    supabase.from('builder_rate_preferences').select('*').eq('builder_id', builderId),
+  ])
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const toEntry = (r: any) => ({
+    key: r.line_item_key ?? null,
+    description: r.description ?? null,
+    unit: r.unit ?? null,
+    rate: typeof r.rate === 'number' ? r.rate : parseFloat(r.rate),
+    trade_category_id: r.trade_category_id ?? null,
+  })
+  return [...(supplier ?? []), ...(prefs ?? [])]
+    .map(toEntry)
+    .filter((e) => Number.isFinite(e.rate) && e.rate > 0)
 }
 
 function leastMatureStatus(statuses: Array<string | undefined>): string {

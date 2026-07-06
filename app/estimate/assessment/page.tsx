@@ -32,6 +32,7 @@ function AssessmentView() {
   const [estimate, setEstimate] = useState<GeneratedEstimate | null>(null)
   const [generating, setGenerating] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
+  const [pricingMode, setPricingMode] = useState<'market' | 'user_supplied'>('market')
 
   async function generateEstimate() {
     setGenerating(true)
@@ -40,7 +41,7 @@ function AssessmentView() {
       const res = await fetch('/api/estimation/estimate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId, pricing_mode: 'market' }),
+        body: JSON.stringify({ job_id: jobId, pricing_mode: pricingMode }),
       })
       const data = (await res.json()) as { estimate?: GeneratedEstimate; error?: string }
       if (!res.ok || !data.estimate) {
@@ -155,18 +156,46 @@ function AssessmentView() {
 
             {/* Generate estimate */}
             {!estimate && (
-              <div className="rounded-2xl p-5 flex items-center justify-between gap-4 flex-wrap" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Ready to price</p>
-                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                    Generate the line-item estimate — provisional sums for unreadable scope, PC allowances for open
-                    selections, {isIndicative ? 'labelled indicative.' : 'firm where the docs support it.'}
+              <div className="rounded-2xl p-5" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Ready to price</p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  Generate the line-item estimate — provisional sums for unreadable scope, PC allowances for open
+                  selections, {isIndicative ? 'labelled indicative.' : 'firm where the docs support it.'}
+                </p>
+
+                {/* Pricing mode */}
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--text-tertiary)' }}>Pricing basis</p>
+                  <div className="inline-flex rounded-xl p-1" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}>
+                    {([
+                      { v: 'market', l: 'Market rates', h: 'Regional benchmark — indicative' },
+                      { v: 'user_supplied', l: 'My rate library', h: 'Your uploaded rates; unmatched scope flagged' },
+                    ] as const).map((opt) => (
+                      <button
+                        key={opt.v}
+                        onClick={() => setPricingMode(opt.v)}
+                        title={opt.h}
+                        className="text-sm font-medium rounded-lg px-3.5 py-1.5 transition-colors"
+                        style={{
+                          color: pricingMode === opt.v ? '#fff' : 'var(--text-secondary)',
+                          background: pricingMode === opt.v ? 'var(--orange-primary)' : 'transparent',
+                        }}
+                      >
+                        {opt.l}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>
+                    {pricingMode === 'market'
+                      ? 'Current regional benchmark rates — indicative, verify against live quotes before tender.'
+                      : 'Your rate library is applied line-by-line; any scope with no matching rate is flagged, never silently priced at market.'}
                   </p>
                 </div>
+
                 <button
                   onClick={generateEstimate}
                   disabled={generating}
-                  className="text-sm font-semibold rounded-xl px-5 py-2.5 transition-opacity disabled:opacity-50 flex-shrink-0"
+                  className="mt-4 text-sm font-semibold rounded-xl px-5 py-2.5 transition-opacity disabled:opacity-50"
                   style={{ color: '#fff', background: 'var(--orange-primary)' }}
                 >
                   {generating ? 'Generating…' : 'Generate estimate'}

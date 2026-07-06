@@ -7,6 +7,7 @@ import type {
   EstimateLineItem,
   EstimateBasis,
   GuardWarning,
+  RateMatchSummary,
 } from '@/lib/estimate-generation'
 
 // ─── EstimateView ─────────────────────────────────────────────────────────────
@@ -76,6 +77,11 @@ export default function EstimateView({ estimate }: Props) {
             <GuardRow key={i} warning={w} />
           ))}
         </div>
+      )}
+
+      {/* Rate-library coverage (user-supplied mode) */}
+      {estimate.pricing_mode === 'user_supplied' && estimate.rate_match && (
+        <RateMatchSummaryRow match={estimate.rate_match} />
       )}
 
       {/* Headline totals */}
@@ -174,6 +180,11 @@ function LineItemRow({ item }: { item: EstimateLineItem; key?: React.Key }) {
                 {LOCATION_LABEL[item.location_scope]}
               </span>
             )}
+            {item.rate_unmatched && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase" style={{ background: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)', border: '0.5px solid var(--status-amber)' }}>
+                Not in your library
+              </span>
+            )}
           </div>
           <p className="text-sm mt-1" style={{ color: 'var(--text-primary)', lineHeight: 1.4 }}>{item.description}</p>
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 mt-1">
@@ -213,6 +224,46 @@ function TotalRow({ label, value, sub, strong }: { label: string; value: number;
         {aud(value)}
       </span>
     </div>
+  )
+}
+
+function RateMatchSummaryRow({ match }: { match: RateMatchSummary }) {
+  const total = match.matched + match.unmatched
+  const pct = total > 0 ? Math.round((match.matched / total) * 100) : 0
+  const hasUnmatched = match.unmatched > 0
+  return (
+    <section style={{ ...card }}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p style={sectionLabel}>Your rate library</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--text-primary)' }}>
+            {match.matched} of {total} priceable lines matched ({pct}%)
+          </p>
+        </div>
+        {hasUnmatched && (
+          <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)', border: '1px solid var(--status-amber)' }}>
+            {match.unmatched} unmatched — priced at market, flagged
+          </span>
+        )}
+      </div>
+      {hasUnmatched && (
+        <div className="mt-3 grid gap-1">
+          <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+            These weren&rsquo;t in your library — they fall back to market rates and are flagged, never silently substituted:
+          </p>
+          {match.unmatched_items.slice(0, 12).map((u, i) => (
+            <p key={i} className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+              • {u.description}{u.source_ref ? ` (${u.source_ref})` : ''}
+            </p>
+          ))}
+          {match.unmatched_items.length > 12 && (
+            <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+              …and {match.unmatched_items.length - 12} more.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
 

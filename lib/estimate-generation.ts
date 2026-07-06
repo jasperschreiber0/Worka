@@ -118,6 +118,12 @@ export interface EstimateTotals {
   total_inc_gst: number
 }
 
+export interface RateMatchSummary {
+  matched: number
+  unmatched: number
+  unmatched_items: Array<{ section: string; description: string; source_ref: string | null }>
+}
+
 export interface GeneratedEstimate {
   sections: EstimateSectionGroup[]
   line_count: number
@@ -128,6 +134,8 @@ export interface GeneratedEstimate {
   /** builder/company branding — sourced ONLY from settings, never documents */
   branding: { company_name: string | null; contact: string | null }
   confidence_summary: string
+  /** present in user_supplied mode — how much of the scope the library covered */
+  rate_match?: RateMatchSummary
   generated_at: string
   demo: boolean
 }
@@ -512,6 +520,7 @@ export function assembleEstimate(input: {
   guardWarnings: GuardWarning[]
   branding: { company_name: string | null; contact: string | null }
   confidenceSummary: string
+  rateMatch?: RateMatchSummary
   demo: boolean
 }): GeneratedEstimate {
   const sections = groupIntoSections(input.items)
@@ -526,6 +535,7 @@ export function assembleEstimate(input: {
     guard_warnings: input.guardWarnings,
     branding: input.branding,
     confidence_summary: input.confidenceSummary,
+    rate_match: input.rateMatch,
     generated_at: new Date().toISOString(),
     demo: input.demo,
   }

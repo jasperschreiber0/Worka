@@ -13,11 +13,14 @@ import {
   assembleEstimate,
   runGuards,
   contingencyForMaturity,
+  tradeForSection,
   type EstimateLineItem,
   type EstimateBasis,
   type LocationScope,
   type GeneratedEstimate,
+  type PricingMode,
 } from './estimate-generation'
+import { applyRateLibrary, type RateLibraryEntry } from './rate-library'
 
 function li(
   section: string,
@@ -34,7 +37,7 @@ function li(
   const total = quantity !== null && rate !== null ? Math.round(quantity * rate * 100) / 100 : null
   return {
     section,
-    trade_category_id: 0, // set by assemble via section; not read from the fixture
+    trade_category_id: tradeForSection(section),
     description,
     location_scope: location,
     source_ref,
@@ -189,24 +192,51 @@ const DEMO_SCHEDULES = [
   },
 ]
 
-export function buildDemoEstimate(): GeneratedEstimate {
+// A small demo rate library — covers common structural/framing/roofing scope so
+// user-supplied mode shows a mix of matched (library rate) and unmatched
+// (flagged) lines. Deliberately partial: luxury fit-out, pool and specialist
+// scope is NOT in the library, so those lines flag as unmatched.
+export const DEMO_RATE_LIBRARY: RateLibraryEntry[] = [
+  { key: 'demolish_garage', description: 'Demolish garage', unit: 'm2', rate: 88, trade_category_id: 1 },
+  { key: 'wall_framing', description: 'Timber wall framing', unit: 'm2', rate: 155, trade_category_id: 3 },
+  { key: 'colorbond_roof', description: 'Colorbond metal roof', unit: 'm2', rate: 128, trade_category_id: 4 },
+  { key: 'gutters_downpipes', description: 'Gutters downpipes fascia', unit: 'lm', rate: 78, trade_category_id: 4 },
+  { key: 'wall_batts', description: 'Wall batts insulation', unit: 'm2', rate: 12.5, trade_category_id: 7 },
+  { key: 'ceiling_batts', description: 'Ceiling batts insulation', unit: 'm2', rate: 16, trade_category_id: 7 },
+  { key: 'plasterboard', description: 'Plasterboard walls ceilings', unit: 'm2', rate: 58, trade_category_id: 8 },
+  { key: 'internal_painting', description: 'Internal painting walls ceilings trim', unit: 'm2', rate: 34, trade_category_id: 10 },
+  { key: 'external_cladding', description: 'External cladding', unit: 'm2', rate: 178, trade_category_id: 6 },
+  { key: 'pool_glass_fence', description: 'Child safety glass fencing pool', unit: 'lm', rate: 445, trade_category_id: 2 },
+]
+
+export function buildDemoEstimate(pricingMode: PricingMode = 'market'): GeneratedEstimate {
+  let items = DEMO_ESTIMATE_ITEMS
+  let rateMatch
+
+  if (pricingMode === 'user_supplied') {
+    const res = applyRateLibrary(DEMO_ESTIMATE_ITEMS, DEMO_RATE_LIBRARY)
+    items = res.items
+    rateMatch = { matched: res.matched, unmatched: res.unmatched, unmatched_items: res.unmatched_items }
+  }
+
   const guardWarnings = runGuards({
-    items: DEMO_ESTIMATE_ITEMS,
+    items,
     schedules: DEMO_SCHEDULES,
     // No branding candidate is passed — nothing tries to brand from documents,
     // so the branding guard correctly stays silent here.
   })
   return assembleEstimate({
-    items: DEMO_ESTIMATE_ITEMS,
+    items,
     contingencyPct: contingencyForMaturity('da_modification'), // 12.5% — DA stage
     marginPct: 18,
     gstPct: 10,
     isIndicative: true, // structural/spec/selection gaps keep it budget-range
-    pricingMode: 'market',
+    pricingMode,
     guardWarnings,
     branding: { company_name: null, contact: null },
     confidenceSummary:
       'Budget/preliminary estimate at DA maturity. Structural, pool and specialist items carried as provisional sums; finishes and fittings as PC allowances pending selections. Not tender-ready.',
+    rateMatch,
     demo: true,
   })
 }
