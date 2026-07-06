@@ -209,7 +209,7 @@ function AssessmentView() {
               </div>
             )}
 
-            {estimate && <EstimateView estimate={estimate} />}
+            {estimate && <EstimateView estimate={estimate} jobId={jobId} />}
           </div>
         )}
       </main>

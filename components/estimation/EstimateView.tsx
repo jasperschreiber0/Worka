@@ -17,6 +17,7 @@ import type {
 
 interface Props {
   estimate: GeneratedEstimate
+  jobId?: string | null
 }
 
 const aud = (n: number) =>
@@ -57,12 +58,18 @@ const sectionLabel: React.CSSProperties = {
   color: 'var(--text-tertiary)',
 }
 
-export default function EstimateView({ estimate }: Props) {
+export default function EstimateView({ estimate, jobId }: Props) {
   const { totals } = estimate
   const provisionalCount = useMemo(
     () => estimate.sections.flatMap((s) => s.items).filter((i) => i.basis === 'provisional').length,
     [estimate]
   )
+
+  const exportHref = (format: string) => {
+    const params = new URLSearchParams({ format, pricing_mode: estimate.pricing_mode })
+    if (jobId) params.set('job_id', jobId)
+    return `/api/estimation/estimate/export?${params.toString()}`
+  }
 
   return (
     <div className="grid gap-4">
@@ -120,6 +127,42 @@ export default function EstimateView({ estimate }: Props) {
             {estimate.confidence_summary}
           </p>
         )}
+      </section>
+
+      {/* Exports */}
+      <section style={{ ...card }}>
+        <p style={sectionLabel}>Export</p>
+        <div className="flex flex-wrap gap-2.5 mt-3">
+          <a
+            href={exportHref('xlsx')}
+            className="text-sm font-semibold rounded-xl px-4 py-2"
+            style={{ color: '#fff', background: 'var(--status-green)' }}
+          >
+            Excel workbook
+          </a>
+          <a
+            href={exportHref('pdf')}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm font-medium rounded-xl px-4 py-2"
+            style={{ color: 'var(--text-primary)', background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+          >
+            Builder PDF
+          </a>
+          <a
+            href={exportHref('client')}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm font-medium rounded-xl px-4 py-2"
+            style={{ color: 'var(--text-primary)', background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+          >
+            Client quotation
+          </a>
+        </div>
+        <p className="text-xs mt-2.5" style={{ color: 'var(--text-tertiary)' }}>
+          Excel has live formulas (blue = editable inputs). Client quotation is grouped by area with margin built in.
+          {estimate.is_indicative ? ' All exports are labelled indicative.' : ''}
+        </p>
       </section>
 
       {/* Sections */}
