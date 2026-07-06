@@ -13,7 +13,10 @@ import type {
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { buildAssessmentRunner } from '@/lib/assessment/runner'
+import { matchAssessmentIntent } from '@/lib/assessment/chat-intent'
+import type { AssessmentResult, UiHint } from '@/lib/assessment/contract'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +24,10 @@ interface ChatRequestBody {
   message: string
   builder_id?: string
   force_create?: boolean
+  /** Active job context — set when the builder is inside a job's assessment
+   *  flow. Lets chat advance that assessment (Stage 1-5) via the same runner
+   *  the upload flow uses, instead of duplicating any of its logic here. */
+  job_id?: string
 }
 
 interface Alert {
@@ -104,6 +111,27 @@ interface SuggestJobActivationEvent {
   quote_id: string
 }
 
+// ─── Assessment events (Stages 1-5) — mirror lib/assessment/contract.ts's
+// UiHint union so the AssessmentRunner's output slots into the same
+// ChatInterface event dispatcher as every other chat side-effect. ──────────────
+interface OpenProjectAssessmentEvent {
+  type: 'open_project_assessment'
+  job_id: string
+}
+interface OpenClarifyingQuestionsEvent {
+  type: 'open_clarifying_questions'
+  job_id: string
+}
+interface OpenEstimateEvent {
+  type: 'open_estimate'
+  job_id: string
+}
+interface DownloadEvent {
+  type: 'download'
+  url: string
+  filename: string
+}
+
 type ChatEvent =
   | WorkerModalEvent
   | UploadPanelEvent
@@ -115,6 +143,10 @@ type ChatEvent =
   | InboundEmailAlertEvent
   | SuggestJobActivationEvent
   | PickJobForTaskEvent
+  | OpenProjectAssessmentEvent
+  | OpenClarifyingQuestionsEvent
+  | OpenEstimateEvent
+  | DownloadEvent
 
 export interface MarginJob {
   id: string
@@ -2903,6 +2935,34 @@ async function routeDemoMessage(
   return orchestrateActions(actions, ctx, null as unknown as Anthropic)
 }
 
+// ─── AssessmentResult → ChatResponse ──────────────────────────────────────────
+// The only translation chat does for the assessment flow: map the runner's
+// stage-discriminated result onto the plain-English ChatResponse shape, and its
+// uiHints onto the existing ChatEvent dispatcher (Layer 3 — events are data,
+// never code).
+
+function assessmentResultToChatResponse(result: AssessmentResult): ChatResponse {
+  const events: ChatEvent[] = result.uiHints.map((hint: UiHint): ChatEvent => {
+    switch (hint.type) {
+      case 'open_project_assessment':
+        return { type: 'open_project_assessment', job_id: hint.jobId }
+      case 'open_clarifying_questions':
+        return { type: 'open_clarifying_questions', job_id: hint.jobId }
+      case 'open_estimate':
+        return { type: 'open_estimate', job_id: hint.jobId }
+      case 'download':
+        return { type: 'download', url: hint.url, filename: hint.filename }
+    }
+  })
+
+  const prefix = result.isIndicative ? 'Indicative / budget-range only. ' : ''
+  return {
+    intent: `assessment_${result.stage}`,
+    message: `${prefix}${result.summary}`,
+    events,
+  }
+}
+
 // ─── POST Handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest): Promise<NextResponse<ChatResponse>> {
@@ -2923,6 +2983,42 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         { intent: 'unknown', message: 'Please type a message.' },
         { status: 400 }
       )
+    }
+
+    // ── Assessment flow (Stages 1-5) — additive, only when a job is in play ──
+    // Chat never touches DB/LLM/extraction itself: it recognises "advance the
+    // assessment" phrasing and delegates to the SAME AssessmentRunner the
+    // upload flow uses, then maps the result onto ChatResponse. Anything that
+    // doesn't match falls straight through to the existing dispatch below.
+    if (body.job_id) {
+      const assessmentInput = matchAssessmentIntent(message, body.job_id)
+      if (assessmentInput) {
+        const mode: 'demo' | 'real' = isDemoMode() ? 'demo' : 'real'
+        try {
+          const runner = buildAssessmentRunner(mode)
+          if (assessmentInput.kind === 'export') {
+            const rendered = await runner.render(assessmentInput, { builderId, mode })
+            const kindLabel =
+              assessmentInput.format === 'xlsx' ? 'Excel workbook' : assessmentInput.format === 'client' ? 'client quotation' : 'builder estimate'
+            return NextResponse.json({
+              intent: 'assessment_export',
+              message: `Here's your ${kindLabel}.`,
+              events: [
+                {
+                  type: 'download',
+                  url: `/api/estimation/estimate/export?job_id=${encodeURIComponent(assessmentInput.jobId)}&format=${assessmentInput.format}`,
+                  filename: rendered.filename ?? 'estimate',
+                },
+              ],
+            })
+          }
+          const result: AssessmentResult = await runner.run(assessmentInput, { builderId, mode })
+          return NextResponse.json(assessmentResultToChatResponse(result))
+        } catch (err) {
+          console.error('[chat:assessment]', err instanceof Error ? err.message : String(err))
+          return NextResponse.json({ intent: 'assessment_error', message: 'Could not update the assessment. Please try again.' })
+        }
+      }
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY

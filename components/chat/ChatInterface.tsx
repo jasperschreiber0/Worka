@@ -178,6 +178,10 @@ interface ChatInterfaceProps {
   pendingFillInput?: string | null
   onFillInputConsumed?: () => void
   activeJobAddress?: string | null
+  /** Job the chat is currently scoped to — lets assessment-flow messages
+   *  ("generate the estimate", "skip questions") route through the same
+   *  AssessmentRunner the upload flow uses. Omitted outside a job context. */
+  activeJobId?: string | null
   pendingFiles?: File[] | null
   onPendingFilesConsumed?: () => void
   droppedFiles?: Array<{ file: File; type: string; label: string }>
@@ -303,6 +307,7 @@ export default function ChatInterface({
   pendingFillInput,
   onFillInputConsumed,
   activeJobAddress,
+  activeJobId,
   pendingFiles,
   onPendingFilesConsumed,
   droppedFiles,
@@ -810,6 +815,7 @@ export default function ChatInterface({
           message: apiPayload,
           builder_id: builderId,
           ...(forceCreate ? { force_create: true } : {}),
+          ...(activeJobId ? { job_id: activeJobId } : {}),
         }),
       })
 
@@ -1004,6 +1010,19 @@ export default function ChatInterface({
             intent: e.intent,
             suggested_action: e.suggested_action,
           })
+        }
+
+        // Assessment flow (Stages 1-5) — the AssessmentRunner's uiHints land
+        // here as ordinary chat events, same as every other Layer 3 side-effect.
+        // Navigation only: the assessment page itself owns rendering.
+        if (evt.type === 'open_project_assessment' || evt.type === 'open_clarifying_questions' || evt.type === 'open_estimate') {
+          const jobId = (evt as { job_id?: string }).job_id
+          if (jobId) router.push(`/estimate/assessment?job_id=${encodeURIComponent(jobId)}`)
+        }
+
+        if (evt.type === 'download') {
+          const e = evt as { url: string }
+          window.open(e.url, '_blank')
         }
       }
 

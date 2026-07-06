@@ -363,6 +363,8 @@ export function runGuards(input: {
 // GENERATION (real mode) — prompt, tool schema, normaliser, Claude call
 // ═══════════════════════════════════════════════════════════════════════════
 
+import type { LlmProvider } from './providers/llm'
+
 export const GEN_TOOL_SCHEMA = {
   type: 'object' as const,
   properties: {
@@ -474,39 +476,26 @@ export function normaliseLineItems(toolInput: unknown): { items: EstimateLineIte
   return { items, confidenceSummary: str(input.confidence_summary) ?? '' }
 }
 
-/** Real-mode Claude call — tool use for schema-valid output, AbortController so a
- *  slow request closes rather than hanging the function. */
+/** Real-mode generation — a tool-use call through the injected LlmProvider. */
 export async function generateEstimateItems(
-  apiKey: string,
+  llm: LlmProvider,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   docBlocks: any[],
   scopeSummary: string,
   pricingMode: PricingMode,
   timeoutMs = 240_000
 ): Promise<{ items: EstimateLineItem[]; confidenceSummary: string }> {
-  const Anthropic = (await import('@anthropic-ai/sdk')).default
-  const client = new Anthropic({ apiKey, maxRetries: 0 })
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response: any = await (client.messages.create as any)(
-      {
-        model: ESTIMATE_GEN_MODEL,
-        max_tokens: 16000,
-        system: buildGenerationSystemPrompt(),
-        tools: [{ name: 'generate_estimate', description: 'Return the full line-item estimate', input_schema: GEN_TOOL_SCHEMA }],
-        tool_choice: { type: 'tool', name: 'generate_estimate' },
-        messages: [{ role: 'user', content: [...docBlocks, { type: 'text', text: buildGenerationUserText(scopeSummary, pricingMode) }] }],
-      },
-      { signal: controller.signal }
-    )
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const toolInput = response.content?.find((b: any) => b.type === 'tool_use' && b.name === 'generate_estimate')?.input ?? null
-    return normaliseLineItems(toolInput)
-  } finally {
-    clearTimeout(timer)
-  }
+  const toolInput = await llm.toolCall({
+    model: ESTIMATE_GEN_MODEL,
+    maxTokens: 16000,
+    system: buildGenerationSystemPrompt(),
+    blocks: docBlocks,
+    userText: buildGenerationUserText(scopeSummary, pricingMode),
+    toolName: 'generate_estimate',
+    schema: GEN_TOOL_SCHEMA,
+    timeoutMs,
+  })
+  return normaliseLineItems(toolInput)
 }
 
 /** Assemble sections + totals + guards into the final estimate object. */

@@ -245,6 +245,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           pendingFillInput={pendingFillInput}
           onFillInputConsumed={() => setPendingFillInput(null)}
           activeJobAddress={activeJob?.address ?? null}
+          activeJobId={activeJob?.id ?? null}
           pendingFiles={pendingFiles}
           onPendingFilesConsumed={() => setPendingFiles(null)}
           droppedFiles={droppedFiles}

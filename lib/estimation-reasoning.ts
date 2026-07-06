@@ -677,56 +677,22 @@ export function normaliseReasoning(
 }
 
 // ─── Claude calls (real mode) ─────────────────────────────────────────────────
-// Two separate, inspectable passes. Each uses tool use for schema-valid output
-// and an AbortController so a slow request actually closes rather than hanging
-// the serverless function (same pattern as the intake worker).
+// Two separate, inspectable passes. Each is a tool-use call through the injected
+// LlmProvider (which owns the AbortController/timeout plumbing), so the domain
+// logic here has no dependency on the Anthropic SDK.
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runTool(apiKey: string, opts: {
-  system: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  blocks: any[]
-  userText: string
-  toolName: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  schema: any
-  timeoutMs: number
-}): Promise<unknown> {
-  const Anthropic = (await import('@anthropic-ai/sdk')).default
-  // maxRetries: 0 — the SDK's retries reuse an aborted signal and surface as
-  // "Retry failed: Request was aborted" when our timer fires.
-  const client = new Anthropic({ apiKey, maxRetries: 0 })
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs)
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response: any = await (client.messages.create as any)(
-      {
-        model: REASONING_MODEL,
-        max_tokens: 8192,
-        system: opts.system,
-        tools: [{ name: opts.toolName, description: 'Return structured assessment output', input_schema: opts.schema }],
-        tool_choice: { type: 'tool', name: opts.toolName },
-        messages: [{ role: 'user', content: [...opts.blocks, { type: 'text', text: opts.userText }] }],
-      },
-      { signal: controller.signal }
-    )
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return response.content?.find((b: any) => b.type === 'tool_use' && b.name === opts.toolName)?.input ?? null
-  } finally {
-    clearTimeout(timer)
-  }
-}
+import type { LlmProvider } from './providers/llm'
 
 /** Pass 1 — per-document classification + extraction status. */
 export async function classifyDocuments(
-  apiKey: string,
+  llm: LlmProvider,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   docBlocks: any[],
   files: Array<{ file_id: string | null; filename: string; textLayer?: string }>,
   timeoutMs = 120_000
 ): Promise<ClassifiedDocument[]> {
-  const toolInput = await runTool(apiKey, {
+  const toolInput = await llm.toolCall({
+    model: REASONING_MODEL,
     system: CLASSIFY_SYSTEM_PROMPT,
     blocks: docBlocks,
     userText: buildClassifyUserText(files.map((f) => f.filename)),
@@ -739,14 +705,15 @@ export async function classifyDocuments(
 
 /** Pass 2 — scope reasoning + open questions. Separate call, separate audit. */
 export async function reasonAboutScope(
-  apiKey: string,
+  llm: LlmProvider,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   docBlocks: any[],
   documents: ClassifiedDocument[],
   statedPurpose: StatedPurpose = null,
   timeoutMs = 150_000
 ): Promise<{ scope: ScopeReasoning; openQuestions: OpenQuestion[] }> {
-  const toolInput = await runTool(apiKey, {
+  const toolInput = await llm.toolCall({
+    model: REASONING_MODEL,
     system: REASON_SYSTEM_PROMPT,
     blocks: docBlocks,
     userText: buildReasonUserText(documents),

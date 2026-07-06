@@ -138,6 +138,74 @@ export interface QuoteLineItem {
   source_ref: string | null
   /** Per-line margin rate (0–1). PS items always 0. */
   margin_pct: number
+  /** Estimate section key (Stage 3) — presentation grouping over the 13 trades */
+  estimate_section: string | null
+  /** primary | secondary_dwelling | pool | external | general */
+  location_scope: string | null
+  /** measured | allowance | pc_sum | provisional */
+  basis: string | null
+}
+
+// ─── Assessment reasoning layer (migrations 018–019) ──────────────────────────
+
+export interface DocumentRow {
+  id: string
+  builder_id: string
+  job_id: string | null
+  file_id: string | null
+  filename: string
+  /** architectural | structural | electrical | hydraulic | mechanical | joinery |
+   *  finishes | survey | geotech | specification | other */
+  category: string
+  category_confidence: number | null
+  /** concept | da | da_modification | cc | cdc | ifc | draft | unknown */
+  issue_status: string | null
+  document_date: string | null
+  author: string | null
+  /** ok | partial | failed */
+  extraction_status: string
+  content_summary: string | null
+  unreadable_reason: string | null
+  raw_content: string | null
+  created_at: string
+}
+
+export interface ProjectScopeRow {
+  id: string
+  builder_id: string
+  job_id: string | null
+  project_type: string | null
+  scope_summary: string[]
+  site_data: Record<string, unknown>
+  room_scope: unknown[]
+  specialty_inclusions: unknown[]
+  date_mismatches: string[]
+  complexity_rating: string | null
+  complexity_justification: string[]
+  recommended_estimate_type: string | null
+  estimate_type_justification: string | null
+  trade_list: unknown[]
+  assumptions: string[]
+  risks: string[]
+  exclusions: string[]
+  is_indicative: boolean
+  /** pending | skipped | answered (migration 019) */
+  clarification_status: string
+  created_at: string
+  updated_at: string
+}
+
+export interface OpenQuestionRow {
+  id: string
+  builder_id: string
+  job_id: string | null
+  /** missing_documents | drawing_annotations | unselected_finishes | commercial | output */
+  question_group: string
+  question_text: string
+  source_reference: string | null
+  resolved: boolean
+  answer: string | null
+  created_at: string
 }
 
 export interface CostRate {
@@ -306,6 +374,21 @@ export interface Database {
         Row: QuoteLineItem
         Insert: Omit<QuoteLineItem, 'id' | 'created_at'> & Partial<Pick<QuoteLineItem, 'id' | 'created_at'>>
         Update: Partial<Omit<QuoteLineItem, 'id'>>
+      }
+      documents: {
+        Row: DocumentRow
+        Insert: Omit<DocumentRow, 'id' | 'created_at'> & Partial<Pick<DocumentRow, 'id' | 'created_at'>>
+        Update: Partial<Omit<DocumentRow, 'id'>>
+      }
+      project_scope: {
+        Row: ProjectScopeRow
+        Insert: Omit<ProjectScopeRow, 'id' | 'created_at' | 'updated_at'> & Partial<Pick<ProjectScopeRow, 'id' | 'created_at' | 'updated_at'>>
+        Update: Partial<Omit<ProjectScopeRow, 'id'>>
+      }
+      open_questions: {
+        Row: OpenQuestionRow
+        Insert: Omit<OpenQuestionRow, 'id' | 'created_at'> & Partial<Pick<OpenQuestionRow, 'id' | 'created_at'>>
+        Update: Partial<Omit<OpenQuestionRow, 'id'>>
       }
       cost_rates: {
         Row: CostRate
