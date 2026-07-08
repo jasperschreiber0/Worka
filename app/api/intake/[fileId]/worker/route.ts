@@ -18,6 +18,20 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
+// The SSE poller (/api/intake/[fileId]/route.ts) reads intake_stage/intake_pct
+// (migration 008); this route's own progress tracking uses pipeline_stage
+// (migration 016). Dual-write both so the poller reflects real stage changes
+// regardless of which column set is authoritative.
+const STAGE_PCT: Record<string, number> = {
+  reading: 15,
+  retrieving_memory: 35,
+  extracting_site: 44,
+  scope_intelligence: 84,
+  validating: 90,
+  building_quote: 95,
+  complete: 100,
+}
+
 /**
  * Hybrid pricing — derive a stored rate/total from prices printed in a priced
  * document (builder's estimate, BOQ, trade breakdown). Only positive printed
@@ -156,7 +170,7 @@ export async function POST(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const claimResult: any = await Promise.race([
     supabase.from('files')
-      .update({ intake_status: 'processing', pipeline_stage: 'reading' })
+      .update({ intake_status: 'processing', pipeline_stage: 'reading', intake_stage: 'reading', intake_pct: STAGE_PCT.reading })
       .eq('id', fileId)
       .in('intake_status', ['uploaded', 'queued'])
       .select().single(),
@@ -173,7 +187,9 @@ export async function POST(
   // Non-blocking stage update — resolves after 8s so slow Supabase never stalls the pipeline
   const updateStage = (stage: string): Promise<void> =>
     Promise.race([
-      supabase.from('files').update({ pipeline_stage: stage }).eq('id', fileId).then(() => undefined),
+      supabase.from('files')
+        .update({ pipeline_stage: stage, intake_stage: stage, intake_pct: STAGE_PCT[stage] ?? null })
+        .eq('id', fileId).then(() => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
     ])
 
@@ -186,6 +202,7 @@ export async function POST(
         failure_reason: reason.slice(0, 500),
         processing_time_ms: Date.now() - pipelineStart,
         pipeline_stage: stage,
+        intake_stage: stage,
       }).eq('id', fileId),
       new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
     ])
@@ -765,6 +782,8 @@ Use the extract_estimate tool to return your results.`
         processing_time_ms: Date.now() - pipelineStart,
         failure_stage: null,
         failure_reason: null,
+        intake_stage: 'complete',
+        intake_pct: 100,
       }).eq('id', fileId),
       'files.update(extracted)'
     )

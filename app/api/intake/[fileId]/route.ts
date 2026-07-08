@@ -59,6 +59,10 @@ export async function GET(
   const job_id = searchParams.get('job_id') ?? ''
   const builder_id =
     searchParams.get('builder_id') ?? '00000000-0000-0000-0000-000000000001'
+  // IntakeProgress.tsx attaches every OTHER uploaded file as a sibling so the
+  // whole document bundle gets extracted together, not just the primary file.
+  const siblingsParam = searchParams.get('siblings') ?? ''
+  const sibling_file_ids = siblingsParam ? siblingsParam.split(',').filter(Boolean) : []
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -102,8 +106,16 @@ export async function GET(
     })
   }
 
-  // ── Real mode: trigger edge function then poll DB ──────────────────────────
-  const edgeFnUrl = `${supabaseUrl}/functions/v1/smooth-responder`
+  // ── Real mode: trigger the multi-document worker, then poll DB ─────────────
+  // The worker route (not the legacy smooth-responder edge function) is what
+  // actually supports a document bundle — it accepts sibling_file_ids and
+  // attaches every one of them to the same extraction call. Routing through it
+  // also means the fix ships on the next Railway deploy rather than requiring a
+  // separate `supabase functions deploy`.
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+  const workerUrl = `${appUrl}/api/intake/${encodeURIComponent(fileId)}/worker`
+  // Still needed for the REST API polling calls below (Supabase requires the
+  // anon/service apikey header on every direct REST request).
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
   const stream = new ReadableStream({
@@ -113,17 +125,35 @@ export async function GET(
       }
 
       try {
-        // Trigger the edge function — it returns 202 immediately and runs in background
-        const triggerRes = await fetch(edgeFnUrl, {
+        // Unlike the old edge function (which detached via EdgeRuntime.waitUntil
+        // and returned 202 immediately), the worker route runs the whole pipeline
+        // inline and only responds once fully done — awaiting it here would freeze
+        // the progress bar for the entire extraction. Race it against a short
+        // window instead: a fast synchronous failure (e.g. bad auth) surfaces
+        // immediately, otherwise we move on to polling while the request keeps
+        // running (Railway is a persistent process, not a per-request serverless
+        // teardown, so the un-awaited fetch keeps executing normally).
+        const workerCall = fetch(workerUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${anonKey}`,
+            'Authorization': `Bearer ${supabaseKey}`,
           },
-          body: JSON.stringify({ file_id: fileId, job_id, builder_id }),
+          body: JSON.stringify({ builder_id, job_id, sibling_file_ids }),
+        }).catch((err) => {
+          console.error('Intake worker trigger error:', err)
+          return null
         })
 
-        if (!triggerRes.ok) {
+        const fastResult = await Promise.race([
+          workerCall,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+        ])
+
+        // Only treat this as a hard failure if the worker responded FAST with a
+        // non-OK status (e.g. auth/config error) — a null here just means it's
+        // still running, which is the expected, common case.
+        if (fastResult && !fastResult.ok) {
           emit('error', { message: 'Failed to start processing' })
           controller.close()
           return
