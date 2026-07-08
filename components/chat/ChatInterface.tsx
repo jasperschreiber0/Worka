@@ -313,6 +313,7 @@ export default function ChatInterface({
   droppedFiles,
   onDroppedFilesConsumed,
 }: ChatInterfaceProps = {}) {
+  const router = useRouter()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -1016,12 +1017,12 @@ export default function ChatInterface({
         // here as ordinary chat events, same as every other Layer 3 side-effect.
         // Navigation only: the assessment page itself owns rendering.
         if (evt.type === 'open_project_assessment' || evt.type === 'open_clarifying_questions' || evt.type === 'open_estimate') {
-          const jobId = (evt as { job_id?: string }).job_id
+          const jobId = (evt as unknown as { job_id?: string }).job_id
           if (jobId) router.push(`/estimate/assessment?job_id=${encodeURIComponent(jobId)}`)
         }
 
         if (evt.type === 'download') {
-          const e = evt as { url: string }
+          const e = evt as unknown as { url: string }
           window.open(e.url, '_blank')
         }
       }
