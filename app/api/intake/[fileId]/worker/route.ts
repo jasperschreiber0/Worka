@@ -303,10 +303,36 @@ export async function POST(
       }
     }
 
+    // ── Job-scoped file gathering ──────────────────────────────────────────
+    // A builder doesn't know (or care) that "the first file they upload"
+    // becomes special. If they upload the DA set now and the structural
+    // drawing tomorrow, both uploads must land in the SAME quote. So the
+    // authoritative sibling list is every OTHER file ever uploaded to this
+    // job (queried server-side by job_id), not just whatever the client
+    // happened to select in one upload action — client-supplied
+    // sibling_file_ids is kept only as a fallback if that lookup fails.
+    let siblingFileIds: string[] = Array.isArray(sibling_file_ids) ? sibling_file_ids : []
+    try {
+      w('db:job_files')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const jobFilesResult: any = await Promise.race([
+        supabase.from('files').select('id')
+          .eq('job_id', job_id).eq('builder_id', builder_id)
+          .neq('id', fileId).neq('intake_status', 'failed'),
+        new Promise((resolve) => setTimeout(() => resolve({ data: null }), 8_000)),
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const jobFileIds: string[] = (jobFilesResult?.data ?? []).map((f: any) => f.id)
+      if (jobFileIds.length > 0) {
+        siblingFileIds = Array.from(new Set([...siblingFileIds, ...jobFileIds]))
+      }
+    } catch (e) {
+      console.error('[intake:worker] job-scoped file lookup failed, falling back to client-supplied siblings:', e instanceof Error ? e.message : String(e))
+    }
+
     // ── Load sibling files ─────────────────────────────────────────────────
     const MAX_TOTAL_BYTES = 20 * 1024 * 1024
     let attachedBytes = rawBytes
-    const siblingFileIds: string[] = Array.isArray(sibling_file_ids) ? sibling_file_ids : []
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const siblingBlocks: any[] = []
     let skippedSiblingCount = 0
@@ -634,11 +660,25 @@ Use the extract_estimate tool to return your results.`
     let quoteId = `quote-${fileId.slice(0, 8)}`
 
     try {
+      // Every trigger re-gathers and re-extracts the FULL document set for this
+      // job (see job-scoped file gathering above), so a later upload must
+      // supersede the previous draft as the next version rather than create a
+      // second, disconnected quote. Same "latest = highest version" convention
+      // already used by snapshot/route.ts and elsewhere — no new status value,
+      // old versions just stay in the table with a lower version number.
+      w('db:quote:prior-version')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const priorVersionResult: any = await withDbTimeout(
+        supabase.from('quotes').select('version').eq('job_id', job_id).order('version', { ascending: false }).limit(1),
+        'quotes.priorVersion'
+      ).catch(() => ({ data: null }))
+      const nextVersion = (priorVersionResult?.data?.[0]?.version ?? 0) + 1
+
       w('db:quote:insert')
       const { data: quoteRow, error: quoteErr } = await withDbTimeout(
         supabase.from('quotes').insert({
           job_id, builder_id, status: 'draft',
-          total_cost: null, margin_pct: null, confidence_score: null, version: 1,
+          total_cost: null, margin_pct: null, confidence_score: null, version: nextVersion,
         }).select().single(),
         'quotes.insert'
       )
