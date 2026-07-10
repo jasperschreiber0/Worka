@@ -2,27 +2,12 @@
 import React from 'react'
 import { useState } from 'react'
 import type { ScopeHint } from '@/lib/types/estimation.types'
+import { tradeCategoryName } from '@/lib/trade-taxonomy'
 
 interface ScopeIntelligenceCardProps {
   hints: ScopeHint[]
   onAccept: (hint: ScopeHint) => void
   onDismiss: (hint: ScopeHint) => void
-}
-
-const TRADE_NAMES: Record<number, string> = {
-  1: 'Earthworks',
-  2: 'Concrete',
-  3: 'Framing',
-  4: 'Roofing',
-  5: 'Windows & Doors',
-  6: 'Cladding',
-  7: 'Insulation',
-  8: 'Linings',
-  9: 'Joinery',
-  10: 'Painting',
-  11: 'Plumbing',
-  12: 'Electrical',
-  13: 'Tiling & Finishes',
 }
 
 function confidenceLabel(n: number): string {
@@ -128,7 +113,7 @@ export default function ScopeIntelligenceCard({ hints, onAccept, onDismiss }: Sc
                       {confidenceLabel(hint.confidence)} · {hint.confidence}%
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
-                      {TRADE_NAMES[hint.trade_category_id]}
+                      {tradeCategoryName(hint.trade_category_id)}
                     </span>
                     {hint.typical_cost_range && (
                       <span className="text-[10px] font-medium" style={{ color: 'var(--text-secondary)' }}>

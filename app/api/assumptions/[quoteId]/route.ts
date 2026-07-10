@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
 import type { AssumptionItem } from '@/lib/assumptions-demo'
+import { inferLegacyGate } from '@/lib/estimating/gates'
 
 // Re-export type so components can import it from here if needed
 export type { AssumptionItem }
@@ -89,6 +90,7 @@ export async function GET(
         id,
         line_item_id,
         description,
+        gate,
         resolution_type,
         quote_line_items (
           quantity,
@@ -131,15 +133,11 @@ export async function GET(
 
       const tradeName: string = li?.trade_categories?.name ?? 'Unknown'
 
-      // Infer gate from line item state
-      let gate: 1 | 2 | 3 = 2
-      if (!li?.unit) {
-        gate = 1
-      } else if (li?.quantity !== null && li?.quantity !== undefined && li.quantity <= 0) {
-        gate = 3
-      } else if (!li?.dimensions_string) {
-        gate = 2
-      }
+      // Gate is persisted at extraction time (assumptions.gate). Older rows
+      // written before that column existed fall back to best-effort inference
+      // from the line item's current state.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const gate: 1 | 2 | 3 = (row as any).gate ?? inferLegacyGate(li)
 
       const resolutionType = (row.resolution_type ?? 'unresolved') as
         | 'unresolved'

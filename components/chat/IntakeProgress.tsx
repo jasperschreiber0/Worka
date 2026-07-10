@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import ClarifyingQuestionsPanel, { type ClarifyingQuestion } from './ClarifyingQuestionsPanel'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,20 +26,24 @@ interface CompletedStage {
   message: string
 }
 
-// ─── Stage display label mapping ──────────────────────────────────────────────
+interface ClarificationState {
+  message: string
+  questions: ClarifyingQuestion[]
+}
+
+// ─── Stage display label mapping — mirrors the estimating engine's real
+// stages (Document Intelligence -> Project Understanding -> Scope Reasoning ->
+// Gap Detection -> Estimate Generation -> QA). ──────────────────────────────
 
 const STAGE_LABELS: Record<string, string> = {
-  uploading: 'Uploading plans',
-  reading: 'Reading file',
-  analysing: 'Analysing with AI',
-  retrieving_memory: 'Searching historical projects',
-  extracting_site: 'Site works & concrete',
-  extracting_framing: 'Framing quantities',
-  extracting_roofing: 'Roofing',
-  extracting_fitout: 'Fit-out & finishes',
-  extracting_elec: 'Electrical & prelims',
-  scope_intelligence: 'Scope intelligence',
-  validating: 'Quantity validation',
+  uploading: 'Uploading documents',
+  reading: 'Reading documents',
+  classifying_documents: 'Classifying documents',
+  understanding_project: 'Building project understanding',
+  reasoning_scope: 'Reasoning about scope',
+  detecting_gaps: 'Checking for missing information',
+  generating_estimate: 'Generating the estimate',
+  validating: 'Running quality assurance',
   building_quote: 'Building draft quote',
 }
 
@@ -62,15 +67,45 @@ export default function IntakeProgress({
   const [isDone, setIsDone] = useState(false)
   const [hasError, setHasError] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [clarification, setClarification] = useState<ClarificationState | null>(null)
+  const [clarifySubmitting, setClarifySubmitting] = useState(false)
+  const [clarifyError, setClarifyError] = useState<string | null>(null)
+  const [resumeKey, setResumeKey] = useState(0)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
+
+  const handleAnswerSubmit = async (answers: Array<{ question_id: string; answer: string }>) => {
+    setClarifySubmitting(true)
+    setClarifyError(null)
+    try {
+      const res = await fetch(`/api/intake/${encodeURIComponent(fileId)}/clarify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId, answers }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: 'Could not continue' }))
+        throw new Error((body as { error?: string }).error ?? 'Could not continue')
+      }
+      setClarification(null)
+      setResumeKey((k) => k + 1)
+    } catch (err) {
+      setClarifyError(err instanceof Error ? err.message : 'Could not continue — please try again.')
+    } finally {
+      setClarifySubmitting(false)
+    }
+  }
 
   useEffect(() => {
     const siblings = additionalFileIds && additionalFileIds.length > 0
       ? `&siblings=${encodeURIComponent(additionalFileIds.join(','))}`
       : ''
-    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}`
+    // After answering clarifying questions, the /clarify route has already
+    // re-triggered the engine (with resume: true) — this reconnect must only
+    // poll, not fire a second, non-resumed trigger.
+    const resumedParam = resumeKey > 0 ? '&resumed=1' : ''
+    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}${resumedParam}`
     const es = new EventSource(url)
     eventSourceRef.current = es
     let settled = false
@@ -147,6 +182,19 @@ export default function IntakeProgress({
       }
     })
 
+    // Stage 4/5 — the engine found a blocking gap. Pause here instead of
+    // failing; the builder answers, and we reconnect (resumeKey bump below).
+    es.addEventListener('needs_clarification', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data) as ClarificationState
+        settled = true
+        es.close()
+        setClarification(data)
+      } catch {
+        failOnce()
+      }
+    })
+
     // Handles both server-emitted `event: error` (has .data) and
     // EventSource connection failures (no .data).
     es.addEventListener('error', (e: Event) => {
@@ -167,7 +215,20 @@ export default function IntakeProgress({
       settled = true
       es.close()
     }
-  }, [fileId, jobId, builderId, onComplete, onError])
+  }, [fileId, jobId, builderId, onComplete, onError, resumeKey])
+
+  // ── Clarifying questions state (Stage 4/5) ─────────────────────────────────
+  if (clarification) {
+    return (
+      <ClarifyingQuestionsPanel
+        message={clarification.message}
+        questions={clarification.questions}
+        submitting={clarifySubmitting}
+        error={clarifyError}
+        onSubmit={handleAnswerSubmit}
+      />
+    )
+  }
 
   // ── Error state ────────────────────────────────────────────────────────────
   if (hasError) {

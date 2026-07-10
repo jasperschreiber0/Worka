@@ -63,7 +63,7 @@ Return ONLY valid JSON:
   "scope_hints": [
     {
       "description": "Item name — max 8 words",
-      "trade_category_id": number (1=Earthworks, 2=Concrete, 3=Framing, 4=Roofing, 5=Windows/Doors, 6=Cladding, 7=Insulation, 8=Linings, 9=Joinery, 10=Painting, 11=Plumbing, 12=Electrical, 13=Tiling),
+      "trade_category_id": number (1=Site Works & Concrete, 2=Framing, 3=Roofing, 4=External Cladding, 5=Insulation, 6=Internal Linings, 7=Fit-out Carpentry, 8=Cabinetry, 9=Paint, 10=Flooring, 11=Fixtures & Tapware, 12=Electrical, 13=Preliminaries),
       "confidence": 0-100,
       "reason": "Why this is likely needed — one sentence",
       "typical_cost_range": "e.g. $1,200–$3,500"

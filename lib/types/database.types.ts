@@ -27,9 +27,15 @@ export type CommunicationChannel = 'email' | 'sms' | 'chat'
 
 export type FileType = 'pdf' | 'image' | 'dwg' | 'other'
 
-export type FileIntakeStatus = 'uploaded' | 'queued' | 'processing' | 'extracted' | 'failed'
+export type FileIntakeStatus = 'uploaded' | 'queued' | 'processing' | 'needs_info' | 'extracted' | 'failed'
 
 export type ResolutionType = 'accepted' | 'adjusted' | 'excluded'
+
+export type DocumentReadability = 'clear' | 'partial' | 'poor'
+
+export type OcrQuality = 'good' | 'degraded' | 'unreadable'
+
+export type ClarifyingQuestionStatus = 'open' | 'answered' | 'skipped'
 
 // ─── Row types (mirrors DB columns exactly) ──────────────────────────────────
 
@@ -107,6 +113,17 @@ export interface Quote {
   created_at: string
   sent_at: string | null
   approved_at: string | null
+  /** Stage 6 QA pass output — see lib/estimating/qa.ts */
+  qa_report: QAReport | null
+  overall_confidence: number | null
+}
+
+export interface QAReport {
+  top_risks: string[]
+  review_items: string[]
+  recommended_actions: string[]
+  missing_trades: number[]
+  duplicate_descriptions: string[]
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
@@ -261,10 +278,77 @@ export interface Assumption {
   quote_id: string
   line_item_id: string | null
   description: string
+  /** The validation gate that created this assumption. Set once at extraction time. */
+  gate: 1 | 2 | 3 | null
   resolution_type: ResolutionType | null
   resolved_at: string | null
   resolved_by: string | null
   created_at: string
+}
+
+// ─── Reasoning-first estimating engine (migration 018) ───────────────────────
+
+export interface ProjectDocument {
+  id: string
+  job_id: string
+  file_id: string
+  document_type: string | null
+  discipline: string | null
+  revision: string | null
+  issue_date: string | null
+  scale: string | null
+  page_count: number | null
+  drawing_title: string | null
+  readability: DocumentReadability | null
+  ocr_quality: OcrQuality | null
+  trade_relevance: number[]
+  is_duplicate: boolean
+  duplicate_of_id: string | null
+  is_superseded: boolean
+  superseded_by_id: string | null
+  notes: string | null
+  created_at: string
+}
+
+export interface ProjectFact {
+  id: string
+  job_id: string
+  category: string
+  key: string
+  value: string
+  source_document_id: string | null
+  page_reference: string | null
+  evidence: string | null
+  /** 0-100 */
+  confidence: number
+  superseded: boolean
+  created_at: string
+}
+
+export interface ScopeItem {
+  id: string
+  job_id: string
+  trade_category_id: number
+  included_scope: string[]
+  excluded_scope: string[]
+  dependencies: string[]
+  assumptions: string[]
+  uncertainty_notes: string | null
+  confidence: number | null
+  created_at: string
+}
+
+export interface ClarifyingQuestion {
+  id: string
+  job_id: string
+  question: string
+  reason: string
+  trade_category_id: number | null
+  blocking: boolean
+  status: ClarifyingQuestionStatus
+  answer: string | null
+  created_at: string
+  answered_at: string | null
 }
 
 // ─── Supabase Database type (for typed client) ───────────────────────────────
@@ -357,6 +441,26 @@ export interface Database {
         Insert: Omit<Assumption, 'id' | 'created_at'> & Partial<Pick<Assumption, 'id' | 'created_at'>>
         Update: Partial<Omit<Assumption, 'id'>>
       }
+      project_documents: {
+        Row: ProjectDocument
+        Insert: Omit<ProjectDocument, 'id' | 'created_at'> & Partial<Pick<ProjectDocument, 'id' | 'created_at'>>
+        Update: Partial<Omit<ProjectDocument, 'id'>>
+      }
+      project_facts: {
+        Row: ProjectFact
+        Insert: Omit<ProjectFact, 'id' | 'created_at'> & Partial<Pick<ProjectFact, 'id' | 'created_at'>>
+        Update: Partial<Omit<ProjectFact, 'id'>>
+      }
+      scope_items: {
+        Row: ScopeItem
+        Insert: Omit<ScopeItem, 'id' | 'created_at'> & Partial<Pick<ScopeItem, 'id' | 'created_at'>>
+        Update: Partial<Omit<ScopeItem, 'id'>>
+      }
+      clarifying_questions: {
+        Row: ClarifyingQuestion
+        Insert: Omit<ClarifyingQuestion, 'id' | 'created_at'> & Partial<Pick<ClarifyingQuestion, 'id' | 'created_at'>>
+        Update: Partial<Omit<ClarifyingQuestion, 'id'>>
+      }
     }
     Views: Record<string, never>
     Functions: Record<string, never>
@@ -374,6 +478,9 @@ export interface Database {
       file_type: FileType
       file_intake_status: FileIntakeStatus
       resolution_type: ResolutionType
+      document_readability: DocumentReadability
+      ocr_quality: OcrQuality
+      clarifying_question_status: ClarifyingQuestionStatus
     }
     CompositeTypes: Record<string, never>
   }
