@@ -109,12 +109,10 @@ export async function POST(
       return handleDemoActivation(jobId, quote_id, builder_id)
     }
 
-    try {
-      return await handleLiveActivation(jobId, quote_id, builder_id)
-    } catch {
-      // DB unavailable — fall back to demo activation so the flow still works
-      return handleDemoActivation(jobId, quote_id, builder_id)
-    }
+    // A real DB failure here must surface as a real error — silently
+    // falling back to demo activation would tell the builder their job is
+    // active when nothing was actually written.
+    return await handleLiveActivation(jobId, quote_id, builder_id)
   } catch (err) {
     console.error('[/api/jobs/[jobId]/activate] Error:', err)
     return NextResponse.json(

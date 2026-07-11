@@ -56,11 +56,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }))
 
       const { error } = await sb.from('builder_supplier_rates').insert(rows)
-      if (!error) {
-        return NextResponse.json({ imported: rows.length })
+      if (error) {
+        console.error('[rates/import] insert failed:', error.message)
+        return NextResponse.json({ error: 'Failed to import rates' }, { status: 500 })
       }
-    } catch {
-      // fall through to demo store
+      return NextResponse.json({ imported: rows.length })
+    } catch (err) {
+      // Real mode was configured, so this is a genuine failure — falling
+      // back to the in-memory demo store would tell the builder their rates
+      // were imported into their real account when nothing was persisted
+      // (and the in-memory copy doesn't even survive a cold start).
+      console.error('[rates/import] error:', err)
+      return NextResponse.json({ error: 'Failed to import rates' }, { status: 500 })
     }
   }
 

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'
+import { applyMargin, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
 
 export interface DashboardAlert {
   id: string
@@ -130,7 +131,7 @@ export async function GET() {
     const [{ data: jobs }, { data: invoices }, { data: variations }] = await Promise.all([
       supabase
         .from('jobs')
-        .select('id, address, status, client_name, updated_at')
+        .select('id, address, status, updated_at')
         .eq('builder_id', builderId)
         .not('status', 'in', '("archived")')
         .order('updated_at', { ascending: false })
@@ -259,9 +260,32 @@ export async function GET() {
     }
 
     const overdueTotal = overdueInvoices.reduce((s, i) => s + Number(i.amount ?? 0), 0)
-    const pipelineValue = (jobs ?? [])
+
+    // Pipeline value: sum of the sell price (cost + margin) of each open
+    // job's current (highest-version, non-rejected) quote.
+    const pipelineJobIds = (jobs ?? [])
       .filter(j => j.status === 'active' || j.status === 'quoted' || j.status === 'quoting')
-      .length * 95000 // placeholder — real value needs quote join
+      .map(j => j.id)
+
+    let pipelineValue = 0
+    if (pipelineJobIds.length > 0) {
+      const { data: pipelineQuotes } = await supabase
+        .from('quotes')
+        .select('job_id, total_cost, margin_pct, version, status')
+        .in('job_id', pipelineJobIds)
+        .neq('status', 'rejected')
+
+      const latestByJob = new Map<string, { total_cost: number | null; margin_pct: number | null; version: number }>()
+      for (const q of pipelineQuotes ?? []) {
+        const existing = latestByJob.get(q.job_id)
+        if (!existing || q.version > existing.version) latestByJob.set(q.job_id, q)
+      }
+
+      pipelineValue = Array.from(latestByJob.values()).reduce((sum, q) => {
+        if (q.total_cost === null) return sum
+        return sum + applyMargin(q.total_cost, q.margin_pct ?? DEFAULT_MARGIN_PCT)
+      }, 0)
+    }
 
     return NextResponse.json({
       stats: {
@@ -276,7 +300,10 @@ export async function GET() {
       activity,
     } satisfies DashboardData)
   } catch (err) {
+    // A real, authenticated builder hitting a genuine query failure should
+    // see an error, not fabricated Fitzroy/Toorak/Brunswick demo data
+    // presented as if it were their real dashboard.
     console.error('[dashboard]', err)
-    return NextResponse.json(DEMO_DATA)
+    return NextResponse.json({ error: 'Failed to load dashboard data' }, { status: 500 })
   }
 }
