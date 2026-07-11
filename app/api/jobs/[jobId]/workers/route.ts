@@ -61,16 +61,30 @@ export async function POST(
       .single()
     if (!ownedJob) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
 
+    // The worker being assigned must belong to this builder too — otherwise
+    // a builder could assign another builder's worker row to their own job
+    // by guessing/observing a worker_id.
+    const { data: ownedWorker } = await sb
+      .from('workers')
+      .select('id')
+      .eq('id', body.worker_id)
+      .eq('builder_id', builderId)
+      .single()
+    if (!ownedWorker) return NextResponse.json({ error: 'Worker not found' }, { status: 404 })
+
     const { error } = await sb
       .from('job_workers')
       .upsert({ job_id: jobId, worker_id: body.worker_id }, { onConflict: 'job_id,worker_id' })
-    if (!error) return NextResponse.json({ ok: true }, { status: 201 })
-  } catch {
-    // fall through to in-memory
+    if (error) {
+      console.error('[jobs/[jobId]/workers] upsert failed:', error.message)
+      return NextResponse.json({ error: 'Failed to assign worker' }, { status: 500 })
+    }
+    return NextResponse.json({ ok: true }, { status: 201 })
+  } catch (err) {
+    // Real mode was configured, so this is a genuine failure — falling back
+    // to the in-memory store would tell the builder a worker was assigned
+    // to a real job when nothing was actually written.
+    console.error('[jobs/[jobId]/workers] error:', err)
+    return NextResponse.json({ error: 'Failed to assign worker' }, { status: 500 })
   }
-
-  // DB unavailable — track in-memory so the UI stays consistent
-  if (!DEMO_JOB_WORKERS[jobId]) DEMO_JOB_WORKERS[jobId] = new Set()
-  DEMO_JOB_WORKERS[jobId].add(body.worker_id)
-  return NextResponse.json({ ok: true }, { status: 201 })
 }
