@@ -1,8 +1,20 @@
+import { createClient } from '@supabase/supabase-js'
+
 export type PermissionRole = 'owner' | 'site_manager' | 'subcontractor' | 'tradesperson'
 
 const VALID_ROLES: PermissionRole[] = ['owner', 'site_manager', 'subcontractor', 'tradesperson']
 
-export function getRoleFromRequest(req: Request): PermissionRole {
+/**
+ * Resolve the caller's permission role from the request.
+ *
+ * Live mode: the Authorization bearer token is verified against Supabase
+ * Auth itself (auth.getUser(token)) — this actually checks the token's
+ * signature and expiry, rather than trusting an unverified, client-suppliable
+ * JWT payload. A forged bearer token with a fabricated `worka_role` claim is
+ * rejected here (getUser fails), falling through to the 'owner' default,
+ * exactly as if no token were presented at all.
+ */
+export async function getRoleFromRequest(req: Request): Promise<PermissionRole> {
   const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL
 
   if (isDemoMode) {
@@ -14,20 +26,26 @@ export function getRoleFromRequest(req: Request): PermissionRole {
     return 'owner'
   }
 
-  // Live mode: extract role from Supabase JWT claims.
-  // Workers get a role claim set when their invite token is redeemed.
-  // Builders authenticated via Supabase auth have no role claim → owner.
+  // Live mode: extract role from a Supabase-verified session, not a raw
+  // decoded JWT payload. Workers get a role claim set when their invite
+  // token is redeemed. Builders authenticated via Supabase auth have no
+  // role claim → owner.
   const auth = req.headers.get('authorization') ?? ''
-  if (auth.startsWith('Bearer ')) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (auth.startsWith('Bearer ') && supabaseUrl && anonKey) {
     try {
       const token = auth.slice(7)
-      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
-      const role = payload?.app_metadata?.worka_role as string | undefined
-      if (role && (VALID_ROLES as string[]).includes(role)) {
-        return role as PermissionRole
+      const supabase = createClient(supabaseUrl, anonKey, { auth: { persistSession: false } })
+      const { data, error } = await supabase.auth.getUser(token)
+      if (!error && data.user) {
+        const role = (data.user.app_metadata as Record<string, unknown> | undefined)?.worka_role as string | undefined
+        if (role && (VALID_ROLES as string[]).includes(role)) {
+          return role as PermissionRole
+        }
       }
     } catch {
-      // Malformed token — fall through to default
+      // Invalid/expired token — fall through to default
     }
   }
 
@@ -35,11 +53,11 @@ export function getRoleFromRequest(req: Request): PermissionRole {
   return 'owner'
 }
 
-export function requirePermission(
+export async function requirePermission(
   req: Request,
   action: keyof typeof ROLE_REQUIREMENTS
-): Response | null {
-  const role = getRoleFromRequest(req)
+): Promise<Response | null> {
+  const role = await getRoleFromRequest(req)
   const minimum = ROLE_REQUIREMENTS[action]
   if (!hasPermission(role, minimum)) {
     return new Response(

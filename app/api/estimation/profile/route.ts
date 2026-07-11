@@ -54,15 +54,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 // ─── PATCH /api/estimation/profile — update profile after quote adjustment ────
 
 export async function PATCH(request: NextRequest): Promise<NextResponse> {
-  let body: Partial<BuilderEstimationProfile> & { builder_id: string }
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  let body: Partial<BuilderEstimationProfile> & { builder_id?: string }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { builder_id, ...updates } = body
-  if (!builder_id) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
+  // builder_id is derived from the session, never trusted from the body —
+  // ignore any client-supplied value so a caller can't rewrite another builder's profile.
+  const { builder_id: _ignoredBuilderId, ...updates } = body
 
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
     return NextResponse.json({ ok: true, demo: true })
@@ -77,7 +81,7 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
 
     await supabase
       .from('builder_estimation_profiles')
-      .upsert({ builder_id, ...updates, updated_at: new Date().toISOString() }, { onConflict: 'builder_id' })
+      .upsert({ builder_id: builderId, ...updates, updated_at: new Date().toISOString() }, { onConflict: 'builder_id' })
 
     return NextResponse.json({ ok: true })
   } catch (err) {

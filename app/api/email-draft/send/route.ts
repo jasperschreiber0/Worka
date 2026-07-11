@@ -28,7 +28,7 @@ interface SendEmailResponse {
 export async function POST(
   request: NextRequest
 ): Promise<NextResponse<SendEmailResponse | { error: string }>> {
-  const denied = requirePermission(request, 'send_email')
+  const denied = await requirePermission(request, 'send_email')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const builder_id = await getAuthenticatedBuilderId()

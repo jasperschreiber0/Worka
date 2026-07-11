@@ -81,7 +81,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
-  const denied = requirePermission(request, 'activate_job')
+  const denied = await requirePermission(request, 'activate_job')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const builder_id = await getAuthenticatedBuilderId()

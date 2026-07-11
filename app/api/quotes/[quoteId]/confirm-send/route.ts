@@ -40,7 +40,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
-  const denied = requirePermission(request, 'send_quote')
+  const denied = await requirePermission(request, 'send_quote')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const { quoteId } = params

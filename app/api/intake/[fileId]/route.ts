@@ -2,6 +2,7 @@
 export const runtime = 'edge'
 
 import { NextRequest } from 'next/server'
+import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,8 +58,17 @@ export async function GET(
   const { fileId } = params
   const { searchParams } = new URL(req.url)
   const job_id = searchParams.get('job_id') ?? ''
-  const builder_id =
-    searchParams.get('builder_id') ?? '00000000-0000-0000-0000-000000000001'
+
+  // builder_id is always derived from the authenticated session — never from
+  // the query string — so a caller can't watch or trigger another builder's
+  // intake pipeline by guessing a fileId.
+  const builder_id = await getAuthenticatedBuilderId()
+  if (!builder_id) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -106,6 +116,20 @@ export async function GET(
   const edgeFnUrl = `${supabaseUrl}/functions/v1/smooth-responder`
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
+  // Verify the file actually belongs to this builder before doing anything —
+  // this is the check that was previously missing entirely.
+  const ownerCheckRes = await fetch(
+    `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=id`,
+    { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+  )
+  const ownerRows = ownerCheckRes.ok ? (await ownerCheckRes.json() as Array<{ id: string }>) : []
+  if (ownerRows.length === 0) {
+    return new Response(JSON.stringify({ error: 'File not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
       const emit = (event: string, data: object) => {
@@ -140,7 +164,7 @@ export async function GET(
 
           // Inline fetch against Supabase REST API (no Node SDK needed in edge runtime)
           const res = await fetch(
-            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count`,
+            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count`,
             {
               headers: {
                 'apikey': anonKey,

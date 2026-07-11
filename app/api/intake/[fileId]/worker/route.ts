@@ -553,7 +553,11 @@ Use the extract_estimate tool to return your results.`
       w('fetch:scope-hints')
       const scopeRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/api/estimation/scope-hints`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${supabaseKey}`,
+          'x-worka-builder-id': builder_id,
+        },
         body: JSON.stringify({ project_metadata: projectMetadata }),
       })
       if (scopeRes.ok) scopeHints = (await scopeRes.json()).scope_hints ?? []
