@@ -14,6 +14,7 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -952,6 +953,23 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
 
       if (!error && jobRow) {
         return { job: jobRow as Job, is_duplicate: false }
+      }
+
+      // Unique-violation (23505) means a concurrent request won the race for
+      // this exact address — re-fetch and return it as the duplicate instead
+      // of surfacing an insert error.
+      if (error?.code === '23505') {
+        const { data: winner } = await supabase
+          .from('jobs')
+          .select('*')
+          .eq('builder_id', builder_id)
+          .neq('status', 'archived')
+          .ilike('address', address.trim())
+          .limit(1)
+          .maybeSingle()
+        if (winner) {
+          return { job: winner as Job, is_duplicate: true, existing_job: winner as Job }
+        }
       }
       // Fall through to demo mode if insert failed
     } catch {
@@ -2916,6 +2934,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         { status: 401 }
       )
     }
+
+    const rateLimit = await checkRateLimit(`chat:${builderId}`, { limit: 60, windowSeconds: 60 })
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { intent: 'unknown', message: 'Too many messages — please slow down and try again shortly.' },
+        { status: 429 }
+      )
+    }
+
     const forceCreate = body.force_create === true
 
     if (!message) {

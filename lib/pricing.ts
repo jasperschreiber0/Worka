@@ -370,13 +370,15 @@ export async function ensureQuotePriced(
       unpriced
     )
 
-    for (let i = 0; i < priced.length; i++) {
-      if (priced[i].rate !== null) {
-        await supabase
-          .from('quote_line_items')
-          .update({ rate: priced[i].rate, total: priced[i].total })
-          .eq('id', unpriced[i].id)
-      }
+    // Batched upsert instead of one round trip per line item — quotes with
+    // 20-40 unpriced lines previously issued that many sequential updates.
+    const rowsToUpdate = priced
+      .map((p, i) => ({ id: unpriced[i].id, rate: p.rate, total: p.total }))
+      .filter((row) => row.rate !== null)
+
+    if (rowsToUpdate.length > 0) {
+      const { error: batchUpdateErr } = await supabase.from('quote_line_items').upsert(rowsToUpdate)
+      if (batchUpdateErr) console.error('ensureQuotePriced: batch update failed:', batchUpdateErr.message)
     }
 
     // Merge priced values back for the totals computation
@@ -475,40 +477,25 @@ export async function captureLearnedRates(
       tokens: tokenize(row.description),
     }))
 
-    for (const item of items) {
-      if (item.rate === null || item.assumption_status === 'excluded') continue
-      const key = matchLineItemKey(
-        { ...item, quantity: null },
-        catalogue
-      )
-      if (!key || !item.unit) continue
+    // Atomic per-item upsert (running average computed inside the DB, see
+    // migration 023) — safe to run concurrently since each RPC call is a
+    // single atomic statement, unlike the old select-then-branch which could
+    // lose an update between two concurrent quote approvals.
+    await Promise.all(
+      items.map(async (item) => {
+        if (item.rate === null || item.assumption_status === 'excluded') return
+        const key = matchLineItemKey({ ...item, quantity: null }, catalogue)
+        if (!key || !item.unit) return
 
-      const { data: existing } = await supabase
-        .from('builder_learned_rates')
-        .select('id, rate, sample_count')
-        .eq('builder_id', quote.builder_id)
-        .eq('line_item_key', key)
-        .maybeSingle()
-
-      if (existing) {
-        const nextCount = existing.sample_count + 1
-        const nextRate = round2(
-          (existing.rate * existing.sample_count + item.rate) / nextCount
-        )
-        await supabase
-          .from('builder_learned_rates')
-          .update({ rate: nextRate, sample_count: nextCount, updated_at: new Date().toISOString() })
-          .eq('id', existing.id)
-      } else {
-        await supabase.from('builder_learned_rates').insert({
-          builder_id: quote.builder_id,
-          line_item_key: key,
-          rate: item.rate,
-          unit: item.unit,
-          sample_count: 1,
+        const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
+          p_builder_id: quote.builder_id,
+          p_line_item_key: key,
+          p_rate: item.rate,
+          p_unit: item.unit,
         })
-      }
-    }
+        if (rpcError) console.error('upsert_learned_rate failed:', rpcError.message)
+      })
+    )
   } catch (err) {
     console.error('captureLearnedRates failed:', err)
   }
