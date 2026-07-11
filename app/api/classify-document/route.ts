@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 export interface ClassificationResult {
   type: 'plan' | 'receipt' | 'supplier_quote' | 'variation_request' | 'certificate' | 'contract' | 'photo' | 'unknown'
@@ -107,6 +108,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const builderId = await getAuthenticatedBuilderId()
   if (!builderId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const rateLimit = await checkRateLimit(`classify-document:${builderId}`, { limit: 30, windowSeconds: 60 })
+  if (!rateLimit.allowed) {
+    return NextResponse.json({ error: 'Too many requests — please slow down and try again shortly.' }, { status: 429 })
   }
 
   let formData: FormData

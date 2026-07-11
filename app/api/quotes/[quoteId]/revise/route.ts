@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import { DEMO_QUOTE } from '@/lib/quote-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { recomputeQuoteTotals } from '@/lib/pricing'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -24,7 +26,7 @@ export async function POST(
 
   const { quoteId } = params
 
-  if (quoteId === 'demo-quote-id') {
+  if (isDemoMode() || quoteId === 'demo-quote-id') {
     // Demo mode: return a mock new version
     const newVersion = DEMO_QUOTE.version + 1
     const newQuoteId = `demo-quote-v${newVersion}-${Date.now()}`
@@ -37,10 +39,76 @@ export async function POST(
     return NextResponse.json(response, { status: 201 })
   }
 
-  // Real Supabase path:
-  // 1. Fetch existing quote and line items
-  // 2. Insert new quote row with version = existing.version + 1, status = 'draft'
-  // 3. Copy all line items to new quote
-  // 4. Return { new_quote_id, version }
-  return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+  // Real Supabase path: fetch the existing quote + line items, insert a new
+  // quote row one version up, copy every line item across, and recompute
+  // totals on the new quote.
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!supabaseUrl || !serviceRoleKey) {
+    return NextResponse.json({ error: 'Not configured' }, { status: 503 })
+  }
+
+  try {
+    const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+
+    const { data: existingQuote, error: quoteErr } = await supabase
+      .from('quotes')
+      .select('*')
+      .eq('id', quoteId)
+      .eq('builder_id', builderId)
+      .single()
+
+    if (quoteErr || !existingQuote) {
+      return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
+
+    const { data: existingItems, error: itemsErr } = await supabase
+      .from('quote_line_items')
+      .select('*')
+      .eq('quote_id', quoteId)
+
+    if (itemsErr) {
+      console.error('[quotes/revise] line item fetch failed:', itemsErr.message)
+      return NextResponse.json({ error: 'Failed to load quote line items' }, { status: 500 })
+    }
+
+    const newVersion = (existingQuote.version ?? 1) + 1
+
+    const {
+      id: _oldId, created_at: _oldCreatedAt, sent_at: _sentAt, approved_at: _approvedAt,
+      version: _oldVersion, status: _oldStatus, ...quoteFields
+    } = existingQuote as Record<string, unknown>
+
+    const { data: newQuote, error: insertQuoteErr } = await supabase
+      .from('quotes')
+      .insert({ ...quoteFields, version: newVersion, status: 'draft', sent_at: null, approved_at: null })
+      .select('id, version')
+      .single()
+
+    if (insertQuoteErr || !newQuote) {
+      console.error('[quotes/revise] quote insert failed:', insertQuoteErr?.message)
+      return NextResponse.json({ error: 'Failed to create revised quote' }, { status: 500 })
+    }
+
+    if ((existingItems ?? []).length > 0) {
+      const newLineItems = (existingItems ?? []).map((item: Record<string, unknown>) => {
+        const { id: _itemId, quote_id: _itemQuoteId, created_at: _itemCreatedAt, ...itemFields } = item
+        return { ...itemFields, quote_id: newQuote.id }
+      })
+
+      const { error: insertItemsErr } = await supabase.from('quote_line_items').insert(newLineItems)
+      if (insertItemsErr) {
+        console.error('[quotes/revise] line item copy failed:', insertItemsErr.message)
+        return NextResponse.json({ error: 'Failed to copy quote line items' }, { status: 500 })
+      }
+    }
+
+    await recomputeQuoteTotals(supabase, newQuote.id)
+
+    const response: ReviseResponse = { new_quote_id: newQuote.id, version: newQuote.version }
+    return NextResponse.json(response, { status: 201 })
+  } catch (err) {
+    console.error('[quotes/revise] error:', err)
+    return NextResponse.json({ error: 'Failed to create revised quote' }, { status: 500 })
+  }
 }

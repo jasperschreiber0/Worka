@@ -30,31 +30,37 @@ function SiteCard({ job }: { job: DemoWorkerJob }) {
       </div>
 
       <div className="px-4 py-4 space-y-3">
-        {/* Start time + milestone */}
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <svg style={{ color: 'var(--text-tertiary)' }} className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-            </svg>
-            <span style={{ color: 'var(--text-primary)' }} className="text-sm font-semibold">Start {job.start_time}</span>
+        {/* Start time + milestone week — only shown when known */}
+        {(job.start_time || job.milestone_week) && (
+          <div className="flex items-center gap-4">
+            {job.start_time && (
+              <div className="flex items-center gap-2">
+                <svg style={{ color: 'var(--text-tertiary)' }} className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+                <span style={{ color: 'var(--text-primary)' }} className="text-sm font-semibold">Start {job.start_time}</span>
+              </div>
+            )}
+            {job.start_time && job.milestone_week && <span style={{ color: 'var(--bg-border)' }}>|</span>}
+            {job.milestone_week && <span style={{ color: 'var(--text-secondary)' }} className="text-sm">{job.milestone_week}</span>}
           </div>
-          <span style={{ color: 'var(--bg-border)' }}>|</span>
-          <span style={{ color: 'var(--text-secondary)' }} className="text-sm">{job.milestone_week}</span>
-        </div>
+        )}
 
-        {/* Milestone */}
-        <div className="flex items-center justify-between">
-          <div>
-            <p style={{ color: 'var(--text-tertiary)' }} className="text-xs mb-0.5">Current milestone</p>
-            <p style={{ color: 'var(--text-primary)' }} className="text-sm font-semibold">{job.milestone_label}</p>
+        {/* Milestone — only shown once the job has one */}
+        {job.milestone_label && (
+          <div className="flex items-center justify-between">
+            <div>
+              <p style={{ color: 'var(--text-tertiary)' }} className="text-xs mb-0.5">Current milestone</p>
+              <p style={{ color: 'var(--text-primary)' }} className="text-sm font-semibold">{job.milestone_label}</p>
+            </div>
+            <span
+              style={{ ...urgencyStyle(job.milestone_due_urgency) }}
+              className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold"
+            >
+              {job.milestone_due_display}
+            </span>
           </div>
-          <span
-            style={{ ...urgencyStyle(job.milestone_due_urgency) }}
-            className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold"
-          >
-            {job.milestone_due_display}
-          </span>
-        </div>
+        )}
 
         {/* Map link */}
         <a
@@ -148,19 +154,21 @@ function QuickActions({ job }: { job: DemoWorkerJob }) {
     <div style={{ backgroundColor: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }} className="rounded-2xl shadow-sm px-4 py-4">
       <p style={{ color: 'var(--text-primary)' }} className="text-sm font-bold mb-3">Quick actions</p>
       <div className="grid grid-cols-3 gap-3">
-        {/* Call builder */}
-        <a
-          href={`tel:${job.builder_phone}`}
-          className="flex flex-col items-center gap-2 py-3 px-2 rounded-xl hover:opacity-80 transition-opacity no-underline"
-          style={{ backgroundColor: 'rgba(255,107,43,0.1)', border: '1px solid rgba(255,107,43,0.2)' }}
-        >
-          <svg style={{ color: 'var(--orange-primary)' }} className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 0 0 2.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 0 1-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 0 0-1.091-.852H4.5A2.25 2.25 0 0 0 2.25 4.5v2.25Z" />
-          </svg>
-          <span style={{ color: 'var(--orange-primary)' }} className="text-xs font-semibold text-center leading-tight">
-            Call {job.builder_name.split(' ')[0]}
-          </span>
-        </a>
+        {/* Call builder — only shown when a phone number is on file */}
+        {job.builder_phone && (
+          <a
+            href={`tel:${job.builder_phone}`}
+            className="flex flex-col items-center gap-2 py-3 px-2 rounded-xl hover:opacity-80 transition-opacity no-underline"
+            style={{ backgroundColor: 'rgba(255,107,43,0.1)', border: '1px solid rgba(255,107,43,0.2)' }}
+          >
+            <svg style={{ color: 'var(--orange-primary)' }} className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 0 0 2.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 0 1-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 0 0-1.091-.852H4.5A2.25 2.25 0 0 0 2.25 4.5v2.25Z" />
+            </svg>
+            <span style={{ color: 'var(--orange-primary)' }} className="text-xs font-semibold text-center leading-tight">
+              Call {job.builder_name.split(' ')[0]}
+            </span>
+          </a>
+        )}
 
         {/* Upload photo */}
         <button

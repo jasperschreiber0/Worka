@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 
@@ -273,6 +274,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
     const builderId = await getAuthenticatedBuilderId()
     if (!builderId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    const rateLimit = await checkRateLimit(`email-draft:${builderId}`, { limit: 30, windowSeconds: 60 })
+    if (!rateLimit.allowed) {
+      return NextResponse.json({ error: 'Too many requests — please slow down and try again shortly.' }, { status: 429 })
     }
 
     const body = (await request.json()) as EmailDraftRequestBody

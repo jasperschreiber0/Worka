@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useParams } from 'next/navigation'
+import { useParams, useSearchParams } from 'next/navigation'
 
 interface VariationDetail {
   id: string
@@ -29,6 +29,8 @@ function formatCurrency(amount: number): string {
 export default function VariationApprovalPage() {
   const params = useParams<{ variationId: string }>()
   const variationId = params.variationId
+  const searchParams = useSearchParams()
+  const shareToken = searchParams.get('t')
 
   const [variation, setVariation] = useState<VariationDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -40,11 +42,12 @@ export default function VariationApprovalPage() {
   const [pendingAction, setPendingAction] = useState<'approved' | 'rejected' | null>(null)
 
   useEffect(() => {
-    fetch(`/api/variations/${variationId}`)
+    const qs = shareToken ? `?t=${encodeURIComponent(shareToken)}` : ''
+    fetch(`/api/variations/${variationId}${qs}`)
       .then(r => r.json())
       .then((data: { variation?: VariationDetail; error?: string }) => {
         if (data.error || !data.variation) {
-          setError('Variation not found.')
+          setError('This link is invalid or has expired.')
         } else {
           setVariation(data.variation)
           if (data.variation.status === 'approved') setResult('approved')
@@ -53,7 +56,7 @@ export default function VariationApprovalPage() {
       })
       .catch(() => setError('Could not load variation details.'))
       .finally(() => setLoading(false))
-  }, [variationId])
+  }, [variationId, shareToken])
 
   async function submitDecision(decision: 'approved' | 'rejected', name: string) {
     setActionLoading(true)
@@ -61,13 +64,16 @@ export default function VariationApprovalPage() {
       const res = await fetch(`/api/variations/${variationId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: decision, approved_by: name || 'Client' }),
+        body: JSON.stringify({ status: decision, approved_by: name || 'Client', t: shareToken }),
       })
-      if (!res.ok) throw new Error('Failed')
+      if (!res.ok) {
+        const data = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(data?.error ?? 'Failed')
+      }
       setResult(decision)
       setShowNamePrompt(false)
-    } catch {
-      setError('Something went wrong. Please try again.')
+    } catch (err) {
+      setError(err instanceof Error && err.message !== 'Failed' ? err.message : 'Something went wrong. Please try again.')
     } finally {
       setActionLoading(false)
     }

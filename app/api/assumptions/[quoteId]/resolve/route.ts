@@ -260,26 +260,12 @@ export async function POST(
     }
 
     return NextResponse.json(response)
-  } catch {
-    // DB unavailable — fall through to demo handler
-    const assumption = DEMO_ASSUMPTIONS.find((a) => a.id === assumption_id)
-    if (!assumption) {
-      return NextResponse.json({ error: 'Assumption not found' }, { status: 404 })
-    }
-    demoResolutionState.set(assumption_id, {
-      resolution_type: resolution,
-      adjusted_quantity,
-      adjusted_unit,
-    })
-    const allResolved = DEMO_ASSUMPTIONS.every((a) => {
-      const state = demoResolutionState.get(a.id)
-      return state !== undefined && state.resolution_type !== 'unresolved'
-    })
-    return NextResponse.json({
-      resolved: true,
-      assumption: { id: assumption_id, resolution_type: resolution, resolved_at: new Date().toISOString(), resolved_by: builder_id },
-      all_resolved: allResolved,
-      quote_status: allResolved ? 'pending_review' : 'draft',
-    } satisfies ResolveResponse)
+  } catch (err) {
+    // Real mode was configured, so this is a genuine failure — surfacing it
+    // as a demo-mode "success" would tell the builder an assumption was
+    // resolved (and possibly the quote advanced to pending_review) when
+    // nothing was actually written to the database.
+    console.error('[assumptions/resolve] error:', err)
+    return NextResponse.json({ error: 'Failed to resolve assumption — please try again.' }, { status: 500 })
   }
 }

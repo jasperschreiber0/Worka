@@ -729,7 +729,8 @@ export default function ChatInterface({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ builder_id: builderId }),
       })
-      const data = await res.json() as { new_quote_id: string; version: number }
+      const data = await res.json() as { new_quote_id?: string; version?: number; error?: string }
+      if (!res.ok || !data.version) throw new Error(data.error ?? 'Failed to create revised quote')
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
@@ -741,7 +742,7 @@ export default function ChatInterface({
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
-        content: 'Quote revision created. Resolve any new items before sending.',
+        content: "Couldn't create a revised quote — please try again in a moment.",
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])

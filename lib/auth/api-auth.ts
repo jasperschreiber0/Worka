@@ -15,7 +15,11 @@ export function isDemoMode(): boolean {
  * Accepts auth in two forms:
  *   1. Cookie session (browser requests via the app)
  *   2. Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY> (internal server-to-server calls,
- *      e.g. the intake worker route calling scope-hints)
+ *      e.g. the intake worker route calling scope-hints), paired with an
+ *      `x-worka-builder-id` header declaring which real builder the call is on
+ *      behalf of. The header is only trusted here because the caller has
+ *      already proven it holds the service-role secret — it is never read
+ *      from a client-facing request, so it can't be spoofed by a browser.
  *
  * Returns null when no authenticated session exists — routes must respond 401.
  */
@@ -26,9 +30,10 @@ export async function getAuthenticatedBuilderId(): Promise<string | null> {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (serviceRoleKey) {
     try {
-      const authHeader = headers().get('authorization') ?? ''
+      const hdrs = headers()
+      const authHeader = hdrs.get('authorization') ?? ''
       if (authHeader === `Bearer ${serviceRoleKey}`) {
-        return DEMO_BUILDER_ID
+        return hdrs.get('x-worka-builder-id') || DEMO_BUILDER_ID
       }
     } catch {
       // headers() can throw outside a request context — ignore

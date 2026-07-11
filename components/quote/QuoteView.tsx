@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import { applyMargin } from '@/lib/pricing'
 import SendQuoteModal from './SendQuoteModal'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -224,7 +225,10 @@ function LineItemRow({ item }: LineItemRowProps) {
   const isUnresolved = item.is_assumption && item.assumption_status === 'unresolved'
   const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
 
-  const sellTotal = item.total !== null ? Math.round(item.total * (1 + item.margin_pct)) : null
+  // item.margin_pct is stored as a 0-1 fraction (migration 012); applyMargin
+  // expects a 0-100 percent — convert rather than reimplementing the markup
+  // formula inline, so this and the quote-level summary never drift apart.
+  const sellTotal = item.total !== null ? Math.round(applyMargin(item.total, item.margin_pct * 100)) : null
 
   return (
     <div
@@ -852,20 +856,14 @@ function QuoteViewInner({
     onExportPdf(quoteId)
   }, [quoteId, onExportPdf])
 
-  // Revise — POST then close and notify parent
-  const handleReviseClick = useCallback(async (_qId: string) => {
-    try {
-      await fetch(`/api/quotes/${quoteId}/revise`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ builder_id: builderId }),
-      })
-    } catch {
-      // Best-effort — parent will handle message regardless
-    }
+  // Revise — close and let the parent (ChatInterface.handleQuoteViewRevise)
+  // make the single POST to /revise and report the outcome. This component
+  // used to ALSO fire its own POST here, which meant every click created
+  // two revised quote versions instead of one.
+  const handleReviseClick = useCallback((_qId: string) => {
     onRevise(quoteId)
     handleClose()
-  }, [quoteId, builderId, onRevise, handleClose])
+  }, [quoteId, onRevise, handleClose])
 
   const toggleCategory = useCallback((categoryId: number) => {
     setExpandedCategories((prev) => {

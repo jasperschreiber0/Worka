@@ -3,6 +3,11 @@ import { createClient } from '@supabase/supabase-js'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { recordProofEvent } from '@/lib/proof'
+
+function formatAud(amount: number): string {
+  return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
+}
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
@@ -95,8 +100,13 @@ export async function GET(request: NextRequest): Promise<NextResponse<Variations
 // ─── POST /api/variations ─────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const denied = requirePermission(request, 'approve_variation')
+  const denied = await requirePermission(request, 'approve_variation')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
+  // builder_id always comes from the authenticated session — never from the
+  // request body — so a caller can't create a variation under a fake identity.
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   let body: CreateVariationBody
   try {
@@ -105,10 +115,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { builder_id, job_id, title, description, amount } = body
-  if (!builder_id || !job_id || !title || !description || amount === undefined) {
+  const { job_id, title, description, amount } = body
+  if (!job_id || !title || !description || amount === undefined) {
     return NextResponse.json(
-      { error: 'builder_id, job_id, title, description, and amount are required' },
+      { error: 'job_id, title, description, and amount are required' },
       { status: 400 }
     )
   }
@@ -127,9 +137,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // Verify job belongs to this builder
   const { data: jobRow } = await supabase
     .from('jobs')
-    .select('id')
+    .select('id, address')
     .eq('id', job_id)
-    .eq('builder_id', builder_id)
+    .eq('builder_id', builderId)
     .single()
 
   if (!jobRow) {
@@ -140,7 +150,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .from('variations')
     .insert({
       job_id,
-      builder_id,
+      builder_id: builderId,
       title,
       description,
       amount,
@@ -155,6 +165,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     console.error('[POST /api/variations]', error)
     return NextResponse.json({ error: error?.message ?? 'Failed to create variation' }, { status: 500 })
   }
+
+  await recordProofEvent({
+    jobId: job_id,
+    builderId,
+    eventType: 'variation_submitted',
+    description: `Variation raised: ${title} (${formatAud(amount)})${jobRow.address ? ` — ${jobRow.address}` : ''}`,
+    metadata: { variation_id: variation.id, amount },
+  })
 
   return NextResponse.json({ variation }, { status: 201 })
 }

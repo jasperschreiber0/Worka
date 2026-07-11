@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { BuilderEstimationProfile } from '@/lib/types/estimation.types'
 import { DEMO_BUILDER_PROFILE } from '@/lib/estimation-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── GET /api/estimation/profile?builder_id=xxx ───────────────────────────────
 
@@ -9,8 +9,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const builderId = await getAuthenticatedBuilderId()
   if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const isDemo = !process.env.NEXT_PUBLIC_SUPABASE_URL
-  if (isDemo) {
+  if (isDemoMode()) {
     return NextResponse.json({ profile: DEMO_BUILDER_PROFILE })
   }
 
@@ -46,25 +45,32 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ profile: data as BuilderEstimationProfile })
   } catch (err) {
+    // Real mode was configured, so this is a genuine failure — falling back
+    // to DEMO_BUILDER_PROFILE would show a real builder fabricated settings
+    // (typical margin, contingency, etc.) as if they were their own.
     console.error('[estimation/profile]', err)
-    return NextResponse.json({ profile: DEMO_BUILDER_PROFILE })
+    return NextResponse.json({ error: 'Failed to load profile' }, { status: 500 })
   }
 }
 
 // ─── PATCH /api/estimation/profile — update profile after quote adjustment ────
 
 export async function PATCH(request: NextRequest): Promise<NextResponse> {
-  let body: Partial<BuilderEstimationProfile> & { builder_id: string }
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  let body: Partial<BuilderEstimationProfile> & { builder_id?: string }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { builder_id, ...updates } = body
-  if (!builder_id) return NextResponse.json({ error: 'builder_id required' }, { status: 400 })
+  // builder_id is derived from the session, never trusted from the body —
+  // ignore any client-supplied value so a caller can't rewrite another builder's profile.
+  const { builder_id: _ignoredBuilderId, ...updates } = body
 
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+  if (isDemoMode()) {
     return NextResponse.json({ ok: true, demo: true })
   }
 
@@ -77,7 +83,7 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
 
     await supabase
       .from('builder_estimation_profiles')
-      .upsert({ builder_id, ...updates, updated_at: new Date().toISOString() }, { onConflict: 'builder_id' })
+      .upsert({ builder_id: builderId, ...updates, updated_at: new Date().toISOString() }, { onConflict: 'builder_id' })
 
     return NextResponse.json({ ok: true })
   } catch (err) {

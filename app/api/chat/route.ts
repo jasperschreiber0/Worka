@@ -14,6 +14,7 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -953,13 +954,38 @@ async function createJob(params: CreateJobParams): Promise<CreateJobResult> {
       if (!error && jobRow) {
         return { job: jobRow as Job, is_duplicate: false }
       }
-      // Fall through to demo mode if insert failed
-    } catch {
-      // DB unavailable — fall through to demo mode
+
+      // Unique-violation (23505) means a concurrent request won the race for
+      // this exact address — re-fetch and return it as the duplicate instead
+      // of surfacing an insert error.
+      if (error?.code === '23505') {
+        const { data: winner } = await supabase
+          .from('jobs')
+          .select('*')
+          .eq('builder_id', builder_id)
+          .neq('status', 'archived')
+          .ilike('address', address.trim())
+          .limit(1)
+          .maybeSingle()
+        if (winner) {
+          return { job: winner as Job, is_duplicate: true, existing_job: winner as Job }
+        }
+      }
+
+      // A real insert failure must surface as a real error — the caller
+      // already shows "Couldn't save the job right now" on a thrown error.
+      // Silently falling through to a fabricated demo job here would tell
+      // the builder a job was created when nothing was actually written.
+      throw new Error(error?.message ?? 'Job insert failed')
+    } catch (err) {
+      // Supabase was configured, so this is a genuine failure, not a
+      // "demo mode" situation — rethrow instead of masking it.
+      console.error('[createJob] Supabase error:', err)
+      throw err
     }
   }
 
-  // Demo mode
+  // Demo mode (only reached when Supabase isn't configured at all)
   if (!force_create) {
     const duplicate = findSeedDuplicate(address)
     if (duplicate) {
@@ -1916,22 +1942,29 @@ async function orchestrateActions(
 
         // If no job was specified or resolved, ask the builder to pick one
         if (!job_address && !ctx.resolved_job) {
-          // Build job list for the picker
+          // Build job list for the picker. Real mode: on a genuine query
+          // failure, show an empty list rather than fabricated demo jobs —
+          // a builder picking "Fitzroy" from a fake list would silently
+          // assign the task to a job that doesn't exist in their account.
           const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
           const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
           let pickerJobs: JobListItem[] = DEMO_JOB_LIST
           if (sbUrl && sbKey) {
+            pickerJobs = []
             try {
               const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
-              const { data } = await sb
+              const { data, error } = await sb
                 .from('jobs')
                 .select('id, address, status')
                 .eq('builder_id', ctx.builder_id)
                 .in('status', ['quoting', 'quoted', 'active'])
                 .order('created_at', { ascending: false })
                 .limit(8)
-              if (data?.length) pickerJobs = (data as Array<{ id: string; address: string; status: string }>).map(j => ({ id: j.id, address: j.address, status: j.status }))
-            } catch { /* fall through to demo list */ }
+              if (error) console.error('[pick_job_for_task] query failed:', error.message)
+              else pickerJobs = (data as Array<{ id: string; address: string; status: string }>).map(j => ({ id: j.id, address: j.address, status: j.status }))
+            } catch (err) {
+              console.error('[pick_job_for_task] error:', err)
+            }
           }
           events.push({ type: 'pick_job_for_task', task_description: description, jobs: pickerJobs } as PickJobForTaskEvent)
           // No message — the chips at the bottom handle everything
@@ -2916,6 +2949,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
         { status: 401 }
       )
     }
+
+    const rateLimit = await checkRateLimit(`chat:${builderId}`, { limit: 60, windowSeconds: 60 })
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { intent: 'unknown', message: 'Too many messages — please slow down and try again shortly.' },
+        { status: 429 }
+      )
+    }
+
     const forceCreate = body.force_create === true
 
     if (!message) {

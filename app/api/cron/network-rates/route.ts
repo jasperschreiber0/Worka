@@ -55,14 +55,20 @@ function aggregate(key: string, state: string | null, rates: number[]): Aggregat
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const isRealMode = Boolean(supabaseUrl && supabaseKey)
+
   // ── Auth guard ─────────────────────────────────────────────────────────────
+  // Fail closed: in real mode (real builders' learned rates get aggregated
+  // and written), a missing CRON_SECRET means no run — never fall open.
   const cronSecret = process.env.CRON_SECRET
+  if (isRealMode && !cronSecret) {
+    return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
+  }
   if (cronSecret && request.headers.get('authorization') !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
   if (!supabaseUrl || !supabaseKey) {
     return NextResponse.json({ aggregated: 0, skipped: 'demo mode — no Supabase configured' })
@@ -114,40 +120,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     })
 
     const now = new Date().toISOString()
-    let written = 0
 
-    // State-scoped rows can use upsert on the (line_item_key, state) constraint.
-    // National rows have state = NULL, which never conflicts in Postgres, so
-    // they need an explicit lookup-then-write.
-    for (const agg of aggregates) {
-      if (agg.state !== null) {
-        const { error: upsertErr } = await supabase
-          .from('network_rate_aggregates')
-          .upsert({ ...agg, updated_at: now }, { onConflict: 'line_item_key,state' })
-        if (!upsertErr) written++
-        continue
-      }
+    // The (line_item_key, state) constraint is NULLS NOT DISTINCT (migration
+    // 020), so a single atomic upsert covers both state-scoped rows and
+    // national (state = NULL) rows — no more manual lookup-then-write, and
+    // no race between overlapping cron runs.
+    const { error: upsertErr, count } = await supabase
+      .from('network_rate_aggregates')
+      .upsert(
+        aggregates.map((agg) => ({ ...agg, updated_at: now })),
+        { onConflict: 'line_item_key,state', count: 'exact' }
+      )
 
-      const { data: existing } = await supabase
-        .from('network_rate_aggregates')
-        .select('id')
-        .eq('line_item_key', agg.line_item_key)
-        .is('state', null)
-        .maybeSingle()
-
-      if (existing) {
-        const { error: updateErr } = await supabase
-          .from('network_rate_aggregates')
-          .update({ ...agg, updated_at: now })
-          .eq('id', existing.id)
-        if (!updateErr) written++
-      } else {
-        const { error: insertErr } = await supabase
-          .from('network_rate_aggregates')
-          .insert({ ...agg, updated_at: now })
-        if (!insertErr) written++
-      }
+    if (upsertErr) {
+      console.error('[cron/network-rates] upsert failed:', upsertErr.message)
+      return NextResponse.json({ error: 'Failed to write aggregates' }, { status: 500 })
     }
+
+    const written = count ?? aggregates.length
 
     return NextResponse.json({
       aggregated: written,

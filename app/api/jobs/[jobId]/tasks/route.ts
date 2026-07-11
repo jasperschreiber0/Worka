@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { JobTask } from '@/lib/job-snapshot-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // In-memory store for demo tasks (keyed by jobId)
 const DEMO_TASKS: Record<string, JobTask[]> = {}
@@ -22,9 +22,8 @@ export async function GET(
 
   const { jobId } = params
 
-  const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
 
-  if (isDemoMode) {
+  if (isDemoMode()) {
     return NextResponse.json({ tasks: getDemoTasks(jobId) })
   }
 
@@ -75,12 +74,11 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
 
   // ── Complete / reopen action ──────────────────────────────────────────────
   if ('action' in body && (body.action === 'complete' || body.action === 'reopen')) {
     const newStatus = body.action === 'complete' ? 'done' : 'open'
-    if (isDemoMode) {
+    if (isDemoMode()) {
       if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
       DEMO_TASKS[jobId] = DEMO_TASKS[jobId].map((t) =>
         t.id === body.task_id ? { ...t, status: newStatus } : t
@@ -97,9 +95,16 @@ export async function POST(
         .update({ status: newStatus })
         .eq('id', body.task_id)
         .eq('job_id', jobId)
-      if (error) throw error
-    } catch {
-      // DB unavailable — in-memory fallback keeps client state correct
+      if (error) {
+        console.error('[jobs/[jobId]/tasks] update failed:', error.message)
+        return NextResponse.json({ error: 'Failed to update task' }, { status: 500 })
+      }
+    } catch (err) {
+      // Real mode was configured, so this is a genuine failure — silently
+      // "succeeding" would tell the builder a task was completed/reopened
+      // when nothing was actually written.
+      console.error('[jobs/[jobId]/tasks] error:', err)
+      return NextResponse.json({ error: 'Failed to update task' }, { status: 500 })
     }
     return NextResponse.json({ ok: true })
   }
@@ -119,7 +124,7 @@ export async function POST(
     created_at: 'just now',
   }
 
-  if (isDemoMode) {
+  if (isDemoMode()) {
     if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
     DEMO_TASKS[jobId].unshift(newTask)
     return NextResponse.json({ task: newTask }, { status: 201 })
@@ -133,6 +138,7 @@ export async function POST(
       .from('job_tasks')
       .insert({
         job_id: jobId,
+        builder_id: builderId,
         description: createBody.description.trim(),
         assigned_worker_id: createBody.assigned_worker_id ?? null,
         assigned_to: createBody.assigned_to ?? null,
@@ -140,15 +146,18 @@ export async function POST(
       })
       .select('id, description, assigned_to, assigned_worker_id, status, created_at')
       .single()
-    if (!error && data) return NextResponse.json({ task: data }, { status: 201 })
-  } catch {
-    // fall through to in-memory
+    if (error || !data) {
+      console.error('[jobs/[jobId]/tasks] insert failed:', error?.message)
+      return NextResponse.json({ error: 'Failed to create task' }, { status: 500 })
+    }
+    return NextResponse.json({ task: data }, { status: 201 })
+  } catch (err) {
+    // Real mode was configured, so this is a genuine failure — falling
+    // back to the in-memory store would tell the builder a task was
+    // created for a real job when nothing was actually written.
+    console.error('[jobs/[jobId]/tasks] error:', err)
+    return NextResponse.json({ error: 'Failed to create task' }, { status: 500 })
   }
-
-  // DB unavailable — store in-memory so the session stays consistent
-  if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
-  DEMO_TASKS[jobId].unshift(newTask)
-  return NextResponse.json({ task: newTask }, { status: 201 })
 }
 
 // ─── Ownership guard ──────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode as isDemo } from '@/lib/auth/api-auth'
 import { DEMO_PROJECT_MEMORY } from '@/lib/estimation-demo'
 
 // ─── Estimation history — the corpus behind the parametric estimator ──────────
@@ -22,10 +22,6 @@ interface HistoryRecord {
   project_summary: string | null
   total_cost: number | null
   cost_per_m2: number | null
-}
-
-function isDemo(): boolean {
-  return !process.env.NEXT_PUBLIC_SUPABASE_URL
 }
 
 function withPerM2(r: Omit<HistoryRecord, 'cost_per_m2'>): HistoryRecord {

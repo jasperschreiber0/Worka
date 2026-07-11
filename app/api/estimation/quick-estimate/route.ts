@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import type { ProjectMetadata, SimilarProject } from '@/lib/types/estimation.types'
 import { DEMO_PROJECT_MEMORY, DEMO_BUILDER_PROFILE } from '@/lib/estimation-demo'
 import { scoreProject, estimateFromComparables } from '@/lib/estimation-engine'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── POST /api/estimation/quick-estimate ─────────────────────────────────────
 // Parametric estimate from the builder's own history. Input: high-level job
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     suburb: pm.suburb ?? null,
   }
 
-  const isDemo = !process.env.NEXT_PUBLIC_SUPABASE_URL
+  const isDemo = isDemoMode()
 
   // ── Gather comparables + margin ─────────────────────────────────────────────
   let comparables: SimilarProject[] = []

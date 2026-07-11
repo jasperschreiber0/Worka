@@ -1,7 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import { DEMO_VARIATIONS } from '@/lib/variations-demo'
 import { recordProofEvent } from '@/lib/proof'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+
+async function findVariation(variationId: string, builderId: string): Promise<{ job_id: string; title: string } | null> {
+  if (isDemoMode()) {
+    const v = DEMO_VARIATIONS.find((v) => v.id === variationId && v.builder_id === builderId)
+    return v ? { job_id: v.job_id, title: v.title } : null
+  }
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!supabaseUrl || !serviceRoleKey) return null
+
+  const sb = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+  const { data } = await sb
+    .from('variations')
+    .select('job_id, title')
+    .eq('id', variationId)
+    .eq('builder_id', builderId)
+    .single()
+
+  return data as { job_id: string; title: string } | null
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,7 +70,7 @@ export async function POST(
   }
 
   // Ownership check before anything leaves the building
-  const variation = DEMO_VARIATIONS.find((v) => v.id === variationId && v.builder_id === builderId)
+  const variation = await findVariation(variationId, builderId)
   if (!variation) {
     return NextResponse.json({ error: 'Variation not found' }, { status: 404 })
   }
@@ -85,9 +107,25 @@ export async function POST(
     }
   }
 
-  // Log to communication_history (demo: just acknowledge)
-  // In live mode, insert into Supabase communication_history table:
-  // await supabase.from('communication_history').insert({ ... })
+  if (!isDemoMode()) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (supabaseUrl && serviceRoleKey) {
+      const sb = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+      const { error: commsError } = await sb.from('communication_history').insert({
+        builder_id: builderId,
+        job_id: variation.job_id,
+        direction: 'outbound',
+        channel: 'email',
+        to_address: to,
+        subject,
+        body: emailBody,
+        timestamp: sentAt,
+        linked_variation_id: variationId,
+      })
+      if (commsError) console.error('[send-notification] communication_history insert failed:', commsError)
+    }
+  }
 
   // WorkA Proof: client notification is the evidence that matters in a
   // payment dispute — record that it went out, to whom, and when

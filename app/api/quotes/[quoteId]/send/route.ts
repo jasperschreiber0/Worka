@@ -134,6 +134,18 @@ export async function POST(
 
     if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
 
+    // This status guard used to live after this branch's `return` below,
+    // making it dead code for every real quote — any status could generate
+    // a send draft. Checked here instead, before the draft is built.
+    if ((quoteRow as { status: string }).status !== 'pending_review') {
+      return NextResponse.json(
+        {
+          error: `Quote cannot be sent — current status is '${(quoteRow as { status: string }).status}'. Only quotes in 'pending_review' can be sent.`,
+        },
+        { status: 422 }
+      )
+    }
+
     type QuoteRow = { id: string; job_id: string; status: string; total_cost: number; margin_pct: number; confidence_score: number; version: number; created_at: string }
     type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null }
     type JobRow = { address: string; client_id: string | null }
@@ -202,7 +214,8 @@ export async function POST(
     return NextResponse.json({ draft: draftDb, requires_confirmation: true } as SendResponse)
   }
 
-  // ── Verify quote is in pending_review state ───────────────────────────────
+  // ── Verify quote is in pending_review state (demo-mode path only — the
+  // real-mode branch above returns earlier and checks this itself) ─────────
 
   if (quote.status !== 'pending_review') {
     return NextResponse.json(

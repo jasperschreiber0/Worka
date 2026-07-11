@@ -65,17 +65,19 @@ function StepWelcome({
           <span style={{ color: 'var(--text-primary)' }} className="font-semibold">{invite.role}</span>.
         </p>
 
-        {/* Job card */}
-        <div
-          style={{ backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
-          className="rounded-xl p-4 mb-8"
-        >
-          <p style={{ color: 'var(--text-secondary)' }} className="text-xs font-semibold uppercase tracking-wide mb-1">
-            First job
-          </p>
-          <p style={{ color: 'var(--text-primary)' }} className="text-base font-bold">{invite.job_address}</p>
-          <p style={{ color: 'var(--text-secondary)' }} className="text-sm">{invite.job_ref}</p>
-        </div>
+        {/* Job card — only shown once the builder has actually assigned a job */}
+        {invite.job_address && (
+          <div
+            style={{ backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}
+            className="rounded-xl p-4 mb-8"
+          >
+            <p style={{ color: 'var(--text-secondary)' }} className="text-xs font-semibold uppercase tracking-wide mb-1">
+              First job
+            </p>
+            <p style={{ color: 'var(--text-primary)' }} className="text-base font-bold">{invite.job_address}</p>
+            {invite.job_ref && <p style={{ color: 'var(--text-secondary)' }} className="text-sm">{invite.job_ref}</p>}
+          </div>
+        )}
 
         <div className="mb-6">
           <label htmlFor="worker-name" style={{ color: 'var(--text-primary)' }} className="block text-sm font-medium mb-1">
@@ -106,7 +108,15 @@ function StepWelcome({
 
 // ─── Step 2: Phone ────────────────────────────────────────────────────────────
 
-function StepPhone({ onNext }: { onNext: (phone: string) => void }) {
+function StepPhone({
+  onNext,
+  submitting,
+  error,
+}: {
+  onNext: (phone: string) => void
+  submitting: boolean
+  error: string | null
+}) {
   const [phone, setPhone] = useState('')
 
   return (
@@ -135,21 +145,26 @@ function StepPhone({ onNext }: { onNext: (phone: string) => void }) {
             placeholder="04XX XXX XXX"
           />
         </div>
+
+        {error && (
+          <p className="text-sm mb-4" style={{ color: 'var(--status-red)' }}>{error}</p>
+        )}
       </div>
 
       <div className="space-y-3">
         <button
           type="button"
           onClick={() => onNext(phone.trim())}
-          disabled={!phone.trim()}
+          disabled={!phone.trim() || submitting}
           className="btn-primary w-full py-4 text-base rounded-2xl disabled:opacity-50"
         >
-          Save number
+          {submitting ? 'Saving…' : 'Save number'}
         </button>
         <button
           type="button"
           onClick={() => onNext('')}
-          className="w-full py-3 text-sm transition-opacity hover:opacity-70"
+          disabled={submitting}
+          className="w-full py-3 text-sm transition-opacity hover:opacity-70 disabled:opacity-50"
           style={{ color: 'var(--text-secondary)' }}
         >
           Skip for now
@@ -192,8 +207,14 @@ function StepDone({ name, invite }: { name: string; invite: DemoWorkerInvite }) 
         Welcome to {invite.builder_company}&apos;s crew.
       </p>
       <p style={{ color: 'var(--text-secondary)' }} className="text-sm mb-10">
-        Your first site is{' '}
-        <span style={{ color: 'var(--text-primary)' }} className="font-semibold">{invite.job_address}</span>.
+        {invite.job_address ? (
+          <>
+            Your first site is{' '}
+            <span style={{ color: 'var(--text-primary)' }} className="font-semibold">{invite.job_address}</span>.
+          </>
+        ) : (
+          "Your builder hasn't assigned you to a job yet — check back soon."
+        )}
       </p>
 
       <button
@@ -212,14 +233,33 @@ function StepDone({ name, invite }: { name: string; invite: DemoWorkerInvite }) 
 export default function JoinFlow({ invite }: JoinFlowProps) {
   const [step, setStep] = useState<Step>('welcome')
   const [confirmedName, setConfirmedName] = useState(invite.worker_name)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   function handleWelcomeNext(name: string) {
     setConfirmedName(name)
     setStep('phone')
   }
 
-  function handlePhoneNext(_phone: string) {
-    setStep('done')
+  async function handlePhoneNext(phone: string) {
+    setSubmitting(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/join/${invite.token}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: confirmedName, phone: phone || undefined }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => null) as { error?: string } | null
+        throw new Error(data?.error ?? 'Something went wrong — please try again.')
+      }
+      setStep('done')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong — please try again.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -252,7 +292,7 @@ export default function JoinFlow({ invite }: JoinFlowProps) {
           <StepWelcome invite={invite} onNext={handleWelcomeNext} />
         )}
         {step === 'phone' && (
-          <StepPhone onNext={handlePhoneNext} />
+          <StepPhone onNext={handlePhoneNext} submitting={submitting} error={error} />
         )}
         {step === 'done' && (
           <StepDone name={confirmedName} invite={invite} />

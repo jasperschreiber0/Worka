@@ -2,6 +2,27 @@
 import React, { useState } from 'react'
 import Link from 'next/link'
 import type { EstimateResult, EstimateTradeLine, EstimateComparable } from '@/lib/estimation-engine'
+import type { TradeExplainability } from '@/lib/types/estimation.types'
+import ExplainabilityCard from '@/components/estimation/ExplainabilityCard'
+
+// Adapts the parametric estimator's per-trade breakdown into the shape
+// ExplainabilityCard expects. Confidence and key drivers are the overall
+// estimate's — there's no per-trade breakdown of those yet — and the
+// similar-project range is each trade's share of the overall low/high band.
+function toExplainability(result: EstimateResult): TradeExplainability[] {
+  return result.per_trade.map((t: EstimateTradeLine) => ({
+    trade_category_id: t.trade_category_id,
+    trade_category_name: t.name,
+    estimated_cost: t.amount,
+    confidence: result.confidence,
+    similar_project_range:
+      result.range_low > 0
+        ? `${aud(Math.round(result.range_low * t.pct))}–${aud(Math.round(result.range_high * t.pct))} across ${result.comparable_count} similar project${result.comparable_count !== 1 ? 's' : ''}`
+        : null,
+    historical_accuracy: null,
+    key_drivers: result.drivers,
+  }))
+}
 
 // ─── Options ──────────────────────────────────────────────────────────────────
 
@@ -247,6 +268,12 @@ export default function EstimatePage() {
                 ))}
               </div>
             </div>
+
+            {/* Why these numbers — confidence + drivers per trade */}
+            <ExplainabilityCard
+              explainability={toExplainability(result)}
+              historicalProjectCount={result.comparable_count}
+            />
 
             {/* Comparables */}
             <div className="rounded-2xl p-5" style={{ background: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }}>

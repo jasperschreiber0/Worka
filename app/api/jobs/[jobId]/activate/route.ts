@@ -9,7 +9,7 @@ import {
   type DemoProofEvent,
 } from '@/lib/activation-demo'
 import { recordProofEvent } from '@/lib/proof'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { randomUUID } from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { jobId: string } }
 ): Promise<NextResponse> {
-  const denied = requirePermission(request, 'activate_job')
+  const denied = await requirePermission(request, 'activate_job')
   if (denied) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const builder_id = await getAuthenticatedBuilderId()
@@ -101,20 +101,14 @@ export async function POST(
       )
     }
 
-    const isDemoMode =
-      !process.env.NEXT_PUBLIC_SUPABASE_URL ||
-      process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
-
-    if (isDemoMode) {
+    if (isDemoMode()) {
       return handleDemoActivation(jobId, quote_id, builder_id)
     }
 
-    try {
-      return await handleLiveActivation(jobId, quote_id, builder_id)
-    } catch {
-      // DB unavailable — fall back to demo activation so the flow still works
-      return handleDemoActivation(jobId, quote_id, builder_id)
-    }
+    // A real DB failure here must surface as a real error — silently
+    // falling back to demo activation would tell the builder their job is
+    // active when nothing was actually written.
+    return await handleLiveActivation(jobId, quote_id, builder_id)
   } catch (err) {
     console.error('[/api/jobs/[jobId]/activate] Error:', err)
     return NextResponse.json(
