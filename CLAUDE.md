@@ -32,20 +32,18 @@ AI-powered operations manager for Australian residential builders. Builders type
 
 ---
 
-## The Four-Layer Architecture
+## The Four-Layer Architecture (as documented — read the note below first)
 
-Every feature spans exactly four layers. **Never cross them.**
+The product was designed around four layers, and the Events/Presentation split (Layers 3–4) genuinely holds today. Layers 1–2 do **not** match this description in the current code — read the note directly below before relying on this diagram.
 
 ```
 Layer 1 — Intent (AI)
-  classify-intent edge function
   Input: raw message string
   Output: { intent, entities, confidence }
   Rule: ONLY classifies — no DB queries, no mutations
 
 Layer 2 — Decision (Backend)
-  Supabase edge functions: morning-brief, create-worker, create-job
-  Rule: ONLY backend logic — never calls Claude API (except classify-intent)
+  Backend logic — never calls Claude API (except Layer 1 intent classification)
   Rule: NEVER sends to clients without builder approval
 
 Layer 3 — Events (Schema)
@@ -58,12 +56,16 @@ Layer 4 — Presentation (UI)
   Rule: ONLY renders — never makes business decisions
 ```
 
+**What actually runs Layers 1–2 today:** there is no `classify-intent` edge function — it was never deployed in this repo. Intent classification happens in-process, inside `app/api/chat/route.ts`'s `extractActions()`, which calls the Anthropic SDK directly. `createWorker()` and `createJob()` (also local functions in `chat/route.ts`) do the same job the `create-worker`/`create-job` edge functions were designed for — those two edge functions existed in earlier history but were deleted as dead code (zero callers) rather than wired up, since `chat/route.ts`'s versions are what's actually live. The only edge function genuinely invoked from the app is `morning-brief` (called from `app/api/cron/morning-brief/route.ts`) plus `smooth-responder` (the document-intake pipeline, invoked from `app/api/intake/[fileId]/route.ts`). See "Supabase Edge Functions" below.
+
+In short: Layer 1 and Layer 2 are both implemented inside the same Next.js route file today, not as separate edge functions. If you're re-introducing a real Layer 1/2 split, that's a deliberate architecture change — don't assume the code already works this way.
+
 ---
 
 ## Request Flow: Chat Message → Response
 
-1. `POST /api/chat` (`app/api/chat/route.ts`) receives `{ message, builder_id }`
-2. Route calls the `classify-intent` Supabase edge function (or keyword-matches when Supabase is unavailable)
+1. `POST /api/chat` (`app/api/chat/route.ts`) receives `{ message }`; `builder_id` is derived from the authenticated session (`getAuthenticatedBuilderId()`), never trusted from the request body
+2. `extractActions()` calls the Anthropic SDK directly, in-process, to classify intent (or keyword-matches via `routeDemoMessage()` when `ANTHROPIC_API_KEY`/Supabase is unavailable) — there is no separate `classify-intent` edge function
 3. Intent dispatched to a handler (`handleMorningBrief`, `handleAddWorker`, `handleNewJob`, `handleMarginQuery`, etc.)
 4. Handler returns a `ChatResponse` including an optional `event` field
 5. `ChatInterface` receives the response, renders a `ChatMessage`, and fires UI side-effects based on `event.type`
@@ -111,19 +113,24 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 
 ## Auth
 
-- `middleware.ts` — protects `/chat`, `/settings/*`; redirects to `/login?next=<path>`
+- `middleware.ts` — protects `/chat`, `/settings/*`; redirects to `/login?next=<path>`. **It does not cover `/api/**`** — every API route is responsible for its own auth via `lib/auth/api-auth.ts`.
+- `lib/auth/api-auth.ts` — `getAuthenticatedBuilderId()` (session-cookie or trusted internal service-role-key call) and `isDemoMode()`; this is the auth check nearly every API route uses. Never trust a client-supplied `builder_id` from a request body/query string — always derive it from this function.
 - `lib/auth/get-session.ts` — `getSessionUser()` for server components (cookies-based)
+- `lib/auth/role-guard.ts` — `requirePermission()` / `getRoleFromRequest()` for worker-role-gated actions (`send_quote`, `approve_variation`, `activate_job`, etc.); verifies the bearer token against Supabase Auth (`auth.getUser()`) rather than decoding it unverified.
+- `lib/auth/worker-session.ts` — hashed, expiring session token for the worker portal (workers don't have full Supabase Auth accounts). Issued by `POST /api/join/[token]`, read by `/worker`.
 - `@supabase/auth-helpers-nextjs` v0.10 is the only Supabase auth helper used:
   - Client components: `createClientComponentClient<Database>()`
   - Server components: `createServerComponentClient<Database>({ cookies })`
   - Middleware: `createMiddlewareClient<Database>({ req, res })`
-- `lib/supabase/client.ts` — singleton browser client (use in client components when you don't need cookie-based auth)
-- `lib/supabase/server.ts` — server client + `createAdminClient()` (service role, bypasses RLS — edge functions only)
+  - Route handlers: `createRouteHandlerClient<Database>({ cookies })` (inside `getAuthenticatedBuilderId()`)
+- There is no shared `lib/supabase/client.ts`/`server.ts` singleton — every route constructs its own `createClient(url, serviceRoleKey)` inline. A prior attempt at a shared client (including a `createAdminClient()`) existed but had zero callers and was deleted.
 
 **Public routes (no auth required):**
-- `/approve/variation/[variationId]` — client-facing variation approval portal
+- `/approve/variation/[variationId]` — client-facing variation approval portal. Requires a valid `?t=` share token (see "WorkA Proof" / variations below) — the variation ID alone is not sufficient.
 - `/join/[token]` — worker onboarding
 - `/login`, `/signup`, `/`, `/privacy`, `/terms`
+
+**`/worker` is not in the protected-routes list** (no cookie-based builder session applies there) — it authenticates via the separate worker-session cookie instead. See "Worker / Mobile Portal" below.
 
 ---
 
@@ -159,7 +166,7 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 | `JobSnapshotPanel.tsx` | Right-side split panel. Renders all job data inline (not via tab sub-components). Sections: Client, Financials (hidden when no financial data), Timeline, Next Milestone, Pending Actions, Crew, Tasks, Comms. |
 | `MobileJobSheet.tsx` | Bottom sheet version on mobile — portal-rendered, slide-up animation |
 
-**Note:** `components/job/tabs/` contains OverviewTab, QuoteTab, VariationsTab, InvoicesTab, FilesTab, CommsTab, ProofTab — these files exist but are not imported anywhere. `JobSnapshotPanel.tsx` renders everything inline. The tab files are available for future use if a tabbed layout is adopted.
+**Note:** `components/job/tabs/` contains only `ProofTab.tsx` now — it's genuinely live, rendered inline inside `JobSnapshotPanel.tsx`'s "Proof trail" section. The other six tab files (OverviewTab, QuoteTab, VariationsTab, InvoicesTab, FilesTab, CommsTab) were confirmed dead (zero imports anywhere) and deleted; `JobSnapshotPanel.tsx` renders all of that data inline instead of via a tabbed layout.
 
 ### Quote layer (`components/quote/`)
 | Component | Role |
@@ -167,13 +174,13 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 | `QuoteView.tsx` | Full quote modal — category accordion, PC/PS register, sell price per line, confidence indicators |
 | `SendQuoteModal.tsx` | Send quote confirmation with email preview |
 
-### Dashboard components (`components/dashboard/`)
+### Home page (`components/home/`)
 | Component | Role |
 |-----------|------|
-| `UniversalDropZone.tsx` | Drag-and-drop or click upload (PDF/image) or plain-English question input routing to `/chat?q=...` |
-| `AIRecommendationsSection.tsx` | Recommendation cards |
-| `NeedsAttentionSection.tsx` | Urgent alert tiles |
-| `RecentActivityFeed.tsx` | Activity feed |
+| `HeroUploadZone.tsx` | Public marketing-page (`app/page.tsx`, unauthenticated) drop zone |
+| `QuotesPipeline.tsx` | Public marketing-page pipeline showcase — intentionally static demo content, not fetched from `/api/dashboard` |
+
+**Note:** `components/dashboard/` (`UniversalDropZone.tsx`, `AIRecommendationsSection.tsx`, `NeedsAttentionSection.tsx`, `RecentActivityFeed.tsx`) no longer exists — it was confirmed dead (never imported by any page; `app/page.tsx` uses `components/home/*` instead) and deleted. `GET /api/dashboard` is still live and used (by `ChatInterface.tsx`'s stats bar and `JobSnapshotPanel.tsx`'s empty-state pulse), just not by that component directory.
 
 ### Shell (`app/chat/`)
 - `page.tsx` — async server component; calls `getSessionUser()`, passes session props to `ChatShell`
@@ -185,7 +192,7 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 - `pendingQuoteView: string | null` (quote_id) → ChatInterface scrolls to quote
 
 ### Client-facing pages
-- `app/approve/variation/[variationId]/page.tsx` — mobile-first dark portal where clients approve or reject a variation. Fetches `GET /api/variations/[id]`, submits via `PATCH /api/variations/[id]`. Name confirmation step before finalising. No auth required.
+- `app/approve/variation/[variationId]/page.tsx` — mobile-first dark portal where clients approve or reject a variation. Reads the `?t=` share token from the URL and forwards it on `GET`/`PATCH /api/variations/[id]`. No builder session — the share token (generated by `POST /api/variations/[id]/share`, hashed at rest, expiring) is the sole authorization. Name confirmation step before finalising. Forward-only: an already-approved/rejected variation can't be re-decided through this endpoint.
 
 ---
 
@@ -232,41 +239,69 @@ interface Alert {
 
 ## API Routes (`app/api/`)
 
+This table is now generated to match `app/api/**/route.ts` exactly — a prior version of this doc listed roughly half the real routes. Keep it in sync when adding/removing routes.
+
 | Route | Purpose |
 |-------|---------|
-| `POST /api/chat` | Main chat handler — intent classification + dispatch |
-| `POST /api/intake/[fileId]` | AI extraction pipeline v2 — 12 SSE stages including memory retrieval and scope intelligence |
+| `POST /api/chat` | Main chat handler — intent classification (in-process, see architecture note above) + dispatch. Rate-limited per builder. |
 | `POST /api/upload` | File upload to Supabase Storage |
+| `GET /api/intake/[fileId]` | SSE extraction pipeline v2 — 12 stages including memory retrieval and scope intelligence. Auth derives `builder_id` from the session and verifies the file belongs to that builder before triggering/polling. |
+| `POST /api/intake/[fileId]/worker` | Server-to-server only (requires the service-role bearer token) — the actual extraction work, invoked by the `smooth-responder` edge function |
 | `GET /api/dashboard` | Dashboard stats, alerts, recommendations |
-| `GET /api/jobs` | Job list for snapshot panel |
+| `GET /api/jobs` | Job list |
+| `GET /api/jobs/[jobId]/snapshot` | Full job snapshot for the panel |
+| `POST /api/jobs/[jobId]/activate` | Activate a job from an approved quote — generates milestones + invoice schedule |
+| `GET/POST /api/jobs/[jobId]/tasks` | Job task list; POST creates or completes/reopens a task |
+| `POST /api/jobs/[jobId]/workers` | Assign a worker to a job (verifies both the job and the worker belong to the caller's builder) |
+| `GET /api/jobs/[jobId]/proof` | WorkA Proof trail for a job + hash-chain status |
+| `GET /api/jobs/[jobId]/proof/export` | Download the Proof Pack (plain-text evidence document) |
 | `GET/POST /api/quotes` | Quote fetch and creation |
 | `GET /api/quotes/[quoteId]` | Full quote with line items grouped by trade category |
 | `GET /api/quotes/[quoteId]/export-pdf` | HTML quote export |
-| `POST /api/quotes/[quoteId]/send` | Send quote to client via Resend |
-| `POST /api/quotes/[quoteId]/revise` | Create revised quote version |
-| `GET/POST /api/variations` | Variation list |
-| `GET /api/variations/[variationId]` | Single variation detail |
-| `PATCH /api/variations/[variationId]` | Client approves/rejects variation (no auth — public) |
-| `POST /api/variations/[variationId]/share` | Generate client approval link |
-| `POST /api/estimation/scope-hints` | Pattern-match scope gaps for a project type |
-| `POST /api/classify-document` | Claude classifies an uploaded PDF/image document type |
+| `POST /api/quotes/[quoteId]/send` | Build the send draft (no mutation, no email sent yet) |
+| `POST /api/quotes/[quoteId]/confirm-send` | Builder-confirmed send — atomic `pending_review → sent` guard, Resend delivery, proof event |
+| `POST /api/quotes/[quoteId]/revise` | Copy the quote + all line items into a new draft version one number up |
+| `GET/POST /api/variations` | Variation list / create (builder-session scoped; never trusts a body-supplied `builder_id`) |
+| `GET /api/variations/[variationId]` | Single variation detail — builder session, or a valid `?t=` share token for the public approval page |
+| `PATCH /api/variations/[variationId]` | Client approves/rejects a variation — public, requires the `?t=`/body `t` share token, forward-only |
+| `POST /api/variations/[variationId]/resolve` | Builder-side approve/reject (e.g. after a phone call) — forward-only, real + demo mode |
+| `POST /api/variations/[variationId]/share` | Generate the client approval link — mints a hashed, expiring share token (real mode) |
+| `POST /api/variations/[variationId]/send-notification` | Email the approval notice, logs to `communication_history`, records a proof event |
+| `GET/POST /api/workers` | Worker list / (workers are actually created via chat's `add_worker` intent, not this route) |
+| `PATCH/DELETE /api/workers/[id]` | Update (explicit field allowlist) / soft-delete (deactivate) a worker |
+| `POST /api/join/[token]` | Complete worker onboarding — validates the invite token, saves confirmed name/phone, flips `invited → active`, issues the `/worker` session cookie |
+| `POST /api/estimation/scope-hints` | Pattern-match scope gaps for a project type — tries the seeded `scope_intelligence_patterns` table first, then Claude, then hardcoded demo patterns |
+| `POST /api/estimation/quick-estimate` | Parametric "estimate from history" — powers `/estimate` |
+| `GET/POST /api/estimation/similar-jobs` | Matched historical projects for a project profile |
+| `GET/PATCH /api/estimation/profile` | Builder's learned estimation preferences (margin, contingency, finish level) |
+| `GET/POST /api/estimation/history` | List / seed `project_memory` rows — powers `/estimate/history` |
+| `GET/POST /api/estimation/reconcile` | Log estimated-vs-actual cost per trade after a job completes |
+| `POST /api/classify-document` | Claude classifies an uploaded PDF/image document type. Rate-limited per builder. |
+| `GET/POST /api/rates` | Builder rate preferences list / set |
+| `POST /api/rates/import` | Import a supplier CSV price list |
+| `POST /api/rates/extract-pdf` | Extract rates from a priced PDF via Claude |
 | `GET /api/email-sync/connect` | OAuth initiation (Gmail / Outlook) |
 | `GET /api/email-sync/callback` | OAuth token exchange |
+| `POST /api/email-sync/disconnect` | Revoke an email sync connection |
 | `POST /api/email-sync/parse` | Classify and log an inbound email |
 | `GET /api/email-sync/status` | Check OAuth connection status |
 | `POST /api/email-sync/simulate` | Trigger demo email scenario |
-| `POST /api/email-draft` | Generate draft email via Claude |
-| `POST /api/assumptions` | Resolve an AI assumption |
-| `GET /api/jobs/[jobId]/proof` | WorkA Proof trail for a job + hash-chain status |
-| `GET /api/jobs/[jobId]/proof/export` | Download the Proof Pack (plain-text evidence document) |
-| `GET /api/cron/morning-brief` | Vercel Cron target — emails the daily brief to every builder (guarded by `CRON_SECRET`) |
-| `GET /api/cron/network-rates` | Vercel Cron target — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`) |
+| `POST /api/email-draft` | Generate draft email via Claude. Rate-limited per builder. |
+| `POST /api/email-draft/send` | Send the confirmed draft via Resend, logs to `communication_history` |
+| `GET/POST /api/assumptions/[quoteId]` | Assumption list for a quote |
+| `POST /api/assumptions/[quoteId]/resolve` | Resolve an assumption (accept/adjust/exclude); advances the quote to `pending_review` when all are resolved |
+| `GET /api/cron/morning-brief` | Vercel Cron target — emails the daily brief to every builder (guarded by `CRON_SECRET`, fails closed if unset in real mode) |
+| `GET /api/cron/network-rates` | Vercel Cron target — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`, fails closed if unset in real mode) |
+
+**Rate limiting**: `lib/rate-limit.ts` caps requests per builder on the Claude-backed routes (`chat`, `classify-document`, `email-draft`) — a DB-backed atomic counter in real mode (`api_rate_limits` table, migration 021), an in-memory fixed window in demo mode.
 
 ---
 
 ## WorkA Proof
 
-`lib/proof.ts` is the central audit-trail engine. **Every consequential job action must call `recordProofEvent()`** — quote sent, variation approved/rejected, variation notice emailed, outbound client email, job activated. Events are SHA-256 hash-chained per job (each event's hash covers the previous event's hash), making the trail tamper-evident. `verifyProofChain()` re-validates the chain; the Proof tab (`components/job/tabs/ProofTab.tsx`) shows the trail and links the Proof Pack export at `/api/jobs/[jobId]/proof/export`.
+`lib/proof.ts` is the central audit-trail engine. **Every consequential job action must call `recordProofEvent()`** — quote sent, variation submitted/approved/rejected, variation notice emailed, outbound client email, job activated. Events are SHA-256 hash-chained per job (each event's hash covers the previous event's hash), making the trail tamper-evident. `verifyProofChain()` re-validates the chain; the Proof tab (`components/job/tabs/ProofTab.tsx`) shows the trail and links the Proof Pack export at `/api/jobs/[jobId]/proof/export`.
+
+Demo-mode's in-memory proof log (and the other in-memory demo stores — activation, variations, comms) are best-effort and process-local: they don't survive a cold start or a second serverless instance. That's an acceptable limitation for a single always-warm demo deployment, but don't mistake it for a real persistence guarantee — real mode's `proof_events` table has no such limitation.
 
 Recording is best-effort: `recordProofEvent` never throws — a proof failure must not break the builder action it documents. Demo mode appends to the in-memory `demoProofLog`; real mode inserts into the `proof_events` table.
 
@@ -280,14 +315,14 @@ Recording is best-effort: `recordProofEvent` never throws — a proof failure mu
 
 ## Supabase Edge Functions (`supabase/functions/`)
 
-All use Deno + ESM. Deployed to Supabase; called from Next.js API routes via `fetch`.
+All use Deno + ESM. Deployed to Supabase; called from Next.js API routes via `fetch`. Only two are actually invoked by the app:
 
 | Function | Layer | Purpose |
 |----------|-------|---------|
-| `classify-intent` | 1 (AI) | Calls Claude to classify builder messages |
-| `morning-brief` | 2 (Decision) | Ranked daily alerts from DB |
-| `create-worker` | 2 (Decision) | Creates worker row + generates invite URL |
-| `create-job` | 2 (Decision) | Duplicate-checks address, creates job |
+| `morning-brief` | 2 (Decision) | Ranked daily alerts from DB. Invoked from `app/api/cron/morning-brief/route.ts`. |
+| `smooth-responder` | 2 (Decision) | Document-intake AI extraction pipeline (renamed from `intake-pipeline`; moved here from a Next.js route to escape Vercel's function timeout). Invoked from `app/api/intake/[fileId]/route.ts`. Calls Claude directly — this is the one Layer-2 function that does, since it *is* the AI extraction step, not a Claude-free decision step. |
+
+`create-worker` and `create-job` (earlier Layer-2 functions matching the architecture doc above) had zero callers — `chat/route.ts`'s local `createWorker()`/`createJob()` do that work instead — and were deleted. There is no `classify-intent` function; it was never deployed in this repo. If you're restoring the documented architecture, that means writing (or reviving from git history) both, then actually routing `app/api/chat/route.ts` through them.
 
 **Model used in edge functions**: `claude-sonnet-4-6`
 
@@ -341,7 +376,18 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 015_intake_diagnostics.sql    — intake diagnostic columns on files
 016_pipeline_stage.sql        — intake_stage / intake_pct on files
 017_cost_rates_seed.sql       — 630 platform cost rates (70 national + 8 state variants)
+018_variation_share_tokens.sql        — hashed, expiring client-approval share tokens on variations
+019_jobs_write_policies.sql           — restores INSERT/UPDATE/DELETE RLS on jobs (007 only left SELECT)
+020_network_rate_aggregates_null_state_unique.sql — NULLS NOT DISTINCT constraint so the nightly
+                                         aggregation cron can upsert atomically instead of racing
+021_rate_limits.sql                   — api_rate_limits table + check_rate_limit() RPC
+022_jobs_duplicate_address_guard.sql  — partial unique index closing the create-job duplicate-address race
+023_atomic_learned_rate_upsert.sql    — upsert_learned_rate() RPC, atomic running-average update
+024_job_tasks.sql                     — job_tasks table (route code already assumed this existed)
+025_worker_sessions.sql               — hashed, expiring worker-portal session token on workers
 ```
+
+**Note:** `008_auto_create_builder.sql`, `008_intake_progress.sql`, and `008_job_context_fields.sql` all share the `008_` prefix — a real numbering collision (harmless today since Supabase applies migrations in lexicographic filename order and none of the three depend on each other, but don't add a fourth `008_*` file — use the next free number).
 
 ### Quote line item — key columns
 
@@ -359,11 +405,11 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 
 | Table | Purpose |
 |-------|---------|
-| `trade_subcategories` | 82 subcategory codes under the 13 trades (e.g. `ELEC-POWER`, `TILE-FLOOR`) |
+| `trade_subcategories` | 82 subcategory codes under the 13 trades (e.g. `ELEC-POWER`, `TILE-FLOOR`). Seeded but not currently read anywhere — reserved for finer-grained rate learning than the 13 top-level trades. |
 | `project_memory` | One row per completed/active job — stores metadata, cost actuals, embedding (nullable `vector(1536)`) |
 | `cost_reconciliation` | Per-line actual vs quoted cost; drives the feedback loop |
 | `builder_estimation_profiles` | Learned builder preferences: margin, region, finish level, accuracy score |
-| `scope_intelligence_patterns` | Known scope gaps by job type — matched at intake time |
+| `scope_intelligence_patterns` | Known scope gaps by job type — `POST /api/estimation/scope-hints` reads this as its fast pattern-matching pass before falling back to Claude |
 
 **Similarity scoring** is done in-process (no vector API required): job type (+30), floor area within 20% (+15), same region (+15), same finish level (+15), wet area count (+10), storeys (+10). Minimum score 50 to be surfaced.
 
@@ -444,9 +490,11 @@ Tailwind **utility classes** (layout, spacing, flex, grid, rounded, etc.) are fi
 
 ## Worker / Mobile Portal
 
-- `/join/[token]` — 3-step onboarding flow for invited workers (`JoinFlow.tsx`)
-- `/worker` — mobile-first portal showing today's site, tasks, quick actions
+- Invites are created via chat's `add_worker` intent (`createWorker()` in `chat/route.ts`), which writes a real `workers` row with a DB-generated `invite_token` and returns an `/join/<token>` link (shown in `WorkerModal.tsx` for SMS/WhatsApp/email/copy-link sharing).
+- `/join/[token]` — 3-step onboarding flow for invited workers (`JoinFlow.tsx`). The server component (`page.tsx`) looks up the real invite by token (workers table + any already-assigned job via `job_workers`) in real mode; demo mode uses the two seeded invites in `lib/worker-demo.ts`. An unrecognised token now correctly shows "invalid invite link" (it used to silently fall back to the first seeded invite for any token). On completing the phone step, `JoinFlow` POSTs the confirmed name/phone to `POST /api/join/[token]`, which persists them, flips the worker's status `invited → active`, and sets the `/worker` session cookie (`lib/auth/worker-session.ts`) — a hashed, expiring token, since workers don't have full Supabase Auth accounts.
+- `/worker` — mobile-first portal showing today's site, tasks, quick actions. Reads the session cookie server-side (`lib/worker-portal-data.ts`) and resolves that specific worker's real assigned jobs (`job_workers`), next milestone (`job_milestones`), and tasks (`job_tasks`) — it no longer unconditionally renders a hardcoded demo worker to anyone who requests the URL. No valid session shows a "use your invite link" prompt instead. Some `DemoWorkerJob` display fields have no real schema backing (site start time, "Week X of Y") — the UI hides those specific elements rather than fabricating values for them.
 - Uses `env(safe-area-inset-*)` via `.pt-safe`/`.pb-safe` for iPhone home bar
+- Task completion in the portal is currently local UI state only (not yet persisted) — wiring it to `POST /api/jobs/[jobId]/tasks` would require a worker-session-authenticated variant of that route (it currently requires a builder session), which is a reasonable next step but wasn't in scope for the identity fix above.
 
 ---
 
@@ -456,7 +504,7 @@ Tailwind **utility classes** (layout, spacing, flex, grid, rounded, etc.) are fi
 2. **Never invent quantities.** Failed AI extractions create assumptions; builder must resolve all before quote progresses to `pending_review`.
 3. **Forward-only state machines.** Write guards on every status-change function.
 4. **Zero raw data in the UI.** Format all amounts as AUD, all dates as relative strings.
-5. **Builder data isolation.** Every query must filter by `builder_id`. Service role key only in edge functions — never in browser code.
+5. **Builder data isolation.** Every query must filter by `builder_id`, derived from the authenticated session (`getAuthenticatedBuilderId()`) — never trust a client-supplied `builder_id` from a request body or query string. Service role key only in server-side code (API routes, edge functions) — never in browser code. Every route uses the service role key today (which bypasses RLS), so RLS is a backstop, not the primary enforcement — this rule is.
 6. **13 trade categories are immutable.** All rate and quote logic depends on fixed `sort_order` 1–13.
 
 ---
@@ -467,14 +515,17 @@ See `.env.local.example`. Key variables:
 
 | Variable | Where used |
 |----------|-----------|
-| `NEXT_PUBLIC_SUPABASE_URL` | All Supabase clients; absence triggers fallback data mode |
+| `NEXT_PUBLIC_SUPABASE_URL` | All Supabase clients; absence (or the literal placeholder `your-supabase-url`) triggers fallback data mode — see `isDemoMode()` in `lib/auth/api-auth.ts` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser Supabase client |
-| `SUPABASE_SERVICE_ROLE_KEY` | `createAdminClient()` in server/edge contexts |
-| `ANTHROPIC_API_KEY` | `/api/chat` (classify), `/api/email-sync/parse`, `/api/email-draft`, `/api/intake/[fileId]`, `/api/estimation/scope-hints` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Every API route constructs its own `createClient(url, serviceRoleKey)` inline (no shared admin-client singleton — see "Auth" above) |
+| `ANTHROPIC_API_KEY` | `/api/chat` (intent classification, in-process), `/api/email-sync/parse`, `/api/email-draft`, `/api/classify-document`, `/api/estimation/scope-hints`, the `smooth-responder` edge function |
 | `NEXT_PUBLIC_APP_URL` | OAuth redirect URIs, worker invite links, internal fetch calls |
 | `RAILWAY_GIT_COMMIT_SHA` | Baked into `NEXT_PUBLIC_COMMIT_SHA` at build time |
 | `GOOGLE_CLIENT_ID/SECRET` | Gmail OAuth |
 | `MICROSOFT_CLIENT_ID/SECRET` | Outlook OAuth |
 | `RESEND_API_KEY` | Email delivery |
-| `CRON_SECRET` | Auth for `/api/cron/morning-brief` (Vercel Cron sends it as a Bearer token) |
+| `EMAIL_FROM_ADDRESS` | From address for outbound client emails; defaults to `hello@getworka.com` if unset |
+| `CRON_SECRET` | Auth for `/api/cron/morning-brief` and `/api/cron/network-rates` (Vercel Cron sends it as a Bearer token). Both routes fail closed (503) if unset while Supabase is configured — never fail open. |
 | `MORNING_BRIEF_TEST_EMAIL` | Demo-mode recipient for the daily brief email |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | **Reserved, not implemented.** No code reads these — SMS notifications were never built. |
+| `STRIPE_SECRET_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | **Reserved, not implemented.** No code reads these (though `builders.stripe_customer_id` exists in the schema) — payment collection was never built. |
