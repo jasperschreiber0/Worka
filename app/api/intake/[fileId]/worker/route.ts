@@ -399,7 +399,7 @@ CRITICAL RULES:
 1. ALWAYS produce at least 5–10 line_items. Never return an empty array.
 2. If the document contains a quantity schedule, extract every line item with a quantity and rate.
 3. If the document is schematic plans only (floor plans, elevations), produce professional QS estimates from visible dimensions and layout. A senior QS estimates even from floor plans — this is your core skill.
-4. If you cannot read the document clearly, produce conservative professional estimates for a typical residential project of this type. Set confidence to 25–40 for anything estimated without clear data.
+4. If you cannot read the document clearly, produce conservative professional estimates for a typical residential project of this type — but set confidence to 25–40 HONESTLY for anything estimated without clear data from the actual document. confidence must reflect your true certainty that the number came from this specific project, not how complete or professional the line item looks. The builder relies on this number to decide what needs manual confirmation, so an inflated confidence on a guess is worse than an empty quote.
 5. Descriptions must be specific: "Concrete slab — 125mm ground floor" not "Concrete".
 6. Use Australian units: m², lm, m, m³, ea, hr, wk. Never sf or LF.
 7. Set pricing_type: measured (extracted from schedule/dimensions), pc_allowance (prime cost), or provisional_sum (TBD by others).
@@ -515,7 +515,7 @@ Use the extract_estimate tool to return your results.`
         console.warn('[intake:worker:retry-empty]', { file_id: fileId, doc_type: extractResult.doc_type, budget_ms: retryBudget })
         try {
           const retryBlocks = droppedToPrimaryOnly ? primaryBlocks : allDocBlocks
-          const retryText = userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence to 30–45 for estimated items. The builder needs a starting point, not an empty quote.'
+          const retryText = userText + '\n\nIMPORTANT: Your previous attempt returned zero line items, which is not acceptable. Even if this document is schematic-only or image-based, you are a professional QS — produce your best professional estimates for a typical Australian residential build of this type. Include at minimum: site works, concrete/footings, framing, roofing, and fit-out items. Set confidence HONESTLY to 30-45 for estimated items — this is a genuine guess, not read from the document, and the builder must be able to tell the difference. The builder needs a starting point, not an empty quote, but a guess dressed up as a certainty is worse than no quote at all.'
           const retryTimeoutMs = Math.min(retryBudget, 60_000)
           // Reuse runExtraction — it owns the AbortController and clears it correctly.
           // Never call client.messages.create directly: the SDK's built-in retries will
@@ -591,6 +591,16 @@ Use the extract_estimate tool to return your results.`
           assumptionStatus = 'excluded'
           assumptionMessage = `Invalid quantity (${item.quantity}) for ${item.description} — excluded`
           assumptions.push({ description: item.description, gate: 3, message: assumptionMessage })
+        } else if (typeof item.confidence === 'number' && item.confidence < 50) {
+          // Gate 4: the model itself reported low confidence — this is its own
+          // signal that the number was estimated/guessed rather than read off the
+          // document (the extraction prompt asks for confidence 25-45 whenever it
+          // can't read a document clearly). Units and dimensions_string alone don't
+          // catch this, since a plausible-looking guess can carry both. Never let a
+          // low-confidence guess reach the quote total unflagged.
+          isAssumption = true
+          assumptionMessage = `Low-confidence estimate (${item.confidence}%) — confirm ${item.description}`
+          assumptions.push({ description: item.description, gate: 4, message: assumptionMessage })
         }
 
         return {
