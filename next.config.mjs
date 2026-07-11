@@ -4,8 +4,8 @@ import { createRequire } from 'module'
 const require = createRequire(import.meta.url)
 const { version } = require('./package.json')
 
-// Railway injects RAILWAY_GIT_COMMIT_SHA; fall back to local git, then 'dev'
-let commitSha = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'dev'
+// Vercel injects VERCEL_GIT_COMMIT_SHA; fall back to local git, then 'dev'
+let commitSha = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? 'dev'
 if (commitSha === 'dev') {
   try {
     commitSha = execSync('git rev-parse --short HEAD', { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim()

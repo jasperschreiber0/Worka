@@ -206,43 +206,35 @@ export async function POST(
     // ── Load primary file ──────────────────────────────────────────────────
     w('updateStage:reading'); await updateStage('reading')
 
-    const { getCachedFile } = await import('@/lib/file-cache')
-    const cached = getCachedFile(fileId)
-
     let base64Data: string
     let primaryMediaType: string
 
-    if (cached) {
-      base64Data = cached.base64
-      primaryMediaType = cached.mediaType
-    } else {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const fileRecordResult: any = await Promise.race([
-        supabase.from('files').select('*').eq('id', fileId).eq('builder_id', builder_id).single(),
-        new Promise((resolve) => setTimeout(() => resolve({ data: null, error: new Error('timeout') }), 8_000)),
-      ])
-      const fileRow = fileRecordResult?.data
-      if (!fileRow) {
-        await failWith('FILE_DOWNLOAD_FAILED', 'File record not found — upload may not have completed')
-        return NextResponse.json({ ok: false })
-      }
-
-      w('storage:download')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const downloadResult: any = await Promise.race([
-        supabase.storage.from('plans').download(fileRow.storage_path),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Storage download timed out after 60s')), 60_000)
-        ),
-      ])
-      const { data: fileData, error: downloadErr } = downloadResult as { data: Blob | null; error: { message: string } | null }
-      if (downloadErr || !fileData) {
-        await failWith('FILE_DOWNLOAD_FAILED', `Storage: ${(downloadErr as { message?: string } | null)?.message ?? 'unknown'}`)
-        return NextResponse.json({ ok: false })
-      }
-      base64Data = Buffer.from(await fileData.arrayBuffer()).toString('base64')
-      primaryMediaType = fileRow.file_type === 'pdf' ? 'application/pdf' : 'image/jpeg'
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fileRecordResult: any = await Promise.race([
+      supabase.from('files').select('*').eq('id', fileId).eq('builder_id', builder_id).single(),
+      new Promise((resolve) => setTimeout(() => resolve({ data: null, error: new Error('timeout') }), 8_000)),
+    ])
+    const fileRow = fileRecordResult?.data
+    if (!fileRow) {
+      await failWith('FILE_DOWNLOAD_FAILED', 'File record not found — upload may not have completed')
+      return NextResponse.json({ ok: false })
     }
+
+    w('storage:download')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const downloadResult: any = await Promise.race([
+      supabase.storage.from('plans').download(fileRow.storage_path),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Storage download timed out after 60s')), 60_000)
+      ),
+    ])
+    const { data: fileData, error: downloadErr } = downloadResult as { data: Blob | null; error: { message: string } | null }
+    if (downloadErr || !fileData) {
+      await failWith('FILE_DOWNLOAD_FAILED', `Storage: ${(downloadErr as { message?: string } | null)?.message ?? 'unknown'}`)
+      return NextResponse.json({ ok: false })
+    }
+    base64Data = Buffer.from(await fileData.arrayBuffer()).toString('base64')
+    primaryMediaType = fileRow.file_type === 'pdf' ? 'application/pdf' : 'image/jpeg'
 
     const rawBytes = Math.ceil(base64Data.length * 0.75)
     const isCsv = primaryMediaType?.includes('csv') || primaryMediaType?.includes('text/plain')
@@ -296,24 +288,6 @@ export async function POST(
 
     for (const sibId of siblingFileIds.slice(0, 6)) {
       try {
-        const sibCached = getCachedFile(sibId)
-        if (sibCached) {
-          const sibBytes = Math.ceil(sibCached.base64.length * 0.75)
-          if (attachedBytes + sibBytes > MAX_TOTAL_BYTES) { skippedSiblingCount++; continue }
-          attachedBytes += sibBytes
-          const sibIsPdf = sibCached.mediaType.includes('pdf')
-          const sibIsCsv = sibCached.mediaType.includes('csv') || sibCached.mediaType.includes('text/plain')
-          if (sibIsCsv) {
-            const sibText = Buffer.from(sibCached.base64, 'base64').toString('utf-8')
-            siblingBlocks.push({ type: 'text', text: `CSV FILE (${sibCached.filename ?? 'file'}):\n\`\`\`\n${sibText.slice(0, 30000)}\n\`\`\`` })
-          } else {
-            siblingBlocks.push(sibIsPdf
-              ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: sibCached.base64 } }
-              : { type: 'image', source: { type: 'base64', media_type: sibCached.mediaType, data: sibCached.base64 } }
-            )
-          }
-          continue
-        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const sibRowResult: any = await Promise.race([
           supabase.from('files').select('*').eq('id', sibId).eq('builder_id', builder_id).single(),

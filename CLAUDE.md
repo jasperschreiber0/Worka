@@ -19,7 +19,7 @@ No test suite exists yet. Type-check is the primary correctness gate.
 
 ## Git Rules
 
-- **Always commit directly to `main`** — Railway auto-deploys from main to getworka.com
+- **Always commit directly to `main`** — Vercel auto-deploys from main to getworka.com
 - When given a feature branch, develop there then merge to main before finishing
 - Run `npm run type-check` before every commit; fix all new errors (pre-existing module-not-found errors from missing node_modules are acceptable)
 - Push with `git push -u origin <branch>` or `git push origin main`
@@ -458,7 +458,7 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 
 `next.config.mjs` bakes two env vars at build time:
 - `NEXT_PUBLIC_APP_VERSION` — from `package.json` version field
-- `NEXT_PUBLIC_COMMIT_SHA` — from `RAILWAY_GIT_COMMIT_SHA` (Railway) or local `git rev-parse --short HEAD`
+- `NEXT_PUBLIC_COMMIT_SHA` — from `VERCEL_GIT_COMMIT_SHA` (Vercel) or local `git rev-parse --short HEAD`
 
 These appear in the chat header. When bumping the version for a release, update `package.json` version.
 
@@ -520,7 +520,7 @@ See `.env.local.example`. Key variables:
 | `SUPABASE_SERVICE_ROLE_KEY` | Every API route constructs its own `createClient(url, serviceRoleKey)` inline (no shared admin-client singleton — see "Auth" above) |
 | `ANTHROPIC_API_KEY` | `/api/chat` (intent classification, in-process), `/api/email-sync/parse`, `/api/email-draft`, `/api/classify-document`, `/api/estimation/scope-hints`, the `smooth-responder` edge function |
 | `NEXT_PUBLIC_APP_URL` | OAuth redirect URIs, worker invite links, internal fetch calls |
-| `RAILWAY_GIT_COMMIT_SHA` | Baked into `NEXT_PUBLIC_COMMIT_SHA` at build time |
+| `VERCEL_GIT_COMMIT_SHA` | Auto-injected by Vercel; baked into `NEXT_PUBLIC_COMMIT_SHA` at build time |
 | `GOOGLE_CLIENT_ID/SECRET` | Gmail OAuth |
 | `MICROSOFT_CLIENT_ID/SECRET` | Outlook OAuth |
 | `RESEND_API_KEY` | Email delivery |

@@ -1,8 +1,7 @@
 // ─── In-memory store for AI-generated quotes (no-Supabase mode) ─────────────────
 // When Supabase is not configured, the intake pipeline stores the generated
 // estimate here so /api/quotes/[quoteId] can serve it. Module-level singleton on
-// globalThis so it survives Next.js dev HMR reloads — uploaded file bytes are
-// handled separately by lib/file-cache.ts.
+// globalThis so it survives Next.js dev HMR reloads.
 
 import type { DemoQuote, DemoQuoteLineItem } from './quote-demo'
 
