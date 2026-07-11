@@ -291,6 +291,17 @@ export interface JobWorker {
   assigned_by: string | null
 }
 
+export interface JobTask {
+  id: string
+  job_id: string
+  builder_id: string
+  description: string
+  assigned_to: string | null
+  assigned_worker_id: string | null
+  status: 'open' | 'done'
+  created_at: string
+}
+
 export interface JobMilestone {
   id: string
   job_id: string
@@ -518,6 +529,11 @@ export interface Database {
         Row: JobWorker
         Insert: Omit<JobWorker, 'id' | 'assigned_at'> & Partial<Pick<JobWorker, 'id' | 'assigned_at'>>
         Update: Partial<Omit<JobWorker, 'id'>>
+      }
+      job_tasks: {
+        Row: JobTask
+        Insert: Omit<JobTask, 'id' | 'created_at'> & Partial<Pick<JobTask, 'id' | 'created_at'>>
+        Update: Partial<Omit<JobTask, 'id'>>
       }
       job_milestones: {
         Row: JobMilestone
