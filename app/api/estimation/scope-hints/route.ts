@@ -1,7 +1,58 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { ScopeHint, ProjectMetadata } from '@/lib/types/estimation.types'
 import { SCOPE_HINTS_BY_TYPE, DEMO_SCOPE_HINTS } from '@/lib/estimation-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+
+interface ScopePatternRow {
+  renovation_type: string | null
+  likely_items: ScopeHint[]
+}
+
+/**
+ * Pattern hints from the seeded scope_intelligence_patterns table — cheaper
+ * and faster than a Claude call, and the table this data was seeded into
+ * specifically for this purpose. Falls back to the hardcoded demo patterns
+ * (lib/estimation-demo.ts) when Supabase isn't configured, the query fails,
+ * or nothing matches.
+ */
+async function loadPatternHints(metadata: ProjectMetadata): Promise<ScopeHint[]> {
+  const fallback = metadata.job_type ? (SCOPE_HINTS_BY_TYPE[metadata.job_type] ?? DEMO_SCOPE_HINTS) : DEMO_SCOPE_HINTS
+
+  if (isDemoMode()) return fallback
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!supabaseUrl || !serviceRoleKey) return fallback
+
+  try {
+    const { createClient } = await import('@supabase/supabase-js')
+    const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+
+    const candidates: string[] = [metadata.job_type, metadata.renovation_type].filter(
+      (v): v is NonNullable<typeof v> => Boolean(v)
+    )
+    if (candidates.length === 0) return fallback
+
+    const { data, error } = await supabase
+      .from('scope_intelligence_patterns')
+      .select('renovation_type, likely_items')
+      .in('renovation_type', candidates)
+
+    if (error) {
+      console.error('[scope-hints] pattern table query failed:', error.message)
+      return fallback
+    }
+
+    const rows = (data ?? []) as ScopePatternRow[]
+    if (rows.length === 0) return fallback
+
+    const merged = rows.flatMap((row) => row.likely_items ?? [])
+    return merged.length > 0 ? merged : fallback
+  } catch (err) {
+    console.error('[scope-hints] pattern table error:', err)
+    return fallback
+  }
+}
 
 // ─── POST /api/estimation/scope-hints ────────────────────────────────────────
 // Returns likely missing scope items for a given project type.
@@ -26,9 +77,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const anthropicKey = process.env.ANTHROPIC_API_KEY
 
   // Pattern matching fallback (always available)
-  const patternHints: ScopeHint[] = project_metadata.job_type
-    ? (SCOPE_HINTS_BY_TYPE[project_metadata.job_type] ?? DEMO_SCOPE_HINTS)
-    : DEMO_SCOPE_HINTS
+  const patternHints: ScopeHint[] = await loadPatternHints(project_metadata)
 
   if (!anthropicKey) {
     return NextResponse.json({ scope_hints: patternHints, source: 'patterns' })
