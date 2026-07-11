@@ -107,6 +107,9 @@ export interface Quote {
   created_at: string
   sent_at: string | null
   approved_at: string | null
+  /** Migration 014 */
+  contingency_pct: number | null
+  gst_pct: number | null
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
@@ -138,6 +141,9 @@ export interface QuoteLineItem {
   source_ref: string | null
   /** Per-line margin rate (0–1). PS items always 0. */
   margin_pct: number
+  /** Migration 014 */
+  pricing_basis: 'measured' | 'inferred' | 'allowance' | null
+  notes: string | null
 }
 
 export interface CostRate {
@@ -204,6 +210,14 @@ export interface Variation {
   created_at: string
   approved_at: string | null
   approved_by: string | null
+  /** Migration 006 */
+  variation_ref: string | null
+  labour_cost: number | null
+  materials_cost: number | null
+  submitted_by: string | null
+  /** Migration 018 — client-facing share link auth */
+  share_token_hash: string | null
+  share_token_expires_at: string | null
 }
 
 export interface Invoice {
@@ -265,6 +279,149 @@ export interface Assumption {
   resolved_at: string | null
   resolved_by: string | null
   created_at: string
+}
+
+// ─── Job workers, milestones, invoicing, proof (migrations 005, 007) ─────────
+
+export interface JobWorker {
+  id: string
+  job_id: string
+  worker_id: string
+  assigned_at: string
+  assigned_by: string | null
+}
+
+export interface JobMilestone {
+  id: string
+  job_id: string
+  builder_id: string
+  title: string
+  description: string | null
+  due_date: string | null // ISO date
+  completed_at: string | null
+  sort_order: number
+  created_at: string
+}
+
+export interface InvoiceScheduleEntry {
+  id: string
+  job_id: string
+  builder_id: string
+  label: string
+  percentage: number
+  amount: number
+  due_trigger: string
+  invoice_id: string | null
+  created_at: string
+}
+
+export interface ProofEventRow {
+  id: string
+  job_id: string
+  builder_id: string
+  event_type: string
+  description: string
+  metadata: Record<string, unknown> | null
+  created_at: string
+}
+
+// ─── Estimation Memory Engine tables (migration 011) ─────────────────────────
+// App-facing shapes for these tables live in lib/types/estimation.types.ts —
+// these mirror the raw DB columns instead.
+
+export interface TradeSubcategory {
+  id: string
+  trade_category_id: number
+  code: string
+  name: string
+  typical_unit: string | null
+  sort_order: number
+}
+
+export interface ProjectMemoryRow {
+  id: string
+  builder_id: string
+  job_id: string | null
+  quote_id: string | null
+  project_summary: string | null
+  job_type: string | null
+  renovation_type: string | null
+  floor_area_m2: number | null
+  storeys: number | null
+  wet_areas: number | null
+  bedrooms: number | null
+  finish_level: string | null
+  construction_type: string | null
+  region: string | null
+  suburb: string | null
+  quoted_cost: number | null
+  final_cost: number | null
+  quoted_margin_pct: number | null
+  final_margin_pct: number | null
+  trade_breakdown: Record<string, { estimated: number; actual: number }> | null
+  scope_hits: unknown[] | null
+  scope_misses: unknown[] | null
+  /** pgvector(1536) — nullable until an embedding service is wired up */
+  embedding: number[] | null
+  status: 'draft' | 'quoted' | 'active' | 'completed'
+  created_at: string
+  completed_at: string | null
+}
+
+export interface CostReconciliation {
+  id: string
+  project_memory_id: string
+  builder_id: string
+  trade_category_id: number
+  estimated_cost: number
+  actual_cost: number | null
+  /** Generated column: actual_cost - estimated_cost */
+  variance_amount: number | null
+  job_type: string | null
+  region: string | null
+  finish_level: string | null
+  recorded_at: string | null
+  created_at: string
+}
+
+export interface BuilderEstimationProfileRow {
+  id: string
+  builder_id: string
+  typical_margin_pct: number | null
+  typical_contingency_pct: number | null
+  typical_labour_loading: number | null
+  finish_level: string | null
+  avg_adjustment_pct: number | null
+  adjustment_direction: 'increase' | 'decrease' | 'neutral' | null
+  avg_variations_per_job: number | null
+  avg_variation_value: number | null
+  quotes_generated: number
+  jobs_completed: number
+  avg_quote_accuracy_pct: number | null
+  preferred_suppliers: string[] | null
+  updated_at: string
+}
+
+export interface ScopeIntelligencePattern {
+  id: string
+  renovation_type: string | null
+  trigger_keywords: string[]
+  likely_items: Array<{
+    description: string
+    trade_category_id: number
+    confidence: number
+    typical_cost_range?: string
+    reason: string
+  }>
+  created_at: string
+}
+
+// ─── API rate limiting (migration 021) ───────────────────────────────────────
+
+export interface ApiRateLimit {
+  key: string
+  window_start: string
+  count: number
 }
 
 // ─── Supabase Database type (for typed client) ───────────────────────────────
@@ -356,6 +513,56 @@ export interface Database {
         Row: Assumption
         Insert: Omit<Assumption, 'id' | 'created_at'> & Partial<Pick<Assumption, 'id' | 'created_at'>>
         Update: Partial<Omit<Assumption, 'id'>>
+      }
+      job_workers: {
+        Row: JobWorker
+        Insert: Omit<JobWorker, 'id' | 'assigned_at'> & Partial<Pick<JobWorker, 'id' | 'assigned_at'>>
+        Update: Partial<Omit<JobWorker, 'id'>>
+      }
+      job_milestones: {
+        Row: JobMilestone
+        Insert: Omit<JobMilestone, 'id' | 'created_at'> & Partial<Pick<JobMilestone, 'id' | 'created_at'>>
+        Update: Partial<Omit<JobMilestone, 'id'>>
+      }
+      invoice_schedule: {
+        Row: InvoiceScheduleEntry
+        Insert: Omit<InvoiceScheduleEntry, 'id' | 'created_at'> & Partial<Pick<InvoiceScheduleEntry, 'id' | 'created_at'>>
+        Update: Partial<Omit<InvoiceScheduleEntry, 'id'>>
+      }
+      proof_events: {
+        Row: ProofEventRow
+        Insert: Omit<ProofEventRow, 'id' | 'created_at'> & Partial<Pick<ProofEventRow, 'id' | 'created_at'>>
+        Update: Partial<Omit<ProofEventRow, 'id'>>
+      }
+      trade_subcategories: {
+        Row: TradeSubcategory
+        Insert: Omit<TradeSubcategory, 'id'> & Partial<Pick<TradeSubcategory, 'id'>>
+        Update: Partial<Omit<TradeSubcategory, 'id'>>
+      }
+      project_memory: {
+        Row: ProjectMemoryRow
+        Insert: Omit<ProjectMemoryRow, 'id' | 'created_at'> & Partial<Pick<ProjectMemoryRow, 'id' | 'created_at'>>
+        Update: Partial<Omit<ProjectMemoryRow, 'id'>>
+      }
+      cost_reconciliation: {
+        Row: CostReconciliation
+        Insert: Omit<CostReconciliation, 'id' | 'created_at' | 'variance_amount'> & Partial<Pick<CostReconciliation, 'id' | 'created_at'>>
+        Update: Partial<Omit<CostReconciliation, 'id' | 'variance_amount'>>
+      }
+      builder_estimation_profiles: {
+        Row: BuilderEstimationProfileRow
+        Insert: Omit<BuilderEstimationProfileRow, 'id' | 'updated_at'> & Partial<Pick<BuilderEstimationProfileRow, 'id' | 'updated_at'>>
+        Update: Partial<Omit<BuilderEstimationProfileRow, 'id'>>
+      }
+      scope_intelligence_patterns: {
+        Row: ScopeIntelligencePattern
+        Insert: Omit<ScopeIntelligencePattern, 'id' | 'created_at'> & Partial<Pick<ScopeIntelligencePattern, 'id' | 'created_at'>>
+        Update: Partial<Omit<ScopeIntelligencePattern, 'id'>>
+      }
+      api_rate_limits: {
+        Row: ApiRateLimit
+        Insert: ApiRateLimit
+        Update: Partial<ApiRateLimit>
       }
     }
     Views: Record<string, never>
