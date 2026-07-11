@@ -66,8 +66,14 @@ const DEMO_INVITES: DemoWorkerInvite[] = [
   },
 ]
 
+/**
+ * Looks up a demo invite by its exact token. Returns null for anything else
+ * — this used to silently fall back to the first seeded invite for ANY
+ * unrecognised token, meaning the "invalid invite link" UI could never
+ * actually be reached and every garbage token quietly worked as Jack's.
+ */
 export function getDemoInvite(token: string): DemoWorkerInvite | null {
-  return DEMO_INVITES.find((i) => i.token === token) ?? DEMO_INVITES[0]
+  return DEMO_INVITES.find((i) => i.token === token) ?? null
 }
 
 // ─── Demo worker portal data ──────────────────────────────────────────────────
