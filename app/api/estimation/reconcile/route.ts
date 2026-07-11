@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { CostReconciliationEntry } from '@/lib/types/estimation.types'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 interface ReconcilePayload {
   job_id: string
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'job_id and entries required' }, { status: 400 })
   }
 
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+  if (isDemoMode()) {
     return NextResponse.json({ ok: true, demo: true, message: 'Reconciliation logged (demo mode)' })
   }
 
@@ -121,7 +121,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const tradeCategoryId = request.nextUrl.searchParams.get('trade_category_id')
 
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+  if (isDemoMode()) {
     // Return demo variance data
     const { DEMO_TRADE_VARIANCES } = await import('@/lib/estimation-demo')
     const filtered = tradeCategoryId

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'
 import { applyMargin, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
+import { isDemoMode } from '@/lib/auth/api-auth'
 
 export interface DashboardAlert {
   id: string
@@ -117,7 +118,7 @@ const DEMO_DATA: DashboardData = {
 }
 
 export async function GET() {
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+  if (isDemoMode()) {
     return NextResponse.json({ ...DEMO_DATA, demo: true })
   }
 

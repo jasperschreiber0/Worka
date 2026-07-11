@@ -9,7 +9,7 @@ import {
   type DemoProofEvent,
 } from '@/lib/activation-demo'
 import { recordProofEvent } from '@/lib/proof'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { randomUUID } from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -101,11 +101,7 @@ export async function POST(
       )
     }
 
-    const isDemoMode =
-      !process.env.NEXT_PUBLIC_SUPABASE_URL ||
-      process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
-
-    if (isDemoMode) {
+    if (isDemoMode()) {
       return handleDemoActivation(jobId, quote_id, builder_id)
     }
 

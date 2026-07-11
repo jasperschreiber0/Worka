@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDemoJobList } from '@/lib/job-snapshot-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── GET /api/jobs ────────────────────────────────────────────────────────────
 
@@ -10,9 +10,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
-
-  if (isDemoMode) {
+  if (isDemoMode()) {
     return NextResponse.json({ jobs: getDemoJobList() })
   }
 

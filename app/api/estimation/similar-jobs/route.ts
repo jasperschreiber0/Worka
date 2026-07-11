@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import type { ProjectMetadata, SimilarProject } from '@/lib/types/estimation.types'
 import { DEMO_PROJECT_MEMORY } from '@/lib/estimation-demo'
 import { scoreProject } from '@/lib/estimation-engine'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── POST /api/estimation/similar-jobs ────────────────────────────────────────
 
@@ -24,7 +24,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'project_metadata required' }, { status: 400 })
   }
 
-  const isDemo = !process.env.NEXT_PUBLIC_SUPABASE_URL
+  const isDemo = isDemoMode()
 
   if (isDemo) {
     const scored = DEMO_PROJECT_MEMORY

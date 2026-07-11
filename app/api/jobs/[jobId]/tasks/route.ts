@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { JobTask } from '@/lib/job-snapshot-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // In-memory store for demo tasks (keyed by jobId)
 const DEMO_TASKS: Record<string, JobTask[]> = {}
@@ -22,9 +22,8 @@ export async function GET(
 
   const { jobId } = params
 
-  const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
 
-  if (isDemoMode) {
+  if (isDemoMode()) {
     return NextResponse.json({ tasks: getDemoTasks(jobId) })
   }
 
@@ -75,12 +74,11 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const isDemoMode = !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-supabase-url'
 
   // ── Complete / reopen action ──────────────────────────────────────────────
   if ('action' in body && (body.action === 'complete' || body.action === 'reopen')) {
     const newStatus = body.action === 'complete' ? 'done' : 'open'
-    if (isDemoMode) {
+    if (isDemoMode()) {
       if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
       DEMO_TASKS[jobId] = DEMO_TASKS[jobId].map((t) =>
         t.id === body.task_id ? { ...t, status: newStatus } : t
@@ -126,7 +124,7 @@ export async function POST(
     created_at: 'just now',
   }
 
-  if (isDemoMode) {
+  if (isDemoMode()) {
     if (!DEMO_TASKS[jobId]) DEMO_TASKS[jobId] = []
     DEMO_TASKS[jobId].unshift(newTask)
     return NextResponse.json({ task: newTask }, { status: 201 })

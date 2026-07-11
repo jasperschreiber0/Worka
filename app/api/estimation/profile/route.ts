@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { BuilderEstimationProfile } from '@/lib/types/estimation.types'
 import { DEMO_BUILDER_PROFILE } from '@/lib/estimation-demo'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 
 // ─── GET /api/estimation/profile?builder_id=xxx ───────────────────────────────
 
@@ -9,8 +9,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const builderId = await getAuthenticatedBuilderId()
   if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const isDemo = !process.env.NEXT_PUBLIC_SUPABASE_URL
-  if (isDemo) {
+  if (isDemoMode()) {
     return NextResponse.json({ profile: DEMO_BUILDER_PROFILE })
   }
 
@@ -46,8 +45,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ profile: data as BuilderEstimationProfile })
   } catch (err) {
+    // Real mode was configured, so this is a genuine failure — falling back
+    // to DEMO_BUILDER_PROFILE would show a real builder fabricated settings
+    // (typical margin, contingency, etc.) as if they were their own.
     console.error('[estimation/profile]', err)
-    return NextResponse.json({ profile: DEMO_BUILDER_PROFILE })
+    return NextResponse.json({ error: 'Failed to load profile' }, { status: 500 })
   }
 }
 
@@ -68,7 +70,7 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
   // ignore any client-supplied value so a caller can't rewrite another builder's profile.
   const { builder_id: _ignoredBuilderId, ...updates } = body
 
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+  if (isDemoMode()) {
     return NextResponse.json({ ok: true, demo: true })
   }
 
