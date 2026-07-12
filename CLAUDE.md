@@ -368,7 +368,6 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 006_rbac_refs.sql             — role-based access refs
 007_job_workers.sql           — job ↔ worker assignment
 008_auto_create_builder.sql   — auto-create builder profile on signup
-008_job_context_fields.sql    — extra fields on jobs table
 009_job_deadlines.sql         — deadline tracking on jobs
 010_search_indexes.sql        — performance indexes
 011_estimation_memory.sql     — trade_subcategories (82 rows), project_memory (pgvector),
@@ -399,6 +398,11 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 027_reload_postgrest_schema_cache.sql — NOTIFY pgrst, 'reload schema'. Forces PostgREST to pick up
                                 objects from 021/026 that were returning "not found in schema cache"
                                 in production despite being defined correctly — see note below.
+028_intake_progress.sql       — intake_stage / intake_pct / intake_assumption_count on files.
+                                Renumbered from 008_intake_progress.sql (see note below) — content
+                                unchanged, ADD COLUMN IF NOT EXISTS so the rename was a no-op replay.
+029_job_context_fields.sql    — budget_estimate / scope_notes on jobs. Renumbered from
+                                008_job_context_fields.sql for the same reason as 028 above.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -418,7 +422,19 @@ incident above. It requires a `SUPABASE_DB_URL` repo secret (full Postgres conne
 including password) set in GitHub → Settings → Secrets and variables → Actions. Without that
 secret the workflow fails loudly on the next migration push rather than silently doing nothing.
 
-**Note:** `008_auto_create_builder.sql`, `008_intake_progress.sql`, and `008_job_context_fields.sql` all share the `008_` prefix — a real numbering collision (harmless today since Supabase applies migrations in lexicographic filename order and none of the three depend on each other, but don't add a fourth `008_*` file — use the next free number).
+**Resolved incident:** `008_auto_create_builder.sql`, `008_intake_progress.sql`, and
+`008_job_context_fields.sql` used to share the `008_` prefix. That wasn't just cosmetic —
+Supabase's CLI uses the numeric prefix as the migration's `version` primary key in
+`supabase_migrations.schema_migrations`, so only the first of the three to be applied could ever
+be recorded; the other two could never get their own history row. This is what actually caused
+the `check_rate_limit`/`project_documents` "not found in schema cache" incident: `supabase db
+push` had been silently refusing to apply *every* migration from `010_search_indexes.sql` through
+`027_reload_postgrest_schema_cache.sql` for months, because it always stopped at the unresolvable
+`008_` collision first. `008_intake_progress.sql` and `008_job_context_fields.sql` were renumbered
+to `028_` and `029_` (content unchanged — both are `ADD COLUMN IF NOT EXISTS`, so the rename was a
+safe no-op replay, not a real schema change) to give them distinct versions. If you ever see a
+migration file whose leading number matches an existing one, this is why it matters: rename it to
+the next free number before it ships, don't let a second file reuse a number already on disk.
 
 ### Quote line item — key columns
 
