@@ -170,10 +170,24 @@ export async function POST(
   const w = (step: string) =>
     console.log('[W]', step, { file_id: fileId, elapsed_ms: Date.now() - pipelineStart })
 
+  // Stage → pct for the SSE poller in /api/intake/[fileId]/route.ts, which
+  // reads intake_stage/intake_pct (not pipeline_stage) to animate the bar.
+  const STAGE_PCT: Record<string, number> = {
+    reading: 15,
+    retrieving_memory: 35,
+    extracting_site: 44,
+    scope_intelligence: 84,
+    validating: 90,
+    building_quote: 95,
+  }
+
   // Non-blocking stage update — resolves after 8s so slow Supabase never stalls the pipeline
   const updateStage = (stage: string): Promise<void> =>
     Promise.race([
-      supabase.from('files').update({ pipeline_stage: stage }).eq('id', fileId).then(() => undefined),
+      supabase.from('files')
+        .update({ pipeline_stage: stage, intake_stage: stage, intake_pct: STAGE_PCT[stage] ?? null })
+        .eq('id', fileId)
+        .then(() => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
     ])
 

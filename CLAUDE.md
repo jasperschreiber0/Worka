@@ -245,8 +245,8 @@ This table is now generated to match `app/api/**/route.ts` exactly — a prior v
 |-------|---------|
 | `POST /api/chat` | Main chat handler — intent classification (in-process, see architecture note above) + dispatch. Rate-limited per builder. |
 | `POST /api/upload` | File upload to Supabase Storage |
-| `GET /api/intake/[fileId]` | SSE extraction pipeline v2 — 12 stages including memory retrieval and scope intelligence. Auth derives `builder_id` from the session and verifies the file belongs to that builder before triggering/polling. |
-| `POST /api/intake/[fileId]/worker` | Server-to-server only (requires the service-role bearer token) — the actual extraction work, invoked by the `smooth-responder` edge function |
+| `GET /api/intake/[fileId]` | SSE trigger + poller — 12 stages including memory retrieval and scope intelligence. Auth derives `builder_id` from the session, verifies the primary file and any `?siblings=` file IDs (comma-separated) belong to that builder and job, then triggers `smooth-responder` with `sibling_file_ids` and polls `files.intake_status`/`intake_stage`/`intake_pct`. |
+| `POST /api/intake/[fileId]/worker` | Server-to-server only (requires the service-role bearer token) — the actual extraction work (single tool-use Claude call across the primary doc + siblings), invoked by the `smooth-responder` edge function |
 | `GET /api/dashboard` | Dashboard stats, alerts, recommendations |
 | `GET /api/jobs` | Job list |
 | `GET /api/jobs/[jobId]/snapshot` | Full job snapshot for the panel |
@@ -320,11 +320,11 @@ All use Deno + ESM. Deployed to Supabase; called from Next.js API routes via `fe
 | Function | Layer | Purpose |
 |----------|-------|---------|
 | `morning-brief` | 2 (Decision) | Ranked daily alerts from DB. Invoked from `app/api/cron/morning-brief/route.ts`. |
-| `smooth-responder` | 2 (Decision) | Document-intake AI extraction pipeline (renamed from `intake-pipeline`; moved here from a Next.js route to escape Vercel's function timeout). Invoked from `app/api/intake/[fileId]/route.ts`. Calls Claude directly — this is the one Layer-2 function that does, since it *is* the AI extraction step, not a Claude-free decision step. |
+| `smooth-responder` | 2 (Decision) | Thin, no-timeout trigger. Invoked from `app/api/intake/[fileId]/route.ts`; immediately hands off to `POST /api/intake/[fileId]/worker` (fire-and-forget via `EdgeRuntime.waitUntil`) and returns 202. It does **not** call Claude itself — `/api/intake/[fileId]/worker` owns the actual extraction (single tool-use call across the primary doc + up to 6 sibling files, hybrid document pricing, memory retrieval, scope intelligence). An earlier version of this function ran its own inline single-file extraction pass with no sibling support at all — that's why multi-file uploads used to only ever produce a quote from the first PDF. Requires the `APP_URL` Supabase Edge Function secret (the base URL of the Next.js app, e.g. `https://www.getworka.com`) to reach the worker route — set via `supabase secrets set APP_URL=...`; this is separate from Vercel's `NEXT_PUBLIC_APP_URL` env var and must be set independently after deploying this function. |
 
 `create-worker` and `create-job` (earlier Layer-2 functions matching the architecture doc above) had zero callers — `chat/route.ts`'s local `createWorker()`/`createJob()` do that work instead — and were deleted. There is no `classify-intent` function; it was never deployed in this repo. If you're restoring the documented architecture, that means writing (or reviving from git history) both, then actually routing `app/api/chat/route.ts` through them.
 
-**Model used in edge functions**: `claude-sonnet-4-6`
+**Model used in edge functions**: none directly anymore — `smooth-responder` only dispatches; the model call happens in `/api/intake/[fileId]/worker` (`claude-sonnet-4-6`). `morning-brief` doesn't call Claude at all.
 
 ---
 
@@ -518,8 +518,9 @@ See `.env.local.example`. Key variables:
 | `NEXT_PUBLIC_SUPABASE_URL` | All Supabase clients; absence (or the literal placeholder `your-supabase-url`) triggers fallback data mode — see `isDemoMode()` in `lib/auth/api-auth.ts` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser Supabase client |
 | `SUPABASE_SERVICE_ROLE_KEY` | Every API route constructs its own `createClient(url, serviceRoleKey)` inline (no shared admin-client singleton — see "Auth" above) |
-| `ANTHROPIC_API_KEY` | `/api/chat` (intent classification, in-process), `/api/email-sync/parse`, `/api/email-draft`, `/api/classify-document`, `/api/estimation/scope-hints`, the `smooth-responder` edge function |
+| `ANTHROPIC_API_KEY` | `/api/chat` (intent classification, in-process), `/api/email-sync/parse`, `/api/email-draft`, `/api/classify-document`, `/api/estimation/scope-hints`, `/api/intake/[fileId]/worker` (the actual document extraction call) |
 | `NEXT_PUBLIC_APP_URL` | OAuth redirect URIs, worker invite links, internal fetch calls |
+| `APP_URL` (Supabase Edge Function secret, **not** a Vercel env var) | Set via `supabase secrets set APP_URL=https://www.getworka.com` — the `smooth-responder` edge function needs this to reach `POST /api/intake/[fileId]/worker`. Must be set independently of `NEXT_PUBLIC_APP_URL`; the function fails closed (500) if unset. |
 | `VERCEL_GIT_COMMIT_SHA` | Auto-injected by Vercel; baked into `NEXT_PUBLIC_COMMIT_SHA` at build time |
 | `GOOGLE_CLIENT_ID/SECRET` | Gmail OAuth |
 | `MICROSOFT_CLIENT_ID/SECRET` | Outlook OAuth |

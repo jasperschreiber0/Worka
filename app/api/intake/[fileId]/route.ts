@@ -58,6 +58,15 @@ export async function GET(
   const { fileId } = params
   const { searchParams } = new URL(req.url)
   const job_id = searchParams.get('job_id') ?? ''
+  const siblingsParam = searchParams.get('siblings') ?? ''
+  const requestedSiblingIds = Array.from(
+    new Set(
+      siblingsParam
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && s !== fileId)
+    )
+  )
 
   // builder_id is always derived from the authenticated session — never from
   // the query string — so a caller can't watch or trigger another builder's
@@ -130,6 +139,19 @@ export async function GET(
     })
   }
 
+  // Siblings are client-supplied — re-verify each one belongs to this builder
+  // and the same job before handing them to the worker, same as the primary
+  // file check above.
+  let sibling_file_ids: string[] = []
+  if (requestedSiblingIds.length > 0) {
+    const siblingCheckRes = await fetch(
+      `${supabaseUrl}/rest/v1/files?id=in.(${requestedSiblingIds.map(encodeURIComponent).join(',')})&builder_id=eq.${encodeURIComponent(builder_id)}&job_id=eq.${encodeURIComponent(job_id)}&select=id`,
+      { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+    )
+    const siblingRows = siblingCheckRes.ok ? (await siblingCheckRes.json() as Array<{ id: string }>) : []
+    sibling_file_ids = siblingRows.map((r) => r.id)
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
       const emit = (event: string, data: object) => {
@@ -144,7 +166,7 @@ export async function GET(
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${anonKey}`,
           },
-          body: JSON.stringify({ file_id: fileId, job_id, builder_id }),
+          body: JSON.stringify({ file_id: fileId, job_id, builder_id, sibling_file_ids }),
         })
 
         if (!triggerRes.ok) {

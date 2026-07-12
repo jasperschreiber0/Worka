@@ -372,8 +372,19 @@ export async function ensureQuotePriced(
 
     // Batched upsert instead of one round trip per line item — quotes with
     // 20-40 unpriced lines previously issued that many sequential updates.
+    // quote_id/trade_category_id/description must ride along even though
+    // they're unchanged: upsert plans as a real INSERT ... ON CONFLICT DO
+    // UPDATE, so its NOT NULL columns must be satisfied regardless of which
+    // branch actually fires.
     const rowsToUpdate = priced
-      .map((p, i) => ({ id: unpriced[i].id, rate: p.rate, total: p.total }))
+      .map((p, i) => ({
+        id: unpriced[i].id,
+        quote_id: quoteId,
+        trade_category_id: unpriced[i].trade_category_id,
+        description: unpriced[i].description,
+        rate: p.rate,
+        total: p.total,
+      }))
       .filter((row) => row.rate !== null)
 
     if (rowsToUpdate.length > 0) {
