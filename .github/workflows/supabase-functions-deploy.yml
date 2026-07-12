@@ -1,0 +1,39 @@
+name: Deploy Supabase Edge Functions
+
+# Same gap as migrations, different target: git push to main auto-deploys the
+# Next.js app (Vercel) and now auto-applies DB migrations (see
+# supabase-migrate.yml), but nothing deployed supabase/functions/** itself.
+# Whoever wanted a function update live had to run `supabase functions
+# deploy` by hand, with no record of whether that ever actually happened.
+# This closes that gap the same way: push code, ship code.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: supabase-functions-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy morning-brief
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy morning-brief --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Deploy smooth-responder
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy smooth-responder --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"

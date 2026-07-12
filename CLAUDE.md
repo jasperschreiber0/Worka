@@ -329,6 +329,15 @@ All use Deno + ESM. Deployed to Supabase; called from Next.js API routes via `fe
 
 **Model used in edge functions**: `claude-sonnet-4-6`
 
+**Edge functions now deploy automatically.** `.github/workflows/supabase-functions-deploy.yml`
+runs `supabase functions deploy` for both functions whenever `supabase/functions/**` changes on
+`main`. Before this, a push to main auto-deployed the Next.js app (Vercel) and, once
+`supabase-migrate.yml` existed, the DB migrations — but function code itself still required
+someone to run `supabase functions deploy` by hand, with no record of whether that had actually
+happened for a given commit. Requires `SUPABASE_ACCESS_TOKEN` (from
+supabase.com/dashboard/account/tokens) and `SUPABASE_PROJECT_REF` repo secrets in GitHub →
+Settings → Secrets and variables → Actions.
+
 ---
 
 ## Database
