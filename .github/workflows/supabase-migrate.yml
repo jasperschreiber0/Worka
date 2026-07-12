@@ -1,0 +1,37 @@
+name: Deploy Supabase migrations
+
+# Applies pending SQL migrations to the production Supabase project whenever
+# supabase/migrations/** changes on main, then reloads PostgREST's schema
+# cache. Migrations landing on main via git no longer means they're actually
+# live in the database — this closes that gap.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: supabase-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Push migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Reload PostgREST schema cache
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: psql "$SUPABASE_DB_URL" -c "NOTIFY pgrst, 'reload schema';"

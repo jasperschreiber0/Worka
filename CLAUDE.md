@@ -410,6 +410,14 @@ confirming the migration has actually been applied (`supabase migration list`). 
 does this once; if it recurs after future migrations, add another one-line `NOTIFY` migration
 rather than assuming the DDL itself is wrong.
 
+**Migrations now deploy automatically.** `.github/workflows/supabase-migrate.yml` runs
+`supabase db push` against production (then reloads the PostgREST schema cache) whenever
+`supabase/migrations/**` changes on `main`. This closes the gap where a migration file merged
+into main was never actually applied to the live database — the root cause of the 021/026
+incident above. It requires a `SUPABASE_DB_URL` repo secret (full Postgres connection string,
+including password) set in GitHub → Settings → Secrets and variables → Actions. Without that
+secret the workflow fails loudly on the next migration push rather than silently doing nothing.
+
 **Note:** `008_auto_create_builder.sql`, `008_intake_progress.sql`, and `008_job_context_fields.sql` all share the `008_` prefix — a real numbering collision (harmless today since Supabase applies migrations in lexicographic filename order and none of the three depend on each other, but don't add a fourth `008_*` file — use the next free number).
 
 ### Quote line item — key columns
