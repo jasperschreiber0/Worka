@@ -185,7 +185,7 @@ export async function GET(
           await delay(1500)
 
           const res = await fetch(
-            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count`,
+            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count,failure_stage,failure_reason`,
             {
               headers: {
                 'apikey': anonKey,
@@ -203,6 +203,8 @@ export async function GET(
             intake_pct: number | null
             quote_id: string | null
             intake_assumption_count: number | null
+            failure_stage: string | null
+            failure_reason: string | null
           }>
           const row = rows[0]
           if (!row) continue
@@ -269,6 +271,7 @@ export async function GET(
           }
 
           if (row.intake_status === 'failed') {
+            console.error('Intake failed:', fileId, row.failure_stage, row.failure_reason)
             emit('error', { message: 'Processing failed — please try again' })
             controller.close()
             return
