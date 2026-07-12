@@ -42,10 +42,44 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: supabase migration list --db-url "$SUPABASE_DB_URL"
 
+      # Migrations 011+ were, for a long stretch, applied to production by
+      # hand (SQL editor) rather than through `supabase db push`, so their
+      # DDL/data is often already live while supabase_migrations.schema_migrations
+      # has no record of it — the same shape as the 008_ collision, just
+      # without a filename collision to explain it. A plain `db push` aborts
+      # on the first such migration with a duplicate-key/already-exists
+      # error. Loop: push, and on that specific failure mode, mark just that
+      # one version as applied (supabase migration repair) without
+      # re-running its SQL, then retry. A genuine new-migration error (any
+      # other failure) still aborts the loop instead of being papered over.
       - name: Push migrations
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: supabase db push --db-url "$SUPABASE_DB_URL" ${{ inputs.include_all && '--include-all' || '' }}
+        run: |
+          set +e
+          for i in $(seq 1 30); do
+            OUTPUT=$(supabase db push --db-url "$SUPABASE_DB_URL" ${{ inputs.include_all && '--include-all' || '' }} 2>&1)
+            STATUS=$?
+            echo "$OUTPUT"
+            if [ $STATUS -eq 0 ]; then
+              echo "All migrations applied."
+              exit 0
+            fi
+            if echo "$OUTPUT" | grep -qE "duplicate key value violates unique constraint|already exists"; then
+              VERSION=$(echo "$OUTPUT" | grep -oP 'Applying migration \K[0-9]+' | tail -1)
+              if [ -z "$VERSION" ]; then
+                echo "Push failed on pre-applied content but couldn't determine which migration version — aborting."
+                exit 1
+              fi
+              echo "Migration $VERSION's content is already live but wasn't recorded as applied — repairing and retrying."
+              supabase migration repair --status applied "$VERSION" --db-url "$SUPABASE_DB_URL"
+            else
+              echo "Push failed for a reason other than pre-applied content — not auto-repairing."
+              exit 1
+            fi
+          done
+          echo "Exceeded retry limit."
+          exit 1
 
       - name: Reload PostgREST schema cache
         env:
