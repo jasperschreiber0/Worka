@@ -118,12 +118,18 @@ async function loadFileAsBlock(
     .eq('id', fileId)
     .eq('builder_id', builderId)
     .single()
-  if (!fileRow) return null
+  if (!fileRow) {
+    console.error(`loadFileAsBlock: no files row for ${fileId} (builder ${builderId})`)
+    return null
+  }
 
   const { data: fileData, error: downloadErr } = await supabase.storage
     .from('plans')
     .download(fileRow.storage_path)
-  if (downloadErr || !fileData) return null
+  if (downloadErr || !fileData) {
+    console.error(`loadFileAsBlock: storage download failed for ${fileId} (${fileRow.filename}):`, downloadErr?.message ?? 'no data returned')
+    return null
+  }
 
   const buffer = await fileData.arrayBuffer()
   const base64 = toBase64(buffer)
@@ -436,6 +442,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // classified and their facts already persisted; we're only folding in the
     // builder's new answers (already written as project_facts by the caller).
     const skippedSiblings: string[] = []
+    const failedToLoadSiblings: string[] = []
     if (!resume) {
       const primary = await loadFileAsBlock(supabase, fileId, builderId)
       if (!primary) { await fail('File record or storage object not found'); return }
@@ -450,7 +457,12 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const loadedSiblings: LoadedFile[] = []
       for (const sibId of siblingFileIds.slice(0, 6)) {
         const loaded = await loadFileAsBlock(supabase, sibId, builderId)
-        if (loaded) loadedSiblings.push(loaded)
+        if (loaded) {
+          loadedSiblings.push(loaded)
+        } else {
+          const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
+          failedToLoadSiblings.push(row?.filename ?? sibId)
+        }
       }
       loadedSiblings.sort((a, b) => JSON.stringify(b.block).length - JSON.stringify(a.block).length)
 
@@ -543,10 +555,15 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     }
 
     if (facts.length === 0) {
-      const skippedNote = skippedSiblings.length > 0
-        ? ` (excluded from this run, combined file size over the 20MB analysis limit: ${skippedSiblings.join(', ')} — re-upload separately or split into a smaller batch)`
-        : ''
-      await fail(`No project facts could be established from the provided documents${skippedNote}`)
+      const notes: string[] = []
+      if (skippedSiblings.length > 0) {
+        notes.push(`excluded, combined size over the 20MB analysis limit: ${skippedSiblings.join(', ')}`)
+      }
+      if (failedToLoadSiblings.length > 0) {
+        notes.push(`failed to load from storage: ${failedToLoadSiblings.join(', ')}`)
+      }
+      const note = notes.length > 0 ? ` (${notes.join('; ')} — re-upload separately or split into a smaller batch)` : ''
+      await fail(`No project facts could be established from the provided documents${note}`)
       return
     }
 
