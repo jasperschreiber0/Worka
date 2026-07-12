@@ -123,28 +123,28 @@ export const DEMO_PROJECT_MEMORY: SimilarProject[] = [
 export const DEMO_SCOPE_HINTS: ScopeHint[] = [
   {
     description: 'Demolition of existing rear wall & weatherproofing',
-    trade_category_id: 1,
+    trade_category_id: 1, // Site Works & Concrete
     confidence: 90,
     reason: 'All rear extensions require opening the existing building envelope.',
     typical_cost_range: '$3,500–$6,000',
   },
   {
     description: 'Temporary weather protection during works',
-    trade_category_id: 1,
+    trade_category_id: 1, // Site Works & Concrete
     confidence: 85,
     reason: 'Required while the rear wall is open to the elements.',
     typical_cost_range: '$800–$1,800',
   },
   {
     description: 'Structural tie-in to existing building',
-    trade_category_id: 3,
+    trade_category_id: 2, // Framing
     confidence: 88,
     reason: 'New framing must be engineered to tie into the existing roof and wall structure.',
     typical_cost_range: '$2,000–$4,500',
   },
   {
     description: 'Existing drainage relocation',
-    trade_category_id: 11,
+    trade_category_id: 11, // Fixtures & Tapware
     confidence: 75,
     reason: 'Stormwater and sewer points commonly fall within the extension footprint.',
     typical_cost_range: '$1,200–$3,000',
@@ -159,21 +159,21 @@ export const SCOPE_HINTS_BY_TYPE: Record<string, ScopeHint[]> = {
   bathroom_reno: [
     {
       description: 'Full waterproofing membrane — floor & walls to 1800mm',
-      trade_category_id: 2,
+      trade_category_id: 10, // Flooring (wet-area waterproofing precedes tiling)
       confidence: 98,
       reason: 'BCA mandatory for all wet areas.',
       typical_cost_range: '$1,800–$3,200',
     },
     {
       description: 'Tile removal & substrate preparation',
-      trade_category_id: 1,
+      trade_category_id: 10, // Flooring
       confidence: 90,
       reason: 'Existing tiles must be removed before waterproofing can be applied.',
       typical_cost_range: '$600–$1,500',
     },
     {
       description: 'Floor drainage adjustment to new layout',
-      trade_category_id: 11,
+      trade_category_id: 11, // Fixtures & Tapware
       confidence: 80,
       reason: 'Drain position commonly changes with a new bathroom layout.',
       typical_cost_range: '$800–$2,000',
@@ -182,21 +182,21 @@ export const SCOPE_HINTS_BY_TYPE: Record<string, ScopeHint[]> = {
   kitchen_reno: [
     {
       description: 'Plumbing rough-in changes for new layout',
-      trade_category_id: 11,
+      trade_category_id: 11, // Fixtures & Tapware
       confidence: 85,
       reason: 'Sink and dishwasher positions commonly move in a kitchen renovation.',
       typical_cost_range: '$900–$2,500',
     },
     {
       description: 'Dedicated electrical circuits for appliances',
-      trade_category_id: 12,
+      trade_category_id: 12, // Electrical
       confidence: 88,
       reason: 'Modern kitchens require separate circuits for oven, dishwasher, and fridge.',
       typical_cost_range: '$1,200–$2,800',
     },
     {
       description: 'External rangehood ducting',
-      trade_category_id: 12,
+      trade_category_id: 12, // Electrical
       confidence: 80,
       reason: 'Required unless recirculating model — penetration through wall or roof.',
       typical_cost_range: '$600–$1,400',
@@ -205,21 +205,21 @@ export const SCOPE_HINTS_BY_TYPE: Record<string, ScopeHint[]> = {
   double_storey: [
     {
       description: 'Structural engineering fees',
-      trade_category_id: 1,
+      trade_category_id: 13, // Preliminaries
       confidence: 98,
       reason: 'Mandatory certification for all second-storey work.',
       typical_cost_range: '$3,500–$6,000',
     },
     {
       description: 'Existing footing / structure strengthening',
-      trade_category_id: 3,
+      trade_category_id: 1, // Site Works & Concrete
       confidence: 78,
       reason: 'Original footings often need upgrading to carry the additional load.',
       typical_cost_range: '$8,000–$25,000',
     },
     {
       description: 'Stair construction',
-      trade_category_id: 3,
+      trade_category_id: 7, // Fit-out Carpentry
       confidence: 95,
       reason: 'Internal stair access always required for a second storey.',
       typical_cost_range: '$12,000–$28,000',
@@ -254,9 +254,9 @@ export interface DemoTradeVariance {
 }
 
 export const DEMO_TRADE_VARIANCES: DemoTradeVariance[] = [
-  { trade_category_id: 12, trade_category_name: 'Electrical',          avg_variance_pct: +14.2, sample_count: 12, note: 'Electricals consistently run over — typically more power points and circuits required than initially scoped.' },
-  { trade_category_id: 11, trade_category_name: 'Plumbing',            avg_variance_pct: +8.7,  sample_count: 11, note: 'Hidden drainage issues commonly discovered on-site.' },
-  { trade_category_id: 1,  trade_category_name: 'Earthworks & Site Prep', avg_variance_pct: +11.3, sample_count: 8, note: 'Demolition and site preparation costs frequently exceed estimate.' },
-  { trade_category_id: 3,  trade_category_name: 'Framing & Structural', avg_variance_pct: +2.1,  sample_count: 14, note: 'Framing is historically accurate — good visibility from plans.' },
-  { trade_category_id: 10, trade_category_name: 'Painting',            avg_variance_pct: -1.8,  sample_count: 16, note: 'Painting estimates are slightly conservative — often comes in under.' },
+  { trade_category_id: 12, trade_category_name: 'Electrical',           avg_variance_pct: +14.2, sample_count: 12, note: 'Electricals consistently run over — typically more power points and circuits required than initially scoped.' },
+  { trade_category_id: 11, trade_category_name: 'Fixtures & Tapware',   avg_variance_pct: +8.7,  sample_count: 11, note: 'Hidden drainage issues commonly discovered on-site.' },
+  { trade_category_id: 1,  trade_category_name: 'Site Works & Concrete', avg_variance_pct: +11.3, sample_count: 8, note: 'Demolition and site preparation costs frequently exceed estimate.' },
+  { trade_category_id: 2,  trade_category_name: 'Framing',              avg_variance_pct: +2.1,  sample_count: 14, note: 'Framing is historically accurate — good visibility from plans.' },
+  { trade_category_id: 9,  trade_category_name: 'Paint',                avg_variance_pct: -1.8,  sample_count: 16, note: 'Painting estimates are slightly conservative — often comes in under.' },
 ]

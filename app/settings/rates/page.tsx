@@ -8,19 +8,19 @@ const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 // ─── Trade category matching ──────────────────────────────────────────────────
 
 const TRADE_CATEGORIES = [
-  { id: 1,  name: 'Earthworks & Site Prep',       keywords: ['earthwork', 'site prep', 'excavat', 'cut and fill', 'earthworks', 'site work', 'sitework'] },
-  { id: 2,  name: 'Concrete',                     keywords: ['concrete', 'slab', 'footing', 'foundation', 'pour', 'formwork', 'reinforce'] },
-  { id: 3,  name: 'Framing & Structural',         keywords: ['framing', 'frame', 'structural', 'timber frame', 'stud', 'wall frame', 'roof frame', 'steel frame', 'truss'] },
-  { id: 4,  name: 'Roofing',                      keywords: ['roof', 'colorbond', 'metal roof', 'gutter', 'fascia', 'downpipe', 'sarking', 'ridge', 'hip'] },
-  { id: 5,  name: 'Windows & External Doors',     keywords: ['window', 'external door', 'sliding door', 'glazing', 'alum', 'french door', 'bi-fold'] },
-  { id: 6,  name: 'External Cladding',            keywords: ['clad', 'weatherboard', 'render', 'brick', 'external wall', 'facade', 'hardie', 'linea'] },
-  { id: 7,  name: 'Insulation',                   keywords: ['insulat', 'batts', 'r-value', 'thermal', 'glasswool', 'rockwool', 'batt'] },
-  { id: 8,  name: 'Internal Linings',             keywords: ['lining', 'plasterboard', 'gyprock', 'cornice', 'internal wall', 'drywall', 'plaster'] },
-  { id: 9,  name: 'Joinery & Cabinetry',          keywords: ['joinery', 'cabinet', 'kitchen', 'wardrobe', 'vanity', 'shelf', 'built-in', 'drawer'] },
-  { id: 10, name: 'Painting',                     keywords: ['paint', 'coat', 'primer', 'brush', 'roller', 'decor', 'finish coat', 'undercoat'] },
-  { id: 11, name: 'Plumbing',                     keywords: ['plumb', 'pipe', 'drain', 'hot water', 'gas', 'tap', 'basin', 'toilet', 'shower', 'bath'] },
-  { id: 12, name: 'Electrical',                   keywords: ['electr', 'power', 'light', 'cable', 'switch', 'board', 'circuit', 'gpo', 'outlet', 'wiring'] },
-  { id: 13, name: 'Tiling & Finishes',            keywords: ['tile', 'tiling', 'floor finish', 'bathroom finish', 'grout', 'porcelain', 'timber floor', 'carpet', 'vinyl'] },
+  { id: 1,  name: 'Site Works & Concrete', keywords: ['earthwork', 'site prep', 'excavat', 'cut and fill', 'sitework', 'concrete', 'slab', 'footing', 'foundation', 'pour', 'formwork', 'reinforce', 'drainage', 'retaining wall'] },
+  { id: 2,  name: 'Framing',               keywords: ['framing', 'frame', 'structural', 'timber frame', 'stud', 'wall frame', 'roof frame', 'steel frame', 'truss', 'lvl', 'beam'] },
+  { id: 3,  name: 'Roofing',               keywords: ['roof', 'colorbond', 'metal roof', 'gutter', 'fascia', 'downpipe', 'sarking', 'ridge', 'hip'] },
+  { id: 4,  name: 'External Cladding',     keywords: ['clad', 'weatherboard', 'render', 'brick', 'external wall', 'facade', 'hardie', 'linea', 'window', 'external door', 'sliding door', 'glazing', 'french door', 'bi-fold', 'skylight'] },
+  { id: 5,  name: 'Insulation',            keywords: ['insulat', 'batts', 'r-value', 'thermal', 'glasswool', 'rockwool', 'batt'] },
+  { id: 6,  name: 'Internal Linings',      keywords: ['lining', 'plasterboard', 'gyprock', 'cornice', 'internal wall', 'drywall', 'plaster'] },
+  { id: 7,  name: 'Fit-out Carpentry',     keywords: ['internal door', 'door hardware', 'skirting', 'architrave', 'shelving', 'staircase', 'stair'] },
+  { id: 8,  name: 'Cabinetry',             keywords: ['cabinet', 'kitchen', 'wardrobe', 'vanity', 'shelf', 'built-in', 'drawer', 'benchtop', 'linen'] },
+  { id: 9,  name: 'Paint',                 keywords: ['paint', 'coat', 'primer', 'brush', 'roller', 'decor', 'finish coat', 'undercoat'] },
+  { id: 10, name: 'Flooring',              keywords: ['tile', 'tiling', 'floor finish', 'bathroom finish', 'grout', 'porcelain', 'timber floor', 'carpet', 'vinyl', 'polished concrete', 'waterproof'] },
+  { id: 11, name: 'Fixtures & Tapware',    keywords: ['plumb', 'pipe', 'drain', 'hot water', 'gas', 'tap', 'basin', 'toilet', 'shower', 'bath'] },
+  { id: 12, name: 'Electrical',            keywords: ['electr', 'power', 'light', 'cable', 'switch', 'board', 'circuit', 'gpo', 'outlet', 'wiring', 'data', 'alarm'] },
+  { id: 13, name: 'Preliminaries',         keywords: ['permit', 'council fee', 'site cost', 'insurance', 'scaffold', 'waste', 'skip bin', 'supervision'] },
 ]
 
 function matchCategory(raw: string): { id: number; name: string } | null {

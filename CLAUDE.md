@@ -149,7 +149,8 @@ The app checks `process.env.NEXT_PUBLIC_SUPABASE_URL` to decide whether Supabase
 | `AssumptionReview.tsx` | AI assumption resolution (accept / adjust / exclude). Also renders SimilarJobsCard and ScopeIntelligenceCard. Scope hints track accepted/dismissed state locally; accepted count shown in completion banner. |
 | `ActivationModal.tsx` | Job activation confirmation — shows 8 milestones + 5 invoices |
 | `InboundEmailAlert.tsx` | Floating overlay on `inbound_email_alert` event |
-| `IntakeProgress.tsx` | SSE progress bar during PDF extraction; passes `memoryData` to `onComplete` |
+| `IntakeProgress.tsx` | SSE progress bar during document intake; renders `ClarifyingQuestionsPanel` if the estimating engine pauses for a blocking gap; passes `memoryData` to `onComplete` |
+| `ClarifyingQuestionsPanel.tsx` | Stage 4/5 blocking-question form — collects builder answers, hands them to `IntakeProgress` to POST and resume the engine |
 | `VariationCard.tsx` | Inline variation card in chat — approve/reject + "Send to client" share link |
 | `JobListCard.tsx` | Clickable job list rendered when builder asks "show my jobs" |
 
@@ -245,8 +246,8 @@ This table is now generated to match `app/api/**/route.ts` exactly — a prior v
 |-------|---------|
 | `POST /api/chat` | Main chat handler — intent classification (in-process, see architecture note above) + dispatch. Rate-limited per builder. |
 | `POST /api/upload` | File upload to Supabase Storage |
-| `GET /api/intake/[fileId]` | SSE extraction pipeline v2 — 12 stages including memory retrieval and scope intelligence. Auth derives `builder_id` from the session and verifies the file belongs to that builder before triggering/polling. |
-| `POST /api/intake/[fileId]/worker` | Server-to-server only (requires the service-role bearer token) — the actual extraction work, invoked by the `smooth-responder` edge function |
+| `GET /api/intake/[fileId]` | SSE trigger + poller for the reasoning-first estimating engine (see "Reasoning-First Estimating Engine" below). Auth derives `builder_id` from the session — never trusted from the query string. |
+| `POST /api/intake/[fileId]/clarify` | Records the builder's answers to blocking clarifying questions as `project_facts`, then resumes the engine (`resume: true`) without re-classifying documents |
 | `GET /api/dashboard` | Dashboard stats, alerts, recommendations |
 | `GET /api/jobs` | Job list |
 | `GET /api/jobs/[jobId]/snapshot` | Full job snapshot for the panel |
@@ -320,9 +321,11 @@ All use Deno + ESM. Deployed to Supabase; called from Next.js API routes via `fe
 | Function | Layer | Purpose |
 |----------|-------|---------|
 | `morning-brief` | 2 (Decision) | Ranked daily alerts from DB. Invoked from `app/api/cron/morning-brief/route.ts`. |
-| `smooth-responder` | 2 (Decision) | Document-intake AI extraction pipeline (renamed from `intake-pipeline`; moved here from a Next.js route to escape Vercel's function timeout). Invoked from `app/api/intake/[fileId]/route.ts`. Calls Claude directly — this is the one Layer-2 function that does, since it *is* the AI extraction step, not a Claude-free decision step. |
+| `smooth-responder` | 2 (Decision) | **The reasoning-first estimating engine** — Stages 1–6 (Document Intelligence → Project Understanding → Scope Reasoning → Gap Detection → Estimate Generation → QA), see "Reasoning-First Estimating Engine" below. Invoked from `app/api/intake/[fileId]/route.ts`. Function folder name predates this architecture; not renamed to avoid a deploy-slug break. Calls Claude directly — this is the one Layer-2 function that does, since it *is* the AI extraction/reasoning step, not a Claude-free decision step. |
 
 `create-worker` and `create-job` (earlier Layer-2 functions matching the architecture doc above) had zero callers — `chat/route.ts`'s local `createWorker()`/`createJob()` do that work instead — and were deleted. There is no `classify-intent` function; it was never deployed in this repo. If you're restoring the documented architecture, that means writing (or reviving from git history) both, then actually routing `app/api/chat/route.ts` through them.
+
+**Known regression, tracked as a follow-up:** the previous `smooth-responder` (and the `/api/intake/[fileId]/worker` route it replaced) used `lib/pdf-text.ts` to extract a PDF's raw text layer alongside the vision read, specifically because Claude's vision-only reading sometimes misreads column-aligned price tables in priced documents (quotes/BOQs). The reasoning-first engine reads documents vision-only (Deno edge function — `lib/pdf-text.ts` depends on the `unpdf` npm package and Node's `Buffer`, neither portable here without real work). Until this is ported, priced-document line items extracted via `document_rate`/`document_total` should be spot-checked against the source PDF for tabular data.
 
 **Model used in edge functions**: `claude-sonnet-4-6`
 
@@ -347,7 +350,11 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 4. `cost_rates` — 630 platform defaults (seeded migration 017), state-aware
 5. `network_rate_aggregates` — anonymised P50 across all builders
 
-**Estimation engine** — `lib/pricing.ts`. The intake edge function only extracts quantities; pricing happens Next.js-side. `ensureQuotePriced()` runs when the intake poller sees extraction complete (and lazily from the quote GET as backfill): it matches line items to a `line_item_key` (token overlap within trade category + unit compatibility + construction-slang synonyms) and resolves rates through the 5-tier hierarchy. `recomputeQuoteTotals()` must be called after any line-item mutation. `captureLearnedRates()` runs on job activation (quote approval) to feed Tier 1; the nightly `network-rates` cron aggregates learned rates into Tier 5. All pricing is best-effort — an unpriceable item keeps `rate = null` and is excluded from totals rather than failing the pipeline. Quote `confidence_score` = lowest included line-item confidence.
+**Rate resolution engine** — `lib/pricing.ts`. The estimating engine only extracts quantities; pricing happens Next.js-side. `ensureQuotePriced()` runs when the intake poller sees extraction complete (and lazily from the quote GET as backfill): it matches line items to a `line_item_key` (token overlap within trade category + unit compatibility + construction-slang synonyms) and resolves rates through the 5-tier hierarchy. `recomputeQuoteTotals()` must be called after any line-item mutation. `captureLearnedRates()` runs on job activation (quote approval) to feed Tier 1; the nightly `network-rates` cron aggregates learned rates into Tier 5. All pricing is best-effort — an unpriceable item keeps `rate = null` and is excluded from totals rather than failing the pipeline. Quote `confidence_score` = lowest included line-item confidence.
+
+**Canonical trade taxonomy** — `lib/trade-taxonomy.ts` mirrors the DB-locked `trade_categories` table byte-for-byte. This is the *only* trade numbering used anywhere in the product (rate matching, the estimating engine, scope hints, rates import). Earlier versions of this codebase had a second, incompatible 1–13 numbering living in several now-deleted or fixed code paths — if you ever see a `TRADE_CATEGORIES` constant that doesn't match this file, it's a bug, not an alternate scheme.
+
+**Validation gates** — `lib/estimating/gates.ts` is the single specification (Gate 1 no unit, Gate 2 quantity unverified, Gate 3 invalid quantity → excluded; PC/PS items exempt from Gates 1 & 2). The gate is computed once, at extraction time, and persisted on `assumptions.gate` — never re-derived from current line-item state. The Deno estimating engine (`supabase/functions/smooth-responder`) carries a byte-identical copy of this logic since it can't import Next.js modules across the Supabase/Vercel deploy boundary.
 
 **Margin rule** — `quotes.total_cost` is the builder's internal cost basis. Anything a client sees (send email, PDF export, quote summary `client_price`) must be marked up via `applyMargin(cost, margin_pct)`. Raw cost rates and margin percentage never appear in client-facing output.
 
@@ -385,6 +392,10 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 023_atomic_learned_rate_upsert.sql    — upsert_learned_rate() RPC, atomic running-average update
 024_job_tasks.sql                     — job_tasks table (route code already assumed this existed)
 025_worker_sessions.sql               — hashed, expiring worker-portal session token on workers
+026_reasoning_engine.sql              — assumptions.gate (persisted, not re-derived); project_documents,
+                                project_facts, scope_items, clarifying_questions (Stages 1-5 of the
+                                estimating engine); quotes.qa_report / overall_confidence (Stage 6 QA);
+                                files.intake_status gains 'needs_info'
 ```
 
 **Note:** `008_auto_create_builder.sql`, `008_intake_progress.sql`, and `008_job_context_fields.sql` all share the `008_` prefix — a real numbering collision (harmless today since Supabase applies migrations in lexicographic filename order and none of the three depend on each other, but don't add a fourth `008_*` file — use the next free number).
@@ -415,31 +426,51 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 
 ---
 
-## Intake Pipeline v2 (`app/api/intake/[fileId]/route.ts`)
+## Reasoning-First Estimating Engine
 
-12 SSE progress stages:
+This is the **one canonical pipeline** for turning uploaded documents (or a plain-English description) into an estimate. It replaced four independent, competing "document → quote" implementations that had accumulated in this codebase (two dead/unreachable, two live and inconsistent with each other — including a second, incompatible trade-category numbering sharing the same 1–13 integer space as the DB-locked one). There is now exactly one reasoning engine, one taxonomy, one gate specification.
 
-| Stage | % | Description |
-|-------|---|-------------|
-| `uploading` | 5 | File received |
-| `reading` | 15 | PDF parsed |
-| `metadata` | 25 | Fast metadata extraction (Claude Haiku) |
-| `retrieving_memory` | 35 | Similar project retrieval from `project_memory` |
-| `extracting_site` | 44 | Site works & concrete |
-| `extracting_framing` | 52 | Framing quantities |
-| `extracting_roofing` | 60 | Roofing |
-| `extracting_fitout` | 68 | Fit-out & finishes |
-| `extracting_elec` | 76 | Electrical & prelims |
-| `scope_intelligence` | 84 | Pattern-match scope gaps |
-| `validating` | 90 | Validation gates |
-| `building_quote` | 95 | Quote row + line items created |
+The pipeline always runs in this order and never skips straight to pricing:
+
+```
+Upload → Document Classification → Project Understanding → Scope Reasoning →
+Gap Detection → Clarifying Questions (if blocking) → Estimate Generation →
+Quality Assurance → Render Estimate
+```
+
+**Split across two runtimes, deliberately:**
+
+| Stages | Where | Why |
+|--------|-------|-----|
+| 1 Document Intelligence, 2 Project Understanding | `supabase/functions/smooth-responder` (Deno) | No Vercel timeout — a multi-call reasoning chain needs room to run in the background |
+| 3 Scope Reasoning, 4 Gap Detection, 5 Clarifying Questions | same Deno function | Gap detection falls directly out of scope reasoning — one Claude call covers both |
+| 6 Estimate Generation (quantities only, no rates) | same Deno function | Produces line items with evidence + confidence; `rate`/`total` stay null unless the source document itself is a priced BOQ (hybrid pricing) |
+| Rate resolution (5-tier hierarchy) | Next.js, `lib/pricing.ts`, called from the SSE route once `intake_status = 'extracted'` | Needs the builder's learned/preference/supplier rates — same Postgres the Next.js app already talks to |
+| 8 Quality Assurance | Next.js, `lib/estimating/qa.ts`, runs immediately after pricing | Needs priced totals to check for unpriced/low-confidence/duplicate items |
+| 9 Render | `IntakeProgress` → `AssumptionReview` / `QuoteView` | Presentation only |
+
+**Real progress, not cosmetic.** `files.intake_stage` / `intake_pct` are written at each actual stage boundary inside the Deno function — there is no fake `setInterval` faking progress while a single API call runs.
+
+**Persisted, evidence-backed state** (migration 026), enriched rather than rebuilt on every upload:
+
+| Table | Stage | Purpose |
+|-------|-------|---------|
+| `project_documents` | 1 | Document map — type, discipline, revision, readability, duplicate/superseded detection |
+| `project_facts` | 2 | Evidence-backed facts — every fact carries `source_document_id`, `page_reference`, `evidence`, `confidence`. Unknown stays unknown; nothing is inferred without evidence. |
+| `scope_items` | 3 | Per-trade included/excluded scope, dependencies, assumptions, uncertainty |
+| `clarifying_questions` | 4/5 | `blocking = true` questions stop the pipeline before Stage 6 — no estimate is generated until answered. Non-blocking gaps are instead represented as per-line assumptions, exactly like before. |
+| `quotes.qa_report` / `overall_confidence` | 8 | Top risks, review items, recommended actions, missing trades, duplicate descriptions |
+
+**Blocking clarifying questions pause the pipeline.** `files.intake_status` gains `needs_info`; the SSE route (`GET /api/intake/[fileId]`) detects it, fetches the open blocking questions, and emits a `needs_clarification` event instead of `complete`. `IntakeProgress.tsx` renders `ClarifyingQuestionsPanel.tsx` in place of the progress bar. Answering calls `POST /api/intake/[fileId]/clarify`, which writes each answer as a `project_facts` row (`category: 'builder_answer'`, confidence 100 — a direct builder answer always outranks anything inferred from a document) and re-triggers the engine with `resume: true`, which skips straight back to Scope Reasoning with the merged fact base rather than re-classifying documents from scratch.
+
+**Incremental uploads merge, they don't restart.** A new file uploaded to a job that already has facts/scope/a quote gets classified on its own, folded into the existing fact base, and Scope Reasoning + Gap Detection re-run over the merged set. Estimate Generation reuses the job's existing draft/pending_review quote rather than creating a second one, and skips re-inserting any line item that already exists for the same trade + description — previously-resolved assumptions on unrelated line items are left untouched.
 
 **Validation gates:**
-- Gate 1: no unit → assumption (unresolved). Exempt: `pc_allowance`, `provisional_sum`
-- Gate 2: quantity but no dimensions_string → assumption (unresolved). Exempt: `pc_allowance`, `provisional_sum`
-- Gate 3: quantity ≤ 0 → assumption (excluded)
+- Gate 1: no unit (or a genuinely undeterminable quantity, marked "Manual Input Required" by the model) → assumption (unresolved). Exempt: `pc_allowance`, `provisional_sum`, document-priced lines.
+- Gate 2: quantity present but not traceable to evidence → assumption (unresolved). Same exemptions.
+- Gate 3: quantity ≤ 0 → assumption (excluded).
 
-**`onComplete` payload** includes `similar_projects`, `scope_hints`, `total_in_memory` — passed through `IntakeProgress` → `UploadPanel` → `ChatInterface` → `AssumptionReview`.
+See `lib/estimating/gates.ts` for the canonical spec.
 
 ---
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { tradeCategoryName } from '@/lib/trade-taxonomy'
 
 interface ExtractedRate {
   trade_category_id: number
@@ -9,31 +10,15 @@ interface ExtractedRate {
   rate: number
 }
 
-const TRADE_CATEGORIES = [
-  { id: 1,  name: 'Earthworks & Site Prep' },
-  { id: 2,  name: 'Concrete' },
-  { id: 3,  name: 'Framing & Structural' },
-  { id: 4,  name: 'Roofing' },
-  { id: 5,  name: 'Windows & External Doors' },
-  { id: 6,  name: 'External Cladding' },
-  { id: 7,  name: 'Insulation' },
-  { id: 8,  name: 'Internal Linings' },
-  { id: 9,  name: 'Joinery & Cabinetry' },
-  { id: 10, name: 'Painting' },
-  { id: 11, name: 'Plumbing' },
-  { id: 12, name: 'Electrical' },
-  { id: 13, name: 'Tiling & Finishes' },
-]
-
 const DEMO_EXTRACTED: ExtractedRate[] = [
-  { trade_category_id: 2,  trade_category_name: 'Concrete',               description: '65MPa slab pour – 100mm',           unit: 'm²', rate: 110 },
-  { trade_category_id: 2,  trade_category_name: 'Concrete',               description: 'Strip footing – standard',            unit: 'lm', rate: 85  },
-  { trade_category_id: 3,  trade_category_name: 'Framing & Structural',   description: 'Pine wall frame – 90mm studs',        unit: 'lm', rate: 42  },
-  { trade_category_id: 3,  trade_category_name: 'Framing & Structural',   description: 'Roof truss – standard pitch',         unit: 'ea', rate: 420 },
-  { trade_category_id: 4,  trade_category_name: 'Roofing',                description: 'Colorbond roofing sheet',             unit: 'm²', rate: 55  },
-  { trade_category_id: 4,  trade_category_name: 'Roofing',                description: 'Gutters and downpipes',               unit: 'lm', rate: 38  },
-  { trade_category_id: 10, trade_category_name: 'Painting',               description: 'Walls and ceiling – 2 coats',         unit: 'm²', rate: 18  },
-  { trade_category_id: 11, trade_category_name: 'Plumbing',               description: 'Hot water unit – 26L gas',            unit: 'ea', rate: 1200},
+  { trade_category_id: 1,  trade_category_name: 'Site Works & Concrete',  description: '65MPa slab pour – 100mm',           unit: 'm²', rate: 110 },
+  { trade_category_id: 1,  trade_category_name: 'Site Works & Concrete',  description: 'Strip footing – standard',            unit: 'lm', rate: 85  },
+  { trade_category_id: 2,  trade_category_name: 'Framing',                description: 'Pine wall frame – 90mm studs',        unit: 'lm', rate: 42  },
+  { trade_category_id: 2,  trade_category_name: 'Framing',                description: 'Roof truss – standard pitch',         unit: 'ea', rate: 420 },
+  { trade_category_id: 3,  trade_category_name: 'Roofing',                description: 'Colorbond roofing sheet',             unit: 'm²', rate: 55  },
+  { trade_category_id: 3,  trade_category_name: 'Roofing',                description: 'Gutters and downpipes',               unit: 'lm', rate: 38  },
+  { trade_category_id: 9,  trade_category_name: 'Paint',                  description: 'Walls and ceiling – 2 coats',         unit: 'm²', rate: 18  },
+  { trade_category_id: 11, trade_category_name: 'Fixtures & Tapware',     description: 'Hot water unit – 26L gas',            unit: 'ea', rate: 1200},
   { trade_category_id: 12, trade_category_name: 'Electrical',             description: 'GPO double power point',              unit: 'ea', rate: 85  },
   { trade_category_id: 12, trade_category_name: 'Electrical',             description: 'LED downlight – installed',           unit: 'ea', rate: 120 },
 ]
@@ -84,7 +69,7 @@ Australian builder estimation documents typically have columns: Description | Qu
 
 Rules:
 - Extract every line item that has a quantity and a rate (or from which a rate can be calculated).
-- Include items from ALL sections: Preliminaries, Site Prep, Concrete, Framing, Roofing, Cladding, Insulation, Linings, Joinery, Painting, Plumbing, Electrical, Tiling, Building Labour, Fit-out, etc.
+- Include items from ALL sections: Preliminaries, Site Works & Concrete, Framing, Roofing, External Cladding, Insulation, Internal Linings, Fit-out Carpentry, Cabinetry, Paint, Flooring, Fixtures & Tapware, Electrical, Building Labour, etc.
 - Do NOT skip items just because they are in a section labelled "Preliminaries" or "Building Labour" — map them to the closest trade category.
 - Skip only true lump-sum items where no quantity or rate exists at all (just a single dollar amount with no breakdown).
 - Units may be: m², lm, m, ea, hr, wk, allow, item, set, lot — include all.`
@@ -92,19 +77,19 @@ Rules:
     const userPrompt = `Extract all line items with unit rates from this Australian builder document.
 
 Map each item to the closest trade_category_id (1-13):
-1=Earthworks & Site Prep (includes site toilets, skip bins, scaffolding, site establishment, fencing, surveying)
-2=Concrete (slabs, footings, piers, formwork, reinforcement)
-3=Framing & Structural (timber frames, roof trusses, steel beams, LVL, structural posts)
-4=Roofing (roof sheets, tiles, gutters, downpipes, fascia, sarking, ridge caps)
-5=Windows & External Doors (windows, sliding doors, entry doors, skylights, garage doors)
-6=External Cladding (FC cladding, weatherboard, render, cavity battens, wraps/membranes, brickwork)
-7=Insulation (wall batts, ceiling batts, underfloor insulation)
-8=Internal Linings (plasterboard, cornice, set, acoustic batts, internal doors, skirting)
-9=Joinery & Cabinetry (kitchen, bathroom vanities, laundry, wardrobes, benchtops)
-10=Painting (internal and external painting, sealer, undercoat)
-11=Plumbing (rough-in, fixtures, hot water, drainage, stormwater)
-12=Electrical (power points, lights, switchboard, rough-in, data)
-13=Tiling & Finishes (floor tiles, wall tiles, waterproofing, floor coverings, carpet)
+1=Site Works & Concrete (excavation, footings, slab, paths, drainage, retaining walls, site toilets, skip bins, scaffolding, site establishment, fencing, surveying)
+2=Framing (floor/wall/roof framing, structural steel, LVL beams, timber frames, roof trusses, structural posts)
+3=Roofing (roof sheets, tiles, gutters, downpipes, fascia, sarking, ridge caps, flashings)
+4=External Cladding (brick, render, weatherboard, FC cladding, timber cladding, stone, windows, external doors, sliding doors, skylights, garage doors)
+5=Insulation (wall batts, ceiling batts, foil underlay, underfloor insulation)
+6=Internal Linings (plasterboard, cornice, set, acoustic batts)
+7=Fit-out Carpentry (internal doors, door hardware, skirtings, architraves, shelving, staircases)
+8=Cabinetry (kitchen, bathroom vanities, laundry, wardrobes, linen, benchtops)
+9=Paint (internal and external painting, sealer, undercoat)
+10=Flooring (floor tiles, wall tiles, waterproofing, carpet, timber flooring, vinyl, polished concrete)
+11=Fixtures & Tapware (toilets, basins, showers, baths, taps, rough-in, hot water, drainage, stormwater)
+12=Electrical (power points, lights, switchboard, rough-in, data, alarms)
+13=Preliminaries (permits, council fees, site costs, insurance, supervision)
 
 If an item spans multiple categories, pick the best single match.
 Use the extract_rates tool to return your results.`
@@ -168,7 +153,7 @@ Use the extract_rates tool to return your results.`
       .filter((r) => r.rate > 0 && r.description && r.trade_category_id >= 1 && r.trade_category_id <= 13)
       .map((r) => ({
         trade_category_id: r.trade_category_id,
-        trade_category_name: TRADE_CATEGORIES.find((c) => c.id === r.trade_category_id)?.name ?? 'Unknown',
+        trade_category_name: tradeCategoryName(r.trade_category_id),
         description: r.description,
         unit: r.unit,
         rate: r.rate,
