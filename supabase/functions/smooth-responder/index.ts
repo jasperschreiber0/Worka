@@ -435,17 +435,33 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // Skipped entirely on an answers-only resume — the documents were already
     // classified and their facts already persisted; we're only folding in the
     // builder's new answers (already written as project_facts by the caller).
+    const skippedSiblings: string[] = []
     if (!resume) {
       const primary = await loadFileAsBlock(supabase, fileId, builderId)
       if (!primary) { await fail('File record or storage object not found'); return }
 
-      const siblings: LoadedFile[] = []
-      let totalBytes = 0
+      // Larger PDFs are, on average, multi-page comprehensive drawing sets
+      // (DA submissions, full architectural plans) far more likely to state
+      // basic project facts (address, project type, storeys) than small
+      // single-elevation or trade-detail sheets. Within the byte budget,
+      // prefer those over small ones rather than dropping in upload order —
+      // dropping the largest (most fact-rich) document while keeping five
+      // small trade sheets is what caused Stage 2 to find zero facts here.
+      const loadedSiblings: LoadedFile[] = []
       for (const sibId of siblingFileIds.slice(0, 6)) {
         const loaded = await loadFileAsBlock(supabase, sibId, builderId)
-        if (!loaded) continue
+        if (loaded) loadedSiblings.push(loaded)
+      }
+      loadedSiblings.sort((a, b) => JSON.stringify(b.block).length - JSON.stringify(a.block).length)
+
+      const siblings: LoadedFile[] = []
+      let totalBytes = 0
+      for (const loaded of loadedSiblings) {
         const approxBytes = JSON.stringify(loaded.block).length
-        if (totalBytes + approxBytes > 20 * 1024 * 1024) continue
+        if (totalBytes + approxBytes > 20 * 1024 * 1024) {
+          skippedSiblings.push(loaded.filename ?? 'unnamed file')
+          continue
+        }
         totalBytes += approxBytes
         siblings.push(loaded)
       }
@@ -527,7 +543,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     }
 
     if (facts.length === 0) {
-      await fail('No project facts could be established from the provided documents')
+      const skippedNote = skippedSiblings.length > 0
+        ? ` (excluded from this run, combined file size over the 20MB analysis limit: ${skippedSiblings.join(', ')} — re-upload separately or split into a smaller batch)`
+        : ''
+      await fail(`No project facts could be established from the provided documents${skippedNote}`)
       return
     }
 
