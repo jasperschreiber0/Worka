@@ -10,7 +10,18 @@ on:
     branches: [main]
     paths:
       - 'supabase/migrations/**'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      include_all:
+        description: >-
+          Pass --include-all to supabase db push. Only needed when a
+          migration file's numeric prefix collides with one already applied
+          remotely (e.g. the known 008_ collision, see CLAUDE.md) and the
+          push refuses on ordering grounds. Leave off by default so a
+          genuinely out-of-order new migration still fails loudly instead
+          of being silently forced through.
+        type: boolean
+        default: false
 
 concurrency:
   group: supabase-migrate
@@ -29,7 +40,7 @@ jobs:
       - name: Push migrations
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: supabase db push --db-url "$SUPABASE_DB_URL"
+        run: supabase db push --db-url "$SUPABASE_DB_URL" ${{ inputs.include_all && '--include-all' || '' }}
 
       - name: Reload PostgREST schema cache
         env:
