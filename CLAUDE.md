@@ -396,7 +396,19 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 project_facts, scope_items, clarifying_questions (Stages 1-5 of the
                                 estimating engine); quotes.qa_report / overall_confidence (Stage 6 QA);
                                 files.intake_status gains 'needs_info'
+027_reload_postgrest_schema_cache.sql — NOTIFY pgrst, 'reload schema'. Forces PostgREST to pick up
+                                objects from 021/026 that were returning "not found in schema cache"
+                                in production despite being defined correctly — see note below.
 ```
+
+**If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
+in production logs for an object that genuinely exists in a migration file, this is almost
+always a stale PostgREST schema cache, not a bug in the migration. `supabase db push` does not
+reliably trigger a PostgREST reload on its own. Fix: run `NOTIFY pgrst, 'reload schema';` against
+the database (or use the Supabase Dashboard's Database → "Reload schema cache" button) after
+confirming the migration has actually been applied (`supabase migration list`). Migration 027
+does this once; if it recurs after future migrations, add another one-line `NOTIFY` migration
+rather than assuming the DDL itself is wrong.
 
 **Note:** `008_auto_create_builder.sql`, `008_intake_progress.sql`, and `008_job_context_fields.sql` all share the `008_` prefix — a real numbering collision (harmless today since Supabase applies migrations in lexicographic filename order and none of the three depend on each other, but don't add a fourth `008_*` file — use the next free number).
 
