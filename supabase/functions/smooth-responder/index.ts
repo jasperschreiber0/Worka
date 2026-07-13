@@ -597,9 +597,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
     try {
-      // Was 4096 -- same truncation risk as document intelligence: a real
-      // project's per-trade scope reasoning across all 13 trades can run long.
-      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 8192)
+      // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
+      // on a real 75-fact project reasoning across 13 trades. Match the other
+      // two stages' proven 16000 rather than guessing at yet another cap.
+      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000)
     } catch (err) {
       await fail(`Scope reasoning call failed: ${err instanceof Error ? err.message : String(err)}`)
       return
