@@ -306,6 +306,10 @@ async function callTool(
     tool_choice: { type: 'tool', name: tool.name },
     messages: [{ role: 'user', content }],
   })
+  console.log(`callTool ${tool.name}: stop_reason=${response.stop_reason} usage=${JSON.stringify(response.usage)}`)
+  if (response.stop_reason === 'max_tokens') {
+    console.error(`callTool ${tool.name}: response was truncated at max_tokens=${maxTokens} — tool input may be incomplete or unparseable`)
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const block = response.content.find((b: any) => b.type === 'tool_use' && b.name === tool.name)
   return block?.input ?? null
@@ -494,12 +498,16 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
       let docResult: { documents?: unknown[]; facts?: unknown[] } | null = null
       try {
-        docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 4096)
+        // Was 4096 — a comprehensive DA/architectural set can require dozens of
+        // evidence-backed facts, each with an evidence quote, and a 4096-token
+        // cap can truncate that mid-generation on a large project.
+        docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 8192)
       } catch (err) {
         await fail(`Document intelligence call failed: ${err instanceof Error ? err.message : String(err)}`)
         return
       }
       if (!docResult) { await fail('No structured response from document intelligence stage'); return }
+      console.log(`Stage 1/2 result: ${(docResult.documents ?? []).length} document(s) classified, ${(docResult.facts ?? []).length} fact(s) found`)
 
       await setStage('understanding_project')
 
@@ -507,6 +515,12 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const docRows = (docResult.documents ?? []) as Array<Record<string, unknown>>
       const fileIndexToId: Record<number, string> = {}
       allFiles.forEach((f, idx) => { fileIndexToId[idx] = f.fileId })
+      console.log('Stage 1 classification detail:', JSON.stringify(docRows.map((d) => ({
+        file: allFiles[d.file_index as number]?.filename,
+        document_type: d.document_type,
+        readability: d.readability,
+        ocr_quality: d.ocr_quality,
+      }))))
 
       const documentInserts = docRows
         .filter((d) => typeof d.file_index === 'number' && fileIndexToId[d.file_index as number])
