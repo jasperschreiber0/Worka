@@ -77,6 +77,13 @@ export async function GET(
   // Set by IntakeProgress when reconnecting after /clarify already re-triggered
   // the engine with resume: true — skip the trigger below, poll only.
   const alreadyTriggered = searchParams.get('resumed') === '1'
+  // Rides along in the URL from the client's first connection and persists
+  // through the browser's automatic EventSource reconnects (same URL each
+  // time) — lets this handler track overall elapsed time across the whole
+  // chain of connections Vercel's hard execution ceiling forces us into,
+  // not just this one connection's slice.
+  const startedAtParam = Number(searchParams.get('started_at'))
+  const overallStartedAt = Number.isFinite(startedAtParam) && startedAtParam > 0 ? startedAtParam : Date.now()
 
   // builder_id is always derived from the authenticated session — never from
   // the query string — so a caller can't watch or trigger another builder's
@@ -159,6 +166,7 @@ export async function GET(
 
   const stream = new ReadableStream({
     async start(controller) {
+      const connectionStartedAt = Date.now()
       const emit = (event: string, data: object) => {
         controller.enqueue(sseEvent(encoder, event, data))
       }
@@ -189,16 +197,41 @@ export async function GET(
 
         // Poll the files table until extraction completes, pauses for
         // clarification, or fails.
-        // ~4 minutes (160 x 1.5s) was sized for the old single-call estimate
-        // flow. The reasoning-first engine runs three large sequential Claude
-        // calls (document intelligence, scope reasoning, estimate generation
-        // -- each confirmed taking real time via edge function logs on a real
-        // project), which can genuinely exceed 4 minutes end to end. The
-        // retrigger-prevention fix means a reconnect no longer restarts the
-        // pipeline, so it's safe to just wait longer here instead of the
-        // client giving up while a legitimately-still-running attempt is
-        // about to finish.
-        for (let attempts = 0; attempts < 400; attempts++) {
+        //
+        // Vercel forcibly kills this function at a hard 300s ceiling
+        // regardless of any timeout we set here -- confirmed via
+        // "Vercel Runtime Timeout Error: Task timed out after 300 seconds"
+        // in production. The reasoning-first engine's three large sequential
+        // Claude calls can genuinely exceed that on a real project, so
+        // instead of waiting to be killed, this connection self-closes
+        // cleanly at a safe margin under 300s and tells the client to open a
+        // fresh connection (see the 'reconnect' emit below) rather than
+        // treating the close as a failure. The retrigger-prevention check
+        // above means that reconnect only polls, never restarts the
+        // pipeline, so the underlying Supabase-side run (independent of
+        // this Vercel connection) keeps going undisturbed across as many
+        // reconnect cycles as it needs. OVERALL_TIMEOUT_MS is the real
+        // give-up point, tracked across that whole chain via
+        // overallStartedAt, not per-connection.
+        const CONNECTION_SAFETY_MARGIN_MS = 260_000
+        const OVERALL_TIMEOUT_MS = 15 * 60_000
+        for (let attempts = 0; ; attempts++) {
+          if (Date.now() - overallStartedAt > OVERALL_TIMEOUT_MS) {
+            emit('error', { message: 'Processing timed out — please try again' })
+            controller.close()
+            return
+          }
+          if (Date.now() - connectionStartedAt > CONNECTION_SAFETY_MARGIN_MS) {
+            // Deliberate close well before Vercel's hard kill. A plain close
+            // still fires EventSource's native 'error' (it can't tell a
+            // deliberate close from a real connection loss), so emit an
+            // explicit 'reconnect' event first — IntakeProgress listens for
+            // it and opens a fresh connection itself instead of treating
+            // this as a failure.
+            emit('reconnect', {})
+            controller.close()
+            return
+          }
           await delay(1500)
 
           const res = await fetch(
@@ -294,10 +327,9 @@ export async function GET(
             return
           }
         }
-
-        // Timed out after ~10 minutes
-        emit('error', { message: 'Processing timed out — please try again' })
-        controller.close()
+        // Unreachable: the loop above only exits via an explicit return
+        // (complete / needs_clarification / failed / overall timeout / safe
+        // self-close for reconnect).
       } catch (err) {
         console.error('Intake poll error:', err)
         emit('error', { message: 'Processing failed — please try again' })

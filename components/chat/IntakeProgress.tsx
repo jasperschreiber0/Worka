@@ -71,9 +71,17 @@ export default function IntakeProgress({
   const [clarifySubmitting, setClarifySubmitting] = useState(false)
   const [clarifyError, setClarifyError] = useState<string | null>(null)
   const [resumeKey, setResumeKey] = useState(0)
+  const [reconnectKey, setReconnectKey] = useState(0)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
+  // Vercel kills the connection at a hard 300s ceiling regardless of how long
+  // we're willing to poll — the route self-closes safely under that and the
+  // browser's EventSource auto-reconnects to the same URL. This timestamp
+  // rides along in the URL so the server can track *overall* elapsed time
+  // across that whole chain of reconnects, not just the current connection's
+  // slice, and still give up if the pipeline is genuinely stuck.
+  const startedAtRef = useRef<number>(Date.now())
 
   const handleAnswerSubmit = async (answers: Array<{ question_id: string; answer: string }>) => {
     setClarifySubmitting(true)
@@ -105,7 +113,7 @@ export default function IntakeProgress({
     // re-triggered the engine (with resume: true) — this reconnect must only
     // poll, not fire a second, non-resumed trigger.
     const resumedParam = resumeKey > 0 ? '&resumed=1' : ''
-    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}${resumedParam}`
+    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}${resumedParam}&started_at=${startedAtRef.current}`
     const es = new EventSource(url)
     eventSourceRef.current = es
     let settled = false
@@ -195,6 +203,18 @@ export default function IntakeProgress({
       }
     })
 
+    // Server emits this and closes cleanly when it's approaching Vercel's
+    // hard 300s connection ceiling, rather than waiting to be killed — not
+    // a failure. Mark settled so the native 'error' event this same close
+    // triggers (EventSource can't distinguish a deliberate close from a
+    // real connection loss) is a no-op on this closure, then open a fresh
+    // connection via the same reconnect-safe trigger check server-side.
+    es.addEventListener('reconnect', () => {
+      settled = true
+      es.close()
+      setReconnectKey((k) => k + 1)
+    })
+
     // Handles both server-emitted `event: error` (has .data) and
     // EventSource connection failures (no .data).
     es.addEventListener('error', (e: Event) => {
@@ -215,7 +235,7 @@ export default function IntakeProgress({
       settled = true
       es.close()
     }
-  }, [fileId, jobId, builderId, onComplete, onError, resumeKey])
+  }, [fileId, jobId, builderId, onComplete, onError, resumeKey, reconnectKey])
 
   // ── Clarifying questions state (Stage 4/5) ─────────────────────────────────
   if (clarification) {
