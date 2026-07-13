@@ -138,16 +138,24 @@ export async function GET(
   // Verify the file actually belongs to this builder before doing anything —
   // this is the check that was previously missing entirely.
   const ownerCheckRes = await fetch(
-    `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=id`,
+    `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=id,intake_status`,
     { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
   )
-  const ownerRows = ownerCheckRes.ok ? (await ownerCheckRes.json() as Array<{ id: string }>) : []
+  const ownerRows = ownerCheckRes.ok ? (await ownerCheckRes.json() as Array<{ id: string; intake_status: string | null }>) : []
   if (ownerRows.length === 0) {
     return new Response(JSON.stringify({ error: 'File not found' }), {
       status: 404,
       headers: { 'Content-Type': 'application/json' },
     })
   }
+  // A run is already in flight server-side once intake_status leaves its
+  // pre-trigger value — this can be true even when the client's `resumed`
+  // flag is false, e.g. the browser's EventSource silently reconnected
+  // (network blip, an edge-runtime stream cutoff) without going through the
+  // clarify flow. Trusting only the client flag here caused every reconnect
+  // to fire a brand new trigger, restarting Stages 1-3 from scratch each
+  // time and never reaching estimate generation.
+  const alreadyProcessing = !['uploaded', null].includes(ownerRows[0].intake_status)
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -156,7 +164,7 @@ export async function GET(
       }
 
       try {
-        if (!alreadyTriggered) {
+        if (!alreadyTriggered && !alreadyProcessing) {
           // Trigger the estimating engine — it returns 202 immediately and runs in background
           const triggerRes = await fetch(edgeFnUrl, {
             method: 'POST',
