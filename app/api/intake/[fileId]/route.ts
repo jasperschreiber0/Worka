@@ -188,8 +188,17 @@ export async function GET(
         let lastStage = ''
 
         // Poll the files table until extraction completes, pauses for
-        // clarification, or fails
-        for (let attempts = 0; attempts < 160; attempts++) {
+        // clarification, or fails.
+        // ~4 minutes (160 x 1.5s) was sized for the old single-call estimate
+        // flow. The reasoning-first engine runs three large sequential Claude
+        // calls (document intelligence, scope reasoning, estimate generation
+        // -- each confirmed taking real time via edge function logs on a real
+        // project), which can genuinely exceed 4 minutes end to end. The
+        // retrigger-prevention fix means a reconnect no longer restarts the
+        // pipeline, so it's safe to just wait longer here instead of the
+        // client giving up while a legitimately-still-running attempt is
+        // about to finish.
+        for (let attempts = 0; attempts < 400; attempts++) {
           await delay(1500)
 
           const res = await fetch(
@@ -286,7 +295,7 @@ export async function GET(
           }
         }
 
-        // Timed out after ~4 minutes
+        // Timed out after ~10 minutes
         emit('error', { message: 'Processing timed out — please try again' })
         controller.close()
       } catch (err) {
