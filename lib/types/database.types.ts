@@ -284,6 +284,9 @@ export interface File {
   intake_stage: string | null
   intake_pct: number | null
   intake_assumption_count: number | null
+  upload_batch_id: string | null
+  skipped_sibling_filenames: string[] | null
+  failed_sibling_filenames: string[] | null
   created_at: string
 }
 

@@ -18,6 +18,8 @@ interface CompleteEvent {
   pct: 100
   quote_id: string
   assumption_count: number
+  skipped_files?: string[]
+  failed_files?: string[]
 }
 
 interface ClarificationQuestion {
@@ -61,6 +63,77 @@ function sseEvent(encoder: TextEncoder, event: string, data: object): Uint8Array
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// ─── Job-level intake lock ──────────────────────────────────────────────────
+// At most one smooth-responder run per job at a time. Acquired atomically via
+// a plain INSERT into job_intake_locks (PK conflict = another run holds it) —
+// see migration 030 for why: the previous "already processing" guard was
+// scoped to a single file_id, so a second file uploaded to the same job while
+// the first was still mid-pipeline would start a fully concurrent, unlocked
+// second run. A lock older than the engine's own overall timeout is treated
+// as abandoned (a run that was killed before its finally block could release
+// it) and can be taken over rather than blocking the job forever.
+const LOCK_STALE_MS = 16 * 60_000
+
+type LockResult = 'acquired' | 'locked'
+
+async function tryAcquireJobLock(
+  supabaseUrl: string,
+  supabaseKey: string,
+  anonKey: string,
+  jobId: string,
+  fileId: string
+): Promise<LockResult> {
+  const headers = {
+    apikey: anonKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    'Content-Type': 'application/json',
+    Prefer: 'return=minimal',
+  }
+  const insertRes = await fetch(`${supabaseUrl}/rest/v1/job_intake_locks`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ job_id: jobId, file_id: fileId }),
+  })
+  if (insertRes.status === 201) return 'acquired'
+  if (insertRes.status !== 409) {
+    // Unexpected error talking to Postgres — fail safe as "locked" rather
+    // than risk triggering a second concurrent run on an ambiguous result.
+    console.error('tryAcquireJobLock: unexpected status', insertRes.status, await insertRes.text().catch(() => ''))
+    return 'locked'
+  }
+
+  // Someone holds it — check whether that lock is stale (the run that took
+  // it was killed before releasing).
+  const getRes = await fetch(
+    `${supabaseUrl}/rest/v1/job_intake_locks?job_id=eq.${encodeURIComponent(jobId)}&select=started_at`,
+    { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+  )
+  const rows = getRes.ok ? (await getRes.json() as Array<{ started_at: string }>) : []
+  const startedAt = rows[0]?.started_at ? new Date(rows[0].started_at).getTime() : 0
+  if (startedAt === 0 || Date.now() - startedAt <= LOCK_STALE_MS) {
+    return 'locked'
+  }
+
+  // Stale — steal it.
+  await fetch(`${supabaseUrl}/rest/v1/job_intake_locks?job_id=eq.${encodeURIComponent(jobId)}`, {
+    method: 'DELETE',
+    headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}` },
+  })
+  const retryRes = await fetch(`${supabaseUrl}/rest/v1/job_intake_locks`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ job_id: jobId, file_id: fileId }),
+  })
+  return retryRes.status === 201 ? 'acquired' : 'locked'
+}
+
+async function releaseJobLock(supabaseUrl: string, supabaseKey: string, anonKey: string, jobId: string): Promise<void> {
+  await fetch(`${supabaseUrl}/rest/v1/job_intake_locks?job_id=eq.${encodeURIComponent(jobId)}`, {
+    method: 'DELETE',
+    headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}` },
+  }).catch(() => { /* best-effort */ })
 }
 
 // ─── GET /api/intake/[fileId] ─────────────────────────────────────────────────
@@ -171,8 +244,33 @@ export async function GET(
         controller.enqueue(sseEvent(encoder, event, data))
       }
 
+      // Vercel forcibly kills this function at a hard 300s ceiling regardless
+      // of any timeout we set here -- confirmed via "Vercel Runtime Timeout
+      // Error: Task timed out after 300 seconds" in production. Declared
+      // ahead of the trigger block below since the job-lock wait loop needs
+      // the same overall give-up point the polling loop uses.
+      const CONNECTION_SAFETY_MARGIN_MS = 260_000
+      const OVERALL_TIMEOUT_MS = 15 * 60_000
+
       try {
         if (!alreadyTriggered && !alreadyProcessing) {
+          // Acquire the job-level intake lock before triggering — at most one
+          // smooth-responder run per job at a time (see migration 030 and
+          // tryAcquireJobLock above). If another file belonging to this job
+          // is still mid-pipeline, wait for it to finish rather than starting
+          // a second, unlocked, concurrent run.
+          let lock: LockResult = await tryAcquireJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id, fileId)
+          while (lock === 'locked') {
+            if (Date.now() - overallStartedAt > OVERALL_TIMEOUT_MS) {
+              emit('error', { message: 'Processing timed out — please try again' })
+              controller.close()
+              return
+            }
+            emit('progress', { stage: 'queued', message: 'Finishing your last upload first...', pct: 5 })
+            await delay(2000)
+            lock = await tryAcquireJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id, fileId)
+          }
+
           // Trigger the estimating engine — it returns 202 immediately and runs in background
           const triggerRes = await fetch(edgeFnUrl, {
             method: 'POST',
@@ -184,6 +282,10 @@ export async function GET(
           })
 
           if (!triggerRes.ok) {
+            // The engine never started running, so its own lock-release
+            // finally block will never fire — release it here instead of
+            // leaving the job locked until the staleness timeout.
+            await releaseJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id)
             emit('error', { message: 'Failed to start processing' })
             controller.close()
             return
@@ -198,23 +300,18 @@ export async function GET(
         // Poll the files table until extraction completes, pauses for
         // clarification, or fails.
         //
-        // Vercel forcibly kills this function at a hard 300s ceiling
-        // regardless of any timeout we set here -- confirmed via
-        // "Vercel Runtime Timeout Error: Task timed out after 300 seconds"
-        // in production. The reasoning-first engine's three large sequential
-        // Claude calls can genuinely exceed that on a real project, so
-        // instead of waiting to be killed, this connection self-closes
-        // cleanly at a safe margin under 300s and tells the client to open a
-        // fresh connection (see the 'reconnect' emit below) rather than
-        // treating the close as a failure. The retrigger-prevention check
-        // above means that reconnect only polls, never restarts the
-        // pipeline, so the underlying Supabase-side run (independent of
-        // this Vercel connection) keeps going undisturbed across as many
-        // reconnect cycles as it needs. OVERALL_TIMEOUT_MS is the real
-        // give-up point, tracked across that whole chain via
-        // overallStartedAt, not per-connection.
-        const CONNECTION_SAFETY_MARGIN_MS = 260_000
-        const OVERALL_TIMEOUT_MS = 15 * 60_000
+        // The reasoning-first engine's three large sequential Claude calls
+        // can genuinely exceed Vercel's ceiling on a real project, so instead
+        // of waiting to be killed, this connection self-closes cleanly at a
+        // safe margin under 300s and tells the client to open a fresh
+        // connection (see the 'reconnect' emit below) rather than treating
+        // the close as a failure. The retrigger-prevention check above means
+        // that reconnect only polls, never restarts the pipeline, so the
+        // underlying Supabase-side run (independent of this Vercel
+        // connection) keeps going undisturbed across as many reconnect
+        // cycles as it needs. OVERALL_TIMEOUT_MS is the real give-up point,
+        // tracked across that whole chain via overallStartedAt, not just
+        // this connection's slice.
         for (let attempts = 0; ; attempts++) {
           if (Date.now() - overallStartedAt > OVERALL_TIMEOUT_MS) {
             emit('error', { message: 'Processing timed out — please try again' })
@@ -235,7 +332,7 @@ export async function GET(
           await delay(1500)
 
           const res = await fetch(
-            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count,failure_stage,failure_reason`,
+            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count,failure_stage,failure_reason,skipped_sibling_filenames,failed_sibling_filenames`,
             {
               headers: {
                 'apikey': anonKey,
@@ -255,6 +352,8 @@ export async function GET(
             intake_assumption_count: number | null
             failure_stage: string | null
             failure_reason: string | null
+            skipped_sibling_filenames: string[] | null
+            failed_sibling_filenames: string[] | null
           }>
           const row = rows[0]
           if (!row) continue
@@ -314,6 +413,8 @@ export async function GET(
               pct: 100,
               quote_id: row.quote_id,
               assumption_count: count,
+              skipped_files: row.skipped_sibling_filenames ?? undefined,
+              failed_files: row.failed_sibling_filenames ?? undefined,
             }
             emit('complete', completeData)
             controller.close()

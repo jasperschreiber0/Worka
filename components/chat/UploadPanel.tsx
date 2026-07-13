@@ -18,7 +18,7 @@ export interface UploadPanelProps {
   onClose: () => void
   job: UploadPanelJob
   builderId: string
-  onIntakeComplete?: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
+  onIntakeComplete?: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number; skipped_files?: string[]; failed_files?: string[] }) => void
   preloadedFiles?: File[]
 }
 
@@ -74,10 +74,18 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   const [uploadedFile, setUploadedFile] = useState<DBFile | null>(null)
   const [siblingFileIds, setSiblingFileIds] = useState<string[]>([])
   const [intakeStarted, setIntakeStarted] = useState(false)
+  // Keyed by SelectedFile.id — tracks which files already made it to Storage
+  // this panel session, so retrying after a partial-batch failure only
+  // re-uploads the files that didn't succeed, instead of re-uploading
+  // (and duplicating) everything from scratch.
+  const [uploadedById, setUploadedById] = useState<Record<string, DBFile>>({})
 
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  // Stable for the whole panel session — correlates every file in one
+  // upload batch, even across a retry after a partial failure.
+  const batchIdRef = useRef<string | null>(null)
 
   // Animate in/out
   useEffect(() => {
@@ -96,6 +104,8 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         setUploadedFile(null)
         setSiblingFileIds([])
         setIntakeStarted(false)
+        setUploadedById({})
+        batchIdRef.current = null
       }, 300)
       return () => clearTimeout(id)
     }
@@ -213,7 +223,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
   // in memory for the intake pipeline — no Supabase Storage required.
   // If Supabase Storage is configured, the server also attempts to persist there.
 
-  const uploadSingleFile = useCallback(async (sf: SelectedFile): Promise<DBFile> => {
+  const uploadSingleFile = useCallback(async (sf: SelectedFile, uploadBatchId: string): Promise<DBFile> => {
     // Step 1: Register the file with the server (metadata only — no bytes sent through Vercel)
     const res = await fetch('/api/upload', {
       method: 'POST',
@@ -224,6 +234,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         filename: sf.file.name,
         content_type: sf.file.type || 'application/octet-stream',
         size: sf.file.size,
+        upload_batch_id: uploadBatchId,
       }),
     })
 
@@ -255,14 +266,22 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
 
     setUploading(true)
     setUploadError(null)
+    if (!batchIdRef.current) batchIdRef.current = crypto.randomUUID()
+    const batchId = batchIdRef.current
 
     try {
-      // Upload all files sequentially, collecting DB records
-      const uploaded: DBFile[] = []
+      // Upload sequentially, skipping anything that already succeeded on a
+      // prior attempt this session (retry after a partial-batch failure).
+      const newlyUploaded: Record<string, DBFile> = {}
       for (const sf of files) {
-        const dbFile = await uploadSingleFile(sf)
-        uploaded.push(dbFile)
+        if (uploadedById[sf.id]) continue
+        const dbFile = await uploadSingleFile(sf, batchId)
+        newlyUploaded[sf.id] = dbFile
       }
+      const merged = { ...uploadedById, ...newlyUploaded }
+      setUploadedById(merged)
+
+      const uploaded = files.map((sf) => merged[sf.id]).filter((f): f is DBFile => Boolean(f))
 
       // Primary file drives the intake pipeline; the rest are siblings
       const [primary, ...siblings] = uploaded
@@ -275,12 +294,12 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
     } finally {
       setUploading(false)
     }
-  }, [files, uploading, uploadSingleFile])
+  }, [files, uploading, uploadSingleFile, uploadedById])
 
   // ── Intake complete handler ────────────────────────────────────────────────
 
   const handleIntakeComplete = useCallback(
-    (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => {
+    (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number; skipped_files?: string[]; failed_files?: string[] }) => {
       if (onIntakeComplete) {
         onIntakeComplete(quoteId, assumptionCount, memoryData)
       }

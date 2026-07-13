@@ -519,13 +519,22 @@ export default function ChatInterface({
   }, [])
 
   const handleIntakeComplete = useCallback(
-    (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => {
+    (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number; skipped_files?: string[]; failed_files?: string[] }) => {
       setUploadPanel((prev) => ({ ...prev, isOpen: false }))
 
       const jobAddress = uploadPanel.job?.address ?? 'this job'
 
       const memoryContext = memoryData?.similar_projects?.length
         ? ` Estimate informed by ${memoryData.similar_projects.length} similar historical project${memoryData.similar_projects.length !== 1 ? 's' : ''}.`
+        : ''
+
+      // A document was too large for this batch, or failed to load from
+      // storage — the estimate is real, just missing whatever that file
+      // would have added. Say so in the same message rather than letting it
+      // pass silently.
+      const missedFiles = [...(memoryData?.skipped_files ?? []), ...(memoryData?.failed_files ?? [])]
+      const missedContext = missedFiles.length > 0
+        ? ` Heads up — I couldn't read ${missedFiles.length === 1 ? missedFiles[0] : `${missedFiles.length} files (${missedFiles.join(', ')})`}. Worth uploading ${missedFiles.length === 1 ? 'it' : 'them'} separately.`
         : ''
 
       const hasAssumptions = assumptionCount > 0
@@ -535,8 +544,8 @@ export default function ChatInterface({
         id: generateId(),
         role: 'assistant',
         content: hasAssumptions
-          ? `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.${memoryContext}`
-          : `Draft quote ready for ${jobAddress} — no assumptions to review. You can send it now.${memoryContext}`,
+          ? `Draft quote ready for ${jobAddress} — ${assumptionCount} assumption${assumptionCount !== 1 ? 's' : ''} need your review before you can send it.${memoryContext}${missedContext}`
+          : `Draft quote ready for ${jobAddress} — no assumptions to review. You can send it now.${memoryContext}${missedContext}`,
         alerts: hasAssumptions
           ? [
               {

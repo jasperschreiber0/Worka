@@ -48,14 +48,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  let body: { job_id?: string; filename?: string; content_type?: string; size?: number }
+  let body: { job_id?: string; filename?: string; content_type?: string; size?: number; upload_batch_id?: string }
   try {
     body = await req.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { job_id, content_type, size } = body
+  const { job_id, content_type, size, upload_batch_id } = body
   const filename = body.filename ? sanitizeFilename(body.filename) : undefined
 
   if (!job_id) return NextResponse.json({ error: 'job_id is required' }, { status: 400 })
@@ -119,6 +119,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           filename,
           file_type: detectFileType(filename),
           intake_status: 'uploaded' as FileIntakeStatus,
+          upload_batch_id: upload_batch_id ?? null,
         })
         .select()
         .single()
@@ -161,6 +162,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     intake_stage: null,
     intake_pct: null,
     intake_assumption_count: null,
+    upload_batch_id: upload_batch_id ?? null,
+    skipped_sibling_filenames: null,
+    failed_sibling_filenames: null,
     created_at: new Date().toISOString(),
   }
 

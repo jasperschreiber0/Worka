@@ -489,8 +489,20 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const allFiles = [primary, ...siblings]
       await setStage('classifying_documents')
 
+      // Prior facts, so extraction of a newly-uploaded document isn't blind
+      // to what earlier documents in this job already established. This used
+      // to be title-only ("you cannot see the old files directly") — Claude
+      // extracting from this week's spec document had no way to know
+      // floor_area_m2 was already 120 from last week's plan, so it couldn't
+      // flag agreement, addition, or contradiction. Superseding a
+      // contradicted fact is handled deterministically below at write time
+      // (matched by category+key), not by asking the model to self-report it.
+      const priorFactsBlock = facts.length > 0
+        ? facts.map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
+        : ''
+
       const existingDocsNote = (existingDocs && existingDocs.length > 0)
-        ? `\n\nThis job already has ${existingDocs.length} previously-processed document(s): ${existingDocs.map((d: Record<string, unknown>) => d.drawing_title ?? d.document_type).join(', ')}. Treat the new document(s) below as an addition to that set — flag supersession if a new document replaces an old one in spirit (you cannot see the old files directly, only their titles).`
+        ? `\n\nThis job already has ${existingDocs.length} previously-processed document(s): ${existingDocs.map((d: Record<string, unknown>) => d.drawing_title ?? d.document_type).join(', ')}. You cannot see those earlier files directly (only their titles above), but here is everything already established about this project from them:\n${priorFactsBlock || '(no facts recorded yet)'}\n\nTreat the new document(s) below as an addition to this project, not a fresh start. Extract facts normally from what's in front of you — if something in a new document changes a fact listed above (e.g. a revised drawing changes a room count or floor area), just extract the corrected value; WorkA reconciles the correction automatically, you don't need to flag it separately.`
         : ''
 
       const docSystemPrompt = `You are a senior document controller and quantity surveyor reviewing construction documents for an Australian residential project. Classify every document precisely and extract only facts you can point to direct evidence for. Never invent a fact — if something is not shown or stated, simply omit it. Unknown must remain unknown.${existingDocsNote}${memoryContext}`
@@ -568,8 +580,35 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         confidence: f.confidence ?? 70,
       }))
       if (factInserts.length > 0) {
+        // Auto-supersede: a new fact for the same job_id + category + key
+        // with a different value replaces the prior one instead of both
+        // accumulating forever. The read side of this (`.eq('superseded',
+        // false)` above, and every factsBlock built from `facts`) has always
+        // assumed this happens — nothing ever wrote it until now, so a later
+        // document contradicting an earlier one just left two conflicting
+        // rows concatenated into every future prompt.
+        const priorByKey = new Map(
+          (existingFacts ?? []).map((f: Record<string, unknown>) => [`${f.category as string}::${f.key as string}`, f as { id: string; value: string }])
+        )
+        const supersededKeys = new Set<string>()
+        const toSupersedeIds: string[] = []
+        for (const nf of factInserts) {
+          const k = `${nf.category}::${nf.key}`
+          const prior = priorByKey.get(k)
+          if (prior && String(prior.value).trim().toLowerCase() !== nf.value.trim().toLowerCase()) {
+            toSupersedeIds.push(prior.id)
+            supersededKeys.add(k)
+          }
+        }
+        if (toSupersedeIds.length > 0) {
+          await supabase.from('project_facts').update({ superseded: true }).in('id', toSupersedeIds)
+        }
+
         await supabase.from('project_facts').insert(factInserts)
-        facts = [...facts, ...factInserts.map((f) => ({ category: f.category, key: f.key, value: f.value, evidence: f.evidence, confidence: f.confidence }))]
+        facts = [
+          ...facts.filter((f) => !supersededKeys.has(`${f.category}::${f.key}`)),
+          ...factInserts.map((f) => ({ category: f.category, key: f.key, value: f.value, evidence: f.evidence, confidence: f.confidence })),
+        ]
       }
     }
 
@@ -777,11 +816,24 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     let unresolvedCount = 0
     if (lineItemInserts.length > 0) {
-      const { data: insertedItems, error: insertErr } = await supabase.from('quote_line_items').insert(lineItemInserts).select()
-      if (insertErr || !insertedItems) {
-        await fail(`Line items could not be saved: ${insertErr?.message ?? 'unknown error'}`)
+      // Upsert with ignoreDuplicates instead of a plain insert: the app-level
+      // existingKeys filter above only guards against rows already committed
+      // to the DB, not against two concurrent runs racing this exact insert
+      // (or the model emitting the same trade+description twice in one
+      // response). The unique index from migration 030 makes that a no-op
+      // conflict here instead of a duplicate row.
+      const { data: insertedItemsRaw, error: insertErr } = await supabase
+        .from('quote_line_items')
+        .upsert(lineItemInserts, { onConflict: 'quote_id,trade_category_id,description', ignoreDuplicates: true })
+        .select()
+      if (insertErr) {
+        await fail(`Line items could not be saved: ${insertErr.message}`)
         return
       }
+      // ignoreDuplicates means a row skipped as a conflict is legitimately
+      // absent from the RETURNING set — an empty array here (all rows
+      // happened to already exist) is success, not a failure.
+      const insertedItems = insertedItemsRaw ?? []
 
       const relevantAssumptions = assumptionsToInsert.filter((a) => toInsert.some((i) => String(i.description) === a.description))
       if (relevantAssumptions.length > 0) {
@@ -813,11 +865,29 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         processing_time_ms: Date.now() - startedAt,
         failure_stage: null,
         failure_reason: null,
+        // Previously computed but only ever surfaced on total failure — a
+        // batch that otherwise succeeded but silently dropped one oversized
+        // or unreadable document gave no indication that happened.
+        skipped_sibling_filenames: skippedSiblings.length > 0 ? skippedSiblings : null,
+        failed_sibling_filenames: failedToLoadSiblings.length > 0 ? failedToLoadSiblings : null,
       })
       .eq('id', fileId)
   } catch (err) {
     console.error('estimating-engine error:', err)
     await fail(err instanceof Error ? err.message : String(err))
+  } finally {
+    // Always release the job-level intake lock, however this run ends —
+    // early return (blocking clarifying question, a failure) or full
+    // completion. Acquired by the calling Next.js route before this
+    // function was invoked (see app/api/intake/[fileId]/route.ts and
+    // .../clarify/route.ts) — this is the only place it's released, so a
+    // second file for the same job can start once this one is genuinely
+    // done rather than racing it.
+    try {
+      await supabase.from('job_intake_locks').delete().eq('job_id', jobId)
+    } catch (lockErr) {
+      console.error('Failed to release job intake lock:', lockErr)
+    }
   }
 }
 

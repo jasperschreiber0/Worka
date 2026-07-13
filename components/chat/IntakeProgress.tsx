@@ -11,7 +11,7 @@ export interface IntakeProgressProps {
   builderId: string
   filename: string
   additionalFileIds?: string[]
-  onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number }) => void
+  onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number; skipped_files?: string[]; failed_files?: string[] }) => void
   onError: (message?: string) => void
 }
 
@@ -36,6 +36,7 @@ interface ClarificationState {
 // Gap Detection -> Estimate Generation -> QA). ──────────────────────────────
 
 const STAGE_LABELS: Record<string, string> = {
+  queued: 'Finishing your last upload first',
   uploading: 'Uploading documents',
   reading: 'Reading documents',
   classifying_documents: 'Classifying documents',
@@ -160,6 +161,8 @@ export default function IntakeProgress({
           similar_projects?: unknown[]
           scope_hints?: unknown[]
           total_in_memory?: number
+          skipped_files?: string[]
+          failed_files?: string[]
         }
 
         // Move last active stage to completed
@@ -183,6 +186,8 @@ export default function IntakeProgress({
             similar_projects: data.similar_projects,
             scope_hints: data.scope_hints,
             total_in_memory: data.total_in_memory,
+            skipped_files: data.skipped_files,
+            failed_files: data.failed_files,
           })
         }, 1000)
       } catch {

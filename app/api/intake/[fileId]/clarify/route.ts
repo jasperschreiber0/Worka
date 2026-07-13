@@ -14,6 +14,34 @@ interface ClarifyInput {
   answers: Array<{ question_id: string; answer: string }>
 }
 
+// The run that paused for clarification already released the job's intake
+// lock (see smooth-responder's finally block) — re-triggering with
+// resume: true starts a fresh run that needs to reacquire it, in case a
+// different file's upload session is concurrently active on this job. This
+// is a synchronous request/response route (unlike the SSE intake route), so
+// the wait is bounded rather than held open for minutes.
+async function acquireLockOrWait(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  jobId: string,
+  fileId: string
+): Promise<boolean> {
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    const { error } = await supabase.from('job_intake_locks').insert({ job_id: jobId, file_id: fileId })
+    if (!error) return true
+    if (error.code !== '23505') return false // not a lock conflict — a real DB error
+    const { data: lockRow } = await supabase.from('job_intake_locks').select('started_at').eq('job_id', jobId).maybeSingle()
+    const startedAt = lockRow?.started_at ? new Date(lockRow.started_at as string).getTime() : 0
+    if (startedAt && Date.now() - startedAt > 16 * 60_000) {
+      await supabase.from('job_intake_locks').delete().eq('job_id', jobId)
+      continue
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+  }
+  return false
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: { fileId: string } }
@@ -99,6 +127,14 @@ export async function POST(
 
     const fileId = pausedFile?.id ?? params.fileId
 
+    const locked = await acquireLockOrWait(supabase, job_id, fileId)
+    if (!locked) {
+      return NextResponse.json(
+        { error: 'Still finishing another upload for this job — try again in a moment.' },
+        { status: 409 }
+      )
+    }
+
     const edgeFnUrl = `${supabaseUrl}/functions/v1/smooth-responder`
     const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
     const triggerRes = await fetch(edgeFnUrl, {
@@ -108,6 +144,9 @@ export async function POST(
     })
 
     if (!triggerRes.ok) {
+      // The engine never started, so its finally block won't run to release
+      // the lock we just took — release it here instead.
+      await supabase.from('job_intake_locks').delete().eq('job_id', job_id)
       return NextResponse.json({ error: 'Failed to resume estimating engine' }, { status: 502 })
     }
 
