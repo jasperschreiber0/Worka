@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { randomUUID } from 'crypto'
 import type {
   Invoice,
@@ -2529,7 +2529,7 @@ const DEMO_JOB_LIST: JobListItem[] = DEMO_JOBS.map(j => ({
 // grouped rendering. Uses 2 batched queries (no N+1) plus the job/quote status
 // already on hand — mirrors the aggregate pattern in app/api/dashboard/route.ts.
 async function computeJobAttention(
-  sb: ReturnType<typeof createClient>,
+  sb: SupabaseClient,
   jobs: Array<{ id: string; status: string }>
 ): Promise<Map<string, JobAttention>> {
   const attention = new Map<string, JobAttention>()
