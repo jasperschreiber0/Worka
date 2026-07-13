@@ -668,8 +668,8 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
               d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
             />
           </svg>
-          Send blocked — resolve {summary.unresolved_count} item
-          {summary.unresolved_count !== 1 ? 's' : ''} to enable sending
+          {summary.unresolved_count} item
+          {summary.unresolved_count !== 1 ? 's' : ''} need your input first
         </p>
       )}
       <div className="flex items-center gap-2">
@@ -680,7 +680,7 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
           title={
             summary.can_send
               ? 'Send quote to client'
-              : `Resolve ${summary.unresolved_count} item${summary.unresolved_count !== 1 ? 's' : ''} to enable sending`
+              : `Resolve ${summary.unresolved_count} item${summary.unresolved_count !== 1 ? 's' : ''} first`
           }
           className="btn-primary px-4 py-2 text-[13px] disabled:opacity-40 disabled:cursor-not-allowed flex-1 sm:flex-none"
         >
@@ -890,7 +890,7 @@ function QuoteViewInner({
       style={{ backgroundColor: 'rgba(15, 23, 42, 0.6)' }}
       aria-modal="true"
       role="dialog"
-      aria-label={`Draft quote${data ? ` — ${data.quote.job_address}` : ''}`}
+      aria-label={`Quote${data ? ` — ${data.quote.job_address}` : ''}`}
     >
       {/* Full-screen panel */}
       <div
@@ -930,8 +930,16 @@ function QuoteViewInner({
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold truncate" style={{ color: 'var(--text-primary)' }}>
-                  {sentAt ? 'Quote' : 'Draft Quote'} v{data?.quote.version ?? 1}
+                  Quote v{data?.quote.version ?? 1}
                 </h2>
+                {data && !sentAt && (
+                  <span
+                    className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold"
+                    style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+                  >
+                    Draft
+                  </span>
+                )}
                 {data && !sentAt && <OverallConfidenceBadge score={data.quote.confidence_score} />}
                 {sentAt && (
                   <span

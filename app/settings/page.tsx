@@ -35,13 +35,14 @@ export default function SettingsPage() {
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
           <Link
             href="/chat"
-            className="flex items-center gap-1.5 text-sm transition-colors"
+            className="flex items-center justify-center w-8 h-8 rounded-[6px] transition-colors"
             style={{ color: 'var(--text-secondary)' }}
+            title="Back to chat"
+            aria-label="Back to chat"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
             </svg>
-            Back to WorkA
           </Link>
         </div>
       </header>

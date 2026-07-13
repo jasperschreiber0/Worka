@@ -136,12 +136,15 @@ export interface StateChange {
   label: string
 }
 
+export type JobAttention = 'needs_you' | 'waiting' | 'ai_working' | 'ready' | 'in_progress'
+
 export interface JobListItem {
   id: string
   address: string
   status: string
   client_name?: string
   job_ref?: string | null
+  attention?: JobAttention
 }
 
 export interface WorkerListItem {
@@ -2503,6 +2506,15 @@ Rules:
 // Builds an action list from keyword detection then calls orchestrateActions
 // with a null anthropic reference (no AI calls needed in demo mode).
 
+// Attention bucket per seeded demo job, matching each job's narrative in DEMO_JOBS:
+// Fitzroy has an overdue invoice, Toorak's quote is sent and awaiting the client,
+// Brunswick hasn't had a quote generated yet.
+const DEMO_JOB_ATTENTION: Record<string, JobAttention> = {
+  '00000000-0000-0000-0000-000000000010': 'needs_you',  // Fitzroy — $28k invoice overdue
+  '00000000-0000-0000-0000-000000000020': 'waiting',    // Toorak — quote sent, no response yet
+  '00000000-0000-0000-0000-000000000030': 'ai_working', // Brunswick — no quote yet
+}
+
 // Derived from DEMO_JOBS — single source of truth for demo job data
 const DEMO_JOB_LIST: JobListItem[] = DEMO_JOBS.map(j => ({
   id: j.id,
@@ -2510,7 +2522,61 @@ const DEMO_JOB_LIST: JobListItem[] = DEMO_JOBS.map(j => ({
   status: j.status,
   client_name: j.client_name !== 'Brunswick client' ? j.client_name : undefined,
   job_ref: j.job_ref,
+  attention: DEMO_JOB_ATTENTION[j.id],
 }))
+
+// Buckets jobs by what they need from the builder right now, for JobListCard's
+// grouped rendering. Uses 2 batched queries (no N+1) plus the job/quote status
+// already on hand — mirrors the aggregate pattern in app/api/dashboard/route.ts.
+async function computeJobAttention(
+  sb: ReturnType<typeof createClient>,
+  jobs: Array<{ id: string; status: string }>
+): Promise<Map<string, JobAttention>> {
+  const attention = new Map<string, JobAttention>()
+  const jobIds = jobs.map(j => j.id)
+  if (jobIds.length === 0) return attention
+
+  const [{ data: variations }, { data: invoices }, { data: quotes }] = await Promise.all([
+    sb.from('variations').select('job_id').eq('status', 'pending').in('job_id', jobIds),
+    sb.from('invoices').select('job_id').eq('status', 'overdue').in('job_id', jobIds),
+    sb.from('quotes').select('job_id, status, total_cost, version').in('job_id', jobIds).order('version', { ascending: false }),
+  ])
+
+  const needsYouJobIds = new Set([
+    ...((variations ?? []) as Array<{ job_id: string }>).map(v => v.job_id),
+    ...((invoices ?? []) as Array<{ job_id: string }>).map(i => i.job_id),
+  ])
+
+  // First occurrence per job_id wins — the array is sorted by version desc, so
+  // that's each job's latest quote.
+  const latestQuoteByJob = new Map<string, { status: string; total_cost: number | null }>()
+  for (const q of (quotes ?? []) as Array<{ job_id: string; status: string; total_cost: number | null }>) {
+    if (!latestQuoteByJob.has(q.job_id)) latestQuoteByJob.set(q.job_id, { status: q.status, total_cost: q.total_cost })
+  }
+
+  for (const job of jobs) {
+    if (needsYouJobIds.has(job.id)) {
+      attention.set(job.id, 'needs_you')
+      continue
+    }
+    if (job.status === 'active' || job.status === 'complete') {
+      attention.set(job.id, 'in_progress')
+      continue
+    }
+    const quote = latestQuoteByJob.get(job.id)
+    if (quote?.status === 'sent' || job.status === 'quoted') {
+      attention.set(job.id, 'waiting')
+    } else if (quote?.status === 'pending_review') {
+      attention.set(job.id, 'ready')
+    } else if (quote?.status === 'draft' && quote.total_cost != null) {
+      // Pricing has run — the quote is drafted but has assumptions to resolve.
+      attention.set(job.id, 'needs_you')
+    } else {
+      attention.set(job.id, 'ai_working')
+    }
+  }
+  return attention
+}
 
 async function routeDemoMessage(
   message: string,
@@ -3057,10 +3123,17 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           .limit(20)
         if (jobs && jobs.length > 0) {
           const jobItems = jobs as Array<{ id: string; address: string; status: string; job_ref: string | null }>
+          const attentionByJob = await computeJobAttention(supabase, jobItems)
           return NextResponse.json({
             intent: 'job_query',
             message: `You have ${jobItems.length} active job${jobItems.length === 1 ? '' : 's'}. Tap one to open it.`,
-            job_list: jobItems.map(j => ({ id: j.id, address: j.address, status: j.status, job_ref: j.job_ref })),
+            job_list: jobItems.map(j => ({
+              id: j.id,
+              address: j.address,
+              status: j.status,
+              job_ref: j.job_ref,
+              attention: attentionByJob.get(j.id),
+            })),
           })
         }
         return NextResponse.json({

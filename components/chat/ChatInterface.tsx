@@ -1363,12 +1363,33 @@ export default function ChatInterface({
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <Link href="/estimate" className="text-[13px] font-medium px-2.5 py-1 rounded-[4px] transition-colors" style={{ color: 'var(--text-secondary)' }}>
-            Estimate
+        <div className="flex items-center gap-1">
+          <Link
+            href="/estimate"
+            className="w-8 h-8 rounded-[6px] flex items-center justify-center flex-shrink-0 transition-colors"
+            style={{ color: 'var(--text-secondary)' }}
+            title="Estimate"
+            aria-label="Estimate"
+            onMouseOver={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+            onMouseOut={(e) => { e.currentTarget.style.backgroundColor = 'transparent' }}
+          >
+            <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 7h6m-6 4h6m-6 4h3M5 3.75h14a1 1 0 011 1v14.5a1 1 0 01-1 1H5a1 1 0 01-1-1V4.75a1 1 0 011-1z" />
+            </svg>
           </Link>
-          <Link href="/settings/rates" className="text-[13px] font-medium px-2.5 py-1 rounded-[4px] transition-colors" style={{ color: 'var(--text-secondary)' }}>
-            Rates
+          <Link
+            href="/settings"
+            className="w-8 h-8 rounded-[6px] flex items-center justify-center flex-shrink-0 transition-colors"
+            style={{ color: 'var(--text-secondary)' }}
+            title="Settings"
+            aria-label="Settings"
+            onMouseOver={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+            onMouseOut={(e) => { e.currentTarget.style.backgroundColor = 'transparent' }}
+          >
+            <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
           </Link>
           {isDemo && (
             <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-[3px] text-[11px] font-semibold" style={{ backgroundColor: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)', border: '0.5px solid var(--pill-awaiting-border)' }}>
@@ -1404,7 +1425,7 @@ export default function ChatInterface({
         >
           {[
             {
-              label: 'Active jobs',
+              label: 'Active',
               value: String(dashboardStats.active_jobs),
               color: 'var(--text-primary)',
               onClick: () => void sendMessage('show my jobs'),

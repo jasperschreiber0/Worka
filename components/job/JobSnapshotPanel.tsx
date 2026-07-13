@@ -255,6 +255,38 @@ export default function JobSnapshotPanel({
   const stageMap: Record<string, number> = { quoting: 0, quoted: 1, active: 2, complete: 3, archived: 3 }
   const currentStageIndex = stageMap[displayStatus] ?? 0
 
+  // What WorkA suggests doing next — surfaced once, in "At a glance" (not
+  // repeated under Timeline, which now shows the stage tracker only).
+  const nextAction: { label: string; timing: string | null; isUploadCta: boolean } | null =
+    (['quoting', 'quoted', 'active'] as string[]).includes(displayStatus)
+      ? (() => {
+          if (displayStatus === 'quoting') {
+            if (!snapshot?.quote) {
+              return { label: 'Upload plans to start', timing: null, isUploadCta: true }
+            }
+            return { label: 'Send quote', timing: snapshot?.job.quote_deadline ?? null, isUploadCta: false }
+          }
+          if (displayStatus === 'quoted') {
+            return {
+              label: 'Waiting on client',
+              timing: snapshot?.quote?.sent_at ? `Sent ${snapshot.quote.sent_at}` : null,
+              isUploadCta: false,
+            }
+          }
+          const nextInvoice = (snapshot?.invoices ?? []).find((i) => i.status === 'sent' || i.status === 'draft')
+          return {
+            label: nextInvoice ? formatAUD(nextInvoice.amount) + ' invoice due' : 'Next invoice milestone',
+            timing: nextInvoice?.due_date ?? null,
+            isUploadCta: false,
+          }
+        })()
+      : null
+
+  const confidenceScore = snapshot?.quote?.confidence_score ?? null
+  const confidenceColor =
+    confidenceScore == null ? 'var(--text-tertiary)' : confidenceScore >= 85 ? 'var(--status-green)' : confidenceScore >= 60 ? 'var(--status-amber)' : 'var(--status-red)'
+  const unresolvedCount = snapshot?.quote?.unresolved_count ?? 0
+
   // ── Actions ───────────────────────────────────────────────────────────────
 
   const actions: { label: string; handler: () => void }[] = []
@@ -441,7 +473,7 @@ export default function JobSnapshotPanel({
                       {snapshot.comms.messages.length > 0 ? (
                         <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{snapshot.comms.messages[0].timestamp}</span>
                       ) : (
-                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>No contact yet</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Waiting on you</span>
                       )}
                     </div>
                   </div>
@@ -449,15 +481,78 @@ export default function JobSnapshotPanel({
               </SectionGroup>
             )}
 
-            {/* ── 2. FINANCIALS — hidden when no financial data exists yet ── */}
-            {(quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
-            <SectionGroup label="Financials">
+            {/* ── 2. AT A GLANCE — hidden only when there's genuinely nothing to show yet ── */}
+            {snapshot.quote != null || nextAction != null || (quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
+            <SectionGroup label="At a glance">
               <div style={CARD_STYLE}>
-                {/* Contract row */}
+                {/* Value row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Contract</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Value</span>
                   <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedContract)}</span>
                 </div>
+                {/* Last activity row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Last activity</span>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{snapshot.overview.last_activity || '—'}</span>
+                </div>
+                {/* Confidence row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Confidence</span>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: confidenceColor }}>
+                    {confidenceScore != null ? `${confidenceScore}%` : '—'}
+                  </span>
+                </div>
+                {/* Missing information row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Missing information</span>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: unresolvedCount > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>
+                    {unresolvedCount > 0 ? `${unresolvedCount} item${unresolvedCount === 1 ? '' : 's'}` : 'Nothing missing'}
+                  </span>
+                </div>
+                {/* Next AI action — either the big upload CTA, or a compact accented row */}
+                {nextAction?.isUploadCta && onUploadPlans && job ? (
+                  <button
+                    type="button"
+                    onClick={() => onUploadPlans(job)}
+                    style={{
+                      width: '100%',
+                      padding: '10px 14px',
+                      backgroundColor: 'var(--orange-primary)',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: 8,
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                      marginTop: 4,
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    {nextAction.label}
+                  </button>
+                ) : nextAction ? (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Next</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--orange-primary)' }}>{nextAction.label}</span>
+                      {nextAction.timing && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{nextAction.timing}</span>}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            </SectionGroup>
+            ) : null}
+
+            {/* ── 2b. MONEY DETAIL — secondary, only when there's more than the headline Value to show ── */}
+            {variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
+            <SectionGroup label="Money detail">
+              <div style={CARD_STYLE}>
                 {/* Variations row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Variations</span>
@@ -518,9 +613,9 @@ export default function JobSnapshotPanel({
             </SectionGroup>
             ) : null}
 
-            {/* ── 3. TIMELINE ─────────────────────────────────────────────── */}
+            {/* ── 3. TIMELINE — stage tracker only; next action lives in "At a glance" ── */}
             <SectionGroup label="Timeline">
-              <div style={{ ...CARD_STYLE, display: 'flex', gap: 0, marginBottom: (['quoting', 'quoted', 'active'].includes(displayStatus)) ? 8 : 0 }}>
+              <div style={{ ...CARD_STYLE, display: 'flex', gap: 0, marginBottom: 0 }}>
                 {STAGES.map((stage, idx) => {
                   const isComplete = idx < currentStageIndex
                   const isCurrent = idx === currentStageIndex
@@ -580,64 +675,6 @@ export default function JobSnapshotPanel({
                   )
                 })}
               </div>
-              {/* Next milestone callout — actionable label with timing */}
-              {(['quoting', 'quoted', 'active'] as string[]).includes(displayStatus) && (() => {
-                let nextLabel: string
-                let timing: string | null = null
-                if (displayStatus === 'quoting') {
-                  // If no quote exists yet, show upload CTA instead
-                  if (!snapshot?.quote && onUploadPlans && job) {
-                    return (
-                      <div style={{ padding: '4px 2px 8px' }}>
-                        <button
-                          type="button"
-                          onClick={() => onUploadPlans(job)}
-                          style={{
-                            width: '100%',
-                            padding: '10px 14px',
-                            backgroundColor: 'var(--orange-primary)',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: 8,
-                            fontSize: 13,
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: 6,
-                          }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                          </svg>
-                          Upload plans to start quote
-                        </button>
-                      </div>
-                    )
-                  }
-                  nextLabel = 'Send quote'
-                  const qDeadline = snapshot?.job.quote_deadline
-                  if (qDeadline) {
-                    timing = qDeadline
-                  }
-                } else if (displayStatus === 'quoted') {
-                  nextLabel = 'Awaiting client approval'
-                  timing = snapshot?.quote?.sent_at ? `Sent ${snapshot.quote.sent_at}` : null
-                } else {
-                  // Active — find next unpaid invoice
-                  const nextInvoice = (snapshot?.invoices ?? []).find(i => i.status === 'sent' || i.status === 'draft')
-                  nextLabel = nextInvoice ? formatAUD(nextInvoice.amount) + ' invoice due' : 'Next invoice milestone'
-                  timing = nextInvoice?.due_date ?? null
-                }
-                return (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px' }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: 'var(--orange-primary)', flexShrink: 0 }} />
-                    <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{nextLabel}</span>
-                    {timing && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{timing}</span>}
-                  </div>
-                )
-              })()}
             </SectionGroup>
 
             {/* ── 4. PENDING ACTIONS ──────────────────────────────────────── */}
