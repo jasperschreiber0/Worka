@@ -308,7 +308,11 @@ async function callTool(
   })
   console.log(`callTool ${tool.name}: stop_reason=${response.stop_reason} usage=${JSON.stringify(response.usage)}`)
   if (response.stop_reason === 'max_tokens') {
-    console.error(`callTool ${tool.name}: response was truncated at max_tokens=${maxTokens} — tool input may be incomplete or unparseable`)
+    // A truncated tool call means partial/malformed input (e.g. an empty
+    // array where the model just hadn't reached that field yet) rather than
+    // a genuine "nothing found" result — fail loudly here instead of letting
+    // corrupted data flow downstream as if it were complete.
+    throw new Error(`Response truncated at max_tokens=${maxTokens} — increase the token budget for this stage`)
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const block = response.content.find((b: any) => b.type === 'tool_use' && b.name === tool.name)
@@ -498,10 +502,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
       let docResult: { documents?: unknown[]; facts?: unknown[] } | null = null
       try {
-        // Was 4096 — a comprehensive DA/architectural set can require dozens of
-        // evidence-backed facts, each with an evidence quote, and a 4096-token
-        // cap can truncate that mid-generation on a large project.
-        docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 8192)
+        // Was 4096, then 8192 -- both still truncated on a real DA submission
+        // plus supporting documents (confirmed via the stop_reason=max_tokens
+        // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
+        // 16000 for this same model/API rather than guessing at another cap.
+        docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000)
       } catch (err) {
         await fail(`Document intelligence call failed: ${err instanceof Error ? err.message : String(err)}`)
         return
@@ -592,7 +597,9 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
     try {
-      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 4096)
+      // Was 4096 -- same truncation risk as document intelligence: a real
+      // project's per-trade scope reasoning across all 13 trades can run long.
+      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 8192)
     } catch (err) {
       await fail(`Scope reasoning call failed: ${err instanceof Error ? err.message : String(err)}`)
       return
