@@ -412,6 +412,14 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 unchanged, ADD COLUMN IF NOT EXISTS so the rename was a no-op replay.
 029_job_context_fields.sql    — budget_estimate / scope_notes on jobs. Renumbered from
                                 008_job_context_fields.sql for the same reason as 028 above.
+030_intake_locking_and_batching.sql — job_intake_locks (one active smooth-responder run per
+                                job); files.upload_batch_id / skipped_sibling_filenames /
+                                failed_sibling_filenames; unique indexes on quotes (one open
+                                draft per job) and quote_line_items (no duplicate trade +
+                                description) — see "Reasoning-First Estimating Engine" above.
+031_fact_embeddings.sql       — project_facts.embedding vector(512), optional Voyage AI
+                                semantic fact de-duplication — see "Fact de-duplication at
+                                scale" above.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -501,14 +509,20 @@ Quality Assurance → Render Estimate
 | Table | Stage | Purpose |
 |-------|-------|---------|
 | `project_documents` | 1 | Document map — type, discipline, revision, readability, duplicate/superseded detection |
-| `project_facts` | 2 | Evidence-backed facts — every fact carries `source_document_id`, `page_reference`, `evidence`, `confidence`. Unknown stays unknown; nothing is inferred without evidence. |
+| `project_facts` | 2 | Evidence-backed facts — every fact carries `source_document_id`, `page_reference`, `evidence`, `confidence`. Unknown stays unknown; nothing is inferred without evidence. `superseded` (migration 030) and `embedding` (migration 031, optional) support the de-duplication described below. |
 | `scope_items` | 3 | Per-trade included/excluded scope, dependencies, assumptions, uncertainty |
 | `clarifying_questions` | 4/5 | `blocking = true` questions stop the pipeline before Stage 6 — no estimate is generated until answered. Non-blocking gaps are instead represented as per-line assumptions, exactly like before. |
 | `quotes.qa_report` / `overall_confidence` | 8 | Top risks, review items, recommended actions, missing trades, duplicate descriptions |
 
 **Blocking clarifying questions pause the pipeline.** `files.intake_status` gains `needs_info`; the SSE route (`GET /api/intake/[fileId]`) detects it, fetches the open blocking questions, and emits a `needs_clarification` event instead of `complete`. `IntakeProgress.tsx` renders `ClarifyingQuestionsPanel.tsx` in place of the progress bar. Answering calls `POST /api/intake/[fileId]/clarify`, which writes each answer as a `project_facts` row (`category: 'builder_answer'`, confidence 100 — a direct builder answer always outranks anything inferred from a document) and re-triggers the engine with `resume: true`, which skips straight back to Scope Reasoning with the merged fact base rather than re-classifying documents from scratch.
 
-**Incremental uploads merge, they don't restart.** A new file uploaded to a job that already has facts/scope/a quote gets classified on its own, folded into the existing fact base, and Scope Reasoning + Gap Detection re-run over the merged set. Estimate Generation reuses the job's existing draft/pending_review quote rather than creating a second one, and skips re-inserting any line item that already exists for the same trade + description — previously-resolved assumptions on unrelated line items are left untouched.
+**Incremental uploads merge, they don't restart.** A new file uploaded to a job that already has facts/scope/a quote gets classified on its own, folded into the existing fact base, and Scope Reasoning + Gap Detection re-run over the merged set. Estimate Generation reuses the job's existing draft/pending_review quote rather than creating a second one, and skips re-inserting any line item that already exists for the same trade + description — previously-resolved assumptions on unrelated line items are left untouched. Estimate Generation's line-item insert is an `upsert` with `ignoreDuplicates` against a unique index on `(quote_id, trade_category_id, description)` (migration 030) — a hard backstop, not the primary defense; see the locking note below for that.
+
+**At most one active run per job** (`job_intake_locks`, migration 030). The Deno function's Stage 1/2 fact extraction is scoped to whatever's in the current invocation's batch — a second file for the same job triggering a second, concurrent `smooth-responder` run would reason over an incomplete fact base and race the first run's writes to `scope_items`/`quotes`/`quote_line_items`. The lock is acquired by the Next.js intake routes (`app/api/intake/[fileId]/route.ts`, `.../clarify/route.ts`) before triggering the engine, and released by the engine itself in a `try/finally` so it clears on every exit path, including pausing for a blocking clarifying question. A second upload session to the same job waits (SSE emits a `queued` progress stage) rather than racing.
+
+**Stage 1/2 extraction sees prior facts, not just document titles.** The system prompt includes the job's already-established `project_facts` (not just a list of previously-processed document titles) so a newly-uploaded document is classified with real awareness of what earlier documents in the job established — it can extend, agree with, or correct that context instead of extracting in a vacuum. A fact that a new document corrects is marked `superseded = true` on the prior row (matched by `job_id` + `category` + `key`, differing value) rather than both rows accumulating forever and both landing in every future prompt.
+
+**Fact de-duplication at scale (optional, Voyage AI).** As a job accumulates many documents, the same real-world fact often gets restated under a different `category`/`key` label per document (e.g. "gross floor area" vs `floor_area_m2`) — the exact-key supersession above won't catch that. If `VOYAGE_API_KEY` is set (as a Supabase Edge Function secret, not just in the Next.js app's env), each new fact is embedded (`voyage-3-lite`, 512 dimensions, stored on `project_facts.embedding` — migration 031) and compared by cosine similarity against the job's existing facts; anything above a 0.93 threshold is treated as the same fact restated and superseded the same way. Best-effort throughout — an unset key or a failed Voyage call just means that fact falls back to the exact-key check, never fatal to the pipeline. A separate hard cap (200 facts, highest-confidence kept) bounds prompt size regardless, in case a project genuinely has more distinct facts than that. This is deliberately not a chunking/RAG pipeline over raw PDFs — vision reads stay the extraction method; only the *fact list* gets this treatment.
 
 **Validation gates:**
 - Gate 1: no unit (or a genuinely undeterminable quantity, marked "Manual Input Required" by the model) → assumption (unresolved). Exempt: `pc_allowance`, `provisional_sum`, document-priced lines.
@@ -595,6 +609,7 @@ See `.env.local.example`. Key variables:
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser Supabase client |
 | `SUPABASE_SERVICE_ROLE_KEY` | Every API route constructs its own `createClient(url, serviceRoleKey)` inline (no shared admin-client singleton — see "Auth" above) |
 | `ANTHROPIC_API_KEY` | `/api/chat` (intent classification, in-process), `/api/email-sync/parse`, `/api/email-draft`, `/api/classify-document`, `/api/estimation/scope-hints`, the `smooth-responder` edge function |
+| `VOYAGE_API_KEY` | Optional. The `smooth-responder` edge function's fact de-duplication (`voyage-3-lite` embeddings) — must be set as a Supabase Edge Function secret, not just in the Next.js app's env, since it's only ever read inside that Deno function. Unset = the engine just falls back to exact category+key supersession, never fatal. |
 | `NEXT_PUBLIC_APP_URL` | OAuth redirect URIs, worker invite links, internal fetch calls |
 | `VERCEL_GIT_COMMIT_SHA` | Auto-injected by Vercel; baked into `NEXT_PUBLIC_COMMIT_SHA` at build time |
 | `GOOGLE_CLIENT_ID/SECRET` | Gmail OAuth |

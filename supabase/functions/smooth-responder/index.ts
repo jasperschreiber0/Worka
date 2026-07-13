@@ -98,6 +98,59 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
+// ─── Fact embeddings (P2 — semantic near-duplicate detection at scale) ─────────
+// Best-effort throughout: an unset VOYAGE_API_KEY or a failed call just means
+// facts fall back to the exact category+key supersession check from
+// migration 030 — never fatal to the pipeline. See migration 031.
+
+const VOYAGE_MODEL = 'voyage-3-lite' // 512-dimension embeddings, cheapest tier
+
+async function embedTexts(texts: string[], voyageApiKey: string | undefined): Promise<Array<number[] | null>> {
+  if (!voyageApiKey || texts.length === 0) return texts.map(() => null)
+  try {
+    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${voyageApiKey}` },
+      body: JSON.stringify({ input: texts, model: VOYAGE_MODEL, input_type: 'document' }),
+    })
+    if (!res.ok) {
+      console.error('Voyage embeddings call failed:', res.status, await res.text().catch(() => ''))
+      return texts.map(() => null)
+    }
+    const body = await res.json() as { data?: Array<{ embedding: number[]; index: number }> }
+    const byIndex = new Map((body.data ?? []).map((d) => [d.index, d.embedding]))
+    return texts.map((_, i) => byIndex.get(i) ?? null)
+  } catch (err) {
+    console.error('Voyage embeddings error:', err)
+    return texts.map(() => null)
+  }
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0
+  let dot = 0, normA = 0, normB = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i]
+    normA += a[i] * a[i]
+    normB += b[i] * b[i]
+  }
+  if (normA === 0 || normB === 0) return 0
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB))
+}
+
+// Above this similarity, two facts are treated as the same real-world fact
+// restated (possibly with a different category/key label) rather than two
+// distinct facts — e.g. "gross floor area: 120m2" vs "floor_area_m2: 120".
+const SEMANTIC_DUPLICATE_THRESHOLD = 0.93
+
+// Hard ceiling on how many facts get concatenated into a Stage 3/6 prompt.
+// Near-duplicate merging (below) keeps real-world fact count bounded as
+// documents accumulate, but this is the backstop for the case where a
+// project genuinely has this many distinct facts — keep the
+// highest-confidence ones (builder-answered facts are always 100) rather
+// than an unbounded prompt.
+const MAX_FACTS_IN_PROMPT = 200
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DocBlock = any
 
@@ -430,7 +483,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Existing state for this job (incremental upload / resume support) ─
     const { data: existingFacts } = await supabase
       .from('project_facts')
-      .select('id, category, key, value, evidence, confidence')
+      .select('id, category, key, value, evidence, confidence, embedding')
       .eq('job_id', jobId)
       .eq('superseded', false)
 
@@ -498,7 +551,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // contradicted fact is handled deterministically below at write time
       // (matched by category+key), not by asking the model to self-report it.
       const priorFactsBlock = facts.length > 0
-        ? facts.map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
+        ? (facts.length > MAX_FACTS_IN_PROMPT
+            ? [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)
+            : facts
+          ).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
         : ''
 
       const existingDocsNote = (existingDocs && existingDocs.length > 0)
@@ -569,17 +625,28 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // Persist Stage 2 — new facts (append; existing facts stay, superseded
       // ones are left for the builder's history rather than deleted)
       const factRows = (docResult.facts ?? []) as Array<Record<string, unknown>>
-      const factInserts = factRows.map((f) => ({
+      const factInsertsBase = factRows.map((f) => ({
         job_id: jobId,
-        category: f.category,
-        key: f.key,
+        category: f.category as string,
+        key: f.key as string,
         value: String(f.value),
         source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(fileIndexToId[f.source_file_index as number]) ?? null) : null,
         page_reference: f.page_reference ?? null,
         evidence: f.evidence ?? null,
         confidence: f.confidence ?? 70,
       }))
-      if (factInserts.length > 0) {
+
+      if (factInsertsBase.length > 0) {
+        // P2: embed each new fact's text for semantic near-duplicate
+        // detection, best-effort — see embedTexts above. Voyage bills per
+        // call, so this is one batched request for the whole new-fact set.
+        const voyageApiKey = Deno.env.get('VOYAGE_API_KEY')
+        const factTexts = factInsertsBase.map((f) => `[${f.category}] ${f.key}: ${f.value}`)
+        const embeddings = await embedTexts(factTexts, voyageApiKey)
+        const factInserts = factInsertsBase.map((f, i) => ({ ...f, embedding: embeddings[i] }))
+
+        const priorRows = (existingFacts ?? []) as Array<{ id: string; category: string; key: string; value: string; embedding: number[] | null }>
+
         // Auto-supersede: a new fact for the same job_id + category + key
         // with a different value replaces the prior one instead of both
         // accumulating forever. The read side of this (`.eq('superseded',
@@ -587,21 +654,41 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // assumed this happens — nothing ever wrote it until now, so a later
         // document contradicting an earlier one just left two conflicting
         // rows concatenated into every future prompt.
-        const priorByKey = new Map(
-          (existingFacts ?? []).map((f: Record<string, unknown>) => [`${f.category as string}::${f.key as string}`, f as { id: string; value: string }])
-        )
+        const priorByKey = new Map(priorRows.map((f) => [`${f.category}::${f.key}`, f]))
+
+        const supersededIds = new Set<string>()
         const supersededKeys = new Set<string>()
-        const toSupersedeIds: string[] = []
-        for (const nf of factInserts) {
+
+        for (let i = 0; i < factInserts.length; i++) {
+          const nf = factInserts[i]
           const k = `${nf.category}::${nf.key}`
-          const prior = priorByKey.get(k)
-          if (prior && String(prior.value).trim().toLowerCase() !== nf.value.trim().toLowerCase()) {
-            toSupersedeIds.push(prior.id)
+          const exactMatch = priorByKey.get(k)
+          if (exactMatch && String(exactMatch.value).trim().toLowerCase() !== nf.value.trim().toLowerCase()) {
+            supersededIds.add(exactMatch.id)
             supersededKeys.add(k)
+            continue
+          }
+          // No exact category+key match (or the value is identical) — check
+          // whether this is the same real-world fact restated under a
+          // different label. Only meaningful when both sides have an
+          // embedding; rows from before migration 031, or ones where the
+          // Voyage call failed, just fall back to the exact-key check above.
+          if (!nf.embedding) continue
+          let bestSim = 0
+          let bestMatch: (typeof priorRows)[number] | null = null
+          for (const prior of priorRows) {
+            if (!prior.embedding || supersededIds.has(prior.id)) continue
+            const sim = cosineSimilarity(nf.embedding, prior.embedding)
+            if (sim > bestSim) { bestSim = sim; bestMatch = prior }
+          }
+          if (bestMatch && bestSim >= SEMANTIC_DUPLICATE_THRESHOLD) {
+            supersededIds.add(bestMatch.id)
+            supersededKeys.add(`${bestMatch.category}::${bestMatch.key}`)
           }
         }
-        if (toSupersedeIds.length > 0) {
-          await supabase.from('project_facts').update({ superseded: true }).in('id', toSupersedeIds)
+
+        if (supersededIds.size > 0) {
+          await supabase.from('project_facts').update({ superseded: true }).in('id', Array.from(supersededIds))
         }
 
         await supabase.from('project_facts').insert(factInserts)
@@ -628,7 +715,15 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Stage 3 + 4: Scope Reasoning + Gap Detection ───────────────────────
     await setStage('reasoning_scope')
 
-    const factsBlock = facts.map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.evidence ? `, evidence: ${f.evidence}` : ''})`).join('\n')
+    // Near-duplicate merging above keeps real-world fact count bounded as
+    // documents accumulate; this is the backstop for a project that
+    // genuinely has more distinct facts than that — keep the
+    // highest-confidence ones rather than an unbounded prompt.
+    const factsForPrompt = facts.length > MAX_FACTS_IN_PROMPT
+      ? [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)
+      : facts
+
+    const factsBlock = factsForPrompt.map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.evidence ? `, evidence: ${f.evidence}` : ''})`).join('\n')
 
     const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all).${memoryContext}`
 
