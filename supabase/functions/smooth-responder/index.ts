@@ -631,9 +631,9 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         key: f.key as string,
         value: String(f.value),
         source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(fileIndexToId[f.source_file_index as number]) ?? null) : null,
-        page_reference: f.page_reference ?? null,
-        evidence: f.evidence ?? null,
-        confidence: f.confidence ?? 70,
+        page_reference: (f.page_reference as string) ?? null,
+        evidence: (f.evidence as string) ?? null,
+        confidence: (f.confidence as number) ?? 70,
       }))
 
       if (factInsertsBase.length > 0) {
