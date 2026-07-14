@@ -414,9 +414,12 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 008_job_context_fields.sql for the same reason as 028 above.
 030_intake_locking_and_batching.sql — job_intake_locks (one active smooth-responder run per
                                 job); files.upload_batch_id / skipped_sibling_filenames /
-                                failed_sibling_filenames; unique indexes on quotes (one open
-                                draft per job) and quote_line_items (no duplicate trade +
-                                description) — see "Reasoning-First Estimating Engine" above.
+                                failed_sibling_filenames; unique index on quote_line_items (no
+                                duplicate trade + description per quote — the job lock is the
+                                primary defense against the duplicate-quote race, not a DB
+                                constraint, since QuoteView's Revise button legitimately creates
+                                a second draft quote for a job) — see "Reasoning-First
+                                Estimating Engine" above.
 031_fact_embeddings.sql       — project_facts.embedding vector(512), optional Voyage AI
                                 semantic fact de-duplication — see "Fact de-duplication at
                                 scale" above.
