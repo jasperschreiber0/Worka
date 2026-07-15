@@ -263,8 +263,11 @@ export function didRelevanceChangeSelection(
   const a = new Set(withRelevance.map(key))
   const b = new Set(withoutRelevance.map(key))
   if (a.size !== b.size) return true
-  for (const k of a) if (!b.has(k)) return true
-  return false
+  // Never iterate a Set directly with for...of — the project's TS target
+  // doesn't enable --downlevelIteration (see CLAUDE.md's TypeScript
+  // Compatibility Rules). Array.from() first, as everywhere else in this
+  // codebase.
+  return Array.from(a).some((k) => !b.has(k))
 }
 
 // ─── Coarse category relevance inference (no embeddings) ──────────────────

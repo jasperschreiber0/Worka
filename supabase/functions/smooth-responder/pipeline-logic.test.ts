@@ -210,7 +210,7 @@ test('buildDocumentProcessingJobs: one job row per document, all pending with ze
   const documentIds = ['doc-1', 'doc-2', 'doc-3', 'doc-4', 'doc-5', 'doc-6', 'doc-7']
   const jobs = buildDocumentProcessingJobs(parentJobId, documentIds)
   assert.equal(jobs.length, 7)
-  for (const [i, job] of jobs.entries()) {
+  for (const [i, job] of Array.from(jobs.entries())) {
     assert.equal(job.parentJobId, parentJobId)
     assert.equal(job.documentId, documentIds[i])
     assert.equal(job.status, 'pending')
