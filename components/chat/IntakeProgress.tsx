@@ -12,7 +12,11 @@ export interface IntakeProgressProps {
   filename: string
   additionalFileIds?: string[]
   onComplete: (quoteId: string, assumptionCount: number, memoryData?: { similar_projects?: unknown[]; scope_hints?: unknown[]; total_in_memory?: number; skipped_files?: string[]; failed_files?: string[] }) => void
-  onError: (message?: string) => void
+  onError: (message?: string, skippedFiles?: string[], failedFiles?: string[]) => void
+  // Present only when the run ended (success or failure) with files that
+  // weren't included — lets the error state offer a one-click retry scoped
+  // to just those files instead of "start the whole upload over".
+  onRetryFiles?: (filenames: string[]) => void
 }
 
 interface ProgressState {
@@ -58,6 +62,7 @@ export default function IntakeProgress({
   additionalFileIds,
   onComplete,
   onError,
+  onRetryFiles,
 }: IntakeProgressProps) {
   const [progress, setProgress] = useState<ProgressState>({
     stage: 'uploading',
@@ -68,6 +73,8 @@ export default function IntakeProgress({
   const [isDone, setIsDone] = useState(false)
   const [hasError, setHasError] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [errorSkippedFiles, setErrorSkippedFiles] = useState<string[]>([])
+  const [errorFailedFiles, setErrorFailedFiles] = useState<string[]>([])
   const [clarification, setClarification] = useState<ClarificationState | null>(null)
   const [clarifySubmitting, setClarifySubmitting] = useState(false)
   const [clarifyError, setClarifyError] = useState<string | null>(null)
@@ -83,6 +90,12 @@ export default function IntakeProgress({
   // across that whole chain of reconnects, not just the current connection's
   // slice, and still give up if the pipeline is genuinely stuck.
   const startedAtRef = useRef<number>(Date.now())
+  // Same idea, but for the last time real progress (a pct change) was
+  // observed — lets the server give up on a genuinely-stuck run well before
+  // the overall ceiling without punishing a run that's slowly working
+  // through several document batches. See shouldGiveUp server-side.
+  const lastProgressAtRef = useRef<number>(Date.now())
+  const lastProgressPctRef = useRef<number>(5)
 
   const handleAnswerSubmit = async (answers: Array<{ question_id: string; answer: string }>) => {
     setClarifySubmitting(true)
@@ -114,18 +127,20 @@ export default function IntakeProgress({
     // re-triggered the engine (with resume: true) — this reconnect must only
     // poll, not fire a second, non-resumed trigger.
     const resumedParam = resumeKey > 0 ? '&resumed=1' : ''
-    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}${resumedParam}&started_at=${startedAtRef.current}`
+    const url = `/api/intake/${encodeURIComponent(fileId)}?job_id=${encodeURIComponent(jobId)}&builder_id=${encodeURIComponent(builderId)}${siblings}${resumedParam}&started_at=${startedAtRef.current}&last_progress_at=${lastProgressAtRef.current}`
     const es = new EventSource(url)
     eventSourceRef.current = es
     let settled = false
 
-    const failOnce = (message?: string) => {
+    const failOnce = (message?: string, skippedFiles?: string[], failedFiles?: string[]) => {
       if (settled) return
       settled = true
       setHasError(true)
       if (message) setErrorMessage(message)
+      if (skippedFiles) setErrorSkippedFiles(skippedFiles)
+      if (failedFiles) setErrorFailedFiles(failedFiles)
       es.close()
-      onError(message)
+      onError(message, skippedFiles, failedFiles)
     }
 
     es.addEventListener('progress', (e: MessageEvent) => {
@@ -143,6 +158,11 @@ export default function IntakeProgress({
           }
         }
         prevStageRef.current = data.stage
+
+        if (data.pct !== lastProgressPctRef.current) {
+          lastProgressPctRef.current = data.pct
+          lastProgressAtRef.current = Date.now()
+        }
 
         setProgress(data)
       } catch {
@@ -221,14 +241,23 @@ export default function IntakeProgress({
     })
 
     // Handles both server-emitted `event: error` (has .data) and
-    // EventSource connection failures (no .data).
+    // EventSource connection failures (no .data). skipped_files/failed_files
+    // are now populated on timeout/failure too, not just on success — see
+    // the early-persistence fix in smooth-responder/index.ts.
     es.addEventListener('error', (e: Event) => {
       let message: string | undefined
+      let skippedFiles: string[] | undefined
+      let failedFiles: string[] | undefined
       const data = (e as MessageEvent).data as string | undefined
       if (data) {
-        try { message = (JSON.parse(data) as { message?: string }).message } catch { /* ignore */ }
+        try {
+          const parsed = JSON.parse(data) as { message?: string; skipped_files?: string[]; failed_files?: string[] }
+          message = parsed.message
+          skippedFiles = parsed.skipped_files
+          failedFiles = parsed.failed_files
+        } catch { /* ignore */ }
       }
-      failOnce(message)
+      failOnce(message, skippedFiles, failedFiles)
     })
 
     es.onerror = () => {
@@ -257,6 +286,9 @@ export default function IntakeProgress({
 
   // ── Error state ────────────────────────────────────────────────────────────
   if (hasError) {
+    const missedFiles = [...errorSkippedFiles, ...errorFailedFiles]
+    const totalFiles = 1 + (additionalFileIds?.length ?? 0)
+    const processedCount = Math.max(0, totalFiles - missedFiles.length)
     return (
       <div className="rounded-xl border border-[rgba(244,67,54,0.3)] bg-[rgba(244,67,54,0.08)] px-4 py-5 space-y-2">
         <div className="flex items-center gap-2">
@@ -276,6 +308,27 @@ export default function IntakeProgress({
         <p className="text-sm text-[#f44336] pl-10">
           {errorMessage ?? <>Could not process <span className="font-medium">{filename}</span>. Please try again.</>}
         </p>
+        {missedFiles.length > 0 && (
+          <div className="pl-10 space-y-2">
+            <p className="text-sm text-[#f44336]">
+              {totalFiles > 1
+                ? `${processedCount} of ${totalFiles} files processed. The following ${missedFiles.length === 1 ? 'file was' : 'files were'} not included due to processing limits:`
+                : `This file was not included due to processing limits:`}
+            </p>
+            <ul className="text-sm text-[#f44336]/90 list-disc list-inside space-y-0.5">
+              {missedFiles.map((f) => <li key={f}>{f}</li>)}
+            </ul>
+            {onRetryFiles && (
+              <button
+                type="button"
+                onClick={() => onRetryFiles(missedFiles)}
+                className="mt-1 text-sm font-semibold text-[#ff6b2b] hover:underline"
+              >
+                Retry {missedFiles.length === 1 ? 'this file' : `these ${missedFiles.length} files`} only →
+              </button>
+            )}
+          </div>
+        )}
       </div>
     )
   }

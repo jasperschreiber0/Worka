@@ -308,11 +308,31 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
     [onIntakeComplete, onClose]
   )
 
-  const handleIntakeError = useCallback((message?: string) => {
-    setUploadedFile(null)
-    setIntakeStarted(false)
-    setUploadError(message ?? 'Processing failed — please try uploading again.')
-  }, [])
+  // Deliberately doesn't reset uploadedFile/intakeStarted — IntakeProgress
+  // owns displaying its own error state (including which files were
+  // skipped/failed and a retry action for just those), so unmounting it
+  // immediately here would discard that UI before it's ever shown. Only a
+  // successful retry (handleRetryMissedFiles below) or closing the panel
+  // resets back to the file-selection view.
+  const handleIntakeError = useCallback(() => {}, [])
+
+  // Bumped on every retry to force IntakeProgress to fully remount (fresh
+  // internal progress/error state) rather than reuse the failed run's state
+  // with just new props.
+  const [retryGeneration, setRetryGeneration] = useState(0)
+
+  const handleRetryMissedFiles = useCallback(
+    (filenames: string[]) => {
+      const allUploaded: DBFile[] = Object.keys(uploadedById).map((id) => uploadedById[id])
+      const matches = allUploaded.filter((f) => filenames.includes(f.filename))
+      if (matches.length === 0) return
+      const [retryPrimary, ...retrySiblings] = matches
+      setUploadedFile(retryPrimary)
+      setSiblingFileIds(retrySiblings.map((f) => f.id))
+      setRetryGeneration((g) => g + 1)
+    },
+    [uploadedById]
+  )
 
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -397,6 +417,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
           {/* ── Intake progress (replaces drop zone after upload) ─── */}
           {intakeStarted && uploadedFile ? (
             <IntakeProgress
+              key={retryGeneration}
               fileId={uploadedFile.id}
               jobId={job.id}
               builderId={builderId}
@@ -404,6 +425,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
               additionalFileIds={siblingFileIds}
               onComplete={handleIntakeComplete}
               onError={handleIntakeError}
+              onRetryFiles={handleRetryMissedFiles}
             />
           ) : (
             <>

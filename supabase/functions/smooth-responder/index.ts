@@ -34,6 +34,7 @@
 
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { splitIntoBatches, mergeFacts, type BatchableFile, type FactRow } from './pipeline-logic.ts'
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -126,17 +127,8 @@ async function embedTexts(texts: string[], voyageApiKey: string | undefined): Pr
   }
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0
-  let dot = 0, normA = 0, normB = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
-  }
-  if (normA === 0 || normB === 0) return 0
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB))
-}
+// cosineSimilarity now lives in ./pipeline-logic.ts (used inside mergeFacts)
+// so it can be unit-tested without a Deno runtime.
 
 // Above this similarity, two facts are treated as the same real-world fact
 // restated (possibly with a different category/key label) rather than two
@@ -492,10 +484,16 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .select('id, file_id, document_type, drawing_title')
       .eq('job_id', jobId)
 
-    let facts: Array<{ category: string; key: string; value: string; evidence: string | null; confidence: number }> =
+    // Carries id/embedding through the whole run (not just category/key/
+    // value/confidence) so batched Stage 1/2 calls below can supersede
+    // against facts from earlier batches in this same run, not only
+    // against what was already in the database before this run started.
+    let facts: FactRow[] =
       (existingFacts ?? []).map((f: Record<string, unknown>) => ({
+        id: f.id as string,
         category: f.category as string, key: f.key as string, value: f.value as string,
         evidence: (f.evidence as string) ?? null, confidence: f.confidence as number,
+        embedding: (f.embedding as number[] | null) ?? null,
       }))
 
     // ── Stage 1 + 2: Document Intelligence + Project Understanding ────────
@@ -508,194 +506,232 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const primary = await loadFileAsBlock(supabase, fileId, builderId)
       if (!primary) { await fail('File record or storage object not found'); return }
 
-      // Larger PDFs are, on average, multi-page comprehensive drawing sets
-      // (DA submissions, full architectural plans) far more likely to state
-      // basic project facts (address, project type, storeys) than small
-      // single-elevation or trade-detail sheets. Within the byte budget,
-      // prefer those over small ones rather than dropping in upload order —
-      // dropping the largest (most fact-rich) document while keeping five
-      // small trade sheets is what caused Stage 2 to find zero facts here.
+      // Sane upper bound on how many documents one run will even attempt —
+      // batching below means a run is no longer capped at ~7 files, but an
+      // unbounded upload could still mean unbounded Storage downloads and
+      // Claude calls in one invocation. Anything beyond this is tracked as
+      // skipped (with a real filename looked up), never silently ignored —
+      // previously anything past the first 6 sibling files wasn't even
+      // loaded or tracked, it just vanished.
+      const MAX_SIBLINGS_CONSIDERED = 30
+      const consideredSiblingIds = siblingFileIds.slice(0, MAX_SIBLINGS_CONSIDERED)
+      const overflowSiblingIds = siblingFileIds.slice(MAX_SIBLINGS_CONSIDERED)
+
       const loadedSiblings: LoadedFile[] = []
-      for (const sibId of siblingFileIds.slice(0, 6)) {
+      for (const sibId of consideredSiblingIds) {
+        const loadStartedAt = Date.now()
         const loaded = await loadFileAsBlock(supabase, sibId, builderId)
         if (loaded) {
           loadedSiblings.push(loaded)
+          console.log(JSON.stringify({ document: loaded.filename, status: 'loaded', durationMs: Date.now() - loadStartedAt }))
         } else {
           const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
-          failedToLoadSiblings.push(row?.filename ?? sibId)
+          const filename = row?.filename ?? sibId
+          failedToLoadSiblings.push(filename)
+          console.log(JSON.stringify({ document: filename, status: 'failed_to_load', durationMs: Date.now() - loadStartedAt }))
         }
       }
-      loadedSiblings.sort((a, b) => JSON.stringify(b.block).length - JSON.stringify(a.block).length)
+      for (const sibId of overflowSiblingIds) {
+        const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
+        skippedSiblings.push(row?.filename ?? sibId)
+      }
 
-      const siblings: LoadedFile[] = []
-      let totalBytes = 0
-      for (const loaded of loadedSiblings) {
-        const approxBytes = JSON.stringify(loaded.block).length
-        if (totalBytes + approxBytes > 20 * 1024 * 1024) {
-          skippedSiblings.push(loaded.filename ?? 'unnamed file')
-          continue
+      // ── Batch instead of a single hard cutoff ────────────────────────────
+      // Previously: one 20MB pass/fail per run, largest-first, anything that
+      // didn't fit was dropped with no way to retry short of a fresh manual
+      // re-upload. Now: up to MAX_BATCHES batches of up to 20MB each, one
+      // Stage 1/2 Claude call per batch, facts merged across batches the
+      // same way the existing incremental-upload path already merges facts
+      // across separate uploads (see mergeFacts in pipeline-logic.ts).
+      // MAX_BATCHES bounds this invocation's total wall-clock time, since
+      // each batch is a real, possibly-slow Claude call run sequentially —
+      // true cross-invocation batching (for uploads that would still exceed
+      // even this) is a natural follow-up using the same batch-index
+      // persistence below, not implemented in this pass.
+      const MAX_BYTES_PER_BATCH = 20 * 1024 * 1024
+      const MAX_BATCHES = 3
+
+      const allLoaded = [primary, ...loadedSiblings]
+      const batchInput: BatchableFile[] = allLoaded.map((f) => ({
+        fileId: f.fileId,
+        filename: f.filename,
+        approxBytes: JSON.stringify(f.block).length,
+      }))
+      const { batches: fileBatches, excluded } = splitIntoBatches(batchInput, MAX_BYTES_PER_BATCH, MAX_BATCHES)
+      for (const ex of excluded) skippedSiblings.push(ex.filename)
+
+      // Persist what's included/excluded as soon as it's decided — not just
+      // on eventual success — so a later-stage failure or timeout doesn't
+      // discard information the engine already had (previously this was
+      // only ever written on the final success path, so a timeout gave the
+      // builder zero indication anything had been skipped).
+      await supabase.from('files').update({
+        skipped_sibling_filenames: skippedSiblings.length > 0 ? skippedSiblings : null,
+        failed_sibling_filenames: failedToLoadSiblings.length > 0 ? failedToLoadSiblings : null,
+        intake_batch_count: fileBatches.length,
+      }).eq('id', fileId)
+
+      const blockById = new Map(allLoaded.map((f) => [f.fileId, f]))
+      // Titles of documents classified so far — starts with documents from
+      // earlier uploads to this job, grows with each batch in this run, so
+      // batch 2+ knows what batch 1 already established, not just what the
+      // database had before this run started.
+      const processedDocTitles: string[] = ((existingDocs ?? []) as Array<Record<string, unknown>>)
+        .map((d) => (d.drawing_title as string) ?? (d.document_type as string))
+        .filter((t): t is string => Boolean(t))
+
+      for (let batchIdx = 0; batchIdx < fileBatches.length; batchIdx++) {
+        const batchFiles = fileBatches[batchIdx]
+          .map((bf) => blockById.get(bf.fileId))
+          .filter((f): f is LoadedFile => Boolean(f))
+
+        await supabase.from('files').update({ intake_batch_index: batchIdx + 1 }).eq('id', fileId)
+        await setStage('classifying_documents')
+
+        // Prior facts, so extraction of a newly-uploaded document isn't blind
+        // to what earlier documents/batches already established. This used
+        // to be title-only ("you cannot see the old files directly") — Claude
+        // extracting from this week's spec document had no way to know
+        // floor_area_m2 was already 120 from last week's plan, so it couldn't
+        // flag agreement, addition, or contradiction. Superseding a
+        // contradicted fact is handled deterministically below at write time
+        // (matched by category+key or semantic similarity), not by asking
+        // the model to self-report it.
+        const priorFactsBlock = facts.length > 0
+          ? (facts.length > MAX_FACTS_IN_PROMPT
+              ? [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)
+              : facts
+            ).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
+          : ''
+
+        const existingDocsNote = processedDocTitles.length > 0
+          ? `\n\nThis job already has ${processedDocTitles.length} previously-processed document(s): ${processedDocTitles.join(', ')}. You cannot see those earlier files directly (only their titles above), but here is everything already established about this project from them:\n${priorFactsBlock || '(no facts recorded yet)'}\n\nTreat the new document(s) below as an addition to this project, not a fresh start. Extract facts normally from what's in front of you — if something in a new document changes a fact listed above (e.g. a revised drawing changes a room count or floor area), just extract the corrected value; WorkA reconciles the correction automatically, you don't need to flag it separately.`
+          : ''
+
+        const docSystemPrompt = `You are a senior document controller and quantity surveyor reviewing construction documents for an Australian residential project. Classify every document precisely and extract only facts you can point to direct evidence for. Never invent a fact — if something is not shown or stated, simply omit it. Unknown must remain unknown.${existingDocsNote}${memoryContext}`
+
+        const docUserContent = [
+          ...batchFiles.map((f) => f.block),
+          { type: 'text', text: `Analyse the ${batchFiles.length} document(s) above (file_index 0 to ${batchFiles.length - 1}, in the order provided). Use the analyse_project_documents tool.` },
+        ]
+
+        const batchStartedAt = Date.now()
+        let docResult: { documents?: unknown[]; facts?: unknown[] } | null = null
+        try {
+          // Was 4096, then 8192 -- both still truncated on a real DA submission
+          // plus supporting documents (confirmed via the stop_reason=max_tokens
+          // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
+          // 16000 for this same model/API rather than guessing at another cap.
+          docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000)
+        } catch (err) {
+          console.log(JSON.stringify({
+            batch: batchIdx + 1, totalBatches: fileBatches.length,
+            documents: batchFiles.map((f) => f.filename), status: 'failed',
+            durationMs: Date.now() - batchStartedAt,
+            error: err instanceof Error ? err.message : String(err),
+          }))
+          await fail(`Document intelligence call failed on batch ${batchIdx + 1} of ${fileBatches.length}: ${err instanceof Error ? err.message : String(err)}`)
+          return
         }
-        totalBytes += approxBytes
-        siblings.push(loaded)
-      }
+        if (!docResult) {
+          await fail(`No structured response from document intelligence stage on batch ${batchIdx + 1} of ${fileBatches.length}`)
+          return
+        }
 
-      const allFiles = [primary, ...siblings]
-      await setStage('classifying_documents')
-
-      // Prior facts, so extraction of a newly-uploaded document isn't blind
-      // to what earlier documents in this job already established. This used
-      // to be title-only ("you cannot see the old files directly") — Claude
-      // extracting from this week's spec document had no way to know
-      // floor_area_m2 was already 120 from last week's plan, so it couldn't
-      // flag agreement, addition, or contradiction. Superseding a
-      // contradicted fact is handled deterministically below at write time
-      // (matched by category+key), not by asking the model to self-report it.
-      const priorFactsBlock = facts.length > 0
-        ? (facts.length > MAX_FACTS_IN_PROMPT
-            ? [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)
-            : facts
-          ).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
-        : ''
-
-      const existingDocsNote = (existingDocs && existingDocs.length > 0)
-        ? `\n\nThis job already has ${existingDocs.length} previously-processed document(s): ${existingDocs.map((d: Record<string, unknown>) => d.drawing_title ?? d.document_type).join(', ')}. You cannot see those earlier files directly (only their titles above), but here is everything already established about this project from them:\n${priorFactsBlock || '(no facts recorded yet)'}\n\nTreat the new document(s) below as an addition to this project, not a fresh start. Extract facts normally from what's in front of you — if something in a new document changes a fact listed above (e.g. a revised drawing changes a room count or floor area), just extract the corrected value; WorkA reconciles the correction automatically, you don't need to flag it separately.`
-        : ''
-
-      const docSystemPrompt = `You are a senior document controller and quantity surveyor reviewing construction documents for an Australian residential project. Classify every document precisely and extract only facts you can point to direct evidence for. Never invent a fact — if something is not shown or stated, simply omit it. Unknown must remain unknown.${existingDocsNote}${memoryContext}`
-
-      const docUserContent = [
-        ...allFiles.map((f) => f.block),
-        { type: 'text', text: `Analyse the ${allFiles.length} document(s) above (file_index 0 to ${allFiles.length - 1}, in the order provided). Use the analyse_project_documents tool.` },
-      ]
-
-      let docResult: { documents?: unknown[]; facts?: unknown[] } | null = null
-      try {
-        // Was 4096, then 8192 -- both still truncated on a real DA submission
-        // plus supporting documents (confirmed via the stop_reason=max_tokens
-        // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
-        // 16000 for this same model/API rather than guessing at another cap.
-        docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000)
-      } catch (err) {
-        await fail(`Document intelligence call failed: ${err instanceof Error ? err.message : String(err)}`)
-        return
-      }
-      if (!docResult) { await fail('No structured response from document intelligence stage'); return }
-      console.log(`Stage 1/2 result: ${(docResult.documents ?? []).length} document(s) classified, ${(docResult.facts ?? []).length} fact(s) found`)
-
-      await setStage('understanding_project')
-
-      // Persist Stage 1 — document map
-      const docRows = (docResult.documents ?? []) as Array<Record<string, unknown>>
-      const fileIndexToId: Record<number, string> = {}
-      allFiles.forEach((f, idx) => { fileIndexToId[idx] = f.fileId })
-      console.log('Stage 1 classification detail:', JSON.stringify(docRows.map((d) => ({
-        file: allFiles[d.file_index as number]?.filename,
-        document_type: d.document_type,
-        readability: d.readability,
-        ocr_quality: d.ocr_quality,
-      }))))
-
-      const documentInserts = docRows
-        .filter((d) => typeof d.file_index === 'number' && fileIndexToId[d.file_index as number])
-        .map((d) => ({
-          job_id: jobId,
-          file_id: fileIndexToId[d.file_index as number],
-          document_type: d.document_type ?? null,
-          discipline: d.discipline ?? null,
-          revision: d.revision ?? null,
-          issue_date: d.issue_date ?? null,
-          scale: d.scale ?? null,
-          page_count: d.page_count ?? null,
-          drawing_title: d.drawing_title ?? null,
-          readability: d.readability ?? null,
-          ocr_quality: d.ocr_quality ?? null,
-          trade_relevance: d.trade_relevance ?? [],
-          is_duplicate: d.is_duplicate ?? false,
-          is_superseded: d.is_superseded ?? false,
-          notes: d.notes ?? null,
+        // Structured observability log — real per-batch duration and token
+        // usage (from the Claude response's own usage object, via callTool's
+        // internal log). Per-document token attribution isn't reported by
+        // the API for a multi-document call, so this deliberately reports
+        // at batch granularity rather than fabricating a per-document split.
+        console.log(JSON.stringify({
+          batch: batchIdx + 1, totalBatches: fileBatches.length,
+          documents: batchFiles.map((f) => f.filename), status: 'processed',
+          durationMs: Date.now() - batchStartedAt,
+          factsFound: (docResult.facts ?? []).length,
+          documentsClassified: (docResult.documents ?? []).length,
         }))
 
-      let insertedDocs: Array<{ id: string; file_id: string }> = []
-      if (documentInserts.length > 0) {
-        const { data } = await supabase.from('project_documents').upsert(documentInserts, { onConflict: 'file_id' }).select('id, file_id')
-        insertedDocs = data ?? []
-      }
-      const fileIdToDocId = new Map(insertedDocs.map((d) => [d.file_id, d.id]))
+        await setStage('understanding_project')
 
-      // Persist Stage 2 — new facts (append; existing facts stay, superseded
-      // ones are left for the builder's history rather than deleted)
-      const factRows = (docResult.facts ?? []) as Array<Record<string, unknown>>
-      const factInsertsBase = factRows.map((f) => ({
-        job_id: jobId,
-        category: f.category as string,
-        key: f.key as string,
-        value: String(f.value),
-        source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(fileIndexToId[f.source_file_index as number]) ?? null) : null,
-        page_reference: (f.page_reference as string) ?? null,
-        evidence: (f.evidence as string) ?? null,
-        confidence: (f.confidence as number) ?? 70,
-      }))
+        // Persist Stage 1 — document map (this batch)
+        const docRows = (docResult.documents ?? []) as Array<Record<string, unknown>>
+        const fileIndexToId: Record<number, string> = {}
+        batchFiles.forEach((f, idx) => { fileIndexToId[idx] = f.fileId })
 
-      if (factInsertsBase.length > 0) {
-        // P2: embed each new fact's text for semantic near-duplicate
-        // detection, best-effort — see embedTexts above. Voyage bills per
-        // call, so this is one batched request for the whole new-fact set.
-        const voyageApiKey = Deno.env.get('VOYAGE_API_KEY')
-        const factTexts = factInsertsBase.map((f) => `[${f.category}] ${f.key}: ${f.value}`)
-        const embeddings = await embedTexts(factTexts, voyageApiKey)
-        const factInserts = factInsertsBase.map((f, i) => ({ ...f, embedding: embeddings[i] }))
+        const documentInserts = docRows
+          .filter((d) => typeof d.file_index === 'number' && fileIndexToId[d.file_index as number])
+          .map((d) => ({
+            job_id: jobId,
+            file_id: fileIndexToId[d.file_index as number],
+            document_type: d.document_type ?? null,
+            discipline: d.discipline ?? null,
+            revision: d.revision ?? null,
+            issue_date: d.issue_date ?? null,
+            scale: d.scale ?? null,
+            page_count: d.page_count ?? null,
+            drawing_title: d.drawing_title ?? null,
+            readability: d.readability ?? null,
+            ocr_quality: d.ocr_quality ?? null,
+            trade_relevance: d.trade_relevance ?? [],
+            is_duplicate: d.is_duplicate ?? false,
+            is_superseded: d.is_superseded ?? false,
+            notes: d.notes ?? null,
+          }))
 
-        const priorRows = (existingFacts ?? []) as Array<{ id: string; category: string; key: string; value: string; embedding: number[] | null }>
-
-        // Auto-supersede: a new fact for the same job_id + category + key
-        // with a different value replaces the prior one instead of both
-        // accumulating forever. The read side of this (`.eq('superseded',
-        // false)` above, and every factsBlock built from `facts`) has always
-        // assumed this happens — nothing ever wrote it until now, so a later
-        // document contradicting an earlier one just left two conflicting
-        // rows concatenated into every future prompt.
-        const priorByKey = new Map(priorRows.map((f) => [`${f.category}::${f.key}`, f]))
-
-        const supersededIds = new Set<string>()
-        const supersededKeys = new Set<string>()
-
-        for (let i = 0; i < factInserts.length; i++) {
-          const nf = factInserts[i]
-          const k = `${nf.category}::${nf.key}`
-          const exactMatch = priorByKey.get(k)
-          if (exactMatch && String(exactMatch.value).trim().toLowerCase() !== nf.value.trim().toLowerCase()) {
-            supersededIds.add(exactMatch.id)
-            supersededKeys.add(k)
-            continue
-          }
-          // No exact category+key match (or the value is identical) — check
-          // whether this is the same real-world fact restated under a
-          // different label. Only meaningful when both sides have an
-          // embedding; rows from before migration 031, or ones where the
-          // Voyage call failed, just fall back to the exact-key check above.
-          if (!nf.embedding) continue
-          let bestSim = 0
-          let bestMatch: (typeof priorRows)[number] | null = null
-          for (const prior of priorRows) {
-            if (!prior.embedding || supersededIds.has(prior.id)) continue
-            const sim = cosineSimilarity(nf.embedding, prior.embedding)
-            if (sim > bestSim) { bestSim = sim; bestMatch = prior }
-          }
-          if (bestMatch && bestSim >= SEMANTIC_DUPLICATE_THRESHOLD) {
-            supersededIds.add(bestMatch.id)
-            supersededKeys.add(`${bestMatch.category}::${bestMatch.key}`)
-          }
+        let insertedDocs: Array<{ id: string; file_id: string }> = []
+        if (documentInserts.length > 0) {
+          const { data } = await supabase.from('project_documents').upsert(documentInserts, { onConflict: 'file_id' }).select('id, file_id')
+          insertedDocs = data ?? []
+        }
+        const fileIdToDocId = new Map(insertedDocs.map((d) => [d.file_id, d.id]))
+        for (const d of docRows) {
+          const title = (d.drawing_title as string) ?? (d.document_type as string)
+          if (title) processedDocTitles.push(title)
         }
 
-        if (supersededIds.size > 0) {
-          await supabase.from('project_facts').update({ superseded: true }).in('id', Array.from(supersededIds))
-        }
+        // Persist Stage 2 — new facts (this batch), merged against both
+        // pre-existing DB facts and facts extracted by earlier batches in
+        // this same run (facts, kept up to date after every batch below).
+        const factRows = (docResult.facts ?? []) as Array<Record<string, unknown>>
+        const factInsertsBase = factRows.map((f) => ({
+          job_id: jobId,
+          category: f.category as string,
+          key: f.key as string,
+          value: String(f.value),
+          source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(fileIndexToId[f.source_file_index as number]) ?? null) : null,
+          page_reference: (f.page_reference as string) ?? null,
+          evidence: (f.evidence as string) ?? null,
+          confidence: (f.confidence as number) ?? 70,
+        }))
 
-        await supabase.from('project_facts').insert(factInserts)
-        facts = [
-          ...facts.filter((f) => !supersededKeys.has(`${f.category}::${f.key}`)),
-          ...factInserts.map((f) => ({ category: f.category, key: f.key, value: f.value, evidence: f.evidence, confidence: f.confidence })),
-        ]
+        if (factInsertsBase.length > 0) {
+          // P2: embed each new fact's text for semantic near-duplicate
+          // detection, best-effort — see embedTexts above. Voyage bills per
+          // call, so this is one batched request per document batch.
+          const voyageApiKey = Deno.env.get('VOYAGE_API_KEY')
+          const factTexts = factInsertsBase.map((f) => `[${f.category}] ${f.key}: ${f.value}`)
+          const embeddings = await embedTexts(factTexts, voyageApiKey)
+          const factInserts: FactRow[] = factInsertsBase.map((f, i) => ({ ...f, embedding: embeddings[i] }))
+
+          // Auto-supersede: a new fact for the same job_id + category + key
+          // with a different value replaces the prior one instead of both
+          // accumulating forever, or (below the exact-key check) a semantic
+          // near-duplicate under a different label — see mergeFacts. Merges
+          // against `facts`, which already includes both DB-persisted facts
+          // and anything extracted by earlier batches in this run.
+          const merge = mergeFacts(facts, factInserts, SEMANTIC_DUPLICATE_THRESHOLD)
+
+          if (merge.supersededIds.length > 0) {
+            await supabase.from('project_facts').update({ superseded: true }).in('id', merge.supersededIds)
+          }
+          const { data: insertedFactRows } = await supabase.from('project_facts').insert(factInserts).select('id')
+          const insertedIds = (insertedFactRows ?? []).map((r: Record<string, unknown>) => r.id as string)
+
+          facts = [
+            ...facts.filter((f) => !merge.supersededKeys.includes(`${f.category}::${f.key}`)),
+            ...factInserts.map((f, i) => ({ ...f, id: insertedIds[i] })),
+          ]
+        }
       }
     }
 
@@ -729,6 +765,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     const scopeUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${TRADE_CATEGORIES.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.` }]
 
+    const scopeStartedAt = Date.now()
     let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
     try {
       // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
@@ -736,10 +773,12 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // two stages' proven 16000 rather than guessing at yet another cap.
       scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000)
     } catch (err) {
+      console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, error: err instanceof Error ? err.message : String(err) }))
       await fail(`Scope reasoning call failed: ${err instanceof Error ? err.message : String(err)}`)
       return
     }
     if (!scopeResult) { await fail('No structured response from scope reasoning stage'); return }
+    console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'processed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, tradesReasoned: (scopeResult.scope ?? []).length, questionsRaised: (scopeResult.clarifying_questions ?? []).length }))
 
     await setStage('detecting_gaps')
 
@@ -810,17 +849,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     const estimateUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
 
+    const estimateStartedAt = Date.now()
     let estimateResult: { line_items?: unknown[] } | null = null
     try {
       estimateResult = await callTool(anthropic, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
     } catch (err) {
+      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, error: err instanceof Error ? err.message : String(err) }))
       await fail(`Estimate generation call failed: ${err instanceof Error ? err.message : String(err)}`)
       return
     }
     if (!estimateResult || !estimateResult.line_items || estimateResult.line_items.length === 0) {
+      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, reason: 'no line items returned' }))
       await fail('Estimate generation returned no line items')
       return
     }
+    console.log(JSON.stringify({ stage: 'generating_estimate', status: 'processed', durationMs: Date.now() - estimateStartedAt, lineItems: estimateResult.line_items.length }))
 
     // ── Validation gates ────────────────────────────────────────────────────
     await setStage('validating')

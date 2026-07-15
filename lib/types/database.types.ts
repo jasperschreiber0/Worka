@@ -287,6 +287,8 @@ export interface File {
   upload_batch_id: string | null
   skipped_sibling_filenames: string[] | null
   failed_sibling_filenames: string[] | null
+  intake_batch_index: number | null
+  intake_batch_count: number | null
   created_at: string
 }
 

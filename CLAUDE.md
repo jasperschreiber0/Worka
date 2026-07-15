@@ -11,9 +11,15 @@ npm run dev          # start dev server (localhost:3000)
 npm run build        # production build
 npm run type-check   # tsc --noEmit — run this before every commit
 npm run lint         # eslint
+npm run test         # node --experimental-strip-types --test — pure-function unit tests only
 ```
 
-No test suite exists yet. Type-check is the primary correctness gate.
+Type-check is still the primary correctness gate. `npm run test` covers a narrow slice — pure,
+dependency-free logic extracted from the document-processing pipeline (batch splitting, fact
+merge/supersession, timeout decisions — see `supabase/functions/smooth-responder/pipeline-logic.ts`
+and its `.test.ts`). It uses Node's built-in test runner and experimental TypeScript stripping
+(needs Node 22.6+) specifically so it adds zero new dependencies — there is still no test
+framework installed for the rest of the app.
 
 ---
 
@@ -423,6 +429,9 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
 031_fact_embeddings.sql       — project_facts.embedding vector(512), optional Voyage AI
                                 semantic fact de-duplication — see "Fact de-duplication at
                                 scale" above.
+032_intake_batch_progress.sql — files.intake_batch_index / intake_batch_count, for the
+                                multi-batch Stage 1/2 document processing described in
+                                "Document batching" below.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -522,6 +531,10 @@ Quality Assurance → Render Estimate
 **Incremental uploads merge, they don't restart.** A new file uploaded to a job that already has facts/scope/a quote gets classified on its own, folded into the existing fact base, and Scope Reasoning + Gap Detection re-run over the merged set. Estimate Generation reuses the job's existing draft/pending_review quote rather than creating a second one, and skips re-inserting any line item that already exists for the same trade + description — previously-resolved assumptions on unrelated line items are left untouched. Estimate Generation's line-item insert is an `upsert` with `ignoreDuplicates` against a unique index on `(quote_id, trade_category_id, description)` (migration 030) — a hard backstop, not the primary defense; see the locking note below for that.
 
 **At most one active run per job** (`job_intake_locks`, migration 030). The Deno function's Stage 1/2 fact extraction is scoped to whatever's in the current invocation's batch — a second file for the same job triggering a second, concurrent `smooth-responder` run would reason over an incomplete fact base and race the first run's writes to `scope_items`/`quotes`/`quote_line_items`. The lock is acquired by the Next.js intake routes (`app/api/intake/[fileId]/route.ts`, `.../clarify/route.ts`) before triggering the engine, and released by the engine itself in a `try/finally` so it clears on every exit path, including pausing for a blocking clarifying question. A second upload session to the same job waits (SSE emits a `queued` progress stage) rather than racing.
+
+**Document batching (never silently drop files).** A single Stage 1/2 Claude call has a real payload ceiling, so the primary file plus its siblings are split into batches — largest-first bin packing under a 20MB per-batch vision-encoding budget, up to `MAX_BATCHES` (3) batches per run — instead of the old single hard 20MB/6-sibling cutoff that silently discarded anything past the limit. Batch splitting is a pure function (`splitIntoBatches` in `supabase/functions/smooth-responder/pipeline-logic.ts`, unit-tested — see Commands above) shared with nothing else; facts extracted by each batch are merged into the running fact base via `mergeFacts` (same file — the same exact-key/semantic-supersession logic that already handled merging facts across separate incremental uploads, applied here across batches within one run). `files.intake_batch_index`/`intake_batch_count` (migration 032) are written at each batch boundary so `IntakeProgress.tsx` can show real "batch 2 of 3" progress. **Any file excluded — whether by the byte budget, a storage load failure, or the (generous, 30-file) total-considered cap — is written to `files.skipped_sibling_filenames`/`failed_sibling_filenames` as soon as batching decides it, not only on eventual success.** This matters: a run that later times out or fails at a subsequent stage still has this information persisted, and `GET /api/intake/[fileId]`'s `error` SSE events now read and forward it (previously only the `complete` event ever carried it, so a timeout gave the builder zero indication anything had been skipped). `UploadPanel.tsx` surfaces "N of M files processed, these weren't included" with a one-click retry scoped to just those files (resolved by filename against the panel's own already-uploaded-this-session file map, no re-upload needed). True cross-invocation batching (for uploads that would still exceed even 3 batches in one edge function invocation) is a natural follow-up using the same batch-index persistence, not implemented yet.
+
+**Timeout handling: stuck vs. slow are different things.** The SSE poller's `OVERALL_TIMEOUT_MS` (15 min, tracked via `overallStartedAt`) is still the hard ceiling regardless of activity, but a second, tighter signal — `STUCK_TIMEOUT_MS` (5 min) since `lastProgressAt`, a real stage or batch-index change — now lets a genuinely-hung run give up well before 15 minutes without penalizing a run that's legitimately working through several document batches. Both timestamps ride along in the SSE URL across the deliberate reconnects Vercel's 300s connection ceiling forces (same pattern as `started_at`), tracked client-side in `IntakeProgress.tsx` refs. See `shouldGiveUp` in `pipeline-logic.ts`.
 
 **Stage 1/2 extraction sees prior facts, not just document titles.** The system prompt includes the job's already-established `project_facts` (not just a list of previously-processed document titles) so a newly-uploaded document is classified with real awareness of what earlier documents in the job established — it can extend, agree with, or correct that context instead of extracting in a vacuum. A fact that a new document corrects is marked `superseded = true` on the prior row (matched by `job_id` + `category` + `key`, differing value) rather than both rows accumulating forever and both landing in every future prompt.
 

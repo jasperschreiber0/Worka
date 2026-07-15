@@ -3,6 +3,7 @@ export const runtime = 'edge'
 
 import { NextRequest } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { shouldGiveUp } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -136,6 +137,34 @@ async function releaseJobLock(supabaseUrl: string, supabaseKey: string, anonKey:
   }).catch(() => { /* best-effort */ })
 }
 
+// Best-effort lookup used only when giving up (timeout/failure) — the main
+// polling loop already selects these columns on every iteration, but a
+// give-up can happen before that iteration's fetch has run.
+async function fetchSkipInfo(
+  supabaseUrl: string,
+  supabaseKey: string,
+  anonKey: string,
+  fileId: string,
+  builderId: string
+): Promise<{ skipped?: string[]; failed?: string[] }> {
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builderId)}&select=skipped_sibling_filenames,failed_sibling_filenames`,
+      { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+    )
+    if (!res.ok) return {}
+    const rows = await res.json() as Array<{ skipped_sibling_filenames: string[] | null; failed_sibling_filenames: string[] | null }>
+    const row = rows[0]
+    if (!row) return {}
+    return {
+      skipped: row.skipped_sibling_filenames ?? undefined,
+      failed: row.failed_sibling_filenames ?? undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
 // ─── GET /api/intake/[fileId] ─────────────────────────────────────────────────
 
 export async function GET(
@@ -157,6 +186,14 @@ export async function GET(
   // not just this one connection's slice.
   const startedAtParam = Number(searchParams.get('started_at'))
   const overallStartedAt = Number.isFinite(startedAtParam) && startedAtParam > 0 ? startedAtParam : Date.now()
+  // Same idea as started_at, but tracks the last time real progress (a
+  // stage/pct change) was observed rather than when polling began — rides
+  // along the same reconnect chain so a run that's genuinely stuck can be
+  // given up on well before the 15-minute overall ceiling, while a run
+  // that's slowly working through several document batches isn't punished
+  // just for taking a while in total. See shouldGiveUp in pipeline-logic.ts.
+  const lastProgressAtParam = Number(searchParams.get('last_progress_at'))
+  let lastProgressAt = Number.isFinite(lastProgressAtParam) && lastProgressAtParam > 0 ? lastProgressAtParam : overallStartedAt
 
   // builder_id is always derived from the authenticated session — never from
   // the query string — so a caller can't watch or trigger another builder's
@@ -251,6 +288,11 @@ export async function GET(
       // the same overall give-up point the polling loop uses.
       const CONNECTION_SAFETY_MARGIN_MS = 260_000
       const OVERALL_TIMEOUT_MS = 15 * 60_000
+      // Genuinely-stuck give-up point — shorter than the overall ceiling so
+      // a hung run doesn't make the builder wait the full 15 minutes to
+      // find out. Generous enough that a single slow Claude call on a large
+      // batch (observed up to ~90s for a 60k-token call) is nowhere close.
+      const STUCK_TIMEOUT_MS = 5 * 60_000
 
       try {
         if (!alreadyTriggered && !alreadyProcessing) {
@@ -261,6 +303,11 @@ export async function GET(
           // a second, unlocked, concurrent run.
           let lock: LockResult = await tryAcquireJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id, fileId)
           while (lock === 'locked') {
+            // Plain overall ceiling here, not the stuck-check below — this
+            // loop is waiting on a DIFFERENT file's run for the same job
+            // (staleness of that lock is handled separately by
+            // LOCK_STALE_MS), not observing this run's own progress, so
+            // "no progress" isn't a meaningful signal yet.
             if (Date.now() - overallStartedAt > OVERALL_TIMEOUT_MS) {
               emit('error', { message: 'Processing timed out — please try again' })
               controller.close()
@@ -270,6 +317,11 @@ export async function GET(
             await delay(2000)
             lock = await tryAcquireJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id, fileId)
           }
+
+          // Real processing is about to start for this file — the stuck-
+          // timeout clock (used in the polling loop below) starts fresh
+          // here, not from whenever lock-wait or connection began.
+          lastProgressAt = Date.now()
 
           // Trigger the estimating engine — it returns 202 immediately and runs in background
           const triggerRes = await fetch(edgeFnUrl, {
@@ -296,6 +348,12 @@ export async function GET(
         emit('progress', PROGRESS_STAGES[0])
 
         let lastStage = ''
+        // Tracked separately from lastStage: multiple document batches all
+        // report the same 'classifying_documents' stage key, so batch-to-
+        // batch progress needs its own signal for the stuck-timeout check
+        // below — otherwise a slow-but-genuinely-progressing multi-batch
+        // run could look identical to a truly hung one.
+        let lastBatchIndex: number | null = null
 
         // Poll the files table until extraction completes, pauses for
         // clarification, or fails.
@@ -313,8 +371,15 @@ export async function GET(
         // tracked across that whole chain via overallStartedAt, not just
         // this connection's slice.
         for (let attempts = 0; ; attempts++) {
-          if (Date.now() - overallStartedAt > OVERALL_TIMEOUT_MS) {
-            emit('error', { message: 'Processing timed out — please try again' })
+          if (shouldGiveUp(Date.now(), overallStartedAt, lastProgressAt, OVERALL_TIMEOUT_MS, STUCK_TIMEOUT_MS)) {
+            // Skip/fail info was previously only ever attached to the
+            // 'complete' event — a timeout gave the builder zero indication
+            // anything had even been attempted, let alone what was skipped.
+            // smooth-responder now writes these columns as soon as batching
+            // decides them (not just on eventual success), so they're
+            // available here even when the run never finished.
+            const { skipped, failed } = await fetchSkipInfo(supabaseUrl!, supabaseKey!, anonKey, fileId, builder_id)
+            emit('error', { message: 'Processing timed out — please try again', skipped_files: skipped, failed_files: failed })
             controller.close()
             return
           }
@@ -354,6 +419,8 @@ export async function GET(
             failure_reason: string | null
             skipped_sibling_filenames: string[] | null
             failed_sibling_filenames: string[] | null
+            intake_batch_index: number | null
+            intake_batch_count: number | null
           }>
           const row = rows[0]
           if (!row) continue
@@ -362,9 +429,20 @@ export async function GET(
           const pct = row.intake_pct ?? 5
 
           if (stage !== lastStage && !['complete', 'failed', 'awaiting_clarification'].includes(stage)) {
-            const message = STAGE_MESSAGE[stage] ?? stage
+            let message = STAGE_MESSAGE[stage] ?? stage
+            // Real per-batch progress, not cosmetic — smooth-responder writes
+            // these two columns at each batch boundary when a run spans more
+            // than one Stage 1/2 Claude call (see MAX_BATCHES there).
+            if (stage === 'classifying_documents' && row.intake_batch_count && row.intake_batch_count > 1 && row.intake_batch_index) {
+              message = `${message} — batch ${row.intake_batch_index} of ${row.intake_batch_count}`
+            }
             emit('progress', { stage, message, pct })
             lastStage = stage
+            lastProgressAt = Date.now()
+          }
+          if (row.intake_batch_index != null && row.intake_batch_index !== lastBatchIndex) {
+            lastBatchIndex = row.intake_batch_index
+            lastProgressAt = Date.now()
           }
 
           // Stage 4/5: the engine found a blocking gap and stopped before
@@ -423,7 +501,11 @@ export async function GET(
 
           if (row.intake_status === 'failed') {
             console.error('Intake failed:', fileId, row.failure_stage, row.failure_reason)
-            emit('error', { message: 'Processing failed — please try again' })
+            emit('error', {
+              message: 'Processing failed — please try again',
+              skipped_files: row.skipped_sibling_filenames ?? undefined,
+              failed_files: row.failed_sibling_filenames ?? undefined,
+            })
             controller.close()
             return
           }
