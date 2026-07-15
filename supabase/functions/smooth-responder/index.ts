@@ -273,6 +273,85 @@ async function loadFileAsBlock(
   return { fileId, filename: fileRow.filename, block, rawPdfBytes }
 }
 
+// document-worker persists extraction output as jsonb on document_processing_jobs
+// (blockType/text/hasUsableText/pageCount/durationMs — see that function's
+// ExtractionResult type, which this must stay structurally compatible
+// with). Never holds raw file bytes: a vision-path document's binary is
+// plain I/O to re-fetch here and doesn't need re-isolating the way parsing
+// did — only the CPU-bound extraction step needed its own invocation.
+interface PersistedExtractionResult {
+  blockType: 'text_only' | 'vision_only' | 'image' | 'csv'
+  text: string | null
+  hasUsableText: boolean
+  pageCount: number | null
+  durationMs: number
+}
+
+async function loadBlockFromExtractionResult(
+  supabase: SupabaseClient,
+  documentId: string,
+  result: PersistedExtractionResult
+): Promise<LoadedFile | null> {
+  const { data: fileRow } = await supabase.from('files').select('*').eq('id', documentId).single()
+  if (!fileRow) return null
+
+  if (result.blockType === 'text_only') {
+    return { fileId: fileRow.id, filename: fileRow.filename, block: buildTextOnlyBlock(fileRow.filename, result.text ?? '') }
+  }
+  if (result.blockType === 'csv') {
+    return { fileId: fileRow.id, filename: fileRow.filename, block: { type: 'text', text: `CSV FILE (${fileRow.filename}):\n\`\`\`\n${result.text ?? ''}\n\`\`\`` } }
+  }
+
+  const { data: fileData, error: downloadErr } = await supabase.storage.from('plans').download(fileRow.storage_path)
+  if (downloadErr || !fileData) return null
+  const buffer = await fileData.arrayBuffer()
+  const base64 = toBase64(buffer)
+
+  if (result.blockType === 'image') {
+    return { fileId: fileRow.id, filename: fileRow.filename, block: { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } } }
+  }
+
+  // vision_only
+  const visionBlock: DocBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+  const block = result.hasUsableText && result.text ? [visionBlock, buildTextLayerBlock(result.text)] : visionBlock
+  return { fileId: fileRow.id, filename: fileRow.filename, block, rawPdfBytes: new Uint8Array(buffer) }
+}
+
+async function loadAllFromExtractionResults(
+  supabase: SupabaseClient,
+  parentJobId: string,
+  failedOut: string[]
+): Promise<LoadedFile[]> {
+  const { data: completedJobs } = await supabase
+    .from('document_processing_jobs')
+    .select('document_id, result')
+    .eq('parent_job_id', parentJobId)
+    .eq('status', 'completed')
+
+  const loaded: LoadedFile[] = []
+  for (const j of (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>) {
+    const lf = await loadBlockFromExtractionResult(supabase, j.document_id, j.result)
+    if (lf) loaded.push(lf)
+    else failedOut.push(j.document_id)
+  }
+
+  // A permanently-failed document's job row still exists (status='failed')
+  // — surfaced by filename so the builder sees exactly what to re-upload,
+  // mirroring how a storage-load failure was already reported before this
+  // queue model existed.
+  const { data: failedJobs } = await supabase
+    .from('document_processing_jobs')
+    .select('document_id')
+    .eq('parent_job_id', parentJobId)
+    .eq('status', 'failed')
+  for (const j of (failedJobs ?? []) as Array<{ document_id: string }>) {
+    const { data: row } = await supabase.from('files').select('filename').eq('id', j.document_id).single()
+    failedOut.push(row?.filename ?? j.document_id)
+  }
+
+  return loaded
+}
+
 // ─── Tool schemas ──────────────────────────────────────────────────────────────
 
 const DOCUMENT_INTELLIGENCE_TOOL = {
@@ -513,10 +592,17 @@ interface RunArgs {
   builderId: string
   siblingFileIds: string[]
   resume: boolean
+  // When set, every document to classify was already downloaded and
+  // extracted independently by document-worker (its own invocation, its
+  // own CPU budget, per document) — Stage 1/2 loads their persisted
+  // results (loadAllFromExtractionResults) instead of re-downloading and
+  // re-extracting inline. See the "document processing queue" note above
+  // loadFileAsBlock for why that isolation exists.
+  parentJobId?: string
 }
 
 async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: Anthropic) {
-  const { fileId, jobId, builderId, siblingFileIds, resume } = args
+  const { fileId, jobId, builderId, siblingFileIds, resume, parentJobId } = args
 
   // Touches job_intake_locks.last_progress_at alongside the files row on
   // every real stage boundary — lets the Next.js lock-staleness check
@@ -540,6 +626,9 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .from('files')
       .update({ intake_status: 'failed', intake_stage: 'failed', intake_pct: 0, failure_stage: 'AI_REASONING_FAILED', failure_reason: reason.slice(0, 500) })
       .eq('id', fileId)
+    if (parentJobId) {
+      await supabase.from('document_processing_batches').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', parentJobId)
+    }
   }
 
   const startedAt = Date.now()
@@ -595,41 +684,62 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     const skippedSiblings: string[] = []
     const failedToLoadSiblings: string[] = []
     if (!resume) {
-      // Shared across every loadFileAsBlock call in this run — see
-      // ExtractionBudget's comment above.
-      const extractionBudget: ExtractionBudget = { spentMs: 0 }
+      let allLoaded: LoadedFile[]
 
-      const primary = await loadFileAsBlock(supabase, fileId, builderId, extractionBudget)
-      if (!primary) { await fail('File record or storage object not found'); return }
-
-      // Sane upper bound on how many documents one run will even attempt —
-      // batching below means a run is no longer capped at ~7 files, but an
-      // unbounded upload could still mean unbounded Storage downloads and
-      // Claude calls in one invocation. Anything beyond this is tracked as
-      // skipped (with a real filename looked up), never silently ignored —
-      // previously anything past the first 6 sibling files wasn't even
-      // loaded or tracked, it just vanished.
-      const MAX_SIBLINGS_CONSIDERED = 30
-      const consideredSiblingIds = siblingFileIds.slice(0, MAX_SIBLINGS_CONSIDERED)
-      const overflowSiblingIds = siblingFileIds.slice(MAX_SIBLINGS_CONSIDERED)
-
-      const loadedSiblings: LoadedFile[] = []
-      for (const sibId of consideredSiblingIds) {
-        const loadStartedAt = Date.now()
-        const loaded = await loadFileAsBlock(supabase, sibId, builderId, extractionBudget)
-        if (loaded) {
-          loadedSiblings.push(loaded)
-          console.log(JSON.stringify({ document: loaded.filename, status: 'loaded', durationMs: Date.now() - loadStartedAt }))
-        } else {
-          const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
-          const filename = row?.filename ?? sibId
-          failedToLoadSiblings.push(filename)
-          console.log(JSON.stringify({ document: filename, status: 'failed_to_load', durationMs: Date.now() - loadStartedAt }))
+      if (parentJobId) {
+        // Extraction already happened per-document, each in its own
+        // document-worker invocation with its own CPU budget (see that
+        // function's header comment) — load the persisted results instead
+        // of downloading and re-extracting inline. A document whose job
+        // never reached 'completed' (still retrying, or permanently
+        // failed) is simply absent from this batch; permanently-failed
+        // ones are still surfaced by filename below.
+        allLoaded = await loadAllFromExtractionResults(supabase, parentJobId, failedToLoadSiblings)
+        if (allLoaded.length === 0) {
+          await fail('No documents were successfully extracted for this batch')
+          return
         }
-      }
-      for (const sibId of overflowSiblingIds) {
-        const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
-        skippedSiblings.push(row?.filename ?? sibId)
+      } else {
+        // Legacy direct-load path — kept for any caller that still invokes
+        // this function the old way (not through the document processing
+        // queue). Shared across every loadFileAsBlock call in this run —
+        // see ExtractionBudget's comment above.
+        const extractionBudget: ExtractionBudget = { spentMs: 0 }
+
+        const primary = await loadFileAsBlock(supabase, fileId, builderId, extractionBudget)
+        if (!primary) { await fail('File record or storage object not found'); return }
+
+        // Sane upper bound on how many documents one run will even attempt —
+        // batching below means a run is no longer capped at ~7 files, but an
+        // unbounded upload could still mean unbounded Storage downloads and
+        // Claude calls in one invocation. Anything beyond this is tracked as
+        // skipped (with a real filename looked up), never silently ignored —
+        // previously anything past the first 6 sibling files wasn't even
+        // loaded or tracked, it just vanished.
+        const MAX_SIBLINGS_CONSIDERED = 30
+        const consideredSiblingIds = siblingFileIds.slice(0, MAX_SIBLINGS_CONSIDERED)
+        const overflowSiblingIds = siblingFileIds.slice(MAX_SIBLINGS_CONSIDERED)
+
+        const loadedSiblings: LoadedFile[] = []
+        for (const sibId of consideredSiblingIds) {
+          const loadStartedAt = Date.now()
+          const loaded = await loadFileAsBlock(supabase, sibId, builderId, extractionBudget)
+          if (loaded) {
+            loadedSiblings.push(loaded)
+            console.log(JSON.stringify({ document: loaded.filename, status: 'loaded', durationMs: Date.now() - loadStartedAt }))
+          } else {
+            const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
+            const filename = row?.filename ?? sibId
+            failedToLoadSiblings.push(filename)
+            console.log(JSON.stringify({ document: filename, status: 'failed_to_load', durationMs: Date.now() - loadStartedAt }))
+          }
+        }
+        for (const sibId of overflowSiblingIds) {
+          const { data: row } = await supabase.from('files').select('filename').eq('id', sibId).single()
+          skippedSiblings.push(row?.filename ?? sibId)
+        }
+
+        allLoaded = [primary, ...loadedSiblings]
       }
 
       // ── Batch instead of a single hard cutoff ────────────────────────────
@@ -646,8 +756,6 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // persistence below, not implemented in this pass.
       const MAX_BYTES_PER_BATCH = 20 * 1024 * 1024
       const MAX_BATCHES = 3
-
-      const allLoaded = [primary, ...loadedSiblings]
 
       // Rescue a single vision PDF too large to fit any batch on its own —
       // splitIntoBatches would otherwise exclude it outright (a whole
@@ -1187,6 +1295,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         failed_sibling_filenames: failedToLoadSiblings.length > 0 ? failedToLoadSiblings : null,
       })
       .eq('id', fileId)
+
+    if (parentJobId) {
+      await supabase.from('document_processing_batches').update({ quote_id: quoteId, updated_at: new Date().toISOString() }).eq('id', parentJobId)
+    }
   } catch (err) {
     console.error('estimating-engine error:', err)
     await fail(err instanceof Error ? err.message : String(err))
@@ -1224,20 +1336,47 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response(JSON.stringify({ error: 'Missing environment variables' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
 
-  let body: { file_id: string; job_id: string; builder_id: string; sibling_file_ids?: string[]; resume?: boolean }
+  let body: { file_id?: string; job_id?: string; builder_id?: string; sibling_file_ids?: string[]; resume?: boolean; parent_job_id?: string }
   try {
     body = await req.json()
   } catch {
     return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
 
+  const supabase = createClient(supabaseUrl, supabaseKey)
+  const anthropic = new Anthropic({ apiKey: anthropicKey })
+
+  // Document-worker mode: every document in this batch was already
+  // downloaded and extracted in its own invocation (see
+  // document-worker/index.ts), and this call is the exactly-once trigger
+  // fired once every child job reaches a terminal state
+  // (recompute_parent_batch_status in migration 034). Look up the batch to
+  // recover job_id/builder_id/the primary file to report progress against
+  // — the caller only needs to know parent_job_id.
+  if (body.parent_job_id) {
+    const { data: batch } = await supabase
+      .from('document_processing_batches')
+      .select('id, job_id, builder_id, primary_file_id')
+      .eq('id', body.parent_job_id)
+      .single()
+    if (!batch) {
+      return new Response(JSON.stringify({ error: 'Unknown parent_job_id' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    EdgeRuntime.waitUntil(
+      runPipeline(
+        { fileId: batch.primary_file_id, jobId: batch.job_id, builderId: batch.builder_id, siblingFileIds: [], resume: false, parentJobId: batch.id },
+        supabase,
+        anthropic
+      )
+    )
+    return new Response(JSON.stringify({ status: 'started' }), { status: 202, headers: { ...CORS, 'Content-Type': 'application/json' } })
+  }
+
   const { file_id, job_id, builder_id, sibling_file_ids, resume } = body
   if (!file_id || !job_id || !builder_id) {
     return new Response(JSON.stringify({ error: 'file_id, job_id, builder_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
-
-  const supabase = createClient(supabaseUrl, supabaseKey)
-  const anthropic = new Anthropic({ apiKey: anthropicKey })
 
   EdgeRuntime.waitUntil(
     runPipeline(

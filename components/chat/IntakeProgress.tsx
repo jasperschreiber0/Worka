@@ -35,6 +35,19 @@ interface ClarificationState {
   questions: ClarifyingQuestion[]
 }
 
+// Per-document extraction checklist — each document now gets its own
+// document-worker Edge Function invocation (its own isolated CPU budget)
+// instead of sharing one invocation's budget with every other document in
+// the upload. This surfaces that per-document status while extraction is
+// still in progress, before classification (the existing stage-based
+// progress bar below) takes over.
+interface DocumentProgressItem {
+  document_id: string
+  filename: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  error_message?: string | null
+}
+
 // ─── Stage display label mapping — mirrors the estimating engine's real
 // stages (Document Intelligence -> Project Understanding -> Scope Reasoning ->
 // Gap Detection -> Estimate Generation -> QA). ──────────────────────────────
@@ -75,6 +88,7 @@ export default function IntakeProgress({
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [errorSkippedFiles, setErrorSkippedFiles] = useState<string[]>([])
   const [errorFailedFiles, setErrorFailedFiles] = useState<string[]>([])
+  const [documentProgress, setDocumentProgress] = useState<DocumentProgressItem[] | null>(null)
   const [clarification, setClarification] = useState<ClarificationState | null>(null)
   const [clarifySubmitting, setClarifySubmitting] = useState(false)
   const [clarifyError, setClarifyError] = useState<string | null>(null)
@@ -167,6 +181,16 @@ export default function IntakeProgress({
         setProgress(data)
       } catch {
         // Ignore parse errors in progress events
+      }
+    })
+
+    es.addEventListener('document_progress', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data) as { documents: DocumentProgressItem[] }
+        setDocumentProgress(data.documents)
+      } catch {
+        // Ignore parse errors — the stage-based progress bar below still
+        // reflects overall progress even if this per-document detail is lost.
       }
     })
 
@@ -370,6 +394,46 @@ export default function IntakeProgress({
           )}
         </div>
       </div>
+
+      {/* Per-document extraction checklist */}
+      {documentProgress && documentProgress.length > 1 && (
+        <ul className="space-y-1.5" aria-label="Document processing status">
+          {documentProgress.map((doc) => (
+            <li key={doc.document_id} className="flex items-center gap-2 text-[12px]">
+              {doc.status === 'completed' && (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
+                  <path d="M2 6l2.5 2.5L10 3" stroke="#4caf50" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              {doc.status === 'failed' && (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
+                  <path d="M3 3l6 6M9 3l-6 6" stroke="#f44336" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              )}
+              {doc.status === 'running' && (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0 animate-spin">
+                  <path d="M6 1v2M6 9v2M1 6h2M9 6h2" stroke="#ff6b2b" strokeWidth="1.25" strokeLinecap="round" />
+                </svg>
+              )}
+              {doc.status === 'pending' && (
+                <span className="w-3 h-3 rounded-full border border-[#555555] flex-shrink-0" aria-hidden="true" />
+              )}
+              <span
+                className={
+                  doc.status === 'completed' ? 'text-[#4caf50]'
+                    : doc.status === 'failed' ? 'text-[#f44336]'
+                    : doc.status === 'running' ? 'text-[#ff6b2b] font-medium'
+                    : 'text-[#555555]'
+                }
+              >
+                {doc.filename}
+                {doc.status === 'running' && ' — processing'}
+                {doc.status === 'failed' && ' — needs review'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {/* Progress bar */}
       <div className="space-y-1.5">

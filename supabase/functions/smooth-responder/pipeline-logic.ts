@@ -251,3 +251,82 @@ export function shouldGiveUp(
   if (now - lastProgressAt > stuckTimeoutMs) return true
   return false
 }
+
+// ─── Document processing queue (worker model) ──────────────────────────────
+//
+// Text extraction's CPU-budget gating (gateTextExtraction, above) reduces
+// the CHANCE any one file blows the shared per-invocation budget, but it
+// can't eliminate it — a genuinely pathological document can still exhaust
+// its share and take the whole shared invocation down with it, since
+// Supabase's CPU-time kill is external and uncatchable regardless of how
+// conservative the gating was. The actual fix for blast radius is
+// structural: each document gets its OWN document-worker invocation (see
+// supabase/functions/document-worker/index.ts), and per Supabase's
+// per-REQUEST CPU metering, that's a genuinely fresh 2000ms budget — one
+// document's crash can no longer touch any other document's processing.
+//
+// These are the pure decision functions behind that model — claiming
+// (FOR UPDATE SKIP LOCKED) and the transactional "trigger classification
+// exactly once" logic live in SQL (migration 034) since they need real
+// atomicity a JS pure function can't provide; what's here is everything
+// that doesn't need a live database to verify.
+
+export interface DocumentProcessingJobDraft {
+  parentJobId: string
+  documentId: string
+  status: 'pending'
+  attempts: number
+}
+
+/** One row per document — building the batch's queue entries. */
+export function buildDocumentProcessingJobs(parentJobId: string, documentIds: string[]): DocumentProcessingJobDraft[] {
+  return documentIds.map((documentId) => ({ parentJobId, documentId, status: 'pending', attempts: 0 }))
+}
+
+export const MAX_DOCUMENT_JOB_ATTEMPTS = 3
+// Delay before the NEXT attempt, keyed by attempts-so-far after a failure:
+// 30s before attempt 2, 2min before attempt 3. Mirrored in migration 034's
+// retry_or_fail_document_job — keep both in sync if either changes.
+export const RETRY_DELAYS_MS: Record<number, number> = { 1: 30_000, 2: 120_000 }
+
+export interface RetryDecision {
+  status: 'pending' | 'failed'
+  attempts: number
+  delayMs: number | null
+}
+
+/**
+ * Attempt 1 runs immediately (a freshly-created job's run_after is already
+ * "now"). On failure, this decides what happens next: attempts 1 and 2
+ * schedule a retry with backoff; the 3rd failure (attempts reaches
+ * MAX_DOCUMENT_JOB_ATTEMPTS) marks the document permanently failed.
+ */
+export function nextRetryState(currentAttempts: number, maxAttempts: number = MAX_DOCUMENT_JOB_ATTEMPTS): RetryDecision {
+  const attempts = currentAttempts + 1
+  if (attempts >= maxAttempts) {
+    return { status: 'failed', attempts, delayMs: null }
+  }
+  return { status: 'pending', attempts, delayMs: RETRY_DELAYS_MS[attempts] ?? RETRY_DELAYS_MS[2] }
+}
+
+export type ChildJobStatus = 'pending' | 'running' | 'completed' | 'failed'
+export type ParentBatchStatus = 'pending' | 'running' | 'completed' | 'completed_with_failures' | 'failed'
+
+/**
+ * Mirrors recompute_parent_batch_status in migration 034 exactly (kept as
+ * a pure function so it's unit-testable without a live database) — the
+ * parent batch is only ever 'running' while any child is still
+ * pending/running; once every child has reached a terminal state, a mix of
+ * completed and failed children is 'completed_with_failures' (a single bad
+ * PDF must not fail the whole batch), all-failed is 'failed', and
+ * all-completed is 'completed'.
+ */
+export function deriveParentBatchStatus(childStatuses: ChildJobStatus[]): ParentBatchStatus {
+  if (childStatuses.length === 0) return 'pending'
+  if (childStatuses.some((s) => s === 'pending' || s === 'running')) return 'running'
+  const anyCompleted = childStatuses.some((s) => s === 'completed')
+  const anyFailed = childStatuses.some((s) => s === 'failed')
+  if (anyFailed && anyCompleted) return 'completed_with_failures'
+  if (anyFailed) return 'failed'
+  return 'completed'
+}

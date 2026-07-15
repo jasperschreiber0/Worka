@@ -35,6 +35,24 @@ interface NeedsClarificationEvent {
   questions: ClarificationQuestion[]
 }
 
+// Per-document extraction status — one row per uploaded file, emitted
+// while document-worker invocations are draining document_processing_jobs
+// for this upload's batch (see "Document processing queue" below). Once
+// every document reaches a terminal state, classification (Stage 1/2
+// onward) takes over and the existing ProgressEvent/CompleteEvent stream
+// resumes as before.
+interface DocumentProgressItem {
+  document_id: string
+  filename: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  error_message?: string | null
+}
+
+interface DocumentProgressEvent {
+  stage: 'document_progress'
+  documents: DocumentProgressItem[]
+}
+
 // ─── Progress stages — mirrors supabase/functions/smooth-responder's real
 // pipeline stages (Document Intelligence -> Project Understanding -> Scope
 // Reasoning -> Gap Detection -> Estimate Generation). Demo mode below plays
@@ -166,6 +184,86 @@ async function releaseJobLock(supabaseUrl: string, supabaseKey: string, anonKey:
   }).catch(() => { /* best-effort */ })
 }
 
+// ─── Document processing queue (worker model) ──────────────────────────────
+// Each uploaded document gets its own document_processing_jobs row and is
+// extracted by its own document-worker Edge Function invocation — a fresh
+// per-request CPU budget, per Supabase's own metering, instead of every
+// document in an upload sharing one smooth-responder invocation's budget
+// (see migration 034 and pipeline-logic.ts's gateTextExtraction comment for
+// the incident this replaces). Returns the new batch's id, or null on any
+// failure (caller treats that as a hard error, not a silent fallback to the
+// old direct-invocation path — a batch that half-created would be far
+// harder to reason about than a clean upfront failure).
+async function createDocumentProcessingBatch(
+  supabaseUrl: string,
+  supabaseKey: string,
+  anonKey: string,
+  jobId: string,
+  builderId: string,
+  primaryFileId: string,
+  documentIds: string[]
+): Promise<string | null> {
+  const headers = {
+    apikey: anonKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    'Content-Type': 'application/json',
+  }
+
+  const batchRes = await fetch(`${supabaseUrl}/rest/v1/document_processing_batches`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=representation' },
+    body: JSON.stringify({ job_id: jobId, builder_id: builderId, primary_file_id: primaryFileId, status: 'running' }),
+  })
+  if (!batchRes.ok) {
+    console.error('createDocumentProcessingBatch: batch insert failed', batchRes.status, await batchRes.text().catch(() => ''))
+    return null
+  }
+  const batchRows = await batchRes.json() as Array<{ id: string }>
+  const batchId = batchRows[0]?.id
+  if (!batchId) return null
+
+  const jobsRes = await fetch(`${supabaseUrl}/rest/v1/document_processing_jobs`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=minimal' },
+    body: JSON.stringify(documentIds.map((documentId) => ({ parent_job_id: batchId, document_id: documentId }))),
+  })
+  if (!jobsRes.ok) {
+    console.error('createDocumentProcessingBatch: jobs insert failed', jobsRes.status, await jobsRes.text().catch(() => ''))
+    return null
+  }
+
+  // Anchors the batch to the primary file's row so a reconnecting SSE
+  // client (which already re-fetches this row every poll) can recover
+  // which batch to poll without a new query-string parameter.
+  await fetch(`${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(primaryFileId)}`, {
+    method: 'PATCH',
+    headers: { ...headers, Prefer: 'return=minimal' },
+    body: JSON.stringify({ processing_batch_id: batchId, intake_status: 'processing' }),
+  }).catch(() => { /* best-effort — the poller re-derives status from document_processing_jobs regardless */ })
+
+  return batchId
+}
+
+interface DocumentProcessingJobRow {
+  document_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  error_message: string | null
+}
+
+async function fetchBatchJobStatuses(
+  supabaseUrl: string,
+  supabaseKey: string,
+  anonKey: string,
+  batchId: string
+): Promise<DocumentProcessingJobRow[]> {
+  const res = await fetch(
+    `${supabaseUrl}/rest/v1/document_processing_jobs?parent_job_id=eq.${encodeURIComponent(batchId)}&select=document_id,status,error_message`,
+    { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+  )
+  if (!res.ok) return []
+  return await res.json() as DocumentProcessingJobRow[]
+}
+
 // Best-effort lookup used only when giving up (timeout/failure) — the main
 // polling loop already selects these columns on every iteration, but a
 // give-up can happen before that iteration's fetch has run.
@@ -278,7 +376,6 @@ export async function GET(
   }
 
   // ── Real mode: trigger the estimating engine then poll DB ──────────────────
-  const edgeFnUrl = `${supabaseUrl}/functions/v1/smooth-responder`
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
   // Verify the file actually belongs to this builder before doing anything —
@@ -302,6 +399,22 @@ export async function GET(
   // to fire a brand new trigger, restarting Stages 1-3 from scratch each
   // time and never reaching estimate generation.
   const alreadyProcessing = !['uploaded', null].includes(ownerRows[0].intake_status)
+
+  // Filenames for the per-document checklist (document_progress event) —
+  // fetched once per connection rather than once per 1.5s poll iteration,
+  // since document_processing_jobs only carries document_id, not filename.
+  const allDocumentIds = [fileId, ...sibling_file_ids]
+  const filenameByDocumentId = new Map<string, string>()
+  {
+    const namesRes = await fetch(
+      `${supabaseUrl}/rest/v1/files?id=in.(${allDocumentIds.map(encodeURIComponent).join(',')})&select=id,filename`,
+      { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+    )
+    if (namesRes.ok) {
+      const nameRows = await namesRes.json() as Array<{ id: string; filename: string }>
+      for (const r of nameRows) filenameByDocumentId.set(r.id, r.filename)
+    }
+  }
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -352,25 +465,37 @@ export async function GET(
           // here, not from whenever lock-wait or connection began.
           lastProgressAt = Date.now()
 
-          // Trigger the estimating engine — it returns 202 immediately and runs in background
-          const triggerRes = await fetch(edgeFnUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${anonKey}`,
-            },
-            body: JSON.stringify({ file_id: fileId, job_id, builder_id, sibling_file_ids }),
-          })
-
-          if (!triggerRes.ok) {
-            // The engine never started running, so its own lock-release
-            // finally block will never fire — release it here instead of
+          // Create the batch + one document_processing_jobs row per file,
+          // then kick off a small number of parallel document-worker
+          // chains — each claim is atomic (FOR UPDATE SKIP LOCKED, migration
+          // 034) so these can never collide on the same document. This is
+          // what replaces one shared smooth-responder invocation extracting
+          // every file in-process: each document now gets its own Edge
+          // Function invocation and its own fresh Supabase CPU budget.
+          const allDocumentIds = [fileId, ...sibling_file_ids]
+          const batchId = await createDocumentProcessingBatch(
+            supabaseUrl!, supabaseKey!, anonKey, job_id, builder_id, fileId, allDocumentIds
+          )
+          if (!batchId) {
+            // The batch never started, so nothing will ever release this
+            // lock via its own completion — release it here instead of
             // leaving the job locked until the staleness timeout.
             await releaseJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id)
             emit('error', { message: 'Failed to start processing' })
             controller.close()
             return
           }
+
+          const WORKER_CONCURRENCY = Math.min(2, allDocumentIds.length)
+          await Promise.all(
+            Array.from({ length: WORKER_CONCURRENCY }, () =>
+              fetch(`${supabaseUrl}/functions/v1/document-worker`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+                body: JSON.stringify({ parent_job_id: batchId, builder_id }),
+              }).catch((err) => console.error('document-worker trigger failed', err))
+            )
+          )
         }
 
         // Emit initial stage immediately
@@ -383,6 +508,10 @@ export async function GET(
         // below — otherwise a slow-but-genuinely-progressing multi-batch
         // run could look identical to a truly hung one.
         let lastBatchIndex: number | null = null
+        // Per-document extraction checklist snapshot — only re-emitted when
+        // it actually changes, so a steady stream of identical polls
+        // doesn't spam the client with duplicate document_progress events.
+        let lastDocumentProgressSnapshot = ''
 
         // Poll the files table until extraction completes, pauses for
         // clarification, or fails.
@@ -426,7 +555,7 @@ export async function GET(
           await delay(1500)
 
           const res = await fetch(
-            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count,failure_stage,failure_reason,skipped_sibling_filenames,failed_sibling_filenames`,
+            `${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(fileId)}&builder_id=eq.${encodeURIComponent(builder_id)}&select=intake_status,intake_stage,intake_pct,quote_id,intake_assumption_count,failure_stage,failure_reason,skipped_sibling_filenames,failed_sibling_filenames,processing_batch_id`,
             {
               headers: {
                 'apikey': anonKey,
@@ -450,9 +579,36 @@ export async function GET(
             failed_sibling_filenames: string[] | null
             intake_batch_index: number | null
             intake_batch_count: number | null
+            processing_batch_id: string | null
           }>
           const row = rows[0]
           if (!row) continue
+
+          // Per-document extraction checklist — while document-worker
+          // invocations are still draining document_processing_jobs for
+          // this batch, surface each document's own status instead of
+          // making the builder wait for a single aggregate progress bar.
+          // Once classification takes over, these rows are all terminal
+          // (completed/failed) and simply stop changing, so this becomes a
+          // no-op for the rest of the run.
+          if (row.processing_batch_id) {
+            const jobRows = await fetchBatchJobStatuses(supabaseUrl!, supabaseKey!, anonKey, row.processing_batch_id)
+            if (jobRows.length > 0) {
+              const snapshot = JSON.stringify(jobRows)
+              if (snapshot !== lastDocumentProgressSnapshot) {
+                lastDocumentProgressSnapshot = snapshot
+                const documents: DocumentProgressItem[] = jobRows.map((j) => ({
+                  document_id: j.document_id,
+                  filename: filenameByDocumentId.get(j.document_id) ?? j.document_id,
+                  status: j.status,
+                  error_message: j.error_message,
+                }))
+                const documentProgress: DocumentProgressEvent = { stage: 'document_progress', documents }
+                emit('document_progress', documentProgress)
+                lastProgressAt = Date.now()
+              }
+            }
+          }
 
           const stage = row.intake_stage ?? 'uploading'
           const pct = row.intake_pct ?? 5

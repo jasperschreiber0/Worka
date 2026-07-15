@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   splitIntoBatches,
   mergeFacts,
@@ -7,6 +10,10 @@ import {
   shouldGiveUp,
   gateTextExtraction,
   DEFAULT_EXTRACTION_LIMITS,
+  buildDocumentProcessingJobs,
+  nextRetryState,
+  deriveParentBatchStatus,
+  MAX_DOCUMENT_JOB_ATTEMPTS,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -188,4 +195,73 @@ test('gateTextExtraction: cumulative spend right at the ceiling is treated as ex
   const justUnder = gateTextExtraction(500 * 1024, 3, DEFAULT_EXTRACTION_LIMITS.maxCumulativeMs - 1)
   assert.equal(atCeiling.skip, true)
   assert.equal(justUnder.skip, false)
+})
+
+// ─── Document processing queue (worker model) ──────────────────────────────
+// Requirement 1: multiple PDFs create multiple jobs.
+
+test('buildDocumentProcessingJobs: one job row per document, all pending with zero attempts', () => {
+  const parentJobId = 'batch-1'
+  const documentIds = ['doc-1', 'doc-2', 'doc-3', 'doc-4', 'doc-5', 'doc-6', 'doc-7']
+  const jobs = buildDocumentProcessingJobs(parentJobId, documentIds)
+  assert.equal(jobs.length, 7)
+  for (const [i, job] of jobs.entries()) {
+    assert.equal(job.parentJobId, parentJobId)
+    assert.equal(job.documentId, documentIds[i])
+    assert.equal(job.status, 'pending')
+    assert.equal(job.attempts, 0)
+  }
+})
+
+// Requirement 2: two workers cannot claim the same job. This guarantee is
+// enforced at the database layer (claim_next_document_job in migration
+// 034 uses `FOR UPDATE SKIP LOCKED`, which makes two concurrent claimants
+// for the same parent physically unable to receive the same row) — no
+// pure-JS unit test can exercise real Postgres row locking, so this is a
+// regression guard on the SQL itself rather than a behavioral test: it
+// fails loudly if that clause is ever accidentally dropped from the
+// migration, which would silently reintroduce the double-claim race.
+test('claim_next_document_job: migration enforces FOR UPDATE SKIP LOCKED for atomic claiming', () => {
+  const migrationPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations', '034_document_processing_jobs.sql')
+  const sql = readFileSync(migrationPath, 'utf-8')
+  assert.match(sql, /FOR UPDATE SKIP LOCKED/)
+  assert.match(sql, /CREATE OR REPLACE FUNCTION claim_next_document_job/)
+})
+
+// Requirement 3 & 4: failed document retries correctly, third failure marks failed.
+
+test('nextRetryState: 1st failure schedules a retry with a 30s delay', () => {
+  const result = nextRetryState(0)
+  assert.deepEqual(result, { status: 'pending', attempts: 1, delayMs: 30_000 })
+})
+
+test('nextRetryState: 2nd failure schedules a retry with a 2min delay', () => {
+  const result = nextRetryState(1)
+  assert.deepEqual(result, { status: 'pending', attempts: 2, delayMs: 120_000 })
+})
+
+test('nextRetryState: 3rd failure marks the document permanently failed, no further delay', () => {
+  const result = nextRetryState(2)
+  assert.deepEqual(result, { status: 'failed', attempts: 3, delayMs: null })
+  assert.equal(result.attempts, MAX_DOCUMENT_JOB_ATTEMPTS)
+})
+
+// Requirement 5 & 6: parent completes only when all children are terminal;
+// one failed PDF does not fail the entire batch.
+
+test('deriveParentBatchStatus: running while any child is still pending or running', () => {
+  assert.equal(deriveParentBatchStatus(['completed', 'pending', 'completed']), 'running')
+  assert.equal(deriveParentBatchStatus(['completed', 'running']), 'running')
+})
+
+test('deriveParentBatchStatus: all completed with no failures is a clean completed', () => {
+  assert.equal(deriveParentBatchStatus(['completed', 'completed', 'completed']), 'completed')
+})
+
+test('deriveParentBatchStatus: one failed document among otherwise-completed ones does not fail the batch', () => {
+  assert.equal(deriveParentBatchStatus(['completed', 'completed', 'failed', 'completed']), 'completed_with_failures')
+})
+
+test('deriveParentBatchStatus: every child failed is a genuine batch failure', () => {
+  assert.equal(deriveParentBatchStatus(['failed', 'failed']), 'failed')
 })
