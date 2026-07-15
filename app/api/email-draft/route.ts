@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { createClient } from '@supabase/supabase-js'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
@@ -61,7 +62,7 @@ interface JobContext {
   latest_variation_amount: number | null
 }
 
-function loadJobContext(jobId: string): JobContext | null {
+function loadDemoJobContext(jobId: string): JobContext | null {
   const snapshot = getDemoJobSnapshot(jobId)
   if (!snapshot) return null
 
@@ -92,17 +93,87 @@ function loadJobContext(jobId: string): JobContext | null {
   }
 }
 
+// ─── Real builder + job loaders ───────────────────────────────────────────────
+
+interface BuilderIdentity {
+  name: string
+  business_name: string
+}
+
+async function loadBuilderIdentity(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: any,
+  builderId: string,
+): Promise<BuilderIdentity> {
+  const { data } = await sb
+    .from('builders')
+    .select('name, business_name')
+    .eq('id', builderId)
+    .single()
+
+  return {
+    name: data?.name ?? 'the WorkA team',
+    business_name: data?.business_name ?? '',
+  }
+}
+
+async function loadRealJobContext(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: any,
+  jobId: string,
+  builderId: string,
+): Promise<JobContext | null> {
+  const { data: job } = await sb
+    .from('jobs')
+    .select('id, address, clients(name, email)')
+    .eq('id', jobId)
+    .eq('builder_id', builderId)
+    .single()
+
+  if (!job) return null
+
+  const [{ data: quotes }, { data: variations }, { data: invoices }] = await Promise.all([
+    sb.from('quotes').select('total_cost, sent_at, version, status').eq('job_id', jobId).order('version', { ascending: false }).limit(1),
+    sb.from('variations').select('title, amount').eq('job_id', jobId).eq('status', 'pending').order('created_at', { ascending: false }).limit(1),
+    sb.from('invoices').select('amount, status, due_date').eq('job_id', jobId).order('created_at', { ascending: false }).limit(1),
+  ])
+
+  const quote = quotes?.[0] ?? null
+  const variation = variations?.[0] ?? null
+  const invoice = invoices?.[0] ?? null
+
+  let invoiceDaysOverdue: number | null = null
+  if (invoice?.status === 'overdue' && invoice.due_date) {
+    invoiceDaysOverdue = Math.floor((Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24))
+  }
+
+  return {
+    job_id: jobId,
+    job_address: job.address,
+    client_name: job.clients?.name ?? 'there',
+    client_email: job.clients?.email ?? '',
+    invoice_amount: invoice?.amount ?? null,
+    invoice_status: invoice?.status ?? null,
+    invoice_days_overdue: invoiceDaysOverdue,
+    quote_amount: quote?.total_cost ?? null,
+    quote_sent_display: quote?.sent_at ?? null,
+    latest_variation_title: variation?.title ?? null,
+    latest_variation_amount: variation?.amount ?? null,
+  }
+}
+
 // ─── Fallback template drafts (no AI) ────────────────────────────────────────
 
 function buildFallbackDraft(
   ctx: JobContext | null,
   intentHint: IntentHint,
   recipientName: string | undefined,
+  builder: BuilderIdentity,
 ): EmailDraft {
   const clientName = ctx?.client_name ?? recipientName ?? 'there'
   const jobAddress = ctx?.job_address ?? 'your project'
-  const builderName = DEMO_BUILDER.name
-  const businessName = DEMO_BUILDER.business_name
+  const builderName = builder.name
+  const businessName = builder.business_name
   const toEmail = ctx?.client_email ?? ''
   const toName = clientName
 
@@ -178,11 +249,12 @@ async function buildAIDraft(
   recipientName: string | undefined,
   contextMessage: string | undefined,
   anthropic: Anthropic,
+  builder: BuilderIdentity,
 ): Promise<EmailDraft> {
   const clientName = ctx?.client_name ?? recipientName ?? 'the client'
   const jobAddress = ctx?.job_address ?? 'the project'
-  const builderName = DEMO_BUILDER.name
-  const businessName = DEMO_BUILDER.business_name
+  const builderName = builder.name
+  const businessName = builder.business_name
   const toEmail = ctx?.client_email ?? ''
 
   const contextBlock = ctx
@@ -248,7 +320,7 @@ Respond with ONLY valid JSON in this exact format:
 
   const content = response.content[0]
   if (content.type !== 'text') {
-    return buildFallbackDraft(ctx, intentHint, recipientName)
+    return buildFallbackDraft(ctx, intentHint, recipientName, builder)
   }
 
   try {
@@ -263,7 +335,7 @@ Respond with ONLY valid JSON in this exact format:
       job_address: ctx?.job_address ?? null,
     }
   } catch {
-    return buildFallbackDraft(ctx, intentHint, recipientName)
+    return buildFallbackDraft(ctx, intentHint, recipientName, builder)
   }
 }
 
@@ -284,8 +356,27 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
     const body = (await request.json()) as EmailDraftRequestBody
     const { job_id, recipient_name, intent_hint = 'general', context } = body
 
-    // Load job context
-    const jobCtx = job_id ? loadJobContext(job_id) : null
+    // Load builder identity + job context — demo mode uses the seeded demo
+    // data, real mode looks up the authenticated builder's actual profile
+    // and the actual job (previously this always used DEMO_BUILDER and the
+    // demo-only job snapshot, so real builders got "Dave Nguyen" sign-offs
+    // and generic drafts with no real job context).
+    let builder: BuilderIdentity
+    let jobCtx: JobContext | null
+
+    if (isDemoMode()) {
+      builder = DEMO_BUILDER
+      jobCtx = job_id ? loadDemoJobContext(job_id) : null
+    } else {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+      if (!supabaseUrl || !serviceRoleKey) {
+        return NextResponse.json({ error: 'Not configured' }, { status: 503 })
+      }
+      const sb = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+      builder = await loadBuilderIdentity(sb, builderId)
+      jobCtx = job_id ? await loadRealJobContext(sb, job_id, builderId) : null
+    }
 
     const contextUsed: ContextUsed = {
       job_address: jobCtx?.job_address ?? null,
@@ -298,9 +389,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
 
     if (apiKey) {
       const anthropic = new Anthropic({ apiKey })
-      draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic)
+      draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic, builder)
     } else {
-      draft = buildFallbackDraft(jobCtx, intent_hint, recipient_name)
+      draft = buildFallbackDraft(jobCtx, intent_hint, recipient_name, builder)
     }
 
     return NextResponse.json({
