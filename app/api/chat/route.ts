@@ -15,6 +15,7 @@ import { DEMO_ASSUMPTIONS } from '@/lib/assumptions-demo'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
+import { buildProjectContext, persistContext } from '@/lib/project-context'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1204,92 +1205,14 @@ async function handleJobQuery(entities: Record<string, string>, builderId: strin
 
 // ─── Project memory / free-form project Q&A ────────────────────────────────
 //
-// Reuses the reasoning engine's existing knowledge base (project_facts,
-// scope_items, clarifying_questions — migration 026) rather than a new
-// table: those already carry evidence, confidence, source_document_id, and
-// a `superseded` flag that's never deleted (an audit trail, not a
-// snapshot — see mergeFacts in supabase/functions/smooth-responder/
-// pipeline-logic.ts for how a fact gets superseded when a later document
-// contradicts it). Nothing outside the intake pipeline read this data
-// before this — every other chat intent operates on jobs/quotes/variations
-// only, never on the fact base a document upload built.
-
-interface ProjectContextFact {
-  category: string
-  key: string
-  value: string
-  confidence: number
-  sourceLabel: string | null
-}
-
-interface ProjectContextChange {
-  category: string
-  key: string
-  oldValue: string
-  newValue: string
-}
-
-interface ProjectContext {
-  hasData: boolean
-  activeFacts: ProjectContextFact[]
-  // A superseded fact paired with whatever fact (same category+key) replaced
-  // it — this is what makes "conflict"/change history answerable at all,
-  // without a separate conflict-tracking table: supersession already is the
-  // conflict record, just not previously surfaced anywhere.
-  recentChanges: ProjectContextChange[]
-  scope: Array<{ tradeCategoryId: number; included: string[]; excluded: string[]; assumptions: string[] }>
-  missingInformation: string[]
-  documentsReferenced: string[]
-  confidence: number
-}
-
-async function buildProjectContext(sb: SupabaseClient, jobId: string): Promise<ProjectContext> {
-  const [{ data: facts }, { data: scopeRows }, { data: questions }, { data: docs }] = await Promise.all([
-    sb.from('project_facts').select('category, key, value, confidence, source_document_id, superseded, created_at').eq('job_id', jobId).order('created_at', { ascending: false }).limit(200),
-    sb.from('scope_items').select('trade_category_id, included_scope, excluded_scope, assumptions').eq('job_id', jobId),
-    sb.from('clarifying_questions').select('question, reason').eq('job_id', jobId).eq('status', 'open'),
-    sb.from('project_documents').select('id, drawing_title, document_type').eq('job_id', jobId),
-  ])
-
-  type FactRow = { category: string; key: string; value: string; confidence: number; source_document_id: string | null; superseded: boolean; created_at: string }
-  const allFacts = (facts ?? []) as FactRow[]
-  const docLabel = new Map<string, string>(
-    ((docs ?? []) as Array<{ id: string; drawing_title: string | null; document_type: string | null }>)
-      .map((d) => [d.id, d.drawing_title ?? d.document_type ?? 'a document'])
-  )
-
-  const activeRows = allFacts.filter((f) => !f.superseded)
-  const supersededRows = allFacts.filter((f) => f.superseded)
-  const activeByKey = new Map(activeRows.map((f) => [`${f.category}::${f.key}`, f]))
-
-  const recentChanges: ProjectContextChange[] = supersededRows
-    .slice(0, 10)
-    .map((old) => {
-      const replacement = activeByKey.get(`${old.category}::${old.key}`)
-      return replacement ? { category: old.category, key: old.key, oldValue: old.value, newValue: replacement.value } : null
-    })
-    .filter((c): c is ProjectContextChange => c !== null)
-
-  const activeFacts: ProjectContextFact[] = activeRows.map((f) => ({
-    category: f.category,
-    key: f.key,
-    value: f.value,
-    confidence: f.confidence,
-    sourceLabel: f.source_document_id ? docLabel.get(f.source_document_id) ?? null : null,
-  }))
-
-  const scope = ((scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }>)
-    .map((s) => ({ tradeCategoryId: s.trade_category_id, included: s.included_scope ?? [], excluded: s.excluded_scope ?? [], assumptions: s.assumptions ?? [] }))
-
-  const missingInformation = ((questions ?? []) as Array<{ question: string; reason: string }>).map((q) => q.question)
-  const documentsReferenced = Array.from(new Set(activeFacts.map((f) => f.sourceLabel).filter((l): l is string => Boolean(l))))
-
-  const confidence = activeFacts.length > 0
-    ? Math.round(activeFacts.reduce((sum, f) => sum + f.confidence, 0) / activeFacts.length)
-    : 0
-
-  return { hasData: activeFacts.length > 0 || scope.length > 0, activeFacts, recentChanges, scope, missingInformation, documentsReferenced, confidence }
-}
+// buildProjectContext/persistContext now live in lib/project-context.ts,
+// shared with app/api/intake/[fileId]/route.ts (see persistProjectUnderstanding
+// there) so there's exactly one computation path for "what does WorkA
+// understand about this project" — not a chat-only copy and a separate
+// intake-only copy. See that file's header for the truncation-bug fix this
+// replaced (recency-ordered active+superseded mixed in one query, which
+// could silently drop an old-but-active high-confidence fact) and the
+// semantic-aware supersession pairing it reuses from mergeFacts's own logic.
 
 const PROJECT_QUESTION_SYSTEM_PROMPT = `You are WorkA's project memory assistant for an Australian residential builder. Answer the builder's question using ONLY the project facts, scope, and change history provided below — never invent information that isn't present. If a fact was superseded by a later document, mention both and note which is current. If the answer isn't covered by the provided facts, say so plainly and name what's missing rather than guessing. Keep the answer to 2-4 sentences, plain English, no headers or bullet lists unless genuinely needed for a list of items.`
 
@@ -1330,7 +1253,15 @@ async function handleProjectQuestion(
   }
 
   const job = jobs[0] as { id: string; address: string }
-  const context = await buildProjectContext(sb, job.id)
+  // Passing the question through lets inferRelevantCategories bias which
+  // facts survive truncation toward this specific question's likely trade
+  // — a no-op when everything already fits under MAX_FACTS_IN_PROMPT.
+  const context = await buildProjectContext(sb, job.id, question)
+  // Best-effort, non-blocking: cache this same computation onto the job
+  // row so Job Snapshot/Morning Brief can eventually read a standing
+  // understanding score without requiring a chat question first. Reuses
+  // the context already built above rather than re-fetching.
+  void persistContext(sb, job.id, context)
 
   if (!context.hasData) {
     return { message: `I don't have any extracted project facts for ${job.address} yet — upload plans or specs and I'll be able to answer questions like this.` }
@@ -1377,6 +1308,13 @@ async function handleProjectQuestion(
     context_chars: userContent.length,
     confidence_score: context.confidence,
     conflicts_detected: context.recentChanges.length,
+    // True when this job has more active facts than fit in one prompt even
+    // after relevance-boosted ranking — not yet observed in production,
+    // but logged so it's visible the moment it happens rather than
+    // silently degrading an answer. See ACTIVE_FACTS_FETCH_LIMIT in
+    // lib/project-context.ts for the threshold this would actually need
+    // embeddings-based retrieval to fix properly.
+    facts_truncated: context.truncated,
     duration_ms: Date.now() - startedAt,
   }))
 

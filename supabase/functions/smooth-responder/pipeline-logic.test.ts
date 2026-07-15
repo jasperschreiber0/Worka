@@ -14,6 +14,11 @@ import {
   nextRetryState,
   deriveParentBatchStatus,
   MAX_DOCUMENT_JOB_ATTEMPTS,
+  selectFactsForPrompt,
+  inferRelevantCategories,
+  pairSupersededFacts,
+  MAX_FACTS_IN_PROMPT,
+  SEMANTIC_DUPLICATE_THRESHOLD,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -264,4 +269,107 @@ test('deriveParentBatchStatus: one failed document among otherwise-completed one
 
 test('deriveParentBatchStatus: every child failed is a genuine batch failure', () => {
   assert.equal(deriveParentBatchStatus(['failed', 'failed']), 'failed')
+})
+
+// ─── selectFactsForPrompt ───────────────────────────────────────────────────
+// Regression coverage for the architecture-review finding: a prior version
+// of chat's context builder queried active+superseded facts together,
+// ORDER BY created_at DESC LIMIT 200, before splitting them — so an old
+// but still-active, high-confidence fact could be evicted by recency
+// alone before truncation ever considered confidence. selectFactsForPrompt
+// must never do that: no created_at anywhere in its logic.
+
+function fact(overrides: Partial<FactRow> & { category: string; key: string; value: string; confidence: number }): FactRow {
+  return { evidence: null, ...overrides }
+}
+
+test('selectFactsForPrompt: below the cap, returns every fact unchanged (no truncation)', () => {
+  const facts = [fact({ category: 'rooms', key: 'a', value: '1', confidence: 10 })]
+  const result = selectFactsForPrompt(facts, 5)
+  assert.equal(result.length, 1)
+  assert.deepEqual(result, facts)
+})
+
+test('selectFactsForPrompt: over the cap with no relevance hint, keeps the highest-confidence facts regardless of order given', () => {
+  const facts = [
+    fact({ category: 'rooms', key: 'old_high_confidence', value: 'x', confidence: 95 }),
+    fact({ category: 'rooms', key: 'newer_low_confidence', value: 'y', confidence: 20 }),
+    fact({ category: 'rooms', key: 'mid', value: 'z', confidence: 60 }),
+  ]
+  const result = selectFactsForPrompt(facts, 2)
+  assert.equal(result.length, 2)
+  assert.deepEqual(result.map((f) => f.key), ['old_high_confidence', 'mid'])
+})
+
+test('selectFactsForPrompt: a relevant-category fact is promoted ahead of a higher-confidence irrelevant one when truncating', () => {
+  const facts = [
+    fact({ category: 'services', key: 'electrical_spec', value: 'x', confidence: 90 }),
+    fact({ category: 'finishes', key: 'floor_type', value: 'polished concrete', confidence: 55 }),
+  ]
+  // Without relevance: electrical (90) beats flooring (55).
+  assert.deepEqual(selectFactsForPrompt(facts, 1).map((f) => f.key), ['electrical_spec'])
+  // With "finishes" inferred as relevant: flooring is kept despite lower confidence.
+  assert.deepEqual(selectFactsForPrompt(facts, 1, new Set(['finishes'])).map((f) => f.key), ['floor_type'])
+})
+
+test('selectFactsForPrompt: within the same relevance tier, confidence still breaks ties', () => {
+  const facts = [
+    fact({ category: 'finishes', key: 'low', value: 'a', confidence: 40 }),
+    fact({ category: 'finishes', key: 'high', value: 'b', confidence: 80 }),
+  ]
+  assert.deepEqual(selectFactsForPrompt(facts, 1, new Set(['finishes'])).map((f) => f.key), ['high'])
+})
+
+test('selectFactsForPrompt: default cap matches MAX_FACTS_IN_PROMPT', () => {
+  const facts = Array.from({ length: MAX_FACTS_IN_PROMPT + 5 }, (_, i) =>
+    fact({ category: 'rooms', key: `k${i}`, value: 'v', confidence: i }))
+  assert.equal(selectFactsForPrompt(facts).length, MAX_FACTS_IN_PROMPT)
+})
+
+// ─── inferRelevantCategories ────────────────────────────────────────────────
+
+test('inferRelevantCategories: matches a known trade keyword', () => {
+  const hits = inferRelevantCategories('what flooring is required for the kitchen')
+  assert.ok(hits.has('finishes'))
+  assert.ok(hits.has('kitchens'))
+})
+
+test('inferRelevantCategories: no keyword match returns an empty set, not a guess', () => {
+  const hits = inferRelevantCategories('is everything on track')
+  assert.equal(hits.size, 0)
+})
+
+// ─── pairSupersededFacts ────────────────────────────────────────────────────
+// Regression coverage for the architecture-review finding: read-side
+// change detection previously only matched exact category+key, a strictly
+// weaker guarantee than mergeFacts' write-side semantic-similarity check.
+
+test('pairSupersededFacts: exact category+key match pairs old value with its replacement', () => {
+  const active: FactRow[] = [fact({ category: 'rooms', key: 'floor_area_m2', value: '135', confidence: 90 })]
+  const superseded: FactRow[] = [fact({ category: 'rooms', key: 'floor_area_m2', value: '120', confidence: 80 })]
+  const changes = pairSupersededFacts(active, superseded)
+  assert.deepEqual(changes, [{ category: 'rooms', key: 'floor_area_m2', oldValue: '120', newValue: '135' }])
+})
+
+test('pairSupersededFacts: semantic near-duplicate under a different key is paired via embeddings, matching mergeFacts', () => {
+  const active: FactRow[] = [
+    fact({ category: 'rooms', key: 'floor_area_m2', value: '120', confidence: 90, embedding: [0.99, 0.01, 0] }),
+  ]
+  const superseded: FactRow[] = [
+    fact({ category: 'rooms', key: 'gross_floor_area', value: '110sqm', confidence: 70, embedding: [1, 0, 0] }),
+  ]
+  const changes = pairSupersededFacts(active, superseded, SEMANTIC_DUPLICATE_THRESHOLD)
+  assert.deepEqual(changes, [{ category: 'rooms', key: 'floor_area_m2', oldValue: '110sqm', newValue: '120' }])
+})
+
+test('pairSupersededFacts: below the semantic threshold and no exact key match, no pairing is invented', () => {
+  const active: FactRow[] = [fact({ category: 'rooms', key: 'bathroom_count', value: '2', confidence: 90, embedding: [1, 0, 0] })]
+  const superseded: FactRow[] = [fact({ category: 'rooms', key: 'kitchen_count', value: '1', confidence: 70, embedding: [0, 1, 0] })]
+  assert.deepEqual(pairSupersededFacts(active, superseded), [])
+})
+
+test('pairSupersededFacts: respects maxChanges', () => {
+  const active: FactRow[] = Array.from({ length: 5 }, (_, i) => fact({ category: 'rooms', key: `k${i}`, value: 'new', confidence: 90 }))
+  const superseded: FactRow[] = Array.from({ length: 5 }, (_, i) => fact({ category: 'rooms', key: `k${i}`, value: 'old', confidence: 70 }))
+  assert.equal(pairSupersededFacts(active, superseded, SEMANTIC_DUPLICATE_THRESHOLD, 2).length, 2)
 })

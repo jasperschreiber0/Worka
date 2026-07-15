@@ -96,7 +96,35 @@ export interface FactRow {
   evidence: string | null
   confidence: number
   embedding?: number[] | null
+  // Optional: only populated by callers reading full project_facts rows
+  // for context-building (e.g. lib/project-context.ts), not required by
+  // mergeFacts itself. Kept on the same FactRow type rather than a second,
+  // parallel shape so there's exactly one definition of "a project_facts
+  // row" shared across the Deno pipeline and the Next.js app — see
+  // "Priority 2: Remove implicit storage contracts" in project history.
+  source_document_id?: string | null
+  superseded?: boolean
+  created_at?: string
 }
+
+// Above this similarity, two facts are treated as the same real-world fact
+// restated (possibly with a different category/key label) rather than two
+// distinct facts. This is the ONE definition of "semantic duplicate" for
+// this pipeline — used at write time by mergeFacts (below) and reused,
+// not reimplemented, at read time by pairSupersededFacts for chat's
+// project-memory context (lib/project-context.ts). Previously this lived
+// only as a local constant inside smooth-responder/index.ts; chat's
+// read-side conflict detection had no access to it and fell back to
+// exact category+key matching only, silently missing exactly the class of
+// conflict this threshold exists to catch (see mergeFacts's comment).
+export const SEMANTIC_DUPLICATE_THRESHOLD = 0.93
+
+// Hard ceiling on how many facts get concatenated into a single prompt —
+// shared by Stage 3/6's scope/estimate reasoning (smooth-responder/
+// index.ts) and chat's project-memory context (lib/project-context.ts).
+// Previously a local constant in index.ts; moved here so both consumers
+// truncate identically instead of each guessing their own number.
+export const MAX_FACTS_IN_PROMPT = 200
 
 export interface FactMergeResult {
   supersededIds: string[]
@@ -158,6 +186,142 @@ export function mergeFacts(
     supersededKeys: Array.from(supersededKeys),
     mergedFacts,
   }
+}
+
+// ─── Fact selection for a single prompt ────────────────────────────────────
+//
+// Extracted from what used to be duplicated inline in two places inside
+// smooth-responder/index.ts's Stage 3/6 (identical `.sort((a,b) =>
+// b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)` at both call
+// sites) — now the one place this logic exists, called by both the Deno
+// pipeline (no relevantCategories — it reasons across every trade, there's
+// no single question to be relevant to) and lib/project-context.ts's chat
+// answer-building (relevantCategories inferred from the builder's
+// question, see inferRelevantCategories below).
+//
+// IMPORTANT: this must only ever be called with ACTIVE (non-superseded)
+// facts. A prior version of the chat-side caller fetched active and
+// superseded facts in one query, ORDER BY created_at DESC LIMIT 200,
+// *then* split them — meaning superseded rows competed with active rows
+// for the same 200-row budget, and an old-but-still-active, high-
+// confidence fact could silently fall out of context (recency isn't
+// confidence, and the row could be evicted before the split ever
+// happened). Callers must query/filter superseded separately (see
+// pairSupersededFacts) and give it its own, smaller budget.
+export function selectFactsForPrompt(
+  facts: FactRow[],
+  maxFacts: number = MAX_FACTS_IN_PROMPT,
+  relevantCategories?: Set<string>,
+): FactRow[] {
+  if (facts.length <= maxFacts) return facts
+  if (!relevantCategories || relevantCategories.size === 0) {
+    return [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, maxFacts)
+  }
+  // Relevance-boosted ranking, not a hard filter: a fact whose category
+  // wasn't inferred as relevant is still eligible, just ranked behind
+  // relevant-category facts of equal or lower confidence. This means a
+  // keyword-inference miss degrades gracefully (the fact can still make
+  // the cut on confidence alone) rather than vanishing outright the way a
+  // hard category filter would if the inference guessed wrong.
+  return [...facts]
+    .sort((a, b) => {
+      const relA = relevantCategories.has(a.category) ? 1 : 0
+      const relB = relevantCategories.has(b.category) ? 1 : 0
+      if (relA !== relB) return relB - relA
+      return b.confidence - a.confidence
+    })
+    .slice(0, maxFacts)
+}
+
+// ─── Coarse category relevance inference (no embeddings) ──────────────────
+//
+// A deliberately simple keyword heuristic, not a retrieval system: it only
+// ever RE-RANKS which facts survive truncation (see selectFactsForPrompt
+// above) — it never removes a fact outright. This is the right amount of
+// engineering for the current fact volume (capped at MAX_FACTS_IN_PROMPT,
+// which today's projects rarely exceed): a real embeddings-based retrieval
+// layer is justified once truncation starts happening routinely and
+// keyword inference's false-negative rate starts mattering, not before.
+// Categories mirror the enum smooth-responder's DOCUMENT_INTELLIGENCE_TOOL
+// schema constrains Claude's extraction to (index.ts) — kept here instead
+// of only there so this stays honest if that enum ever changes.
+export const FACT_CATEGORY_KEYWORDS: Record<string, string[]> = {
+  finishes: ['floor', 'flooring', 'finish', 'paint', 'tile', 'timber floor', 'carpet', 'polished concrete'],
+  fixtures: ['tap', 'tapware', 'fixture', 'window', 'door', 'handle', 'hardware'],
+  materials: ['material', 'brick', 'cladding', 'concrete', 'steel', 'render', 'weatherboard'],
+  kitchens: ['kitchen', 'cabinetry', 'benchtop', 'splashback', 'pantry'],
+  laundries: ['laundry'],
+  wet_areas: ['bathroom', 'ensuite', 'toilet', 'shower', 'wet area', 'wc'],
+  services: ['electrical', 'plumbing', 'hvac', 'services', 'wiring', 'ducted', 'hydraulic'],
+  structural_system: ['structural', 'footing', 'slab', 'frame', 'beam', 'column'],
+  external_works: ['landscap', 'driveway', 'fence', 'external', 'deck', 'pergola', 'retaining wall'],
+  rooms: ['bedroom', 'living', 'room', 'storey', 'floor plan', 'layout'],
+  construction_method: ['construction method', 'build method', 'framing type'],
+}
+
+export function inferRelevantCategories(question: string): Set<string> {
+  const q = question.toLowerCase()
+  const hits = new Set<string>()
+  for (const [category, keywords] of Object.entries(FACT_CATEGORY_KEYWORDS)) {
+    if (keywords.some((k) => q.includes(k))) hits.add(category)
+  }
+  return hits
+}
+
+// ─── Superseded-fact pairing (read-side conflict/change detection) ────────
+//
+// mergeFacts (write time, inside smooth-responder) already detects two
+// classes of "this is the same real-world fact restated": an exact
+// category+key match with a different value, and — when both sides have
+// an embedding — a semantic near-duplicate under a different label. A
+// prior version of chat's read-side change detection only checked the
+// first (exact category+key), which is a strictly weaker guarantee than
+// what write time already computed: a fact semantically superseded via
+// embedding similarity (e.g. "gross floor area: 120m2" vs floor_area_m2:
+// 120) would never be paired with its replacement in chat, even though
+// mergeFacts had already correctly marked it superseded. This reuses the
+// SAME threshold and similarity function mergeFacts uses, so there is
+// exactly one definition of "these two facts are the same thing restated"
+// across write time and read time, not two.
+export interface FactChange {
+  category: string
+  key: string
+  oldValue: string
+  newValue: string
+}
+
+export function pairSupersededFacts(
+  activeFacts: FactRow[],
+  supersededFacts: FactRow[],
+  semanticThreshold: number = SEMANTIC_DUPLICATE_THRESHOLD,
+  maxChanges: number = 10,
+): FactChange[] {
+  const activeByKey = new Map(activeFacts.map((f) => [`${f.category}::${f.key}`, f]))
+  const changes: FactChange[] = []
+
+  for (const old of supersededFacts) {
+    if (changes.length >= maxChanges) break
+
+    const exact = activeByKey.get(`${old.category}::${old.key}`)
+    if (exact) {
+      changes.push({ category: old.category, key: old.key, oldValue: old.value, newValue: exact.value })
+      continue
+    }
+
+    if (!old.embedding) continue
+    let bestMatch: FactRow | null = null
+    let bestSim = 0
+    for (const active of activeFacts) {
+      if (!active.embedding) continue
+      const sim = cosineSimilarity(old.embedding, active.embedding)
+      if (sim > bestSim) { bestSim = sim; bestMatch = active }
+    }
+    if (bestMatch && bestSim >= semanticThreshold) {
+      changes.push({ category: bestMatch.category, key: bestMatch.key, oldValue: old.value, newValue: bestMatch.value })
+    }
+  }
+
+  return changes
 }
 
 // ─── Text-extraction gating (per-invocation CPU budget control) ───────────

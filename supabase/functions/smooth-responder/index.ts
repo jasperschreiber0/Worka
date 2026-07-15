@@ -34,7 +34,11 @@
 
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { splitIntoBatches, mergeFacts, type BatchableFile, type FactRow } from './pipeline-logic.ts'
+import {
+  splitIntoBatches, mergeFacts, selectFactsForPrompt,
+  SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
+  type BatchableFile, type FactRow,
+} from './pipeline-logic.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
@@ -135,21 +139,12 @@ async function embedTexts(texts: string[], voyageApiKey: string | undefined): Pr
   }
 }
 
-// cosineSimilarity now lives in ./pipeline-logic.ts (used inside mergeFacts)
-// so it can be unit-tested without a Deno runtime.
-
-// Above this similarity, two facts are treated as the same real-world fact
-// restated (possibly with a different category/key label) rather than two
-// distinct facts — e.g. "gross floor area: 120m2" vs "floor_area_m2: 120".
-const SEMANTIC_DUPLICATE_THRESHOLD = 0.93
-
-// Hard ceiling on how many facts get concatenated into a Stage 3/6 prompt.
-// Near-duplicate merging (below) keeps real-world fact count bounded as
-// documents accumulate, but this is the backstop for the case where a
-// project genuinely has this many distinct facts — keep the
-// highest-confidence ones (builder-answered facts are always 100) rather
-// than an unbounded prompt.
-const MAX_FACTS_IN_PROMPT = 200
+// cosineSimilarity, SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT, and
+// selectFactsForPrompt now live in ./pipeline-logic.ts (imported above) so
+// they're unit-testable without a Deno runtime AND so chat's project-memory
+// context (lib/project-context.ts, Next.js side) reuses the exact same
+// truncation and semantic-duplicate logic instead of maintaining a second,
+// silently-divergent definition of both.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DocBlock = any
@@ -850,10 +845,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // (matched by category+key or semantic similarity), not by asking
         // the model to self-report it.
         const priorFactsBlock = facts.length > 0
-          ? (facts.length > MAX_FACTS_IN_PROMPT
-              ? [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)
-              : facts
-            ).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
+          ? selectFactsForPrompt(facts).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
           : ''
 
         const existingDocsNote = processedDocTitles.length > 0
@@ -1040,9 +1032,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // documents accumulate; this is the backstop for a project that
     // genuinely has more distinct facts than that — keep the
     // highest-confidence ones rather than an unbounded prompt.
-    const factsForPrompt = facts.length > MAX_FACTS_IN_PROMPT
-      ? [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, MAX_FACTS_IN_PROMPT)
-      : facts
+    const factsForPrompt = selectFactsForPrompt(facts)
 
     const factsBlock = factsForPrompt.map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.evidence ? `, evidence: ${f.evidence}` : ''})`).join('\n')
 

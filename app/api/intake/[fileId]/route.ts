@@ -669,6 +669,22 @@ export async function GET(
               console.error('Intake pricing/QA error:', pricingErr)
             }
 
+            // Persist a project-understanding snapshot (confidence, open
+            // question count) onto the job row right when intake completes
+            // — not just ephemerally inside a chat answer — so Job
+            // Snapshot/Morning Brief can eventually surface it without
+            // requiring a builder to ask a chat question first. Same
+            // computation path chat's project_question intent uses (see
+            // lib/project-context.ts); idempotent, best-effort.
+            try {
+              const { createClient } = await import('@supabase/supabase-js')
+              const { persistProjectUnderstanding } = await import('@/lib/project-context')
+              const supabase = createClient(supabaseUrl!, supabaseKey!)
+              await persistProjectUnderstanding(supabase, job_id)
+            } catch (understandingErr) {
+              console.error('Intake project-understanding persist error:', understandingErr)
+            }
+
             const count = row.intake_assumption_count ?? 0
             const completeData: CompleteEvent = {
               stage: 'complete',
