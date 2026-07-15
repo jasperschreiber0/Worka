@@ -35,6 +35,8 @@
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { splitIntoBatches, mergeFacts, type BatchableFile, type FactRow } from './pipeline-logic.ts'
+import { extractPdfText, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
+import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -86,7 +88,13 @@ const STAGES: Record<string, number> = {
 // Base64-encode an ArrayBuffer in chunks. Spreading a whole multi-MB byte
 // array into String.fromCharCode(...) overflows the call stack.
 function toBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer)
+  return bytesToBase64(new Uint8Array(buffer))
+}
+
+// Same chunked encoding as toBase64, but operating directly on a Uint8Array
+// — needed for pdf-lib chunk output, whose .buffer isn't guaranteed to
+// exactly match the view's own bounds.
+function bytesToBase64(bytes: Uint8Array): string {
   const CHUNK = 0x8000
   let binary = ''
   for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -149,7 +157,16 @@ type DocBlock = any
 interface LoadedFile {
   fileId: string
   filename: string
-  block: DocBlock
+  // A single document normally sends one content block, but a sparse-text
+  // PDF sends its vision block plus a supplementary text-layer block (see
+  // pdf-text.ts) — an array here, flattened when building a batch's
+  // message content, not a second logical "document".
+  block: DocBlock | DocBlock[]
+  // Present only for a PDF actually sent as a vision block (not text-only,
+  // not CSV, not an image) — lets the oversized-file rescue step below
+  // page-chunk it instead of excluding it outright if it alone is too big
+  // for any batch.
+  rawPdfBytes?: Uint8Array
 }
 
 async function loadFileAsBlock(
@@ -181,17 +198,33 @@ async function loadFileAsBlock(
   const isPdf = fileRow.file_type === 'pdf'
   const isCsv = fileRow.file_type === 'other' && /\.csv$/i.test(fileRow.filename ?? '')
 
-  let block: DocBlock
+  let block: DocBlock | DocBlock[]
+  let rawPdfBytes: Uint8Array | undefined
   if (isCsv) {
     const text = atob(base64)
     block = { type: 'text', text: `CSV FILE (${fileRow.filename}):\n\`\`\`\n${text.slice(0, 40000)}\n\`\`\`` }
   } else if (isPdf) {
-    block = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+    // Text-dense PDFs (specs, fixture schedules, priced BOQs) are sent as
+    // text only — skips vision encoding entirely, the single biggest lever
+    // on this pipeline's token cost, since these are exactly the documents
+    // that were most often the ones getting silently dropped for size.
+    // Sparse-text PDFs (actual drawings) still get the full vision read,
+    // with any usable text attached as a numeric-accuracy supplement —
+    // this is the same rationale lib/pdf-text.ts has always used for the
+    // Next.js-side pipeline, applied here with a Deno-portable extractor.
+    const extractedText = await extractPdfText(base64)
+    if (isTextDense(extractedText)) {
+      block = buildTextOnlyBlock(fileRow.filename, extractedText)
+    } else {
+      const visionBlock: DocBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+      block = hasUsableText(extractedText) ? [visionBlock, buildTextLayerBlock(extractedText)] : visionBlock
+      rawPdfBytes = new Uint8Array(buffer)
+    }
   } else {
     block = { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } }
   }
 
-  return { fileId, filename: fileRow.filename, block }
+  return { fileId, filename: fileRow.filename, block, rawPdfBytes }
 }
 
 // ─── Tool schemas ──────────────────────────────────────────────────────────────
@@ -552,7 +585,49 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const MAX_BATCHES = 3
 
       const allLoaded = [primary, ...loadedSiblings]
-      const batchInput: BatchableFile[] = allLoaded.map((f) => ({
+
+      // Rescue a single vision PDF too large to fit any batch on its own —
+      // splitIntoBatches would otherwise exclude it outright (a whole
+      // document lost, not just delayed). Only reached for genuinely large,
+      // vision-necessary documents: a text-dense PDF this large would
+      // already have been reduced to a small text block above, long before
+      // this point. Chunk ids are suffixed (`${realId}#pStart-End`) and
+      // mapped back to the real file id wherever a DB row is written below
+      // (realFileId) — multiple chunks of one file share that file's single
+      // project_documents row; the last chunk processed wins its
+      // classification metadata, but every chunk's facts are captured
+      // regardless, since facts aren't gated by that row.
+      const expandedLoaded: LoadedFile[] = []
+      for (const f of allLoaded) {
+        const approxBytes = JSON.stringify(f.block).length
+        if (approxBytes > MAX_BYTES_PER_BATCH && f.rawPdfBytes) {
+          try {
+            const pageCount = await getPdfPageCount(f.rawPdfBytes)
+            const targetChunks = Math.ceil(approxBytes / MAX_BYTES_PER_BATCH)
+            const pagesPerChunk = Math.max(1, Math.floor(pageCount / targetChunks))
+            const chunks = await splitPdfIntoChunks(f.rawPdfBytes, pagesPerChunk)
+            if (chunks.length > 1) {
+              console.log(JSON.stringify({ document: f.filename, status: 'chunked', pageCount, chunkCount: chunks.length }))
+              for (const c of chunks) {
+                expandedLoaded.push({
+                  fileId: `${f.fileId}#p${c.pageStart}-${c.pageEnd}`,
+                  filename: `${f.filename} (pages ${c.pageStart}-${c.pageEnd})`,
+                  block: { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: bytesToBase64(c.bytes) } },
+                })
+              }
+              continue
+            }
+          } catch (err) {
+            console.log(JSON.stringify({ document: f.filename, status: 'chunk_failed', error: err instanceof Error ? err.message : String(err) }))
+            // Fall through — keep the original oversized entry below;
+            // splitIntoBatches will exclude it with a clear reason rather
+            // than this failing the whole run.
+          }
+        }
+        expandedLoaded.push(f)
+      }
+
+      const batchInput: BatchableFile[] = expandedLoaded.map((f) => ({
         fileId: f.fileId,
         filename: f.filename,
         approxBytes: JSON.stringify(f.block).length,
@@ -571,7 +646,12 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         intake_batch_count: fileBatches.length,
       }).eq('id', fileId)
 
-      const blockById = new Map(allLoaded.map((f) => [f.fileId, f]))
+      const blockById = new Map(expandedLoaded.map((f) => [f.fileId, f]))
+      // Chunk ids are `${realId}#pStart-End` — this strips that suffix so
+      // every DB write (project_documents.file_id, project_facts.
+      // source_document_id) always references the real files row, never a
+      // synthetic chunk id that has no row of its own.
+      const realFileId = (id: string): string => id.split('#')[0]
       // Titles of documents classified so far — starts with documents from
       // earlier uploads to this job, grows with each batch in this run, so
       // batch 2+ knows what batch 1 already established, not just what the
@@ -610,9 +690,17 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
         const docSystemPrompt = `You are a senior document controller and quantity surveyor reviewing construction documents for an Australian residential project. Classify every document precisely and extract only facts you can point to direct evidence for. Never invent a fact — if something is not shown or stated, simply omit it. Unknown must remain unknown.${existingDocsNote}${memoryContext}`
 
+        // A document's block is an array when it has a supplementary text
+        // excerpt (a sparse-text PDF's text layer, attached right after its
+        // vision block) — flattened here for the API, but each entry in
+        // batchFiles is still exactly one logical document for file_index
+        // purposes, regardless of how many content blocks it expands to.
         const docUserContent = [
-          ...batchFiles.map((f) => f.block),
-          { type: 'text', text: `Analyse the ${batchFiles.length} document(s) above (file_index 0 to ${batchFiles.length - 1}, in the order provided). Use the analyse_project_documents tool.` },
+          ...batchFiles.flatMap((f) => Array.isArray(f.block) ? f.block : [f.block]),
+          {
+            type: 'text',
+            text: `Analyse the ${batchFiles.length} document(s) above (file_index 0 to ${batchFiles.length - 1}, in the order provided — a document immediately followed by a text excerpt block is that document's own extracted text layer, not a separate document). Use the analyse_project_documents tool.`,
+          },
         ]
 
         const batchStartedAt = Date.now()
@@ -662,7 +750,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           .filter((d) => typeof d.file_index === 'number' && fileIndexToId[d.file_index as number])
           .map((d) => ({
             job_id: jobId,
-            file_id: fileIndexToId[d.file_index as number],
+            file_id: realFileId(fileIndexToId[d.file_index as number]),
             document_type: d.document_type ?? null,
             discipline: d.discipline ?? null,
             revision: d.revision ?? null,
@@ -698,7 +786,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           category: f.category as string,
           key: f.key as string,
           value: String(f.value),
-          source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(fileIndexToId[f.source_file_index as number]) ?? null) : null,
+          source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(realFileId(fileIndexToId[f.source_file_index as number])) ?? null) : null,
           page_reference: (f.page_reference as string) ?? null,
           evidence: (f.evidence as string) ?? null,
           confidence: (f.confidence as number) ?? 70,
