@@ -42,6 +42,34 @@ export async function extractPdfText(base64: string): Promise<string> {
   }
 }
 
+// PDF parsing (decompression, font-program interpretation for glyph→text
+// mapping) is genuine CPU work, not I/O wait — a large or structurally
+// complex PDF (a full CAD/Revit-exported drawing set, especially one with
+// embedded/subsetted TrueType fonts) can burn real CPU time extracting a
+// text layer that likely wasn't going to be text-dense anyway. Supabase
+// Edge Functions enforce a CPU-time budget per invocation, separate from
+// wall-clock time, and a CPU-time kill is abrupt — no catch/finally runs,
+// so the job lock is never released and the run just retries identically
+// once the lock goes stale, forever. Two independent guards:
+//   1. Skip extraction entirely above a raw byte-size threshold — these are
+//      also the documents least likely to be text-dense, so the vision
+//      read was the right call anyway.
+//   2. A wall-clock timeout as a second backstop, in case a small file
+//      still turns out to be pathologically expensive to parse.
+const MAX_EXTRACTABLE_BYTES = 4 * 1024 * 1024
+const EXTRACTION_TIMEOUT_MS = 5_000
+
+export async function extractPdfTextBounded(base64: string, rawByteLength: number): Promise<{ text: string; skippedReason?: string }> {
+  if (rawByteLength > MAX_EXTRACTABLE_BYTES) {
+    return { text: '', skippedReason: `over ${Math.round(MAX_EXTRACTABLE_BYTES / (1024 * 1024))}MB, extraction skipped to avoid CPU-time risk` }
+  }
+  const timeout = new Promise<{ text: string; skippedReason?: string }>((resolve) =>
+    setTimeout(() => resolve({ text: '', skippedReason: `extraction exceeded ${EXTRACTION_TIMEOUT_MS}ms` }), EXTRACTION_TIMEOUT_MS)
+  )
+  const attempt = extractPdfText(base64).then((text) => ({ text }))
+  return Promise.race([attempt, timeout])
+}
+
 /**
  * A PDF is worth attaching a text layer for only when it actually carries
  * one. A handful of characters is just page numbers / a title block on a

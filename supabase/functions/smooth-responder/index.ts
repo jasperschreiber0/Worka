@@ -35,7 +35,7 @@
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { splitIntoBatches, mergeFacts, type BatchableFile, type FactRow } from './pipeline-logic.ts'
-import { extractPdfText, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
+import { extractPdfTextBounded, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -212,7 +212,15 @@ async function loadFileAsBlock(
     // with any usable text attached as a numeric-accuracy supplement —
     // this is the same rationale lib/pdf-text.ts has always used for the
     // Next.js-side pipeline, applied here with a Deno-portable extractor.
-    const extractedText = await extractPdfText(base64)
+    // Bounded (size + timeout), not a plain extractPdfText call: parsing a
+    // large or font-complex PDF is genuine CPU work, and Supabase Edge
+    // Functions enforce a CPU-time budget separate from wall-clock — a
+    // large CAD-exported drawing set blew through it and killed the
+    // invocation outright (see extractPdfTextBounded's comment).
+    const { text: extractedText, skippedReason } = await extractPdfTextBounded(base64, buffer.byteLength)
+    if (skippedReason) {
+      console.log(JSON.stringify({ document: fileRow.filename, status: 'text_extraction_skipped', reason: skippedReason }))
+    }
     if (isTextDense(extractedText)) {
       block = buildTextOnlyBlock(fileRow.filename, extractedText)
     } else {
