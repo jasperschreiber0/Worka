@@ -165,6 +165,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     upload_batch_id: upload_batch_id ?? null,
     skipped_sibling_filenames: null,
     failed_sibling_filenames: null,
+    intake_batch_index: null,
+    intake_batch_count: null,
     created_at: new Date().toISOString(),
   }
 
