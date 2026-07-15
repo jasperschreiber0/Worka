@@ -2,9 +2,12 @@
 import React from 'react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import { deriveTimelineSteps } from '@/lib/job-snapshot-demo'
 import type { PermissionRole } from '@/lib/auth/role-guard'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
 import ProofTab from '@/components/job/tabs/ProofTab'
+import Timeline from '@/components/dashboard/Timeline'
+import AIInsightCard from '@/components/dashboard/AIInsightCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -251,9 +254,12 @@ export default function JobSnapshotPanel({
   const animatedInvoiced = useCountUp(paidSentInvoiceTotal)
   const animatedVariations = useCountUp(variationsTotal > 0 ? variationsTotal : null)
 
-  const STAGES = ['Quoting', 'Quoted', 'Active', 'Complete']
-  const stageMap: Record<string, number> = { quoting: 0, quoted: 1, active: 2, complete: 3, archived: 3 }
-  const currentStageIndex = stageMap[displayStatus] ?? 0
+  const timelineSteps = snapshot ? deriveTimelineSteps(snapshot) : []
+  const jobHealth = snapshot?.job_health ?? null
+  const healthColor =
+    jobHealth?.label === 'At Risk' ? 'var(--status-red)' : jobHealth?.label === 'Watch' ? 'var(--status-amber)' : 'var(--status-green)'
+  const healthBg =
+    jobHealth?.label === 'At Risk' ? 'rgba(244,67,54,0.1)' : jobHealth?.label === 'Watch' ? 'rgba(255,152,0,0.1)' : 'rgba(76,175,80,0.15)'
 
   // What WorkA suggests doing next — surfaced once, in "At a glance" (not
   // repeated under Timeline, which now shows the stage tracker only).
@@ -481,6 +487,31 @@ export default function JobSnapshotPanel({
               </SectionGroup>
             )}
 
+            {/* ── JOB HEALTH — disclosed rule (highest risk severity present), not a fabricated score ── */}
+            {jobHealth && (
+              <SectionGroup label="Job health">
+                <div style={{ ...CARD_STYLE }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: jobHealth.reasons.length > 0 ? 10 : 0 }}>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: '3px 8px',
+                        borderRadius: 4,
+                        backgroundColor: healthBg,
+                        color: healthColor,
+                      }}
+                    >
+                      {jobHealth.label}
+                    </span>
+                  </div>
+                  {jobHealth.reasons.map((reason: string, idx: number) => (
+                    <AIInsightCard key={idx} icon="risk" text={reason} />
+                  ))}
+                </div>
+              </SectionGroup>
+            )}
+
             {/* ── 2. AT A GLANCE — hidden only when there's genuinely nothing to show yet ── */}
             {snapshot.quote != null || nextAction != null || (quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
             <SectionGroup label="At a glance">
@@ -613,67 +644,10 @@ export default function JobSnapshotPanel({
             </SectionGroup>
             ) : null}
 
-            {/* ── 3. TIMELINE — stage tracker only; next action lives in "At a glance" ── */}
+            {/* ── 3. TIMELINE — real sub-steps, each backed by a real column (see lib/job-snapshot-demo.ts) ── */}
             <SectionGroup label="Timeline">
-              <div style={{ ...CARD_STYLE, display: 'flex', gap: 0, marginBottom: 0 }}>
-                {STAGES.map((stage, idx) => {
-                  const isComplete = idx < currentStageIndex
-                  const isCurrent = idx === currentStageIndex
-                  const isPending = idx > currentStageIndex
-                  return (
-                    <div key={stage} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative' }}>
-                      {/* Connector line */}
-                      {idx < STAGES.length - 1 && (
-                        <div
-                          style={{
-                            position: 'absolute',
-                            top: 4,
-                            left: '50%',
-                            width: '100%',
-                            height: 1,
-                            backgroundColor: isComplete || isCurrent ? 'var(--orange-primary)' : 'var(--bg-border)',
-                            opacity: isComplete ? 0.5 : isCurrent ? 1 : 1,
-                          }}
-                        />
-                      )}
-                      {/* Dot */}
-                      <div
-                        style={{
-                          width: 8,
-                          height: 8,
-                          borderRadius: '50%',
-                          backgroundColor: isComplete
-                            ? 'var(--status-green)'
-                            : isCurrent
-                              ? 'var(--orange-primary)'
-                              : 'transparent',
-                          border: isPending ? '1px solid var(--bg-border)' : 'none',
-                          position: 'relative',
-                          zIndex: 1,
-                          marginBottom: 6,
-                        }}
-                      />
-                      {/* Label */}
-                      <span
-                        style={{
-                          fontSize: 11,
-                          fontWeight: isCurrent ? 500 : 400,
-                          color: isComplete
-                            ? 'var(--text-secondary)'
-                            : isCurrent
-                              ? 'var(--text-primary)'
-                              : 'var(--bg-ghost, var(--text-tertiary))',
-                          textAlign: 'center',
-                        }}
-                      >
-                        {stage}
-                      </span>
-                      {isCurrent && (
-                        <span style={{ fontSize: 10, color: 'var(--orange-primary)', marginTop: 2 }}>← now</span>
-                      )}
-                    </div>
-                  )
-                })}
+              <div style={CARD_STYLE}>
+                <Timeline steps={timelineSteps} />
               </div>
             </SectionGroup>
 

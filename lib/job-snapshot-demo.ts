@@ -19,6 +19,14 @@ export interface JobRisk {
   message: string
 }
 
+export interface JobHealth {
+  label: 'On Track' | 'Watch' | 'At Risk'
+  // Disclosed rule, not a predictive score: derived from the same `risks`
+  // array below (highest risk severity present). Never a fabricated
+  // confidence percentage.
+  reasons: string[]
+}
+
 export interface JobTask {
   id: string
   description: string
@@ -108,11 +116,54 @@ export interface JobSnapshot {
   workers: JobWorkerRef[]
   tasks: JobTask[]
   risks: JobRisk[]
+  job_health: JobHealth
+  // Count of job_milestones rows — real signal for the "Work Scheduled"
+  // timeline step (milestones are generated on job activation).
+  milestones_count: number
+}
+
+export interface TimelineStep {
+  label: string
+  done: boolean
+  current: boolean
+}
+
+// Vertical checklist for the sidebar — six sub-steps, each backed by a real
+// column (see the field it reads). Drops the brief's "Measurements
+// Complete" step (no real signal backs it as a distinct milestone) and
+// relabels "Deposit Paid" to "Deposit Invoiced" — the invoice_schedule
+// data available here tracks whether an invoice was raised, not whether it
+// was actually paid.
+export function deriveTimelineSteps(snapshot: JobSnapshot): TimelineStep[] {
+  const done = [
+    snapshot.files.length > 0,
+    snapshot.quote != null,
+    snapshot.quote?.sent_at != null,
+    snapshot.quote?.status === 'approved' || snapshot.job.status === 'active' || snapshot.job.status === 'complete',
+    snapshot.invoices.some(i => i.status === 'sent' || i.status === 'paid'),
+    snapshot.milestones_count > 0,
+  ]
+  const labels = ['Plans Uploaded', 'Quote Drafted', 'Quote Sent', 'Client Approved', 'Deposit Invoiced', 'Work Scheduled']
+  const currentIdx = done.findIndex(d => !d)
+  return labels.map((label, i) => ({ label, done: done[i], current: i === currentIdx }))
+}
+
+// Disclosed rule, not a predictive score: highest risk severity present
+// determines the label. Never a fabricated confidence percentage.
+export function deriveJobHealth(risks: JobRisk[]): JobHealth {
+  const highs = risks.filter(r => r.level === 'high')
+  if (highs.length > 0) return { label: 'At Risk', reasons: highs.map(r => r.message) }
+  const meds = risks.filter(r => r.level === 'medium')
+  if (meds.length > 0) return { label: 'Watch', reasons: meds.map(r => r.message) }
+  return {
+    label: 'On Track',
+    reasons: risks.length > 0 ? risks.map(r => r.message) : ['No open risks — quote, invoices, and files are all up to date.'],
+  }
 }
 
 // ─── Job 1: Fitzroy (active) ──────────────────────────────────────────────────
 
-const JOB_1_FITZROY: JobSnapshot = {
+const JOB_1_FITZROY: Omit<JobSnapshot, 'job_health'> = {
   job: {
     id: '00000000-0000-0000-0000-000000000010',
     address: '14 Merri St, Fitzroy VIC 3065',
@@ -239,6 +290,7 @@ const JOB_1_FITZROY: JobSnapshot = {
     ],
     proof_events: [],
   },
+  milestones_count: 8,
   risks: [
     { level: 'high', message: '2 variations pending approval.' },
     { level: 'high', message: 'Invoice for $28,000 overdue 3 days.' },
@@ -247,7 +299,7 @@ const JOB_1_FITZROY: JobSnapshot = {
 
 // ─── Job 2: Toorak (quoted) ───────────────────────────────────────────────────
 
-const JOB_2_TOORAK: JobSnapshot = {
+const JOB_2_TOORAK: Omit<JobSnapshot, 'job_health'> = {
   job: {
     id: '00000000-0000-0000-0000-000000000011',
     address: '8 Burnside Rd, Toorak VIC 3142',
@@ -332,6 +384,7 @@ const JOB_2_TOORAK: JobSnapshot = {
       },
     ],
   },
+  milestones_count: 0,
   risks: [
     { level: 'medium', message: 'Quote sent 5 days ago with no response from Tom Caruso.' },
     { level: 'low', message: 'Client email on file — ready to follow up.' },
@@ -340,7 +393,7 @@ const JOB_2_TOORAK: JobSnapshot = {
 
 // ─── Job 3: Brunswick (quoting) ───────────────────────────────────────────────
 
-const JOB_3_BRUNSWICK: JobSnapshot = {
+const JOB_3_BRUNSWICK: Omit<JobSnapshot, 'job_health'> = {
   job: {
     id: '00000000-0000-0000-0000-000000000012',
     address: '52 Bendigo St, Brunswick VIC 3056',
@@ -384,6 +437,7 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
     messages: [],
     proof_events: [],
   },
+  milestones_count: 0,
   risks: [
     { level: 'medium', message: 'Budget noted ($380,000) but no plans uploaded yet.' },
     { level: 'medium', message: '2 assumptions need resolving before quote can be sent.' },
@@ -393,7 +447,7 @@ const JOB_3_BRUNSWICK: JobSnapshot = {
 
 // ─── Lookup map ───────────────────────────────────────────────────────────────
 
-const DEMO_SNAPSHOTS: Record<string, JobSnapshot> = {
+const DEMO_SNAPSHOTS: Record<string, Omit<JobSnapshot, 'job_health'>> = {
   '00000000-0000-0000-0000-000000000010': JOB_1_FITZROY,
   // Toorak — both IDs resolve (chat uses 020, snapshot panel uses 011)
   '00000000-0000-0000-0000-000000000011': JOB_2_TOORAK,
@@ -406,7 +460,9 @@ const DEMO_SNAPSHOTS: Record<string, JobSnapshot> = {
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 export function getDemoJobSnapshot(jobId: string): JobSnapshot | null {
-  return DEMO_SNAPSHOTS[jobId] ?? null
+  const snapshot = DEMO_SNAPSHOTS[jobId]
+  if (!snapshot) return null
+  return { ...snapshot, job_health: deriveJobHealth(snapshot.risks) }
 }
 
 export function getDemoJobList(): Array<{ id: string; address: string; status: string }> {

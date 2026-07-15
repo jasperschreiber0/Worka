@@ -1,19 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { createClient } from '@supabase/supabase-js'
-import type { JobSnapshot } from '@/lib/job-snapshot-demo'
+import { deriveJobHealth, type JobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function daysAgo(dateStr: string): string {
-  const d = new Date(dateStr)
-  const diffMs = Date.now() - d.getTime()
-  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24))
-  if (days === 0) return 'today'
-  if (days === 1) return 'yesterday'
-  return `${days} days ago`
-}
+import { daysAgo } from '@/lib/job-activity'
 
 // ─── GET /api/jobs/[jobId]/snapshot ──────────────────────────────────────────
 
@@ -127,6 +117,12 @@ export async function GET(
   const workerRefs = (jobWorkers ?? []).map((jw: any) =>
     jw.workers ? { id: jw.workers.id, name: jw.workers.name, role: jw.workers.role } : null
   ).filter(Boolean) as Array<{ id: string; name: string; role: string }>
+
+  // Milestones (activation-generated) — real signal for the "Work Scheduled" timeline step
+  const { count: milestonesCount } = await sb
+    .from('job_milestones')
+    .select('id', { count: 'exact', head: true })
+    .eq('job_id', jobId)
 
   // Tasks
   const { data: jobTasks } = await sb
@@ -262,6 +258,8 @@ export async function GET(
       })),
     },
     risks,
+    job_health: deriveJobHealth(risks),
+    milestones_count: milestonesCount ?? 0,
   }
 
   return NextResponse.json({ snapshot })

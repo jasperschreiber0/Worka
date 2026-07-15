@@ -3,6 +3,8 @@ import { cookies } from 'next/headers'
 import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'
 import { applyMargin, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
 import { isDemoMode } from '@/lib/auth/api-auth'
+import { computeLastActivityByJob } from '@/lib/job-activity'
+import { computeJobFeedAttention, BUCKET_ORDER, type JobBucket } from '@/lib/job-attention'
 
 export interface DashboardAlert {
   id: string
@@ -34,6 +36,25 @@ export interface DashboardStats {
   overdue_invoices: number
   overdue_invoice_total: number
   pipeline_value: number
+  // Real sum of invoices already sent with a due_date inside the next 7
+  // days — money actually scheduled to be due, not a revenue forecast.
+  revenue_due_this_week: number
+  // Count of jobs currently in a feed bucket (overdue / due today /
+  // waiting on client / waiting on supplier / ready to invoice).
+  attention_count: number
+}
+
+export interface JobFeedItem {
+  job_id: string
+  address: string
+  client_name: string | null
+  estimated_value: number | null
+  last_activity: string
+  status: string
+  bucket: JobBucket
+  ai_reasoning: string
+  primary_action: string
+  secondary_action?: string
 }
 
 export interface DashboardData {
@@ -41,11 +62,46 @@ export interface DashboardData {
   alerts: DashboardAlert[]
   recommendations: DashboardRecommendation[]
   activity: DashboardActivity[]
+  feed: JobFeedItem[]
   demo?: boolean
 }
 
 const DEMO_DATA: DashboardData = {
-  stats: { active_jobs: 3, pending_variations: 2, overdue_invoices: 1, overdue_invoice_total: 28000, pipeline_value: 284500 },
+  stats: {
+    active_jobs: 3,
+    pending_variations: 2,
+    overdue_invoices: 1,
+    overdue_invoice_total: 28000,
+    pipeline_value: 284500,
+    revenue_due_this_week: 18450,
+    attention_count: 2,
+  },
+  feed: [
+    {
+      job_id: '00000000-0000-0000-0000-000000000010',
+      address: '14 Merri St, Fitzroy VIC 3065',
+      client_name: 'Hendersons',
+      estimated_value: 142000,
+      last_activity: '2 days ago',
+      status: 'active',
+      bucket: 'overdue',
+      ai_reasoning: 'Fitzroy — $28,000 invoice is 3 days overdue. The Hendersons haven’t paid, and 2 variations are also waiting on their approval.',
+      primary_action: 'Send payment chaser',
+      secondary_action: 'Review variations',
+    },
+    {
+      job_id: '00000000-0000-0000-0000-000000000020',
+      address: '8 Burnside Rd, Toorak VIC 3142',
+      client_name: 'Tom Caruso',
+      estimated_value: 127500,
+      last_activity: '5 days ago',
+      status: 'quoted',
+      bucket: 'waiting_client',
+      ai_reasoning: 'Toorak — quote for $127,500 sent 5 days ago, no response from Tom Caruso yet. Quotes older than a week convert less often.',
+      primary_action: 'Follow up now',
+      secondary_action: 'Open job',
+    },
+  ],
   alerts: [
     {
       id: 'a1',
@@ -129,31 +185,51 @@ export async function GET() {
 
     const builderId = user.id
 
-    const [{ data: jobs }, { data: invoices }, { data: variations }] = await Promise.all([
+    const todayStr = new Date().toISOString().split('T')[0]
+    const weekAheadStr = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+
+    const [{ data: jobs }, { data: invoices }, { data: variations }, { data: dueSoonInvoices }] = await Promise.all([
       supabase
         .from('jobs')
-        .select('id, address, status, updated_at')
+        .select('id, address, status, updated_at, clients(name)')
         .eq('builder_id', builderId)
         .not('status', 'in', '("archived")')
         .order('updated_at', { ascending: false })
         .limit(20),
+      // Overdue: invoices that have been sent (or already flagged
+      // 'overdue') and whose due_date has passed. This queries the
+      // `invoices` table, which has real due_date/status columns —
+      // `invoice_schedule` (a different table, activation-generated
+      // progress-claim rows) does not, and querying it here previously
+      // caused "column invoice_schedule.due_date does not exist" in
+      // production.
       supabase
-        .from('invoice_schedule')
+        .from('invoices')
         .select('id, job_id, amount, due_date, status')
         .eq('builder_id', builderId)
-        .eq('status', 'sent')
-        .lt('due_date', new Date().toISOString().split('T')[0]),
+        .in('status', ['sent', 'overdue'])
+        .not('due_date', 'is', null)
+        .lt('due_date', todayStr),
       supabase
         .from('variations')
         .select('id, job_id, title, amount, status')
         .eq('builder_id', builderId)
         .eq('status', 'pending'),
+      supabase
+        .from('invoices')
+        .select('amount')
+        .eq('builder_id', builderId)
+        .eq('status', 'sent')
+        .not('due_date', 'is', null)
+        .gte('due_date', todayStr)
+        .lte('due_date', weekAheadStr),
     ])
 
     const activeJobs = (jobs ?? []).filter(j => j.status === 'active')
     const quotingJobs = (jobs ?? []).filter(j => j.status === 'quoting' || j.status === 'quoted')
     const overdueInvoices = invoices ?? []
     const pendingVariations = variations ?? []
+    const revenueDueThisWeek = (dueSoonInvoices ?? []).reduce((s, i) => s + Number(i.amount ?? 0), 0)
 
     const alerts: DashboardAlert[] = []
 
@@ -269,6 +345,7 @@ export async function GET() {
       .map(j => j.id)
 
     let pipelineValue = 0
+    const estimatedValueByJob = new Map<string, number>()
     if (pipelineJobIds.length > 0) {
       const { data: pipelineQuotes } = await supabase
         .from('quotes')
@@ -282,11 +359,41 @@ export async function GET() {
         if (!existing || q.version > existing.version) latestByJob.set(q.job_id, q)
       }
 
-      pipelineValue = Array.from(latestByJob.values()).reduce((sum, q) => {
-        if (q.total_cost === null) return sum
-        return sum + applyMargin(q.total_cost, q.margin_pct ?? DEFAULT_MARGIN_PCT)
-      }, 0)
+      Array.from(latestByJob.entries()).forEach(([jobId, q]) => {
+        if (q.total_cost === null) return
+        estimatedValueByJob.set(jobId, applyMargin(q.total_cost, q.margin_pct ?? DEFAULT_MARGIN_PCT))
+      })
+      pipelineValue = Array.from(estimatedValueByJob.values()).reduce((sum, v) => sum + v, 0)
     }
+
+    // ── AI inbox feed: bucket every open job by what it needs from the
+    // builder right now, richest-first (see lib/job-attention.ts). ──
+    const feedEligibleJobs = (jobs ?? []).filter(j => j.status !== 'complete')
+    const [attentionByJob, lastActivityByJob] = await Promise.all([
+      computeJobFeedAttention(supabase, feedEligibleJobs),
+      computeLastActivityByJob(supabase, feedEligibleJobs),
+    ])
+
+    const feed: JobFeedItem[] = feedEligibleJobs
+      .filter(j => attentionByJob.has(j.id))
+      .map(j => {
+        const attention = attentionByJob.get(j.id)!
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const clientName = (j as any).clients?.name ?? null
+        return {
+          job_id: j.id,
+          address: j.address,
+          client_name: clientName,
+          estimated_value: estimatedValueByJob.get(j.id) ?? null,
+          last_activity: lastActivityByJob.get(j.id) ?? 'No activity yet',
+          status: j.status,
+          bucket: attention.bucket,
+          ai_reasoning: attention.ai_reasoning,
+          primary_action: attention.primary_action,
+          secondary_action: attention.secondary_action,
+        }
+      })
+      .sort((a, b) => BUCKET_ORDER.indexOf(a.bucket) - BUCKET_ORDER.indexOf(b.bucket))
 
     return NextResponse.json({
       stats: {
@@ -295,10 +402,13 @@ export async function GET() {
         overdue_invoices: overdueInvoices.length,
         overdue_invoice_total: overdueTotal,
         pipeline_value: pipelineValue,
+        revenue_due_this_week: revenueDueThisWeek,
+        attention_count: feed.length,
       },
       alerts,
       recommendations,
       activity,
+      feed,
     } satisfies DashboardData)
   } catch (err) {
     // A real, authenticated builder hitting a genuine query failure should

@@ -3,7 +3,11 @@ import React from 'react'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { AnimatePresence, motion } from 'framer-motion'
 import ChatMessage, { type Message, type DuplicateJob } from './ChatMessage'
+import ChatInput from './ChatInput'
+import JobCard, { type JobFeedCardItem } from '@/components/dashboard/JobCard'
+import { BUCKET_LABEL, BUCKET_ORDER } from '@/lib/job-attention'
 import type { Alert } from './MorningBriefCard'
 import WorkerModal from './WorkerModal'
 import UploadPanel from './UploadPanel'
@@ -354,7 +358,11 @@ export default function ChatInterface({
     overdue_invoices: number
     overdue_invoice_total: number
     pipeline_value: number
+    revenue_due_this_week: number
+    attention_count: number
   } | null>(null)
+  const [dashboardFeed, setDashboardFeed] = useState<JobFeedCardItem[]>([])
+  const [feedCollapsed, setFeedCollapsed] = useState(false)
 
   const [pendingDropFiles, setPendingDropFiles] = useState<Array<{ file: File; type: string; label: string }>>([])
   const [dropJobQuery, setDropJobQuery] = useState<string>('')
@@ -411,11 +419,17 @@ export default function ChatInterface({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Fetch dashboard stats once on mount for the stats bar
+  // Fetch dashboard stats + AI inbox feed once on mount
   useEffect(() => {
     fetch('/api/dashboard')
       .then(r => r.json())
-      .then((data: { stats?: { active_jobs: number; pending_variations: number; overdue_invoices: number; overdue_invoice_total?: number; pipeline_value?: number } }) => {
+      .then((data: {
+        stats?: {
+          active_jobs: number; pending_variations: number; overdue_invoices: number
+          overdue_invoice_total?: number; pipeline_value?: number; revenue_due_this_week?: number; attention_count?: number
+        }
+        feed?: JobFeedCardItem[]
+      }) => {
         if (data.stats) {
           setDashboardStats({
             active_jobs: data.stats.active_jobs,
@@ -423,10 +437,13 @@ export default function ChatInterface({
             overdue_invoices: data.stats.overdue_invoices,
             overdue_invoice_total: data.stats.overdue_invoice_total ?? 0,
             pipeline_value: data.stats.pipeline_value ?? 0,
+            revenue_due_this_week: data.stats.revenue_due_this_week ?? 0,
+            attention_count: data.stats.attention_count ?? 0,
           })
         }
+        setDashboardFeed(data.feed ?? [])
       })
-      .catch(() => {/* silently fail — stats bar is optional */})
+      .catch(() => {/* silently fail — briefing/stats bar are optional */})
   }, [])
 
   // Focus input on mount so user can start typing immediately
@@ -1343,6 +1360,29 @@ export default function ChatInterface({
     e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`
   }
 
+  // ── AI briefing header — real numbers only, no fabricated forecast ──────────
+  const briefingHour = new Date().getHours()
+  const briefingGreeting = briefingHour < 12 ? 'Good morning' : briefingHour < 17 ? 'Good afternoon' : 'Good evening'
+  const firstName = userName.split(' ')[0]
+  // Feed is already sorted by bucket severity server-side — the first item
+  // is the single highest-priority real thing needing attention.
+  const topFeedItem = dashboardFeed[0] ?? null
+  const feedByBucket: Array<{ bucket: typeof BUCKET_ORDER[number]; items: JobFeedCardItem[] }> = BUCKET_ORDER
+    .map(bucket => ({
+      bucket,
+      items: dashboardFeed.filter(item => item.bucket === bucket),
+    }))
+    .filter(group => group.items.length > 0)
+
+  const handleFeedPrimaryAction = useCallback((item: JobFeedCardItem) => {
+    void sendMessage(`${item.primary_action} — ${item.address.split(',')[0]}`)
+  }, [sendMessage])
+
+  const handleFeedOpen = useCallback((jobId: string) => {
+    const item = dashboardFeed.find(f => f.job_id === jobId)
+    if (item) handleOpenJobFromList(jobId, item.address, item.status, item.client_name ?? undefined)
+  }, [dashboardFeed, handleOpenJobFromList])
+
   return (
     <div className="flex flex-col h-full relative">
       {/* ── Header ─────────────────────────────────────────────────────────── */}
@@ -1426,6 +1466,32 @@ export default function ChatInterface({
         </div>
       </header>
 
+      {/* ── AI briefing ────────────────────────────────────────────────────── */}
+      {dashboardStats && (
+        <div className="flex-shrink-0 px-4 pt-3 pb-2" style={{ borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-shell)' }}>
+          <div className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            {briefingGreeting} {firstName}.{' '}
+            <span className="font-normal" style={{ color: 'var(--text-secondary)' }}>
+              Today: {dashboardStats.attention_count} job{dashboardStats.attention_count === 1 ? '' : 's'} requiring attention
+              {dashboardStats.pipeline_value > 0 && (
+                <> · {dashboardStats.pipeline_value >= 1000 ? `$${Math.round(dashboardStats.pipeline_value / 1000)}k` : `$${dashboardStats.pipeline_value.toLocaleString('en-AU')}`} pipeline</>
+              )}
+              {dashboardStats.overdue_invoices > 0 && (
+                <> · {dashboardStats.overdue_invoices} overdue invoice{dashboardStats.overdue_invoices === 1 ? '' : 's'}</>
+              )}
+              {dashboardStats.revenue_due_this_week > 0 && (
+                <> · ${dashboardStats.revenue_due_this_week.toLocaleString('en-AU')} due this week</>
+              )}
+            </span>
+          </div>
+          {topFeedItem && (
+            <p className="text-[12.5px] mt-1.5 leading-relaxed" style={{ color: 'var(--text-tertiary)' }}>
+              {topFeedItem.ai_reasoning}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* ── Stats bar ──────────────────────────────────────────────────────── */}
       {dashboardStats && (
         <div
@@ -1479,6 +1545,58 @@ export default function ChatInterface({
               <span className="text-[10px] mt-1 uppercase tracking-wide leading-none" style={{ color: 'var(--text-tertiary)' }}>{stat.label}</span>
             </button>
           ))}
+        </div>
+      )}
+
+      {/* ── AI inbox feed — jobs bucketed by what they need right now ───────── */}
+      {feedByBucket.length > 0 && (
+        <div className="flex-shrink-0" style={{ borderBottom: '0.5px solid var(--bg-border)', backgroundColor: 'var(--bg-shell)' }}>
+          <button
+            type="button"
+            onClick={() => setFeedCollapsed(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-2 transition-colors"
+            style={{ backgroundColor: 'transparent' }}
+          >
+            <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
+              AI Inbox &middot; {dashboardFeed.length} job{dashboardFeed.length === 1 ? '' : 's'}
+            </span>
+            <svg
+              width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true"
+              style={{ color: 'var(--text-tertiary)', transform: feedCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <AnimatePresence initial={false}>
+            {!feedCollapsed && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.18 }}
+                style={{ overflow: 'hidden' }}
+              >
+                <div className="px-4 pb-3" style={{ maxHeight: 340, overflowY: 'auto' }}>
+                  {feedByBucket.map(group => (
+                    <div key={group.bucket} style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: 6 }}>
+                        {BUCKET_LABEL[group.bucket]}
+                      </div>
+                      {group.items.map((item: JobFeedCardItem) => (
+                        <JobCard
+                          key={item.job_id}
+                          item={item}
+                          onOpen={handleFeedOpen}
+                          onPrimaryAction={handleFeedPrimaryAction}
+                          onSecondaryAction={(i: JobFeedCardItem) => handleFeedOpen(i.job_id)}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
 
@@ -1815,57 +1933,16 @@ export default function ChatInterface({
         })()
         )}
 
-        <form onSubmit={handleSubmit} className="flex items-end gap-2">
-          <label htmlFor="chat-input" className="sr-only">
-            Type a message
-          </label>
-          {/* Mic button */}
-          <button
-            type="button"
-            onClick={toggleVoice}
-            disabled={loading}
-            aria-label={isListening ? 'Stop recording' : 'Start voice input'}
-            className={`flex-shrink-0 w-10 h-10 rounded-[6px] flex items-center justify-center transition-colors disabled:opacity-40${isListening ? ' animate-pulse' : ''}`}
-            style={isListening ? {
-              backgroundColor: 'rgba(244,67,54,0.15)',
-              color: 'var(--status-red)',
-            } : {
-              backgroundColor: 'var(--bg-elevated)',
-              border: '0.5px solid var(--bg-border)',
-              color: 'var(--text-tertiary)',
-            }}
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
-            </svg>
-          </button>
-          <textarea
-            ref={inputRef}
-            id="chat-input"
-            value={input}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-            placeholder={isListening ? 'Listening…' : 'Reply to WorkA…'}
-            rows={1}
-            disabled={loading}
-            className="flex-1 resize-none rounded-[6px] px-3 py-2 text-[13px] focus:outline-none transition-colors disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed overflow-hidden"
-            style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)', color: 'var(--text-primary)', outlineColor: 'var(--orange-primary)', minHeight: '40px', maxHeight: '120px' }}
-          />
-          <button
-            type="submit"
-            disabled={loading || !input.trim()}
-            className="flex-shrink-0 text-white text-[12px] font-semibold px-3 py-1.5 rounded-[4px] min-h-[40px] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            style={{ backgroundColor: 'var(--orange-primary)' }}
-            aria-label="Send message"
-          >
-            Send
-          </button>
-        </form>
-        <p className="mt-1.5 text-xs hidden sm:block" style={{ color: 'var(--text-tertiary)' }}>
-          Press <kbd className="font-mono text-xs rounded px-1" style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>Enter</kbd> to send
-          &nbsp;&middot;&nbsp;
-          <kbd className="font-mono text-xs rounded px-1" style={{ backgroundColor: 'var(--bg-elevated)', border: '0.5px solid var(--bg-border)' }}>Shift+Enter</kbd> for new line
-        </p>
+        <ChatInput
+          value={input}
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          onSubmit={handleSubmit}
+          inputRef={inputRef}
+          loading={loading}
+          isListening={isListening}
+          onToggleVoice={toggleVoice}
+        />
       </div>
     </div>
   )
