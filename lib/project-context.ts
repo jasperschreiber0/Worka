@@ -190,7 +190,12 @@ async function executeFactQuery(sb: SupabaseClient, jobId: string, spec: FactQue
   query = query.order(spec.orderBy, { ascending: false }).limit(spec.limit)
 
   const { data } = await query
-  return (data ?? []) as FactRow[]
+  // `columns` is a runtime string, not a literal, so postgrest-js's
+  // template-literal-parsed return type can't be statically inferred here
+  // (it resolves to a ParserError type instead of a real row shape) —
+  // going through `unknown` first is the correct, minimal fix (and what
+  // the compiler itself suggests), not a sign the query is wrong.
+  return (data ?? []) as unknown as FactRow[]
 }
 
 // ─── Pure assembly (testable without a live database) ──────────────────────
