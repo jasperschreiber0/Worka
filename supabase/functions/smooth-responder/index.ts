@@ -35,7 +35,7 @@
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { splitIntoBatches, mergeFacts, type BatchableFile, type FactRow } from './pipeline-logic.ts'
-import { extractPdfTextBounded, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
+import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -169,10 +169,22 @@ interface LoadedFile {
   rawPdfBytes?: Uint8Array
 }
 
+// Supabase meters CPU time per REQUEST (2000ms), not per file — every
+// loadFileAsBlock call in one runPipeline invocation draws from the SAME
+// budget for its text-extraction attempt. This tracks cumulative spend
+// across the whole run so a later file can be gated off once earlier
+// files have already used up the self-imposed budget, even if no single
+// file looks individually dangerous. See gateTextExtraction in
+// pipeline-logic.ts for the incident this exists to prevent a repeat of.
+interface ExtractionBudget {
+  spentMs: number
+}
+
 async function loadFileAsBlock(
   supabase: SupabaseClient,
   fileId: string,
-  builderId: string
+  builderId: string,
+  budget: ExtractionBudget
 ): Promise<LoadedFile | null> {
   const { data: fileRow } = await supabase
     .from('files')
@@ -212,21 +224,47 @@ async function loadFileAsBlock(
     // with any usable text attached as a numeric-accuracy supplement —
     // this is the same rationale lib/pdf-text.ts has always used for the
     // Next.js-side pipeline, applied here with a Deno-portable extractor.
-    // Bounded (size + timeout), not a plain extractPdfText call: parsing a
-    // large or font-complex PDF is genuine CPU work, and Supabase Edge
-    // Functions enforce a CPU-time budget separate from wall-clock — a
-    // large CAD-exported drawing set blew through it and killed the
-    // invocation outright (see extractPdfTextBounded's comment).
-    const { text: extractedText, skippedReason } = await extractPdfTextBounded(base64, buffer.byteLength)
-    if (skippedReason) {
-      console.log(JSON.stringify({ document: fileRow.filename, status: 'text_extraction_skipped', reason: skippedReason }))
+    //
+    // Gated, not a plain extractPdfText call: parsing a PDF is genuine
+    // CPU-bound work, metered per REQUEST by Supabase (2000ms/invocation),
+    // not per file — see extractPdfTextGated's comment for the incident
+    // (a ~290KB file, not a large one) this replaced a byte-size-only gate
+    // to actually prevent. Page count is cheap here (pdf-lib doesn't
+    // interpret font programs, just the object graph) and is an
+    // independent-but-still-weak signal alongside byte size.
+    const rawBytes = new Uint8Array(buffer)
+    let pageCount: number | null = null
+    try {
+      pageCount = await getPdfPageCount(rawBytes)
+    } catch {
+      pageCount = null // best-effort — a failed page-count read never blocks the gate on its own
     }
+
+    console.log(JSON.stringify({
+      document: fileRow.filename, status: 'extraction_start',
+      byteLength: buffer.byteLength, pageCount, cumulativeSpentMs: budget.spentMs,
+    }))
+    const { text: extractedText, skippedReason, durationMs } = await extractPdfTextGated(
+      base64, buffer.byteLength, pageCount, budget.spentMs
+    )
+    budget.spentMs += durationMs
+    console.log(JSON.stringify({
+      document: fileRow.filename, status: skippedReason ? 'extraction_skipped' : 'extraction_complete',
+      durationMs, cumulativeSpentMs: budget.spentMs,
+      reason: skippedReason ?? undefined, textLength: extractedText.length,
+    }))
+
     if (isTextDense(extractedText)) {
       block = buildTextOnlyBlock(fileRow.filename, extractedText)
+      console.log(JSON.stringify({ document: fileRow.filename, status: 'fallback_decision', decision: 'text_only' }))
     } else {
       const visionBlock: DocBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
       block = hasUsableText(extractedText) ? [visionBlock, buildTextLayerBlock(extractedText)] : visionBlock
-      rawPdfBytes = new Uint8Array(buffer)
+      rawPdfBytes = rawBytes
+      console.log(JSON.stringify({
+        document: fileRow.filename, status: 'fallback_decision',
+        decision: hasUsableText(extractedText) ? 'vision_plus_text_supplement' : 'vision_only',
+      }))
     }
   } else {
     block = { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } }
@@ -480,8 +518,21 @@ interface RunArgs {
 async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: Anthropic) {
   const { fileId, jobId, builderId, siblingFileIds, resume } = args
 
+  // Touches job_intake_locks.last_progress_at alongside the files row on
+  // every real stage boundary — lets the Next.js lock-staleness check
+  // (app/api/intake/[fileId]/route.ts) reclaim an abandoned lock based on
+  // "no progress observed recently" instead of only a fixed, much longer
+  // age-since-acquired window. Best-effort: a failed touch here should
+  // never block a stage transition from being recorded.
+  const touchLockProgress = async () => {
+    try {
+      await supabase.from('job_intake_locks').update({ last_progress_at: new Date().toISOString() }).eq('job_id', jobId)
+    } catch { /* best-effort */ }
+  }
+
   const setStage = async (stage: string) => {
     await supabase.from('files').update({ intake_stage: stage, pipeline_stage: stage, intake_pct: STAGES[stage] ?? 0 }).eq('id', fileId)
+    await touchLockProgress()
   }
 
   const fail = async (reason: string) => {
@@ -544,7 +595,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     const skippedSiblings: string[] = []
     const failedToLoadSiblings: string[] = []
     if (!resume) {
-      const primary = await loadFileAsBlock(supabase, fileId, builderId)
+      // Shared across every loadFileAsBlock call in this run — see
+      // ExtractionBudget's comment above.
+      const extractionBudget: ExtractionBudget = { spentMs: 0 }
+
+      const primary = await loadFileAsBlock(supabase, fileId, builderId, extractionBudget)
       if (!primary) { await fail('File record or storage object not found'); return }
 
       // Sane upper bound on how many documents one run will even attempt —
@@ -561,7 +616,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const loadedSiblings: LoadedFile[] = []
       for (const sibId of consideredSiblingIds) {
         const loadStartedAt = Date.now()
-        const loaded = await loadFileAsBlock(supabase, sibId, builderId)
+        const loaded = await loadFileAsBlock(supabase, sibId, builderId, extractionBudget)
         if (loaded) {
           loadedSiblings.push(loaded)
           console.log(JSON.stringify({ document: loaded.filename, status: 'loaded', durationMs: Date.now() - loadStartedAt }))
@@ -674,6 +729,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           .filter((f): f is LoadedFile => Boolean(f))
 
         await supabase.from('files').update({ intake_batch_index: batchIdx + 1 }).eq('id', fileId)
+        await touchLockProgress()
         await setStage('classifying_documents')
 
         // Prior facts, so extraction of a newly-uploaded document isn't blind
@@ -720,18 +776,34 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // 16000 for this same model/API rather than guessing at another cap.
           docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000)
         } catch (err) {
+          // A single batch's Claude call failing (a transient API error, a
+          // truncated/malformed response) used to abort the ENTIRE run via
+          // fail()+return — losing every fact already extracted by earlier,
+          // successful batches. This is a genuinely catchable, in-band
+          // failure (unlike the CPU-governor kill this pipeline separately
+          // guards against above, which no catch block can intercept) — so
+          // it should cost this batch's files, not the whole run. The
+          // batch's files are recorded as failed and surfaced to the
+          // builder exactly like a failed-to-load sibling; remaining
+          // batches still get a chance to run.
           console.log(JSON.stringify({
             batch: batchIdx + 1, totalBatches: fileBatches.length,
             documents: batchFiles.map((f) => f.filename), status: 'failed',
             durationMs: Date.now() - batchStartedAt,
             error: err instanceof Error ? err.message : String(err),
           }))
-          await fail(`Document intelligence call failed on batch ${batchIdx + 1} of ${fileBatches.length}: ${err instanceof Error ? err.message : String(err)}`)
-          return
+          failedToLoadSiblings.push(...batchFiles.map((f) => f.filename))
+          continue
         }
         if (!docResult) {
-          await fail(`No structured response from document intelligence stage on batch ${batchIdx + 1} of ${fileBatches.length}`)
-          return
+          console.log(JSON.stringify({
+            batch: batchIdx + 1, totalBatches: fileBatches.length,
+            documents: batchFiles.map((f) => f.filename), status: 'failed',
+            durationMs: Date.now() - batchStartedAt,
+            error: 'no structured response from document intelligence stage',
+          }))
+          failedToLoadSiblings.push(...batchFiles.map((f) => f.filename))
+          continue
         }
 
         // Structured observability log — real per-batch duration and token
@@ -829,6 +901,15 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           ]
         }
       }
+
+      // Re-persist: a batch failure inside the loop above (Claude API error,
+      // malformed response) can add to failedToLoadSiblings well after the
+      // earlier write right after the sibling-loading loop — without this,
+      // a later-stage failure or timeout would only ever surface storage
+      // load failures, not batch-classification failures, to the builder.
+      if (failedToLoadSiblings.length > 0) {
+        await supabase.from('files').update({ failed_sibling_filenames: failedToLoadSiblings }).eq('id', fileId)
+      }
     }
 
     if (facts.length === 0) {
@@ -837,7 +918,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         notes.push(`excluded, combined size over the 20MB analysis limit: ${skippedSiblings.join(', ')}`)
       }
       if (failedToLoadSiblings.length > 0) {
-        notes.push(`failed to load from storage: ${failedToLoadSiblings.join(', ')}`)
+        notes.push(`failed to load or process: ${failedToLoadSiblings.join(', ')}`)
       }
       const note = notes.length > 0 ? ` (${notes.join('; ')} — re-upload separately or split into a smaller batch)` : ''
       await fail(`No project facts could be established from the provided documents${note}`)

@@ -75,6 +75,29 @@ function delay(ms: number): Promise<void> {
 // second run. A lock older than the engine's own overall timeout is treated
 // as abandoned (a run that was killed before its finally block could release
 // it) and can be taken over rather than blocking the job forever.
+//
+// Two independent staleness checks, not one:
+//   - LOCK_NO_PROGRESS_STALE_MS: the primary, much faster check. Supabase's
+//     CPU-time governor kill (the actual cause of an abandoned lock in the
+//     incident this was built for) is an external, uncatchable kill that can
+//     happen almost immediately — well under a minute in — so a dead run's
+//     lock is dead almost immediately too, not "eventually stuck." Comparing
+//     against job_intake_locks.last_progress_at (migration 033, touched by
+//     the engine at every real stage/batch boundary) reclaims it far sooner
+//     than a fixed age check ever could. Deliberately set ABOVE the SSE
+//     poller's own STUCK_TIMEOUT_MS (5 min, below) rather than close to it:
+//     if a different upload session raced in and reclaimed the lock while
+//     THIS run's own SSE connection hadn't yet given up watching it, two
+//     concurrent runs for the same job would follow — exactly the race
+//     migration 030 exists to prevent. Waiting a bit past the client's own
+//     give-up point means the builder will already see "timed out" and be
+//     retrying deliberately before the lock ever becomes reclaimable.
+//   - LOCK_STALE_MS: an absolute backstop for the case last_progress_at
+//     itself never advances for some other reason (e.g. the update call
+//     silently failing) — increasing this further doesn't fix a CPU-time
+//     kill, it only makes builders wait longer to recover from one; see
+//     LOCK_NO_PROGRESS_STALE_MS above for the check that actually matters.
+const LOCK_NO_PROGRESS_STALE_MS = 6 * 60_000
 const LOCK_STALE_MS = 16 * 60_000
 
 type LockResult = 'acquired' | 'locked'
@@ -108,12 +131,18 @@ async function tryAcquireJobLock(
   // Someone holds it — check whether that lock is stale (the run that took
   // it was killed before releasing).
   const getRes = await fetch(
-    `${supabaseUrl}/rest/v1/job_intake_locks?job_id=eq.${encodeURIComponent(jobId)}&select=started_at`,
+    `${supabaseUrl}/rest/v1/job_intake_locks?job_id=eq.${encodeURIComponent(jobId)}&select=started_at,last_progress_at`,
     { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
   )
-  const rows = getRes.ok ? (await getRes.json() as Array<{ started_at: string }>) : []
+  const rows = getRes.ok ? (await getRes.json() as Array<{ started_at: string; last_progress_at: string | null }>) : []
   const startedAt = rows[0]?.started_at ? new Date(rows[0].started_at).getTime() : 0
-  if (startedAt === 0 || Date.now() - startedAt <= LOCK_STALE_MS) {
+  const lastProgressAt = rows[0]?.last_progress_at ? new Date(rows[0].last_progress_at).getTime() : startedAt
+  if (startedAt === 0) {
+    return 'locked'
+  }
+  const staleByProgress = Date.now() - lastProgressAt > LOCK_NO_PROGRESS_STALE_MS
+  const staleByAge = Date.now() - startedAt > LOCK_STALE_MS
+  if (!staleByProgress && !staleByAge) {
     return 'locked'
   }
 

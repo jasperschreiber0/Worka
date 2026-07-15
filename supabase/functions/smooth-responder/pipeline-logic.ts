@@ -160,6 +160,75 @@ export function mergeFacts(
   }
 }
 
+// ─── Text-extraction gating (per-invocation CPU budget control) ───────────
+//
+// Supabase Edge Functions cap CPU time at 2000ms PER REQUEST — the whole
+// invocation, not per file and not per batch (see Supabase's own CPU-limits
+// docs). A production incident showed runPipeline blowing through that
+// ceiling while extracting the text layer of the 5th of 7 uploaded PDFs
+// ("Kitchen Elevation.pdf", ~290KB raw — nowhere near "large"), logging
+// pdf.js's "TT: undefined function" warning (an embedded TrueType font
+// program it struggles to interpret) immediately before Supabase killed the
+// isolate outright ("CPU Time exceeded"). That kill is external and
+// uncatchable — no JS catch/finally runs — which is why the job lock leaked
+// until its own staleness timeout, then retried the identical crash forever.
+//
+// A byte-size cutoff alone cannot explain or prevent this: Kitchen
+// Elevation.pdf is small. The real risk is CUMULATIVE — text extraction is
+// synchronous, CPU-bound work, and every file's extraction in one run draws
+// from the SAME shared 2-second budget alongside everything else the
+// invocation does (base64 (de)serialization, Supabase/Anthropic client
+// response handling, logging). Four files' worth of extraction, even if
+// each is individually unremarkable, can leave too little headroom for a
+// fifth. gateTextExtraction is checked before every extraction attempt,
+// against both weak per-file heuristics (byte size, page count — kept as a
+// floor for genuinely oversized documents, not because they reliably
+// predict cost) and a deliberately conservative run-wide budget that the
+// caller (index.ts) tracks across the whole invocation. Pure and
+// unit-tested for the same reason shouldGiveUp is: no Deno runtime required.
+
+export interface ExtractionLimits {
+  maxBytes: number
+  maxPages: number
+  maxCumulativeMs: number
+}
+
+export const DEFAULT_EXTRACTION_LIMITS: ExtractionLimits = {
+  maxBytes: 4 * 1024 * 1024,
+  maxPages: 15,
+  // Well under Supabase's real 2000ms/request CPU ceiling — leaves
+  // headroom for everything else the invocation spends the same budget on.
+  // Deliberately conservative; tune from the extraction_start/
+  // extraction_end structured logs this fix adds once real production
+  // durations are available, rather than guessing further.
+  maxCumulativeMs: 900,
+}
+
+export interface ExtractionGateResult {
+  skip: boolean
+  reason: string | null
+}
+
+export function gateTextExtraction(
+  byteLength: number,
+  pageCount: number | null,
+  cumulativeSpentMs: number,
+  limits: ExtractionLimits = DEFAULT_EXTRACTION_LIMITS,
+): ExtractionGateResult {
+  // Checked first: once the run has already spent its self-imposed budget,
+  // no per-file size/page signal matters — nothing else gets attempted.
+  if (cumulativeSpentMs >= limits.maxCumulativeMs) {
+    return { skip: true, reason: `run-wide extraction budget (${limits.maxCumulativeMs}ms) already spent by earlier files this run` }
+  }
+  if (byteLength > limits.maxBytes) {
+    return { skip: true, reason: `over ${Math.round(limits.maxBytes / (1024 * 1024))}MB raw` }
+  }
+  if (pageCount !== null && pageCount > limits.maxPages) {
+    return { skip: true, reason: `over ${limits.maxPages} pages (${pageCount} pages)` }
+  }
+  return { skip: false, reason: null }
+}
+
 // ─── Timeout decision ──────────────────────────────────────────────────────
 //
 // Pure wall-clock-since-start was the only signal the Next.js poller used

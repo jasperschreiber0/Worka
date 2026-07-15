@@ -5,6 +5,8 @@ import {
   mergeFacts,
   cosineSimilarity,
   shouldGiveUp,
+  gateTextExtraction,
+  DEFAULT_EXTRACTION_LIMITS,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -141,4 +143,49 @@ test('shouldGiveUp: true once the overall ceiling is exceeded, even with recent 
 test('shouldGiveUp: true if stuck (no progress) even well within the overall ceiling', () => {
   const now = 1_000_000
   assert.equal(shouldGiveUp(now, now - 5 * 60_000, now - 4 * 60_000, 15 * 60_000, 3 * 60_000), true)
+})
+
+// ─── gateTextExtraction ─────────────────────────────────────────────────────
+// Regression coverage for the incident this exists to prevent a repeat of:
+// a byte-size-only gate cannot catch a small-but-expensive file (the crash
+// logs named "Kitchen Elevation.pdf", ~290KB raw), and cumulative spend
+// across a run must independently gate later files even when each one
+// individually looks fine.
+
+test('gateTextExtraction: a small, early file with no prior spend is allowed', () => {
+  const result = gateTextExtraction(300 * 1024, 3, 0)
+  assert.equal(result.skip, false)
+})
+
+test('gateTextExtraction: a small file is still skipped once the run-wide budget is already spent — the Kitchen Elevation.pdf scenario', () => {
+  // ~290KB, well under maxBytes — a byte-size-only gate would wrongly allow
+  // this. Simulates arriving as the 5th file after earlier files in the same
+  // invocation already spent the self-imposed budget.
+  const result = gateTextExtraction(290 * 1024, 3, DEFAULT_EXTRACTION_LIMITS.maxCumulativeMs)
+  assert.equal(result.skip, true)
+  assert.match(result.reason ?? '', /run-wide extraction budget/)
+})
+
+test('gateTextExtraction: a file over the byte-size ceiling is skipped even with no prior spend', () => {
+  const result = gateTextExtraction(13.3 * 1024 * 1024, 10, 0)
+  assert.equal(result.skip, true)
+  assert.match(result.reason ?? '', /MB raw/)
+})
+
+test('gateTextExtraction: a file over the page-count ceiling is skipped even when small and byte-size is fine', () => {
+  const result = gateTextExtraction(500 * 1024, 40, 0)
+  assert.equal(result.skip, true)
+  assert.match(result.reason ?? '', /pages/)
+})
+
+test('gateTextExtraction: an unknown page count (cheap pre-check failed) never blocks on its own', () => {
+  const result = gateTextExtraction(500 * 1024, null, 0)
+  assert.equal(result.skip, false)
+})
+
+test('gateTextExtraction: cumulative spend right at the ceiling is treated as exhausted, not right under it', () => {
+  const atCeiling = gateTextExtraction(500 * 1024, 3, DEFAULT_EXTRACTION_LIMITS.maxCumulativeMs)
+  const justUnder = gateTextExtraction(500 * 1024, 3, DEFAULT_EXTRACTION_LIMITS.maxCumulativeMs - 1)
+  assert.equal(atCeiling.skip, true)
+  assert.equal(justUnder.skip, false)
 })

@@ -14,6 +14,8 @@
 // far more expensive vision encoding entirely, while a text-sparse PDF
 // (an actual drawing) still gets the full vision treatment.
 
+import { gateTextExtraction } from './pipeline-logic.ts'
+
 const MAX_TEXT_CHARS = 40_000
 
 function base64ToBytes(base64: string): Uint8Array {
@@ -42,32 +44,52 @@ export async function extractPdfText(base64: string): Promise<string> {
   }
 }
 
-// PDF parsing (decompression, font-program interpretation for glyph→text
-// mapping) is genuine CPU work, not I/O wait — a large or structurally
-// complex PDF (a full CAD/Revit-exported drawing set, especially one with
-// embedded/subsetted TrueType fonts) can burn real CPU time extracting a
-// text layer that likely wasn't going to be text-dense anyway. Supabase
-// Edge Functions enforce a CPU-time budget per invocation, separate from
-// wall-clock time, and a CPU-time kill is abrupt — no catch/finally runs,
-// so the job lock is never released and the run just retries identically
-// once the lock goes stale, forever. Two independent guards:
-//   1. Skip extraction entirely above a raw byte-size threshold — these are
-//      also the documents least likely to be text-dense, so the vision
-//      read was the right call anyway.
-//   2. A wall-clock timeout as a second backstop, in case a small file
-//      still turns out to be pathologically expensive to parse.
-const MAX_EXTRACTABLE_BYTES = 4 * 1024 * 1024
-const EXTRACTION_TIMEOUT_MS = 5_000
+// A previous version of this function raced extractPdfText against a 5s
+// `setTimeout` via Promise.race, on top of a flat "skip above 4MB raw"
+// gate. Both assumptions turned out to be wrong given what actually
+// crashed in production (see gateTextExtraction in pipeline-logic.ts for
+// the full incident writeup) and are worth naming explicitly so they don't
+// get reintroduced:
+//   1. Byte size doesn't reliably predict parse cost. The file the crash
+//      logs actually named, Kitchen Elevation.pdf, was ~290KB — nowhere
+//      near a 4MB cutoff.
+//   2. A same-thread Promise.race cannot preempt synchronous CPU-bound
+//      work. JS is single-threaded: a `setTimeout` callback only runs once
+//      the call stack is empty, but a pathological synchronous parse (the
+//      "TT: undefined function" warning is pdf.js's font interpreter
+//      spinning on a malformed/unsupported embedded TrueType program)
+//      blocks that same thread until it's done. Worse, it's moot even in
+//      principle: Supabase's own CPU governor kills the isolate at 2000ms
+//      of actual CPU execution per request, and that kill is external and
+//      uncatchable — no JS timeout gets a chance to fire first, and no
+//      catch/finally runs after it.
+//
+// The only real defense against an uncatchable, external kill is not
+// starting the risky work in the first place. extractPdfTextGated checks
+// gateTextExtraction (byte size + cheap page count + how much of a
+// deliberately conservative RUN-WIDE budget earlier files already spent —
+// CPU time is metered per invocation, not per file) before ever calling
+// extractPdfText, and reports real elapsed time back to the caller so it
+// can keep that running total accurate across every file in the run.
+export interface GatedExtractionResult {
+  text: string
+  skippedReason: string | null
+  durationMs: number
+}
 
-export async function extractPdfTextBounded(base64: string, rawByteLength: number): Promise<{ text: string; skippedReason?: string }> {
-  if (rawByteLength > MAX_EXTRACTABLE_BYTES) {
-    return { text: '', skippedReason: `over ${Math.round(MAX_EXTRACTABLE_BYTES / (1024 * 1024))}MB, extraction skipped to avoid CPU-time risk` }
+export async function extractPdfTextGated(
+  base64: string,
+  rawByteLength: number,
+  pageCount: number | null,
+  cumulativeSpentMs: number,
+): Promise<GatedExtractionResult> {
+  const gate = gateTextExtraction(rawByteLength, pageCount, cumulativeSpentMs)
+  if (gate.skip) {
+    return { text: '', skippedReason: gate.reason, durationMs: 0 }
   }
-  const timeout = new Promise<{ text: string; skippedReason?: string }>((resolve) =>
-    setTimeout(() => resolve({ text: '', skippedReason: `extraction exceeded ${EXTRACTION_TIMEOUT_MS}ms` }), EXTRACTION_TIMEOUT_MS)
-  )
-  const attempt = extractPdfText(base64).then((text) => ({ text }))
-  return Promise.race([attempt, timeout])
+  const startedAt = Date.now()
+  const text = await extractPdfText(base64)
+  return { text, skippedReason: null, durationMs: Date.now() - startedAt }
 }
 
 /**
