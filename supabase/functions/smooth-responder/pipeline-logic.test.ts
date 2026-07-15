@@ -326,6 +326,35 @@ test('selectFactsForPrompt: default cap matches MAX_FACTS_IN_PROMPT', () => {
   assert.equal(selectFactsForPrompt(facts).length, MAX_FACTS_IN_PROMPT)
 })
 
+// Direct coverage of idTiebreak itself — the prior tests only exercise
+// confidence breaking a relevance tie, never two facts tied on BOTH
+// relevance and confidence, which is the actual case idTiebreak exists
+// for (flagged as an untested code path in the hardening-pass review).
+test('selectFactsForPrompt: facts tied on both relevance and confidence resolve by ascending id, deterministically', () => {
+  const facts = [
+    fact({ category: 'finishes', key: 'b', value: '2', confidence: 90, id: 'zzz' }),
+    fact({ category: 'finishes', key: 'a', value: '1', confidence: 90, id: 'aaa' }),
+  ]
+  const result = selectFactsForPrompt(facts, 1, new Set(['finishes']))
+  assert.deepEqual(result.map((f) => f.id), ['aaa'], 'the lower id should win the tie')
+
+  // Same input, called repeatedly (simulating rows arriving in a different
+  // order across executions) — the outcome must not depend on input order.
+  const reordered = [facts[1], facts[0]]
+  assert.deepEqual(
+    selectFactsForPrompt(reordered, 1, new Set(['finishes'])).map((f) => f.id),
+    ['aaa'],
+  )
+})
+
+test('selectFactsForPrompt: a fact with no id sorts after one with an id, when otherwise tied', () => {
+  const facts = [
+    fact({ category: 'rooms', key: 'a', value: '1', confidence: 90 }), // no id
+    fact({ category: 'rooms', key: 'b', value: '2', confidence: 90, id: 'has-id' }),
+  ]
+  assert.deepEqual(selectFactsForPrompt(facts, 1).map((f) => f.id), ['has-id'])
+})
+
 // ─── inferRelevantCategories ────────────────────────────────────────────────
 
 test('inferRelevantCategories: matches a known trade keyword', () => {
@@ -372,4 +401,41 @@ test('pairSupersededFacts: respects maxChanges', () => {
   const active: FactRow[] = Array.from({ length: 5 }, (_, i) => fact({ category: 'rooms', key: `k${i}`, value: 'new', confidence: 90 }))
   const superseded: FactRow[] = Array.from({ length: 5 }, (_, i) => fact({ category: 'rooms', key: `k${i}`, value: 'old', confidence: 70 }))
   assert.equal(pairSupersededFacts(active, superseded, SEMANTIC_DUPLICATE_THRESHOLD, 2).length, 2)
+})
+
+// Genuine 3-generation chain (v1 -> v2 -> v3, only v3 active) — the exact
+// scenario the architecture review flagged as having zero direct test
+// coverage. supersededFacts here is ordered most-recently-superseded
+// first (v2 before v1), matching the hard precondition documented on
+// pairSupersededFacts and on buildSupersededFactsQuerySpec in
+// lib/project-context.ts (ORDER BY created_at DESC).
+test('pairSupersededFacts: a v1->v2->v3 chain collapses to one change (v2->v3), not two', () => {
+  const active: FactRow[] = [fact({ category: 'rooms', key: 'floor_area_m2', value: '150', confidence: 95 })] // v3
+  const superseded: FactRow[] = [
+    fact({ category: 'rooms', key: 'floor_area_m2', value: '135', confidence: 85 }), // v2 (most recently superseded)
+    fact({ category: 'rooms', key: 'floor_area_m2', value: '120', confidence: 75 }), // v1 (oldest)
+  ]
+  const changes = pairSupersededFacts(active, superseded)
+  assert.equal(changes.length, 1, 'only one change should be reported, not one per historical version')
+  assert.deepEqual(changes[0], { category: 'rooms', key: 'floor_area_m2', oldValue: '135', newValue: '150' })
+  // v1 (120) must not appear anywhere in the output — this is the
+  // documented, schema-forced limitation: the full lineage isn't
+  // reconstructable without a superseded_by_id column, so the oldest
+  // generation is dropped entirely rather than shown as a second change.
+  assert.ok(!changes.some((c) => c.oldValue === '120'))
+})
+
+test('pairSupersededFacts: chain collapsing is order-dependent on its documented precondition (most-recent-first)', () => {
+  const active: FactRow[] = [fact({ category: 'rooms', key: 'floor_area_m2', value: '150', confidence: 95 })]
+  // Deliberately passed oldest-first (v1 before v2) — violates the
+  // documented precondition. This test exists to make that dependency
+  // explicit: the function has no way to detect the violation, it just
+  // silently reports the wrong predecessor (v1, not v2) as "most recent".
+  const oldestFirst: FactRow[] = [
+    fact({ category: 'rooms', key: 'floor_area_m2', value: '120', confidence: 75 }), // v1
+    fact({ category: 'rooms', key: 'floor_area_m2', value: '135', confidence: 85 }), // v2
+  ]
+  const changes = pairSupersededFacts(active, oldestFirst)
+  assert.equal(changes.length, 1)
+  assert.equal(changes[0].oldValue, '120', 'with the precondition violated, the function reports v1 as if it were the most recent predecessor')
 })

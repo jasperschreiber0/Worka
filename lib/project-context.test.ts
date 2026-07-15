@@ -141,6 +141,34 @@ test('assembleProjectContext: missingInformation and scope pass through from raw
   assert.deepEqual(ctx.scope, [{ tradeCategoryId: 3, included: ['roof'], excluded: [], assumptions: ['standard tiles'] }])
 })
 
+test('assembleProjectContext: relevant_facts_fetched/limit_reached are null/false when no partitioning happened', () => {
+  const active: ActiveFactRow[] = [activeFact({ category: 'rooms', key: 'a', value: '1', confidence: 90, id: 'f1' })]
+  const ctx = assembleProjectContext(active, [], [], [], [], new Set(), { activeFactCount: 1, supersededFactCount: 0 }, { retrievalDurationMs: 1 })
+  assert.equal(ctx.retrieval.relevant_facts_fetched, null)
+  assert.equal(ctx.retrieval.relevant_facts_limit_reached, false)
+})
+
+test('assembleProjectContext: relevant_facts_limit_reached is false when the relevant partition fetched fewer rows than its limit', () => {
+  const active: ActiveFactRow[] = [activeFact({ category: 'finishes', key: 'a', value: '1', confidence: 90, id: 'f1' })]
+  const ctx = assembleProjectContext(
+    active, [], [], [], [], new Set(['finishes']),
+    { activeFactCount: 1, supersededFactCount: 0, relevantFactsFetched: 5, relevantFactsLimit: 200 },
+    { retrievalDurationMs: 1 },
+  )
+  assert.equal(ctx.retrieval.relevant_facts_fetched, 5)
+  assert.equal(ctx.retrieval.relevant_facts_limit_reached, false)
+})
+
+test('assembleProjectContext: relevant_facts_limit_reached is true when the relevant partition fetch hit its own reserved limit — the exact gap the review flagged (aggregated metrics alone cannot distinguish this from harmless fallback-partition truncation)', () => {
+  const active: ActiveFactRow[] = [activeFact({ category: 'finishes', key: 'a', value: '1', confidence: 90, id: 'f1' })]
+  const ctx = assembleProjectContext(
+    active, [], [], [], [], new Set(['finishes']),
+    { activeFactCount: 1, supersededFactCount: 0, relevantFactsFetched: 200, relevantFactsLimit: 200 },
+    { retrievalDurationMs: 1 },
+  )
+  assert.equal(ctx.retrieval.relevant_facts_limit_reached, true)
+})
+
 test('assembleProjectContext: pairs superseded facts against active replacements and reports the count', () => {
   const active: ActiveFactRow[] = [activeFact({ category: 'rooms', key: 'floor_area_m2', value: '135', confidence: 90, id: 'a1' })]
   const superseded: FactRow[] = [supersededFact({ category: 'rooms', key: 'floor_area_m2', value: '120', confidence: 80 })]

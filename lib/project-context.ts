@@ -109,6 +109,19 @@ export interface RetrievalMetrics {
   relevance_changed_selection: boolean
   retrieval_duration_ms: number
   pairing_duration_ms: number
+  // Per-partition breakdown — null when retrieval_strategy is
+  // 'confidence_only' (no partitioning happened). active_facts_fetched
+  // above is aggregated across BOTH partitions, which can't tell an
+  // operator whether truncation happened in the relevant-category
+  // partition (the failure mode that actually matters — see
+  // RELEVANT_FACTS_FETCH_LIMIT's comment) or the harmless fallback
+  // partition. relevant_facts_limit_reached is a heuristic ("fetched
+  // count equals the reserved limit"), not a certainty — the category
+  // could have exactly that many facts and nothing was actually lost —
+  // but it's the cheap signal available without an extra count query per
+  // partition.
+  relevant_facts_fetched: number | null
+  relevant_facts_limit_reached: boolean
 }
 
 export interface ProjectContext {
@@ -207,7 +220,12 @@ export function assembleProjectContext(
   questionRows: Array<{ question: string; reason: string }>,
   docs: Array<{ id: string; drawing_title: string | null; document_type: string | null }>,
   relevantCategories: Set<string>,
-  counts: { activeFactCount: number; supersededFactCount: number },
+  counts: {
+    activeFactCount: number
+    supersededFactCount: number
+    relevantFactsFetched?: number | null
+    relevantFactsLimit?: number | null
+  },
   timings: { retrievalDurationMs: number },
 ): ProjectContext {
   const docLabel = new Map<string, string>(
@@ -252,6 +270,11 @@ export function assembleProjectContext(
     ? Math.round(activeFacts.reduce((sum, f) => sum + f.confidence, 0) / activeFacts.length)
     : 0
 
+  const relevantFactsFetched = counts.relevantFactsFetched ?? null
+  const relevantFactsLimit = counts.relevantFactsLimit ?? null
+  const relevantFactsLimitReached =
+    relevantFactsFetched !== null && relevantFactsLimit !== null && relevantFactsFetched >= relevantFactsLimit
+
   const retrieval: RetrievalMetrics = {
     active_fact_count: counts.activeFactCount,
     active_facts_fetched: activeFactRows.length,
@@ -262,6 +285,8 @@ export function assembleProjectContext(
     relevance_changed_selection: relevanceChangedSelection,
     retrieval_duration_ms: timings.retrievalDurationMs,
     pairing_duration_ms: pairingDurationMs,
+    relevant_facts_fetched: relevantFactsFetched,
+    relevant_facts_limit_reached: relevantFactsLimitReached,
   }
 
   return {
@@ -318,6 +343,16 @@ export async function buildProjectContext(
     }
   }
 
+  // The relevant-category partition is always activeSpecs[0]/activeResults[0]
+  // when partitioning happened (buildActiveFactsQuerySpecs' construction —
+  // see that function) — captured here so RetrievalMetrics can report
+  // whether THAT specific partition hit its own fetch ceiling, distinct
+  // from the aggregated active_facts_fetched/facts_selected numbers which
+  // can't tell the two partitions apart.
+  const isPartitioned = activeSpecs.length === 2
+  const relevantFactsFetched = isPartitioned ? activeResults[0].length : null
+  const relevantFactsLimit = isPartitioned ? activeSpecs[0].limit : null
+
   const context = assembleProjectContext(
     activeFactRows,
     supersededRows,
@@ -325,7 +360,12 @@ export async function buildProjectContext(
     (questionResult.data ?? []) as Array<{ question: string; reason: string }>,
     (docsResult.data ?? []) as Array<{ id: string; drawing_title: string | null; document_type: string | null }>,
     relevantCategories,
-    { activeFactCount: activeCountResult.count ?? 0, supersededFactCount: supersededCountResult.count ?? 0 },
+    {
+      activeFactCount: activeCountResult.count ?? 0,
+      supersededFactCount: supersededCountResult.count ?? 0,
+      relevantFactsFetched,
+      relevantFactsLimit,
+    },
     { retrievalDurationMs },
   )
 
