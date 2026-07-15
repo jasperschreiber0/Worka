@@ -5,49 +5,80 @@
 // persisting a project-understanding snapshot right after intake
 // completes — see persistProjectUnderstanding below). One computation
 // path, not two, so both call sites see identical facts/scope/confidence
-// for the same job.
+// for the same job, and identical observability (see RetrievalMetrics).
 //
 // Deliberately reuses project_facts / scope_items / clarifying_questions
 // (migration 026) rather than a new project_memory table — see CLAUDE.md's
 // "Project memory" section for why a second table would just create a
 // second, driftable source of truth for the same knowledge.
 //
-// Truncation and semantic-duplicate detection are NOT reimplemented here —
-// selectFactsForPrompt / pairSupersededFacts / MAX_FACTS_IN_PROMPT /
-// inferRelevantCategories all live in
+// Selection/ranking/pairing mechanics are NOT reimplemented here —
+// selectFactsForPrompt / pairSupersededFacts / inferRelevantCategories /
+// MAX_FACTS_IN_PROMPT all live in
 // supabase/functions/smooth-responder/pipeline-logic.ts (deliberately
 // Deno-global-free so it can be imported from both runtimes — see that
 // file's own header comment) and are shared with Stage 3/6's scope/
-// estimate reasoning. A prior version of this file re-declared its own
-// truncation logic (recency-ordered, active+superseded mixed in one
-// query) that could silently drop an old-but-still-active, high-
-// confidence fact out of context — see selectFactsForPrompt's comment for
-// the incident.
+// estimate reasoning. This file owns query construction (what to fetch,
+// under what budgets) and assembly (turning raw rows into a ProjectContext)
+// — orchestration, not selection logic.
+//
+// Query construction is split into pure, exported spec-builder functions
+// (buildActiveFactsQuerySpecs / buildSupersededFactsQuerySpec) precisely so
+// it's testable without a live database — see lib/project-context.test.ts.
+// assembleProjectContext is likewise a pure function over already-fetched
+// rows, so the JS-side transformation (ranking, pairing, scope/missing-info
+// shaping) is independently testable from the I/O that fetches those rows.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
+// Relative, .ts-extensioned import (not the `@/*` alias used elsewhere in
+// this codebase) so this file resolves identically under Next.js/webpack
+// AND under plain `node --experimental-strip-types` — the latter has no
+// concept of tsconfig path aliases, and this file needs to be importable
+// by lib/project-context.test.ts (see that file) the same way
+// pipeline-logic.ts already is by its own .test.ts. Requires
+// allowImportingTsExtensions in tsconfig.json (safe to enable: it only
+// widens what's allowed, and noEmit is already true).
 import {
   type FactRow,
   selectFactsForPrompt,
   inferRelevantCategories,
   pairSupersededFacts,
+  didRelevanceChangeSelection,
   MAX_FACTS_IN_PROMPT,
-} from '@/supabase/functions/smooth-responder/pipeline-logic'
+} from '../supabase/functions/smooth-responder/pipeline-logic.ts'
 
 // Small, separate budget for change history — recency-ordered (unlike
 // active facts, where confidence matters more; "what changed most
 // recently" is inherently a recency question). Never competes with
-// active facts for MAX_FACTS_IN_PROMPT.
-const SUPERSEDED_HISTORY_LIMIT = 20
+// active facts for MAX_FACTS_IN_PROMPT. Also the ordering pairSupersededFacts
+// relies on to collapse multi-generation supersession chains — see that
+// function's comment in pipeline-logic.ts.
+export const SUPERSEDED_HISTORY_LIMIT = 20
 
-// Fetched superset for active facts, ordered by confidence — large enough
-// that a lower-confidence-but-relevant fact (per inferRelevantCategories)
-// still has a real chance to be promoted into the final MAX_FACTS_IN_PROMPT
-// selection by selectFactsForPrompt's relevance boost, rather than having
-// already been cut by a plain "top 200 by confidence" DB-side limit before
-// relevance was ever considered. Bounded, not unbounded — a project with
-// more than this many active facts is a documented edge case (see
-// `truncated` on ProjectContext), not a silently-wrong answer.
-const ACTIVE_FACTS_FETCH_LIMIT = 600
+// Reserved fetch budget for facts in a category inferRelevantCategories
+// flagged as relevant to the builder's question. Sized to match
+// MAX_FACTS_IN_PROMPT exactly: if a job has at most this many relevant-
+// category facts, ALL of them are fetched and visible to
+// selectFactsForPrompt's ranking — none can be excluded by a fetch-level
+// cutoff before relevance is even considered, which was the actual defect
+// (not "the number was too small" — the number was applied at the wrong
+// stage, ranking by confidence before relevance was known at all).
+export const RELEVANT_FACTS_FETCH_LIMIT = MAX_FACTS_IN_PROMPT
+
+// Fetch budget for everything NOT in a relevant category, when relevant
+// categories were inferred — fills out remaining context/fallback
+// material. Also the sole budget used when no relevant categories are
+// inferred (preserves the original, simpler single-query behavior
+// exactly in that case).
+export const OTHER_FACTS_FETCH_LIMIT = 400
+
+// This is a narrower ceiling than before, not an eliminated one: a
+// project with more than RELEVANT_FACTS_FETCH_LIMIT facts in a SINGLE
+// relevant category could still lose one to a fetch-level cutoff — but
+// that's a much smaller, rarer committee (facts sharing one category)
+// than "every active fact in the project," which is what the old,
+// confidence-only ACTIVE_FACTS_FETCH_LIMIT compared against.
+export const ACTIVE_FACTS_FETCH_LIMIT = RELEVANT_FACTS_FETCH_LIMIT + OTHER_FACTS_FETCH_LIMIT
 
 export interface ProjectContextFact {
   category: string
@@ -64,6 +95,22 @@ export interface ProjectContextChange {
   newValue: string
 }
 
+// Everything an operator needs to answer "are we approaching retrieval
+// limits, and is relevance actually doing anything" without reading code.
+// Logged identically by both chat- and intake-triggered context builds,
+// since both go through buildProjectContext.
+export interface RetrievalMetrics {
+  active_fact_count: number
+  active_facts_fetched: number
+  facts_selected: number
+  superseded_fact_count: number
+  superseded_selected: number
+  retrieval_strategy: 'confidence_only' | 'relevance_partitioned'
+  relevance_changed_selection: boolean
+  retrieval_duration_ms: number
+  pairing_duration_ms: number
+}
+
 export interface ProjectContext {
   hasData: boolean
   activeFacts: ProjectContextFact[]
@@ -77,50 +124,103 @@ export interface ProjectContext {
   missingInformation: string[]
   documentsReferenced: string[]
   confidence: number
-  // True when this job has more active facts than fit in one prompt, even
-  // after ACTIVE_FACTS_FETCH_LIMIT/relevance-boosting — logged so a real
-  // instance of this (not yet observed in production data) is visible
-  // rather than silently degrading answer quality unnoticed.
+  // Superseded by RetrievalMetrics.facts_selected < active_facts_fetched
+  // (kept for backward compatibility with any existing caller reading
+  // this boolean directly; retrieval carries the actual numbers).
   truncated: boolean
+  retrieval: RetrievalMetrics
 }
 
-type ActiveFactRow = FactRow & { source_document_id: string | null }
+export type ActiveFactRow = FactRow & { source_document_id: string | null }
 
-export async function buildProjectContext(
-  sb: SupabaseClient,
-  jobId: string,
-  question: string = ''
-): Promise<ProjectContext> {
-  const [{ data: activeRows }, { data: supersededRows }, { data: scopeRows }, { data: questionRows }, { data: docs }] =
-    await Promise.all([
-      sb.from('project_facts')
-        .select('category, key, value, confidence, source_document_id, embedding')
-        .eq('job_id', jobId).eq('superseded', false)
-        .order('confidence', { ascending: false })
-        .limit(ACTIVE_FACTS_FETCH_LIMIT),
-      sb.from('project_facts')
-        .select('category, key, value, confidence, embedding')
-        .eq('job_id', jobId).eq('superseded', true)
-        .order('created_at', { ascending: false })
-        .limit(SUPERSEDED_HISTORY_LIMIT),
-      sb.from('scope_items').select('trade_category_id, included_scope, excluded_scope, assumptions').eq('job_id', jobId),
-      sb.from('clarifying_questions').select('question, reason').eq('job_id', jobId).eq('status', 'open'),
-      sb.from('project_documents').select('id, drawing_title, document_type').eq('job_id', jobId),
-    ])
+// ─── Query specs (pure, testable without a live database) ─────────────────
 
+export interface FactQuerySpec {
+  superseded: boolean
+  categoryIn?: string[]
+  categoryNotIn?: string[]
+  orderBy: 'confidence' | 'created_at'
+  limit: number
+}
+
+/**
+ * One spec when no relevant categories were inferred (identical to the
+ * original single-query behavior — confidence-ordered, ACTIVE_FACTS_FETCH_LIMIT
+ * budget, no category partitioning). Two specs when relevant categories
+ * exist: a relevant-category query with its own reserved budget, and an
+ * "everything else" query with the remaining budget — see
+ * RELEVANT_FACTS_FETCH_LIMIT's comment for why this eliminates the
+ * fetch-before-relevance ordering bug rather than just enlarging it.
+ */
+export function buildActiveFactsQuerySpecs(relevantCategories: Set<string>): FactQuerySpec[] {
+  if (relevantCategories.size === 0) {
+    return [{ superseded: false, orderBy: 'confidence', limit: ACTIVE_FACTS_FETCH_LIMIT }]
+  }
+  const categories = Array.from(relevantCategories)
+  return [
+    { superseded: false, categoryIn: categories, orderBy: 'confidence', limit: RELEVANT_FACTS_FETCH_LIMIT },
+    { superseded: false, categoryNotIn: categories, orderBy: 'confidence', limit: OTHER_FACTS_FETCH_LIMIT },
+  ]
+}
+
+export function buildSupersededFactsQuerySpec(): FactQuerySpec {
+  // created_at DESC is a hard requirement, not a preference — pairSupersededFacts
+  // relies on this exact ordering to collapse multi-generation supersession
+  // chains (most-recently-superseded predecessor wins). See that function's
+  // comment in pipeline-logic.ts.
+  return { superseded: true, orderBy: 'created_at', limit: SUPERSEDED_HISTORY_LIMIT }
+}
+
+async function executeFactQuery(sb: SupabaseClient, jobId: string, spec: FactQuerySpec): Promise<FactRow[]> {
+  const columns = spec.superseded
+    ? 'category, key, value, confidence, embedding'
+    // id is required for selectFactsForPrompt's deterministic tiebreak
+    // (see pipeline-logic.ts) — only active facts are ever passed to
+    // selectFactsForPrompt, so only they need it selected.
+    : 'id, category, key, value, confidence, source_document_id, embedding'
+
+  let query = sb.from('project_facts')
+    .select(columns)
+    .eq('job_id', jobId)
+    .eq('superseded', spec.superseded)
+
+  if (spec.categoryIn) query = query.in('category', spec.categoryIn)
+  if (spec.categoryNotIn) query = query.not('category', 'in', `(${spec.categoryNotIn.map((c) => `"${c}"`).join(',')})`)
+
+  query = query.order(spec.orderBy, { ascending: false }).limit(spec.limit)
+
+  const { data } = await query
+  return (data ?? []) as FactRow[]
+}
+
+// ─── Pure assembly (testable without a live database) ──────────────────────
+
+export function assembleProjectContext(
+  activeFactRows: ActiveFactRow[],
+  supersededFactRows: FactRow[],
+  scopeRows: Array<{ trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }>,
+  questionRows: Array<{ question: string; reason: string }>,
+  docs: Array<{ id: string; drawing_title: string | null; document_type: string | null }>,
+  relevantCategories: Set<string>,
+  counts: { activeFactCount: number; supersededFactCount: number },
+  timings: { retrievalDurationMs: number },
+): ProjectContext {
   const docLabel = new Map<string, string>(
-    ((docs ?? []) as Array<{ id: string; drawing_title: string | null; document_type: string | null }>)
-      .map((d) => [d.id, d.drawing_title ?? d.document_type ?? 'a document'])
+    docs.map((d) => [d.id, d.drawing_title ?? d.document_type ?? 'a document'])
   )
 
-  const activeFactRows = (activeRows ?? []) as ActiveFactRow[]
-  const supersededFactRows = (supersededRows ?? []) as FactRow[]
-
-  const relevantCategories = inferRelevantCategories(question)
   const rankedActive = selectFactsForPrompt(activeFactRows, MAX_FACTS_IN_PROMPT, relevantCategories)
   const truncated = activeFactRows.length > rankedActive.length
 
+  // Only meaningful to compute when relevance was actually applied — with
+  // no relevant categories, both selections are definitionally identical.
+  const relevanceChangedSelection = relevantCategories.size > 0
+    ? didRelevanceChangeSelection(rankedActive, selectFactsForPrompt(activeFactRows, MAX_FACTS_IN_PROMPT))
+    : false
+
+  const pairingStartedAt = Date.now()
   const recentChanges = pairSupersededFacts(activeFactRows, supersededFactRows, undefined, SUPERSEDED_HISTORY_LIMIT)
+  const pairingDurationMs = Date.now() - pairingStartedAt
 
   const activeFacts: ProjectContextFact[] = rankedActive.map((f) => {
     const row = f as ActiveFactRow
@@ -133,15 +233,31 @@ export async function buildProjectContext(
     }
   })
 
-  const scope = ((scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }>)
-    .map((s) => ({ tradeCategoryId: s.trade_category_id, included: s.included_scope ?? [], excluded: s.excluded_scope ?? [], assumptions: s.assumptions ?? [] }))
+  const scope = scopeRows.map((s) => ({
+    tradeCategoryId: s.trade_category_id,
+    included: s.included_scope ?? [],
+    excluded: s.excluded_scope ?? [],
+    assumptions: s.assumptions ?? [],
+  }))
 
-  const missingInformation = ((questionRows ?? []) as Array<{ question: string; reason: string }>).map((q) => q.question)
+  const missingInformation = questionRows.map((q) => q.question)
   const documentsReferenced = Array.from(new Set(activeFacts.map((f) => f.sourceLabel).filter((l): l is string => Boolean(l))))
 
   const confidence = activeFacts.length > 0
     ? Math.round(activeFacts.reduce((sum, f) => sum + f.confidence, 0) / activeFacts.length)
     : 0
+
+  const retrieval: RetrievalMetrics = {
+    active_fact_count: counts.activeFactCount,
+    active_facts_fetched: activeFactRows.length,
+    facts_selected: rankedActive.length,
+    superseded_fact_count: counts.supersededFactCount,
+    superseded_selected: recentChanges.length,
+    retrieval_strategy: relevantCategories.size > 0 ? 'relevance_partitioned' : 'confidence_only',
+    relevance_changed_selection: relevanceChangedSelection,
+    retrieval_duration_ms: timings.retrievalDurationMs,
+    pairing_duration_ms: pairingDurationMs,
+  }
 
   return {
     hasData: activeFacts.length > 0 || scope.length > 0,
@@ -152,7 +268,68 @@ export async function buildProjectContext(
     documentsReferenced,
     confidence,
     truncated,
+    retrieval,
   }
+}
+
+// ─── Orchestration (I/O — fetches rows, then delegates to assembleProjectContext) ──
+
+export async function buildProjectContext(
+  sb: SupabaseClient,
+  jobId: string,
+  question: string = ''
+): Promise<ProjectContext> {
+  const relevantCategories = inferRelevantCategories(question)
+  const activeSpecs = buildActiveFactsQuerySpecs(relevantCategories)
+  const supersededSpec = buildSupersededFactsQuerySpec()
+
+  const retrievalStartedAt = Date.now()
+  const [activeResults, supersededRows, scopeResult, questionResult, docsResult, activeCountResult, supersededCountResult] =
+    await Promise.all([
+      Promise.all(activeSpecs.map((spec) => executeFactQuery(sb, jobId, spec))),
+      executeFactQuery(sb, jobId, supersededSpec),
+      sb.from('scope_items').select('trade_category_id, included_scope, excluded_scope, assumptions').eq('job_id', jobId),
+      sb.from('clarifying_questions').select('question, reason').eq('job_id', jobId).eq('status', 'open'),
+      sb.from('project_documents').select('id, drawing_title, document_type').eq('job_id', jobId),
+      sb.from('project_facts').select('id', { count: 'exact', head: true }).eq('job_id', jobId).eq('superseded', false),
+      sb.from('project_facts').select('id', { count: 'exact', head: true }).eq('job_id', jobId).eq('superseded', true),
+    ])
+  const retrievalDurationMs = Date.now() - retrievalStartedAt
+
+  // Merge rows from the (1 or 2) active-fact queries — de-duplicated by id,
+  // since a fact could in principle satisfy neither category filter's
+  // exclusion boundary incorrectly only if the category sets overlap,
+  // which they never do by construction (categoryIn / categoryNotIn are
+  // built from the same partition), but de-duping defensively costs
+  // nothing and removes any doubt.
+  const seenIds = new Set<string>()
+  const activeFactRows: ActiveFactRow[] = []
+  for (const rows of activeResults) {
+    for (const row of rows as ActiveFactRow[]) {
+      const id = row.id
+      if (id && seenIds.has(id)) continue
+      if (id) seenIds.add(id)
+      activeFactRows.push(row)
+    }
+  }
+
+  const context = assembleProjectContext(
+    activeFactRows,
+    supersededRows,
+    (scopeResult.data ?? []) as Array<{ trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }>,
+    (questionResult.data ?? []) as Array<{ question: string; reason: string }>,
+    (docsResult.data ?? []) as Array<{ id: string; drawing_title: string | null; document_type: string | null }>,
+    relevantCategories,
+    { activeFactCount: activeCountResult.count ?? 0, supersededFactCount: supersededCountResult.count ?? 0 },
+    { retrievalDurationMs },
+  )
+
+  // Logged here — the one call site both chat and intake share — so
+  // "equivalent telemetry on both paths" is true by construction rather
+  // than by remembering to duplicate a log statement in two places.
+  console.log(JSON.stringify({ event: 'project_context_built', job_id: jobId, ...context.retrieval }))
+
+  return context
 }
 
 // ─── Persisted project understanding (outside chat) ────────────────────────
@@ -160,17 +337,21 @@ export async function buildProjectContext(
 // The original product ask included a standing "project confidence /
 // completeness / missing information" surface consumable by Job Snapshot
 // and Morning Brief — not just answerable on demand in chat. Rather than a
-// new subsystem, this persists the same computation build ProjectContext
+// new subsystem, this persists the same computation buildProjectContext
 // already does onto the existing jobs row (migration 035:
 // knowledge_confidence / knowledge_missing_count / knowledge_updated_at).
-// Called from two places: opportunistically whenever chat answers a
+// Called from three places: opportunistically whenever chat answers a
 // project_question (via persistContext below, reusing the context it
-// already built rather than fetching twice), and once automatically right
-// after intake completes (app/api/intake/[fileId]/route.ts, alongside the
-// existing ensureQuotePriced/runQualityAssurance calls, via
-// persistProjectUnderstanding) — so it's populated even if nobody ever
-// asks a chat question. Best-effort: a failed write here must never break
-// the caller's own flow.
+// already built rather than fetching twice), automatically right after
+// intake completes (app/api/intake/[fileId]/route.ts), and opportunistically
+// from GET /api/jobs/[jobId]/snapshot when knowledge_updated_at is still
+// null (see that route) — a lightweight recovery path for the case a
+// transient failure left it null forever with nobody ever asking a chat
+// question about that job. No new infrastructure (no cron, no queue): the
+// snapshot endpoint is already the most frequently-hit read for exactly
+// this job, so piggybacking recovery onto it is the smallest change that
+// achieves eventual consistency. Best-effort throughout: a failed write
+// here must never break the caller's own flow.
 export async function persistContext(sb: SupabaseClient, jobId: string, context: ProjectContext): Promise<void> {
   try {
     await sb.from('jobs').update({

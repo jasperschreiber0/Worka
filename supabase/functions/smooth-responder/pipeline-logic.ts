@@ -208,6 +208,19 @@ export function mergeFacts(
 // confidence, and the row could be evicted before the split ever
 // happened). Callers must query/filter superseded separately (see
 // pairSupersededFacts) and give it its own, smaller budget.
+// Deterministic tiebreak for facts equal on every ranking criterion above
+// it (relevance, then confidence): ascending by `id`. Not semantically
+// meaningful — it exists purely so two exactly-tied facts always resolve
+// in the same order on every call, regardless of whatever order the
+// database happened to return them in for a given query execution.
+// Missing ids (a fact not yet persisted) sort last, deterministically.
+function idTiebreak(a: FactRow, b: FactRow): number {
+  if (a.id === b.id) return 0
+  if (a.id === undefined) return 1
+  if (b.id === undefined) return -1
+  return a.id < b.id ? -1 : 1
+}
+
 export function selectFactsForPrompt(
   facts: FactRow[],
   maxFacts: number = MAX_FACTS_IN_PROMPT,
@@ -215,7 +228,9 @@ export function selectFactsForPrompt(
 ): FactRow[] {
   if (facts.length <= maxFacts) return facts
   if (!relevantCategories || relevantCategories.size === 0) {
-    return [...facts].sort((a, b) => b.confidence - a.confidence).slice(0, maxFacts)
+    return [...facts]
+      .sort((a, b) => b.confidence - a.confidence || idTiebreak(a, b))
+      .slice(0, maxFacts)
   }
   // Relevance-boosted ranking, not a hard filter: a fact whose category
   // wasn't inferred as relevant is still eligible, just ranked behind
@@ -228,9 +243,28 @@ export function selectFactsForPrompt(
       const relA = relevantCategories.has(a.category) ? 1 : 0
       const relB = relevantCategories.has(b.category) ? 1 : 0
       if (relA !== relB) return relB - relA
-      return b.confidence - a.confidence
+      return b.confidence - a.confidence || idTiebreak(a, b)
     })
     .slice(0, maxFacts)
+}
+
+// Cheap way to answer "did relevance actually change what got selected,
+// or just cosmetically reorder it" — compares the SET of fact ids/keys a
+// plain confidence-only selection would have produced against what the
+// relevance-boosted selection actually produced. Used for observability
+// (see lib/project-context.ts) rather than for any selection decision
+// itself — selectFactsForPrompt remains the only place that decides what
+// gets included.
+export function didRelevanceChangeSelection(
+  withRelevance: FactRow[],
+  withoutRelevance: FactRow[],
+): boolean {
+  const key = (f: FactRow) => f.id ?? `${f.category}::${f.key}`
+  const a = new Set(withRelevance.map(key))
+  const b = new Set(withoutRelevance.map(key))
+  if (a.size !== b.size) return true
+  for (const k of a) if (!b.has(k)) return true
+  return false
 }
 
 // ─── Coarse category relevance inference (no embeddings) ──────────────────
@@ -283,6 +317,27 @@ export function inferRelevantCategories(question: string): Set<string> {
 // SAME threshold and similarity function mergeFacts uses, so there is
 // exactly one definition of "these two facts are the same thing restated"
 // across write time and read time, not two.
+//
+// Known schema limitation (documented, not fixed here — project_facts has
+// no superseded_by_id column, so there is no way to reconstruct which
+// specific fact superseded which): a fact revised twice (v1 -> v2 -> v3,
+// only v3 active) has TWO superseded rows — v1 and v2 — that both match
+// the same active replacement (v3) by category+key. Pairing both would
+// produce two redundant "changes" entries both claiming v3 as the new
+// value, when only one meaningful transition (the most recent
+// predecessor -> current) is useful to show. This function collapses
+// that: once a given active fact has been paired with one predecessor,
+// later (older) predecessors matching the SAME active fact are skipped.
+// "Most recent predecessor" is derived from iteration order, NOT a
+// timestamp comparison inside this function — callers MUST pass
+// supersededFacts ordered most-recently-superseded first (project-context.ts
+// already queries `ORDER BY created_at DESC` for exactly this reason). This
+// is a real precondition, not an implementation detail: passing an
+// unordered or oldest-first array silently changes which predecessor gets
+// shown, with no error. What's NOT recoverable without a schema change:
+// the full v1->v2->v3 lineage — v1 is dropped from output entirely, not
+// merely deprioritized, since nothing in the data says v1 and v2 are part
+// of the same lineage rather than two independent corrections.
 export interface FactChange {
   category: string
   key: string
@@ -298,12 +353,18 @@ export function pairSupersededFacts(
 ): FactChange[] {
   const activeByKey = new Map(activeFacts.map((f) => [`${f.category}::${f.key}`, f]))
   const changes: FactChange[] = []
+  // Tracks which ACTIVE fact (by category::key) already has a predecessor
+  // paired to it — see the multi-generation-chain comment above.
+  const pairedTargets = new Set<string>()
 
   for (const old of supersededFacts) {
     if (changes.length >= maxChanges) break
 
-    const exact = activeByKey.get(`${old.category}::${old.key}`)
+    const exactKey = `${old.category}::${old.key}`
+    const exact = activeByKey.get(exactKey)
     if (exact) {
+      if (pairedTargets.has(exactKey)) continue
+      pairedTargets.add(exactKey)
       changes.push({ category: old.category, key: old.key, oldValue: old.value, newValue: exact.value })
       continue
     }
@@ -317,6 +378,9 @@ export function pairSupersededFacts(
       if (sim > bestSim) { bestSim = sim; bestMatch = active }
     }
     if (bestMatch && bestSim >= semanticThreshold) {
+      const targetKey = `${bestMatch.category}::${bestMatch.key}`
+      if (pairedTargets.has(targetKey)) continue
+      pairedTargets.add(targetKey)
       changes.push({ category: bestMatch.category, key: bestMatch.key, oldValue: old.value, newValue: bestMatch.value })
     }
   }

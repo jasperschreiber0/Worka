@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js'
 import { deriveJobHealth, type JobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { daysAgo } from '@/lib/job-activity'
+import { persistProjectUnderstanding } from '@/lib/project-context'
 
 // ─── GET /api/jobs/[jobId]/snapshot ──────────────────────────────────────────
 
@@ -49,6 +50,19 @@ export async function GET(
       const snapshot = getDemoJobSnapshot(jobId)
       if (snapshot) return NextResponse.json({ snapshot })
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    }
+
+    // Recovery path for a transient persistence failure that left
+    // knowledge_confidence/knowledge_missing_count null forever (see
+    // lib/project-context.ts's persistContext) — the snapshot panel is
+    // already the most frequently-viewed read for this exact job, so this
+    // is the smallest way to get eventual consistency without a new cron
+    // or queue. Fires only when never-yet-computed (not on every read),
+    // fire-and-forget so it can never slow down or fail this request.
+    if (job.knowledge_updated_at == null) {
+      void persistProjectUnderstanding(sb, jobId).catch((err) =>
+        console.error('snapshot: background persistProjectUnderstanding failed', err)
+      )
     }
 
   // Quote

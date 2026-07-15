@@ -1296,25 +1296,18 @@ async function handleProjectQuestion(
     return { message: "I couldn't answer that right now — try again in a moment." }
   }
 
-  // Observability — job_id, how much of the fact base was loaded, which
-  // documents it traces back to, a rough context-size proxy, the fact-base
-  // confidence score, and how many superseded-fact conflicts were folded
-  // into the answer.
+  // Answer-specific observability. Retrieval-level metrics (active fact
+  // counts, truncation, relevance impact) are already logged once, inside
+  // buildProjectContext's `project_context_built` event — not duplicated
+  // here, so chat and the intake-triggered path emit identical retrieval
+  // telemetry by construction rather than by remembering to copy a log
+  // statement into both places.
   console.log(JSON.stringify({
     event: 'project_question_answered',
     job_id: job.id,
-    memory_items_loaded: context.activeFacts.length,
     documents_referenced: context.documentsReferenced,
     context_chars: userContent.length,
     confidence_score: context.confidence,
-    conflicts_detected: context.recentChanges.length,
-    // True when this job has more active facts than fit in one prompt even
-    // after relevance-boosted ranking — not yet observed in production,
-    // but logged so it's visible the moment it happens rather than
-    // silently degrading an answer. See ACTIVE_FACTS_FETCH_LIMIT in
-    // lib/project-context.ts for the threshold this would actually need
-    // embeddings-based retrieval to fix properly.
-    facts_truncated: context.truncated,
     duration_ms: Date.now() - startedAt,
   }))
 
