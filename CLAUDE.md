@@ -77,7 +77,13 @@ In short: Layer 1 and Layer 2 are both implemented inside the same Next.js route
 5. `ChatInterface` receives the response, renders a `ChatMessage`, and fires UI side-effects based on `event.type`
 
 **Extended intents** (handled entirely in the Next.js route, not by edge functions):
-`email_draft` | `email_sync_status` | `simulate_email` | `margin_query`
+`email_draft` | `email_sync_status` | `simulate_email` | `margin_query` | `project_question`
+
+### Project memory — free-form Q&A over a job's extracted facts
+
+`project_question` (`handleProjectQuestion` in `app/api/chat/route.ts`) is the first chat intent to read the reasoning engine's knowledge base (`project_facts` / `scope_items` / `clarifying_questions` — migration 026) — every other intent operates on `jobs`/`quotes`/`variations` only. Deliberately reuses those tables rather than a new `project_memory` table: `project_facts` already carries `evidence`, `confidence`, `source_document_id`, and a `superseded` flag that's never deleted (an audit trail — see `mergeFacts` in `supabase/functions/smooth-responder/pipeline-logic.ts` for how a fact gets superseded when a later document contradicts it). `buildProjectContext()` loads active (non-superseded) facts, pairs each superseded fact with whatever fact of the same `category`+`key` replaced it (this pairing *is* the conflict/change record — no separate conflict table), open `clarifying_questions` as "missing information", and `scope_items`; a single Claude call answers the builder's question grounded in that context, instructed to name superseded-vs-current facts explicitly and to say plainly when something isn't covered rather than guessing. Logs `project_question_answered` (job_id, memory_items_loaded, documents_referenced, context_chars, confidence_score, conflicts_detected, duration_ms) for observability. Demo mode (no `NEXT_PUBLIC_SUPABASE_URL`) returns an honest "connect a real project" message — the fallback `lib/*-demo.ts` data has no equivalent fact base to answer from.
+
+Deliberately not built (evaluated, scope kept to what the audit showed was actually missing): a separate `project_memory` table (would duplicate `project_facts`), a second "consolidation" Claude call after every document (Stage 1/2 already does this comparison in the same call it makes today), and embeddings-based retrieval (a job's fact base is capped at 200 rows and already fits in one prompt — Voyage-embedding-based semantic dedup across documents already happens where it's needed, inside `smooth-responder`, migration 031).
 
 ### New job flow — address follow-up
 

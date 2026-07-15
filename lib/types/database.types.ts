@@ -753,6 +753,7 @@ export type ActionType =
   | 'approve_quote'
   | 'end_of_day'
   | 'task_help'
+  | 'project_question'
   | 'unknown'
 
 export interface ExtractedAction {

@@ -357,6 +357,14 @@ Your job is to parse a builder's natural-language message and return ALL actions
     Entities: {}
     Examples: "can I message my crew", "team chat", "notify workers", "push notifications to staff"
 
+25. project_question
+    Trigger: asking a specific question about what a job's uploaded documents actually say —
+    materials, finishes, dimensions, specifications, scope, what's included/excluded, what's missing
+    Entities: { address?, question }
+    Examples: "what flooring is required for the Fitzroy kitchen", "what window type does the spec call for",
+              "what's missing from the Brunswick job", "what changed after the last variation"
+    Do NOT use for job status/timeline/workers (use job_query) or margin/cost (use margin_query)
+
 17. unknown
     Trigger: anything that doesn't fit the above
     Entities: {}
@@ -1194,6 +1202,187 @@ async function handleJobQuery(entities: Record<string, string>, builderId: strin
   }
 }
 
+// ─── Project memory / free-form project Q&A ────────────────────────────────
+//
+// Reuses the reasoning engine's existing knowledge base (project_facts,
+// scope_items, clarifying_questions — migration 026) rather than a new
+// table: those already carry evidence, confidence, source_document_id, and
+// a `superseded` flag that's never deleted (an audit trail, not a
+// snapshot — see mergeFacts in supabase/functions/smooth-responder/
+// pipeline-logic.ts for how a fact gets superseded when a later document
+// contradicts it). Nothing outside the intake pipeline read this data
+// before this — every other chat intent operates on jobs/quotes/variations
+// only, never on the fact base a document upload built.
+
+interface ProjectContextFact {
+  category: string
+  key: string
+  value: string
+  confidence: number
+  sourceLabel: string | null
+}
+
+interface ProjectContextChange {
+  category: string
+  key: string
+  oldValue: string
+  newValue: string
+}
+
+interface ProjectContext {
+  hasData: boolean
+  activeFacts: ProjectContextFact[]
+  // A superseded fact paired with whatever fact (same category+key) replaced
+  // it — this is what makes "conflict"/change history answerable at all,
+  // without a separate conflict-tracking table: supersession already is the
+  // conflict record, just not previously surfaced anywhere.
+  recentChanges: ProjectContextChange[]
+  scope: Array<{ tradeCategoryId: number; included: string[]; excluded: string[]; assumptions: string[] }>
+  missingInformation: string[]
+  documentsReferenced: string[]
+  confidence: number
+}
+
+async function buildProjectContext(sb: SupabaseClient, jobId: string): Promise<ProjectContext> {
+  const [{ data: facts }, { data: scopeRows }, { data: questions }, { data: docs }] = await Promise.all([
+    sb.from('project_facts').select('category, key, value, confidence, source_document_id, superseded, created_at').eq('job_id', jobId).order('created_at', { ascending: false }).limit(200),
+    sb.from('scope_items').select('trade_category_id, included_scope, excluded_scope, assumptions').eq('job_id', jobId),
+    sb.from('clarifying_questions').select('question, reason').eq('job_id', jobId).eq('status', 'open'),
+    sb.from('project_documents').select('id, drawing_title, document_type').eq('job_id', jobId),
+  ])
+
+  type FactRow = { category: string; key: string; value: string; confidence: number; source_document_id: string | null; superseded: boolean; created_at: string }
+  const allFacts = (facts ?? []) as FactRow[]
+  const docLabel = new Map<string, string>(
+    ((docs ?? []) as Array<{ id: string; drawing_title: string | null; document_type: string | null }>)
+      .map((d) => [d.id, d.drawing_title ?? d.document_type ?? 'a document'])
+  )
+
+  const activeRows = allFacts.filter((f) => !f.superseded)
+  const supersededRows = allFacts.filter((f) => f.superseded)
+  const activeByKey = new Map(activeRows.map((f) => [`${f.category}::${f.key}`, f]))
+
+  const recentChanges: ProjectContextChange[] = supersededRows
+    .slice(0, 10)
+    .map((old) => {
+      const replacement = activeByKey.get(`${old.category}::${old.key}`)
+      return replacement ? { category: old.category, key: old.key, oldValue: old.value, newValue: replacement.value } : null
+    })
+    .filter((c): c is ProjectContextChange => c !== null)
+
+  const activeFacts: ProjectContextFact[] = activeRows.map((f) => ({
+    category: f.category,
+    key: f.key,
+    value: f.value,
+    confidence: f.confidence,
+    sourceLabel: f.source_document_id ? docLabel.get(f.source_document_id) ?? null : null,
+  }))
+
+  const scope = ((scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }>)
+    .map((s) => ({ tradeCategoryId: s.trade_category_id, included: s.included_scope ?? [], excluded: s.excluded_scope ?? [], assumptions: s.assumptions ?? [] }))
+
+  const missingInformation = ((questions ?? []) as Array<{ question: string; reason: string }>).map((q) => q.question)
+  const documentsReferenced = Array.from(new Set(activeFacts.map((f) => f.sourceLabel).filter((l): l is string => Boolean(l))))
+
+  const confidence = activeFacts.length > 0
+    ? Math.round(activeFacts.reduce((sum, f) => sum + f.confidence, 0) / activeFacts.length)
+    : 0
+
+  return { hasData: activeFacts.length > 0 || scope.length > 0, activeFacts, recentChanges, scope, missingInformation, documentsReferenced, confidence }
+}
+
+const PROJECT_QUESTION_SYSTEM_PROMPT = `You are WorkA's project memory assistant for an Australian residential builder. Answer the builder's question using ONLY the project facts, scope, and change history provided below — never invent information that isn't present. If a fact was superseded by a later document, mention both and note which is current. If the answer isn't covered by the provided facts, say so plainly and name what's missing rather than guessing. Keep the answer to 2-4 sentences, plain English, no headers or bullet lists unless genuinely needed for a list of items.`
+
+async function handleProjectQuestion(
+  entities: Record<string, string>,
+  builderId: string,
+  anthropic: Anthropic
+): Promise<Partial<ChatResponse>> {
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const question = entities.question ?? ''
+
+  if (!sbUrl || !sbKey) {
+    // Demo mode's fallback data (lib/*-demo.ts) has no equivalent of the
+    // reasoning engine's fact base — it's real-mode-only data, so this is
+    // an honest limitation rather than a fabricated demo answer.
+    return { message: "I don't have detailed project documents on file for that in demo mode — connect a real project, upload plans or specs, and I'll be able to answer questions like this from them." }
+  }
+
+  const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+  const ref = (entities.address ?? entities.job_address ?? '').trim()
+
+  const { data: jobs } = await sb
+    .from('jobs')
+    .select('id, address')
+    .eq('builder_id', builderId)
+    .ilike('address', ref ? `%${ref}%` : '%')
+    .not('status', 'eq', 'archived')
+    .order('created_at', { ascending: false })
+    .limit(ref ? 3 : 10)
+
+  if (!jobs || jobs.length === 0) {
+    return { message: ref ? `No job found matching "${ref}".` : 'Which job is this about?' }
+  }
+  if (jobs.length > 1) {
+    const list = (jobs as Array<{ address: string }>).map((j) => `• ${j.address}`).join('\n')
+    return { message: `Which job do you mean?\n${list}` }
+  }
+
+  const job = jobs[0] as { id: string; address: string }
+  const context = await buildProjectContext(sb, job.id)
+
+  if (!context.hasData) {
+    return { message: `I don't have any extracted project facts for ${job.address} yet — upload plans or specs and I'll be able to answer questions like this.` }
+  }
+
+  const factsBlock = context.activeFacts
+    .map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.sourceLabel ? `, source: ${f.sourceLabel}` : ''})`)
+    .join('\n')
+  const changesBlock = context.recentChanges.length > 0
+    ? context.recentChanges.map((c) => `- [${c.category}] ${c.key} was "${c.oldValue}", superseded by "${c.newValue}"`).join('\n')
+    : '(none)'
+  const scopeBlock = context.scope
+    .map((s) => `Trade ${s.tradeCategoryId}: included = ${s.included.join('; ') || '(none)'}. excluded = ${s.excluded.join('; ') || '(none)'}.`)
+    .join('\n') || '(no scope reasoning recorded yet)'
+  const missingBlock = context.missingInformation.length > 0 ? context.missingInformation.join('\n') : '(none currently open)'
+
+  const userContent = `PROJECT: ${job.address}\n\nACTIVE FACTS:\n${factsBlock}\n\nRECENT CHANGES (superseded → current):\n${changesBlock}\n\nSCOPE:\n${scopeBlock}\n\nOPEN QUESTIONS / MISSING INFORMATION:\n${missingBlock}\n\nBUILDER'S QUESTION: ${question}`
+
+  const startedAt = Date.now()
+  let answer: string
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      system: PROJECT_QUESTION_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userContent }],
+    })
+    const block = response.content[0]
+    answer = block.type === 'text' ? block.text.trim() : "I couldn't work out an answer from the project facts on file."
+  } catch (err) {
+    console.error('handleProjectQuestion: Claude call failed', err)
+    return { message: "I couldn't answer that right now — try again in a moment." }
+  }
+
+  // Observability — job_id, how much of the fact base was loaded, which
+  // documents it traces back to, a rough context-size proxy, the fact-base
+  // confidence score, and how many superseded-fact conflicts were folded
+  // into the answer.
+  console.log(JSON.stringify({
+    event: 'project_question_answered',
+    job_id: job.id,
+    memory_items_loaded: context.activeFacts.length,
+    documents_referenced: context.documentsReferenced,
+    context_chars: userContent.length,
+    confidence_score: context.confidence,
+    conflicts_detected: context.recentChanges.length,
+    duration_ms: Date.now() - startedAt,
+  }))
+
+  return { message: answer }
+}
+
 function applyVariationState(variation: DemoVariation): DemoVariation {
   const override = demoVariationState.get(variation.id)
   if (!override) return variation
@@ -1893,6 +2082,12 @@ async function orchestrateActions(
         break
       }
 
+      case 'project_question': {
+        const result = await handleProjectQuestion(action.entities, ctx.builder_id, anthropic)
+        if (result.message) messageParts.push(result.message)
+        break
+      }
+
       case 'update_job_context': {
         // Builder mentioned new context about an existing job mid-conversation.
         // Only update fields that are currently null to avoid overwriting deliberate data.
@@ -2404,9 +2599,6 @@ async function orchestrateActions(
   if (messageParts.length === 0) {
     messageParts.push('I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.')
   }
-
-  // Suppress unused var
-  void anthropic
 
   return {
     intent: actions.map((a) => a.type).join('+'),
