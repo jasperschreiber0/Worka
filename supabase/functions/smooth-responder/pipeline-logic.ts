@@ -483,6 +483,36 @@ export function shouldGiveUp(
   return false
 }
 
+// ─── Document-phase progress (pre-classification) ──────────────────────────
+//
+// While document-worker invocations are draining a batch, nothing writes
+// files.intake_stage/intake_pct at all — classification (Stage 1/2) is what
+// owns those columns, and it hasn't started yet. The SSE poller therefore
+// used to sit on its initial "Uploading documents... 5%" for the ENTIRE
+// extraction phase — minutes of real, observable work (per-document rows
+// flipping pending→running→completed) presented to the builder as a frozen
+// upload. That's not just cosmetic: "stuck at 5% uploading" is exactly what
+// a genuinely-dead run looks like, so builders (reasonably) treated healthy
+// runs as hung. This derives an honest stage/pct from the per-document job
+// counts the poller already fetches every iteration. The 5→20% band hands
+// off to classification's real first write (classifying_documents, 25%)
+// without ever moving backwards.
+
+export function documentPhaseProgress(
+  terminalCount: number,
+  totalCount: number,
+): { pct: number; message: string } {
+  if (totalCount <= 0) {
+    return { pct: 5, message: 'Reading documents...' }
+  }
+  const done = Math.max(0, Math.min(terminalCount, totalCount))
+  const pct = 5 + Math.round((done / totalCount) * 15)
+  const message = totalCount === 1
+    ? 'Reading your document...'
+    : `Reading documents — ${done} of ${totalCount} processed`
+  return { pct, message }
+}
+
 // ─── Document processing queue (worker model) ──────────────────────────────
 //
 // Text extraction's CPU-budget gating (gateTextExtraction, above) reduces

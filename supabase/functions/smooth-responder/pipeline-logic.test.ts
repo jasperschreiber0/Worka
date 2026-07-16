@@ -21,6 +21,7 @@ import {
   SEMANTIC_DUPLICATE_THRESHOLD,
   isRetryableApiError,
   withTimeoutAndRetry,
+  documentPhaseProgress,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -505,6 +506,30 @@ test('withTimeoutAndRetry: exhausting all retries rethrows the last error', asyn
     },
   )
   assert.equal(calls, 3) // initial attempt + 2 retries
+})
+
+// ─── documentPhaseProgress ─────────────────────────────────────────────────
+
+test('documentPhaseProgress: starts at 5% with nothing processed', () => {
+  const { pct, message } = documentPhaseProgress(0, 7)
+  assert.equal(pct, 5)
+  assert.match(message, /0 of 7/)
+})
+
+test('documentPhaseProgress: advances proportionally and caps at 20% fully done', () => {
+  assert.equal(documentPhaseProgress(3, 7).pct, 11)
+  const done = documentPhaseProgress(7, 7)
+  assert.equal(done.pct, 20, 'full completion must stay below classification\'s first real write (25%)')
+  assert.match(done.message, /7 of 7/)
+})
+
+test('documentPhaseProgress: single-document upload gets singular phrasing, terminal count clamps', () => {
+  assert.match(documentPhaseProgress(0, 1).message, /your document/)
+  // Defensive: a terminal count above total (shouldn't happen, but a race
+  // between two polls could momentarily disagree) never exceeds the cap.
+  assert.equal(documentPhaseProgress(9, 7).pct, 20)
+  // Zero/absent totals degrade to the initial state rather than dividing by zero.
+  assert.equal(documentPhaseProgress(0, 0).pct, 5)
 })
 
 test('withTimeoutAndRetry: aborts the call via the signal once timeoutMs elapses', async () => {

@@ -66,7 +66,8 @@ interface DocumentJobRow {
 async function processOneDocument(
   supabase: SupabaseClient,
   job: DocumentJobRow,
-  builderId: string
+  builderId: string,
+  workerId: string
 ): Promise<{ outcome: 'completed' | 'retry' | 'failed'; result?: ExtractionResult; error?: string }> {
   const { data: fileRow } = await supabase
     .from('files')
@@ -112,16 +113,43 @@ async function processOneDocument(
       }
 
       console.log(JSON.stringify({
-        event: 'extraction_start', document_id: job.document_id, filename: fileRow.filename,
-        size: buffer.byteLength, page_count: pageCount,
+        event: 'extraction_start', worker_id: workerId, document_id: job.document_id, filename: fileRow.filename,
+        size: buffer.byteLength, page_count: pageCount, attempt: job.attempts + 1,
       }))
       const base64 = toBase64(buffer)
+      // Retry safeguard: attempts >= 1 means a PRIOR attempt on this exact
+      // document already failed — and the failure mode that matters here is
+      // the one no gate heuristic can prevent: pdf.js's font interpreter
+      // CPU-killing the isolate mid-parse (external, uncatchable — the row
+      // was left at 'running' and reclaimed by staleness, which is precisely
+      // what incremented attempts). Byte size and page count demonstrably do
+      // NOT predict this (the documented incident file was ~290KB — see
+      // pdf-text.ts's header), so re-attempting the identical extraction on
+      // a retry just reproduces the identical crash: a deterministic crash
+      // LOOP, burning all 3 attempts on the same kill and stalling the whole
+      // batch for the builder each cycle. Text extraction is an optimization
+      // (better numeric fidelity for priced tables, cheaper tokens for
+      // text-dense specs) — never a requirement; the vision path processes
+      // the document fully without it. So on any retry, skip extraction
+      // outright and go vision-only: attempt 2 is then guaranteed not to
+      // die in the parser, converting "crash loop until permanently failed"
+      // into "processed successfully with slightly lower text fidelity".
+      const retrySafeguard = job.attempts >= 1
+      if (retrySafeguard) {
+        console.log(JSON.stringify({
+          event: 'extraction_skipped_retry_safeguard', worker_id: workerId, document_id: job.document_id,
+          filename: fileRow.filename, attempt: job.attempts + 1,
+          reason: 'prior attempt on this document failed (likely uncatchable CPU-kill mid-extraction) — processing vision-only, no text-layer parse',
+        }))
+      }
       // Single document per invocation, so cumulative spend starts at 0 —
       // the gate still applies (a single pathologically complex file can
       // still exceed the run-wide ceiling on its own), it just no longer
       // has to account for OTHER documents' spend in the same invocation,
       // since there are none.
-      const { text, skippedReason, durationMs } = await extractPdfTextGated(base64, buffer.byteLength, pageCount, 0)
+      const { text, skippedReason, durationMs } = retrySafeguard
+        ? { text: '', skippedReason: 'retry safeguard — prior attempt crashed, text-layer extraction not re-attempted', durationMs: 0 }
+        : await extractPdfTextGated(base64, buffer.byteLength, pageCount, 0)
       console.log(JSON.stringify({
         event: 'extraction_complete', document_id: job.document_id, filename: fileRow.filename,
         extraction_cpu_duration: durationMs, skipped_reason: skippedReason ?? undefined, text_length: text.length,
@@ -263,7 +291,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // a client call) so that case at least logs clearly instead of becoming
     // a silent unhandled rejection — it is not a substitute for the cron.
     try {
-      const outcome = await processOneDocument(supabase, job, builder_id)
+      const outcome = await processOneDocument(supabase, job, builder_id, workerId)
 
       let shouldTriggerClassification = false
       let retryDelayMs = 0

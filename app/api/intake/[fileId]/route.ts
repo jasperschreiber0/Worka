@@ -10,7 +10,7 @@ export const runtime = 'edge'
 
 import { NextRequest } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-import { shouldGiveUp } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { shouldGiveUp, documentPhaseProgress } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -532,7 +532,16 @@ export async function GET(
             return
           }
 
-          const WORKER_CONCURRENCY = Math.min(2, allDocumentIds.length)
+          // 4 parallel chains, capped at the document count. Was 2 — fine
+          // for small residential uploads, but a 20-30 document commercial
+          // set meant each chain serially processing 10-15 documents, and a
+          // single chain death (CPU-kill on one pathological PDF) orphaned
+          // half the batch until recovery's next cycle. More chains =
+          // faster drain AND smaller blast radius per chain death. Claims
+          // are FOR UPDATE SKIP LOCKED (migration 034), so concurrency here
+          // can never double-process a document, and each invocation gets
+          // its own CPU budget regardless of how many run at once.
+          const WORKER_CONCURRENCY = Math.min(4, allDocumentIds.length)
           await Promise.all(
             Array.from({ length: WORKER_CONCURRENCY }, () =>
               fetch(`${supabaseUrl}/functions/v1/document-worker`, {
@@ -547,7 +556,12 @@ export async function GET(
         // Emit initial stage immediately
         emit('progress', PROGRESS_STAGES[0])
 
-        let lastStage = ''
+        // Starts as 'uploading' (not '') because the line above already
+        // emitted that stage — starting empty would make the stage-diff
+        // block below re-emit "uploading, 5%" on the first poll iteration,
+        // AFTER the synthetic document-phase 'reading' progress emitted
+        // earlier in the same iteration, walking the UI backwards.
+        let lastStage = 'uploading'
         // Tracked separately from lastStage: multiple document batches all
         // report the same 'classifying_documents' stage key, so batch-to-
         // batch progress needs its own signal for the stuck-timeout check
@@ -558,6 +572,12 @@ export async function GET(
         // it actually changes, so a steady stream of identical polls
         // doesn't spam the client with duplicate document_progress events.
         let lastDocumentProgressSnapshot = ''
+        // Synthetic document-phase progress message — see documentPhaseProgress
+        // in pipeline-logic.ts. Tracked separately from lastStage because this
+        // whole phase happens BEFORE classification ever writes
+        // files.intake_stage, so the stage-diff logic below never fires
+        // during it.
+        let lastDocumentPhaseMessage = ''
 
         // Poll the files table until extraction completes, pauses for
         // clarification, or fails.
@@ -661,6 +681,26 @@ export async function GET(
                 const documentProgress: DocumentProgressEvent = { stage: 'document_progress', documents }
                 emit('document_progress', documentProgress)
                 lastProgressAt = Date.now()
+              }
+
+              // Honest overall progress during the document-extraction phase.
+              // Classification hasn't started yet (it's what writes
+              // intake_stage/intake_pct), so without this the progress bar
+              // sits frozen at "Uploading documents... 5%" for the entire
+              // extraction phase — indistinguishable, to the builder, from a
+              // genuinely hung run. Derived from the same job rows fetched
+              // above; hands off cleanly to classification's first real
+              // write (classifying_documents, 25%) since this caps at 20%.
+              // Gated on the stage still being pre-classification so a
+              // reconnect mid-classification can't emit a backwards jump.
+              if (!row.intake_stage || row.intake_stage === 'uploading' || row.intake_stage === 'reading') {
+                const terminalCount = jobRows.filter((j) => j.status === 'completed' || j.status === 'failed').length
+                const { pct, message } = documentPhaseProgress(terminalCount, jobRows.length)
+                if (message !== lastDocumentPhaseMessage) {
+                  lastDocumentPhaseMessage = message
+                  emit('progress', { stage: 'reading', message, pct })
+                  lastProgressAt = Date.now()
+                }
               }
             }
           }
