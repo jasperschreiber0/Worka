@@ -1,0 +1,42 @@
+name: Document intake pipeline health check
+
+# Runs scripts/synthetic-intake-health-check.mjs on a schedule against the
+# live production Supabase project + edge functions — the one part of the
+# document-processing pipeline nothing else in CI can exercise, since it
+# needs a real document-worker/smooth-responder invocation, not just a
+# schema check. See that script's header comment for exactly what a pass
+# does and doesn't certify.
+#
+# Deliberately scheduled rather than run per-deploy: each run creates real
+# Storage/DB rows (cleaned up after) and, once classification triggers,
+# makes real Claude API calls — running it on every push would multiply
+# that cost for no added signal between deploys.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
+  workflow_dispatch: {}
+
+concurrency:
+  group: intake-pipeline-health-check
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci --omit=dev
+
+      - name: Run synthetic intake pipeline health check
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: node scripts/synthetic-intake-health-check.mjs

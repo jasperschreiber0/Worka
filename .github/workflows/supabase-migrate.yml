@@ -85,3 +85,24 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: psql "$SUPABASE_DB_URL" -c "NOTIFY pgrst, 'reload schema';"
+
+      # Automates the manual runbook's "database verification" section:
+      # required tables/columns/constraints/indexes/functions-are-callable/
+      # RLS policies for the document-processing-queue and project-memory
+      # schema. Fails the workflow loudly if a migration silently didn't
+      # produce what the application code expects — the exact class of gap
+      # the 008_/021/026 schema-cache incident (see CLAUDE.md) went
+      # unnoticed for months. ON_ERROR_STOP is set inside the script itself.
+      - name: Verify schema assertions
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: psql "$SUPABASE_DB_URL" -f supabase/verification/schema_assertions.sql
+
+      # Health-monitoring views/functions are re-applied every migration run
+      # too (CREATE OR REPLACE throughout — safe, idempotent, no data
+      # touched) so they can never drift out of date with the schema they
+      # read from.
+      - name: Apply health monitoring views
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: psql "$SUPABASE_DB_URL" -f supabase/verification/health_monitoring_views.sql

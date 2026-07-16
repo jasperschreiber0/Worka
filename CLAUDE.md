@@ -468,6 +468,13 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 understanding (see "Project memory" above), not a new source
                                 of truth. Populated by lib/project-context.ts, not written to
                                 directly.
+036_document_job_stale_reclaim.sql — reclaim_stale_document_jobs() + a modified
+                                claim_next_document_job() that self-heals a
+                                document_processing_jobs row left at status='running'
+                                by a crashed document-worker invocation (the queue-model
+                                analogue of job_intake_locks' own staleness reclaim,
+                                migration 033) — see "Production readiness automation"
+                                below.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -592,6 +599,55 @@ Quality Assurance → Render Estimate
 - Gate 3: quantity ≤ 0 → assumption (excluded).
 
 See `lib/estimating/gates.ts` for the canonical spec.
+
+---
+
+## Production readiness automation
+
+Converts what used to be a manual production-verification runbook (schema checks, stuck/failed-job
+checks, an end-to-end smoke test — all re-derived by hand after every deploy) into checked-in,
+CI-enforced and cron-run automation. Scoped deliberately to the document-processing-queue /
+project-memory schema (migrations 026, 030, 033-036) this session's work actually touched, not a
+retrofit of the whole 36-migration history.
+
+| File | Runs | Purpose |
+|------|------|---------|
+| `supabase/verification/schema_assertions.sql` | `supabase-migrate.yml`, after every push to `main` | Asserts required tables/columns/CHECK constraints/foreign keys/indexes exist, and that `claim_next_document_job`, `complete_document_job`, `retry_or_fail_document_job`, `recompute_parent_batch_status`, and `reclaim_stale_document_jobs` exist with their expected signatures **and are actually callable** (each probed with a bogus uuid that matches zero real rows — never a no-op existence check alone). `RAISE EXCEPTION`s on the first failure, failing the workflow loudly instead of a gap surfacing later as a runtime "not found in schema cache" error (see the 008_/021/026 incident above). |
+| `supabase/verification/health_monitoring_views.sql` | Same workflow, immediately after | `CREATE OR REPLACE VIEW/FUNCTION` (idempotent, no data mutated) for: `stuck_document_jobs`, `failed_document_jobs_recent`, `document_job_retry_rate()`, `document_processing_latency_stats()`, `document_batch_failure_summary()`, `document_batch_completion_latency()`, and a single-row rollup `document_processing_health_summary()` for a dashboard tile or alert cron. |
+| `scripts/synthetic-intake-health-check.mjs` | `.github/workflows/intake-pipeline-health-check.yml`, scheduled every 6h (`workflow_dispatch` also available) | Exercises the real, deployed pipeline end to end — upload → `document_processing_batches`/`jobs` creation → `document-worker` claim → extraction → `classification_triggered` flip → smooth-responder reachability — against a disposable synthetic job/file, cleaned up in a `finally` regardless of outcome. See the script's own header comment for exactly what a pass does and doesn't certify (plumbing, not extraction accuracy). |
+| `supabase/migrations/036_document_job_stale_reclaim.sql` | Applied like any other migration | Closes the stuck-running-job gap (below). |
+
+**The stuck-running-job gap, and the fix.** `document-worker`'s HTTP handler returns `202 claimed`
+immediately after `claim_next_document_job` sets `status='running'`, then does the real extraction
+inside `EdgeRuntime.waitUntil` (see `index.ts`) — the caller that could have noticed a failure has
+already gone away before the real work even starts. If that background work is hit by Supabase's
+external, uncatchable CPU-time governor kill (the same failure mode migration 034 exists to
+isolate down to a single document), the row is left at `status='running'` forever: no code path
+ever calls `complete_document_job`/`retry_or_fail_document_job` for it, so
+`recompute_parent_batch_status` never sees it leave `running`, the batch never turns terminal, and
+classification never triggers. This is the queue-model analogue of the `job_intake_locks` gap
+migration 033 already fixed. The fix mirrors that one rather than inventing a new mechanism:
+`reclaim_stale_document_jobs()` requeues (or, past 3 attempts, permanently fails — the same cap and
+backoff `retry_or_fail_document_job` already uses) any `running` row whose `locked_at` is older than
+3 minutes, and `claim_next_document_job` now sweeps its own batch's stale rows before claiming —
+self-healing on every worker invocation, no new cron required, exactly mirroring
+`tryAcquireJobLock`'s own lazy-reclaim-on-acquire pattern in `app/api/intake/[fileId]/route.ts`. A
+fixed window (not a heartbeat column, unlike `job_intake_locks.last_progress_at`) is sufficient here
+because one `document_processing_jobs` claim does exactly one document's extraction, bounded by the
+same ~2000ms per-request CPU budget — there is no legitimate multi-minute in-progress state to
+distinguish from a dead one, unlike a multi-stage `smooth-responder` run. `reclaim_stale_document_jobs`
+is also exposed standalone (and surfaced via `stuck_document_jobs`) so a health check or monitoring
+cron can sweep across every batch, not only the one a worker happens to be claiming against.
+
+**Manual checks this does *not* replace** (kept as runbook items, not automated): the queue's
+concurrency guarantees themselves (a live two-transaction `FOR UPDATE SKIP LOCKED` demonstration,
+and a `retry_or_fail_document_job` backoff-timing test) are a one-time/occasional correctness proof
+of the locking primitive, not something worth re-running on a schedule; edge function *runtime*
+behaviour beyond reachability (actual extraction accuracy, Claude output quality) is exactly what
+the synthetic health check's header comment explicitly declines to certify; and interpreting a
+non-empty `stuck_document_jobs`/`failed_document_jobs_recent` result operationally (is this one bad
+PDF or a systemic regression) still needs a human, the views only remove the need to hand-write the
+SQL to see it.
 
 ---
 
