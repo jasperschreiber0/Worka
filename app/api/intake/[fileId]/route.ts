@@ -1,4 +1,11 @@
-// Edge runtime — no serverless timeout, SSE can stream indefinitely
+// Edge runtime — avoids Next.js's Node-runtime request handling overhead for
+// a long-lived streaming response. This does NOT mean the SSE connection can
+// stream indefinitely: the app is hosted on Railway (see CLAUDE.md's
+// "Hosting" note), whose edge proxy still caps any HTTP/SSE connection (closed
+// after 5 minutes with no data, hard capped at 15 minutes regardless — see
+// https://docs.railway.com/guides/sse-vs-websockets). The self-close-and-
+// reconnect logic and heartbeat further down in this file exist because of
+// that platform-level ceiling, not despite it — see CONNECTION_SAFETY_MARGIN_MS.
 export const runtime = 'edge'
 
 import { NextRequest } from 'next/server'
@@ -309,7 +316,8 @@ export async function GET(
   // Rides along in the URL from the client's first connection and persists
   // through the browser's automatic EventSource reconnects (same URL each
   // time) — lets this handler track overall elapsed time across the whole
-  // chain of connections Vercel's hard execution ceiling forces us into,
+  // chain of connections the hosting platform's own connection ceiling
+  // forces us into (see CONNECTION_SAFETY_MARGIN_MS below for specifics),
   // not just this one connection's slice.
   const startedAtParam = Number(searchParams.get('started_at'))
   const overallStartedAt = Number.isFinite(startedAtParam) && startedAtParam > 0 ? startedAtParam : Date.now()
@@ -423,11 +431,24 @@ export async function GET(
         controller.enqueue(sseEvent(encoder, event, data))
       }
 
-      // Vercel forcibly kills this function at a hard 300s ceiling regardless
-      // of any timeout we set here -- confirmed via "Vercel Runtime Timeout
-      // Error: Task timed out after 300 seconds" in production. Declared
-      // ahead of the trigger block below since the job-lock wait loop needs
-      // the same overall give-up point the polling loop uses.
+      // This app runs on Railway (not Vercel — see CLAUDE.md's "Hosting"
+      // note), whose edge proxy enforces its own HTTP/SSE connection ceiling:
+      // a connection is closed after 5 minutes with no data sent at all, or
+      // capped at 15 minutes outright even with periodic keep-alives (see
+      // https://docs.railway.com/guides/sse-vs-websockets — SSE rides a
+      // plain HTTP response, so it is NOT exempt from this the way a
+      // WebSocket upgrade would be). This block used to be written against
+      // Vercel's flat 300s-per-invocation kill (a different, now-inapplicable
+      // constraint from when this app was Vercel-hosted) — the numbers below
+      // happen to already satisfy Railway's real limits too (260s is under
+      // both the 5-minute no-data close and the 15-minute hard cap), but the
+      // REASON has changed: don't "simplify" this away just because Vercel's
+      // specific 300s ceiling no longer applies — the underlying problem
+      // (long-lived HTTP connections get cut by the platform) is still real,
+      // just with different numbers and a different failure mode (silent
+      // no-data close vs. an explicit kill). Declared ahead of the trigger
+      // block below since the job-lock wait loop needs the same overall
+      // give-up point the polling loop uses.
       const CONNECTION_SAFETY_MARGIN_MS = 260_000
       const OVERALL_TIMEOUT_MS = 15 * 60_000
       // Genuinely-stuck give-up point — shorter than the overall ceiling so
@@ -435,17 +456,31 @@ export async function GET(
       // find out. Generous enough that a single slow Claude call on a large
       // batch (observed up to ~90s for a 60k-token call) is nowhere close.
       //
-      // Set comfortably above the independent recovery cron's own worst-case
-      // detection+action latency (app/api/cron/intake-recovery/route.ts,
-      // scheduled every 5 min in vercel.json; document_processing_jobs'
+      // Set comfortably above the independent recovery service's own
+      // worst-case detection+action latency (app/api/cron/intake-recovery/
+      // route.ts, triggered on a schedule external to this app — see
+      // .github/workflows/intake-recovery-cron.yml, or Railway's own Cron
+      // Job feature if configured there instead; document_processing_jobs'
       // staleness window is 3 min — see reclaim_stale_document_jobs) rather
-      // than close to it: a client that gives up right as the cron is about
+      // than close to it: a client that gives up right as recovery is about
       // to fix things would show the builder a false "timed out" for a run
       // that was, in fact, seconds from completing on its own. This value
-      // does not gate recovery itself — the cron runs on its own schedule
+      // does not gate recovery itself — it runs on its own external schedule
       // regardless of whether any client is even still connected — it only
       // controls how long a connected client waits before showing an error.
       const STUCK_TIMEOUT_MS = 9 * 60_000
+      // Railway's own guidance for long SSE streams: send a heartbeat at
+      // least every 5 minutes so an idle-but-healthy connection is never
+      // mistaken for a dead one. Without this, the loop below only ever
+      // writes to the stream when real progress happens (a stage/document
+      // status change) — during a long stretch with no visible change
+      // (e.g. mid-Claude-call), zero bytes would cross the wire, and only
+      // the 260s reconnect margin would save it (a 40s buffer under
+      // Railway's 5-minute no-data close, not zero, but tighter than this
+      // deserves). A plain SSE comment line (leading colon) satisfies the
+      // spec without the client's event listeners ever seeing it.
+      const HEARTBEAT_INTERVAL_MS = 60_000
+      let lastHeartbeatAt = Date.now()
 
       try {
         if (!alreadyTriggered && !alreadyProcessing) {
@@ -528,17 +563,17 @@ export async function GET(
         // clarification, or fails.
         //
         // The reasoning-first engine's three large sequential Claude calls
-        // can genuinely exceed Vercel's ceiling on a real project, so instead
-        // of waiting to be killed, this connection self-closes cleanly at a
-        // safe margin under 300s and tells the client to open a fresh
-        // connection (see the 'reconnect' emit below) rather than treating
-        // the close as a failure. The retrigger-prevention check above means
-        // that reconnect only polls, never restarts the pipeline, so the
-        // underlying Supabase-side run (independent of this Vercel
-        // connection) keeps going undisturbed across as many reconnect
-        // cycles as it needs. OVERALL_TIMEOUT_MS is the real give-up point,
-        // tracked across that whole chain via overallStartedAt, not just
-        // this connection's slice.
+        // can genuinely exceed the hosting platform's connection ceiling on
+        // a real project, so instead of waiting to be killed, this
+        // connection self-closes cleanly at a safe margin under that limit
+        // and tells the client to open a fresh connection (see the
+        // 'reconnect' emit below) rather than treating the close as a
+        // failure. The retrigger-prevention check above means that reconnect
+        // only polls, never restarts the pipeline, so the underlying
+        // Supabase-side run (independent of this HTTP connection) keeps
+        // going undisturbed across as many reconnect cycles as it needs.
+        // OVERALL_TIMEOUT_MS is the real give-up point, tracked across that
+        // whole chain via overallStartedAt, not just this connection's slice.
         for (let attempts = 0; ; attempts++) {
           if (shouldGiveUp(Date.now(), overallStartedAt, lastProgressAt, OVERALL_TIMEOUT_MS, STUCK_TIMEOUT_MS)) {
             // Skip/fail info was previously only ever attached to the
@@ -553,15 +588,24 @@ export async function GET(
             return
           }
           if (Date.now() - connectionStartedAt > CONNECTION_SAFETY_MARGIN_MS) {
-            // Deliberate close well before Vercel's hard kill. A plain close
-            // still fires EventSource's native 'error' (it can't tell a
-            // deliberate close from a real connection loss), so emit an
-            // explicit 'reconnect' event first — IntakeProgress listens for
-            // it and opens a fresh connection itself instead of treating
-            // this as a failure.
+            // Deliberate close well before the platform's own connection
+            // ceiling (see CONNECTION_SAFETY_MARGIN_MS's declaration above).
+            // A plain close still fires EventSource's native 'error' (it
+            // can't tell a deliberate close from a real connection loss), so
+            // emit an explicit 'reconnect' event first — IntakeProgress
+            // listens for it and opens a fresh connection itself instead of
+            // treating this as a failure.
             emit('reconnect', {})
             controller.close()
             return
+          }
+          if (Date.now() - lastHeartbeatAt > HEARTBEAT_INTERVAL_MS) {
+            // Plain SSE comment (leading colon) — valid per spec, silently
+            // ignored by EventSource's event listeners, exists purely to put
+            // bytes on the wire so an idle-but-healthy connection doesn't
+            // look identical to a dead one to Railway's no-data-close timer.
+            controller.enqueue(encoder.encode(': heartbeat\n\n'))
+            lastHeartbeatAt = Date.now()
           }
           await delay(1500)
 

@@ -430,7 +430,7 @@ export default function IntakeProgress({
                 </svg>
               )}
               {doc.status === 'pending' && (
-                <span className="w-3 h-3 rounded-full border border-[#555555] flex-shrink-0" aria-hidden="true" />
+                <span className="w-3 h-3 rounded-full border border-[#555555] flex-shrink-0 animate-pulse" aria-hidden="true" />
               )}
               <span
                 className={
@@ -453,7 +453,7 @@ export default function IntakeProgress({
       <div className="space-y-1.5">
         <div className="h-2 w-full rounded-full bg-[#2a2a2a] overflow-hidden">
           <div
-            className="h-full rounded-full bg-[#ff6b2b] transition-all duration-500"
+            className={`h-full rounded-full bg-[#ff6b2b] transition-all duration-500 ${!isDone ? 'animate-pulse' : ''}`}
             style={{ width: `${progress.pct}%` }}
             role="progressbar"
             aria-valuenow={progress.pct}

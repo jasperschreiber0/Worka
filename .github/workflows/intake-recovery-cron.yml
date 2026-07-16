@@ -1,25 +1,25 @@
 name: Intake recovery cron
 
 # Fires GET /api/cron/intake-recovery on a schedule — see
-# scripts/trigger-intake-recovery.mjs and CLAUDE.md's "Independent Intake
+# scripts/trigger-cron-route.mjs and CLAUDE.md's "Independent Intake
 # Recovery Service" for what that route does and why it needs to run
 # frequently (its own staleness windows are 3-6 minutes; a stuck upload
 # should self-heal within one cycle of this schedule).
 #
-# This exists because Vercel Cron below the Pro plan only fires once a day —
-# far too coarse for this route's job — and is deliberately NOT tied to the
-# app's own hosting: any scheduler that can hit an authenticated URL works
-# (this workflow, a Railway Cron Job running the same script, a plain
-# crontab entry). See CLAUDE.md for the Railway alternative if GitHub
-# Actions' scheduling latency (schedules are best-effort and can slip by
-# several minutes under GitHub's own load — acceptable here since the
-# route's own re-derivation is idempotent and safe to run late or skipped
-# occasionally, not acceptable if you need a tight, guaranteed interval).
+# This app is hosted on Railway, not Vercel (see CLAUDE.md's "Hosting"
+# note) — vercel.json's cron entries are never read by anything, since
+# Railway doesn't consult that file. This workflow (or an equivalent
+# Railway-native Cron Job service running the same script) is the actual
+# scheduler. GitHub Actions' own scheduler is best-effort and can slip by
+# several minutes under load — acceptable here since every run is
+# idempotent and a late/skipped run just means recovery takes one cycle
+# longer, not incorrect; use a Railway Cron Job instead if you need a
+# tighter guarantee.
 #
-# Requires two repo secrets: APP_URL (e.g. https://getworka.com) and
-# CRON_SECRET (must match the value configured on the Vercel app — the
-# route fails closed with 401 if this doesn't match, 503 if the app has no
-# CRON_SECRET configured at all).
+# Requires two repo secrets: APP_URL (the app's real, currently-live URL —
+# check Railway → Networking, don't assume a domain) and CRON_SECRET (must
+# match the value set on Railway → Variables for this service — NOT just
+# on Vercel, which does not run this app).
 
 on:
   schedule:
@@ -43,5 +43,6 @@ jobs:
       - name: Trigger intake recovery
         env:
           APP_URL: ${{ secrets.APP_URL }}
+          ROUTE_PATH: /api/cron/intake-recovery
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
-        run: node scripts/trigger-intake-recovery.mjs
+        run: node scripts/trigger-cron-route.mjs

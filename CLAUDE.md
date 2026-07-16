@@ -28,12 +28,61 @@ the rest of the app.
 
 ---
 
+## Hosting
+
+**Production runs on Railway, not Vercel.** This is confirmed by direct inspection (Railway
+project "Worka" → service "worka" → Deployments shows every commit pushed to `main` building and
+going live within minutes; Vercel's own project for this repo has NOT deployed any commit pushed
+in this session despite `main`'s Git integration looking correctly configured there — auto-deploy
+from GitHub to Vercel is not actually firing, for reasons not diagnosed here). Concretely:
+
+- **Real production URL**: `https://worka-production.up.railway.app` (Railway → Settings →
+  Networking → Public Networking). No custom domain (e.g. `getworka.com`) is currently attached to
+  this Railway service — do not assume `getworka.com`/`www.getworka.com` point here. A prior
+  version of this file claimed "Vercel auto-deploys from main to getworka.com"; that claim was
+  never re-verified against the actual live deployment and turned out to be wrong in a way that
+  cost real debugging time (see the git history around July 2026 for the incident) — if you're
+  about to write a URL against "production" anywhere (an env var, a workflow secret, a script),
+  check Railway → Networking first, don't copy this file's prose without re-verifying it.
+- **Auto-deploy**: Railway's GitHub integration ("Auto deploys when pushed to GitHub", visible on
+  the service's Settings → Git tab) is what's actually live — every push to `main` triggers a real
+  Railway build/deploy.
+- **Environment variables**: set on Railway → Variables (per-service), not Vercel. A variable set
+  only on Vercel (e.g. an earlier `CRON_SECRET` addition) has no effect on the running app — this
+  was the root cause of an early false-negative when standing up the cron triggers below.
+- **`vercel.json` is currently inert.** It still declares three `crons` entries, but Railway never
+  reads that file, and Vercel isn't deploying `main` — so nothing was actually invoking
+  `/api/cron/morning-brief`, `/api/cron/network-rates`, or `/api/cron/intake-recovery` on a
+  schedule until the GitHub Actions workflows below were added. Left in place (not deleted) in case
+  a Vercel deployment is intentionally revived as a parallel/staging target later — if that
+  happens, be aware Vercel's cron would then ALSO fire in addition to the GitHub Actions triggers,
+  double-invoking these routes (harmless — every one of them is idempotent — but wasteful and
+  confusing in logs). If Vercel is permanently abandoned, delete `vercel.json`'s `crons` block to
+  remove this ambiguity for the next person.
+- **Scheduled routes now run via GitHub Actions**, not Vercel Cron: `.github/workflows/
+  intake-recovery-cron.yml` (every 5 min), `morning-brief-cron.yml` (daily 20:45 UTC),
+  `network-rates-cron.yml` (daily 15:00 UTC) — each just calls `scripts/trigger-cron-route.mjs`
+  against the real Railway URL with the shared `CRON_SECRET`. Requires two repo secrets: `APP_URL`
+  and `CRON_SECRET` (Settings → Secrets and variables → Actions), matching what's set on Railway.
+  GitHub's own scheduler is best-effort (can slip several minutes under load); a Railway-native
+  Cron Job service running the same script is the tighter-guarantee alternative if that ever
+  matters — see "Independent Intake Recovery Service" below for the intake-recovery route
+  specifically.
+- **SSE / long-lived connections are capped by Railway's edge proxy**, not by a Vercel serverless
+  timeout: closed after 5 minutes with no data transferred, hard capped at 15 minutes even with
+  keep-alives (SSE is not exempt from this the way a WebSocket upgrade is — see
+  https://docs.railway.com/guides/sse-vs-websockets). `app/api/intake/[fileId]/route.ts`'s
+  self-close-and-reconnect logic and idle heartbeat exist because of this — the numbers there
+  (260s reconnect margin, 60s heartbeat) were originally written against Vercel's flat 300s kill
+  and happen to still satisfy Railway's limits, but read that file's own comments before touching
+  those constants; the reasoning is platform-specific and has already been corrected once.
+
+---
+
 ## Git Rules
 
-- **Always commit directly to `main`** — Vercel auto-deploys from main to `www.getworka.com` (the
-  Production environment's actual attached domain — Vercel Project Settings → Environments; the
-  bare `getworka.com` may or may not redirect depending on domain config, don't assume it's
-  equivalent when constructing URLs like `APP_URL` for external cron triggers)
+- **Always commit directly to `main`** — Railway auto-deploys from `main` (see "Hosting" above for
+  the real URL and why `vercel.json`/Vercel are not the live deployment path)
 - When given a feature branch, develop there then merge to main before finishing
 - Run `npm run type-check` before every commit; fix all new errors (pre-existing module-not-found errors from missing node_modules are acceptable)
 - Push with `git push -u origin <branch>` or `git push origin main`
@@ -317,9 +366,9 @@ This table is now generated to match `app/api/**/route.ts` exactly — a prior v
 | `POST /api/email-draft/send` | Send the confirmed draft via Resend, logs to `communication_history` |
 | `GET/POST /api/assumptions/[quoteId]` | Assumption list for a quote |
 | `POST /api/assumptions/[quoteId]/resolve` | Resolve an assumption (accept/adjust/exclude); advances the quote to `pending_review` when all are resolved |
-| `GET /api/cron/morning-brief` | Vercel Cron target — emails the daily brief to every builder (guarded by `CRON_SECRET`, fails closed if unset in real mode) |
-| `GET /api/cron/network-rates` | Vercel Cron target — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`, fails closed if unset in real mode) |
-| `GET /api/cron/intake-recovery` | Vercel Cron target, every 5 min — the independent intake-pipeline recovery service. See "Independent Intake Recovery Service" below. |
+| `GET /api/cron/morning-brief` | Triggered daily by `.github/workflows/morning-brief-cron.yml` (not Vercel Cron — see "Hosting" above) — emails the daily brief to every builder (guarded by `CRON_SECRET`, fails closed if unset in real mode) |
+| `GET /api/cron/network-rates` | Triggered daily by `.github/workflows/network-rates-cron.yml` — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`, fails closed if unset in real mode) |
+| `GET /api/cron/intake-recovery` | Triggered every 5 min by `.github/workflows/intake-recovery-cron.yml` — the independent intake-pipeline recovery service. See "Independent Intake Recovery Service" below. |
 
 **Rate limiting**: `lib/rate-limit.ts` caps requests per builder on the Claude-backed routes (`chat`, `classify-document`, `email-draft`) — a DB-backed atomic counter in real mode (`api_rate_limits` table, migration 021), an in-memory fixed window in demo mode.
 
@@ -337,7 +386,7 @@ Recording is best-effort: `recordProofEvent` never throws — a proof failure mu
 
 ## Morning Brief Delivery
 
-`vercel.json` schedules `GET /api/cron/morning-brief` daily at 20:45 UTC (6:45am AEST). The route authenticates via `Authorization: Bearer $CRON_SECRET`, asks the `morning-brief` edge function for each builder's ranked brief, formats it with `lib/morning-brief.ts`, and sends via Resend. Demo mode sends the demo brief to `MORNING_BRIEF_TEST_EMAIL` if set.
+`.github/workflows/morning-brief-cron.yml` triggers `GET /api/cron/morning-brief` daily at 20:45 UTC (6:45am AEST) — see "Hosting" above for why this is a GitHub Actions workflow and not `vercel.json` (which declares the same schedule but is never actually read, since production runs on Railway). The route authenticates via `Authorization: Bearer $CRON_SECRET`, asks the `morning-brief` edge function for each builder's ranked brief, formats it with `lib/morning-brief.ts`, and sends via Resend. Demo mode sends the demo brief to `MORNING_BRIEF_TEST_EMAIL` if set.
 
 ---
 
@@ -566,7 +615,7 @@ Quality Assurance → Render Estimate
 
 | Stages | Where | Why |
 |--------|-------|-----|
-| 1 Document Intelligence, 2 Project Understanding | `supabase/functions/smooth-responder` (Deno) | No Vercel timeout — a multi-call reasoning chain needs room to run in the background |
+| 1 Document Intelligence, 2 Project Understanding | `supabase/functions/smooth-responder` (Deno) | No request/connection timeout tied to the Next.js app's own HTTP lifecycle — a multi-call reasoning chain needs room to run in the background regardless of whatever connection ceiling the app's own host (Railway; formerly assumed to be Vercel — see "Hosting" above) imposes |
 | 3 Scope Reasoning, 4 Gap Detection, 5 Clarifying Questions | same Deno function | Gap detection falls directly out of scope reasoning — one Claude call covers both |
 | 6 Estimate Generation (quantities only, no rates) | same Deno function | Produces line items with evidence + confidence; `rate`/`total` stay null unless the source document itself is a priced BOQ (hybrid pricing) |
 | Rate resolution (5-tier hierarchy) | Next.js, `lib/pricing.ts`, called from the SSE route once `intake_status = 'extracted'` | Needs the builder's learned/preference/supplier rates — same Postgres the Next.js app already talks to |
@@ -603,7 +652,7 @@ Quality Assurance → Render Estimate
 
 **Deliberately not implemented: summarizing documents before the reasoning stage.** This was evaluated alongside the above as a further token-reduction lever and rejected — it would add a whole extra Claude call per document (net cost/latency negative once you're already paying for the original read), and more fundamentally it conflicts with this pipeline's core guarantee ("never invent a fact — extract only what you can point to direct evidence for"): a summary is a step removed from source evidence, exactly the kind of lossy intermediate that guarantee exists to avoid. The vision-selective processing above gets the real token savings without that tradeoff.
 
-**Timeout handling: stuck vs. slow are different things.** The SSE poller's `OVERALL_TIMEOUT_MS` (15 min, tracked via `overallStartedAt`) is still the hard ceiling regardless of activity, but a second, tighter signal — `STUCK_TIMEOUT_MS` (5 min) since `lastProgressAt`, a real stage or batch-index change — now lets a genuinely-hung run give up well before 15 minutes without penalizing a run that's legitimately working through several document batches. Both timestamps ride along in the SSE URL across the deliberate reconnects Vercel's 300s connection ceiling forces (same pattern as `started_at`), tracked client-side in `IntakeProgress.tsx` refs. See `shouldGiveUp` in `pipeline-logic.ts`.
+**Timeout handling: stuck vs. slow are different things.** The SSE poller's `OVERALL_TIMEOUT_MS` (15 min, tracked via `overallStartedAt`) is still the hard ceiling regardless of activity, but a second, tighter signal — `STUCK_TIMEOUT_MS` (9 min — deliberately set above the independent recovery service's own worst-case detection+action latency, see "Independent Intake Recovery Service" below) since `lastProgressAt`, a real stage/batch-index/per-document-status change — now lets a genuinely-hung run give up well before 15 minutes without penalizing a run that's legitimately working through several document batches. Both timestamps ride along in the SSE URL across the deliberate reconnects Railway's edge-proxy connection ceiling forces (5 min with no data, 15 min hard cap regardless — see "Hosting" above; same pattern as `started_at`), tracked client-side in `IntakeProgress.tsx` refs. See `shouldGiveUp` in `pipeline-logic.ts`.
 
 **Stage 1/2 extraction sees prior facts, not just document titles.** The system prompt includes the job's already-established `project_facts` (not just a list of previously-processed document titles) so a newly-uploaded document is classified with real awareness of what earlier documents in the job established — it can extend, agree with, or correct that context instead of extracting in a vacuum. A fact that a new document corrects is marked `superseded = true` on the prior row (matched by `job_id` + `category` + `key`, differing value) rather than both rows accumulating forever and both landing in every future prompt.
 
@@ -761,30 +810,21 @@ was seconds from fixing on its own. Recovery itself never depends on this value;
 long a *connected* client waits before surfacing an error.
 
 **Operational considerations:**
-- **Vercel plan**: sub-daily cron schedules (`*/5 * * * *`, as configured in `vercel.json`) require a
-  Pro (or higher) plan — Hobby limits cron to once per day, which means `vercel.json`'s entry alone
-  effectively does nothing on Hobby. The route itself is plan-agnostic — it's just an authenticated
-  `GET` endpoint — so on Hobby, trigger it externally instead:
-  - **`scripts/trigger-intake-recovery.mjs`** — a small standalone script (`APP_URL` +
-    `CRON_SECRET` env vars, zero dependencies beyond global `fetch`) that makes the one HTTP call
-    and exits non-zero on failure, for any scheduler that can run `node` on a timer.
-  - **Railway Cron Job**: create a Railway "Cron Job" service in the same project (or a standalone
-    one) pointed at this repo, start command `node scripts/trigger-intake-recovery.mjs`, schedule
-    e.g. `*/5 * * * *`, with `APP_URL` and `CRON_SECRET` set as service variables (`CRON_SECRET` must
-    match the value on the Vercel app exactly). This does **not** require moving the Next.js app off
-    Vercel — Railway is only running the tiny trigger script, hitting the deployed Vercel URL.
-  - **GitHub Actions** — `.github/workflows/intake-recovery-cron.yml` runs the same script on a
-    `*/5 * * * *` schedule, live as soon as the `APP_URL` and `CRON_SECRET` repo secrets are set
-    (Settings → Secrets and variables → Actions). Same pattern as `intake-pipeline-health-check.yml`.
-    Simplest zero-new-infra option, but GitHub's own scheduler is best-effort and can slip by several
-    minutes under load — acceptable here since every run is idempotent and a late/skipped run just
-    means recovery takes one cycle longer, not incorrect; use Railway instead if you need a tighter
-    guarantee.
-- **CRON_SECRET**: this route fails closed (503) in real mode if unset, identical to the other two
-  cron routes — never silently skips recovery. The same secret value must be set in three possible
-  places depending on which trigger path(s) are active: the Vercel app's own env (required, this is
-  what the route checks against), and GitHub Actions repo secrets and/or Railway service variables
-  for whichever external trigger you use.
+- **Actual trigger, live today**: `.github/workflows/intake-recovery-cron.yml` calls
+  `scripts/trigger-cron-route.mjs` (`ROUTE_PATH=/api/cron/intake-recovery`) every 5 minutes against
+  the real Railway URL — confirmed working end to end (a manual `workflow_dispatch` run found and
+  resumed 2 stuck batches + 1 stuck lock in production on first trigger). `vercel.json`'s cron entry
+  for this route is not what's running it — see "Hosting" above; Vercel isn't even deploying `main`.
+  GitHub's own scheduler is best-effort and can slip by several minutes under load — acceptable here
+  since every run is idempotent and a late/skipped run just means recovery takes one cycle longer,
+  not incorrect. A Railway-native Cron Job service (`node scripts/trigger-cron-route.mjs` with
+  `ROUTE_PATH=/api/cron/intake-recovery`, `APP_URL`, `CRON_SECRET` as service variables) is the
+  tighter-guarantee alternative if GitHub's scheduling slop ever matters.
+- **CRON_SECRET**: this route fails closed (503) in real mode if unset. Must be set on **Railway →
+  Variables** for the `worka` service — that's the app that's actually running and actually checks
+  this value. Setting it only on Vercel (easy mistake, since this file used to say Vercel was
+  production) has no effect. The same value must also be present as a `CRON_SECRET` GitHub Actions
+  repo secret for the trigger workflow to authenticate successfully.
 - **Monitoring**: `intake_recovery_runs` is the first place to look during an incident — a healthy
   system shows frequent rows with all-zero counts (nothing to recover); a spike in
   `document_jobs_reclaimed`/`job_locks_reclaimed` is an early signal of a systemic extraction/Claude
@@ -813,7 +853,9 @@ long a *connected* client waits before surfacing an error.
 
 `next.config.mjs` bakes two env vars at build time:
 - `NEXT_PUBLIC_APP_VERSION` — from `package.json` version field
-- `NEXT_PUBLIC_COMMIT_SHA` — from `VERCEL_GIT_COMMIT_SHA` (Vercel) or local `git rev-parse --short HEAD`
+- `NEXT_PUBLIC_COMMIT_SHA` — from `RAILWAY_GIT_COMMIT_SHA` (Railway, the actual production host — see
+  "Hosting" above), falling back to `VERCEL_GIT_COMMIT_SHA` (only relevant if a Vercel deployment is
+  ever revived) or local `git rev-parse --short HEAD`
 
 These appear in the chat header. When bumping the version for a release, update `package.json` version.
 
@@ -876,12 +918,13 @@ See `.env.local.example`. Key variables:
 | `ANTHROPIC_API_KEY` | `/api/chat` (intent classification, in-process), `/api/email-sync/parse`, `/api/email-draft`, `/api/classify-document`, `/api/estimation/scope-hints`, the `smooth-responder` edge function |
 | `VOYAGE_API_KEY` | Optional. The `smooth-responder` edge function's fact de-duplication (`voyage-3-lite` embeddings) — must be set as a Supabase Edge Function secret, not just in the Next.js app's env, since it's only ever read inside that Deno function. Unset = the engine just falls back to exact category+key supersession, never fatal. |
 | `NEXT_PUBLIC_APP_URL` | OAuth redirect URIs, worker invite links, internal fetch calls |
-| `VERCEL_GIT_COMMIT_SHA` | Auto-injected by Vercel; baked into `NEXT_PUBLIC_COMMIT_SHA` at build time |
+| `RAILWAY_GIT_COMMIT_SHA` | Auto-injected by Railway (the actual production host) for a GitHub-triggered deploy; baked into `NEXT_PUBLIC_COMMIT_SHA` at build time — see "Version Tracking" below |
+| `VERCEL_GIT_COMMIT_SHA` | Auto-injected by Vercel, if a Vercel deployment is ever used (not currently — see "Hosting" above); same purpose as `RAILWAY_GIT_COMMIT_SHA`, checked second |
 | `GOOGLE_CLIENT_ID/SECRET` | Gmail OAuth |
 | `MICROSOFT_CLIENT_ID/SECRET` | Outlook OAuth |
 | `RESEND_API_KEY` | Email delivery |
 | `EMAIL_FROM_ADDRESS` | From address for outbound client emails; defaults to `hello@getworka.com` if unset |
-| `CRON_SECRET` | Auth for `/api/cron/morning-brief` and `/api/cron/network-rates` (Vercel Cron sends it as a Bearer token). Both routes fail closed (503) if unset while Supabase is configured — never fail open. |
+| `CRON_SECRET` | Auth for all three `/api/cron/*` routes (morning-brief, network-rates, intake-recovery) — sent as a Bearer token by the GitHub Actions workflows that trigger them (see "Hosting" above; NOT Vercel Cron, despite the routes' own `RequestOptions` shape looking generic). Must be set on **Railway → Variables** (the actual running app) — setting it only on Vercel has no effect. All three routes fail closed (503) if unset while Supabase is configured — never fail open. |
 | `MORNING_BRIEF_TEST_EMAIL` | Demo-mode recipient for the daily brief email |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | **Reserved, not implemented.** No code reads these — SMS notifications were never built. |
 | `STRIPE_SECRET_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | **Reserved, not implemented.** No code reads these (though `builders.stripe_customer_id` exists in the schema) — payment collection was never built. |

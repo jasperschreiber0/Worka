@@ -1,0 +1,46 @@
+name: Morning brief cron
+
+# Fires GET /api/cron/morning-brief daily at 20:45 UTC (6:45am AEST) — the
+# daily habit email every builder gets. Schedule mirrors vercel.json's
+# original entry for this route.
+#
+# IMPORTANT: this app is hosted on Railway, not Vercel (see CLAUDE.md's
+# "Hosting" note) — vercel.json's cron entries are never read by anything
+# on Railway. Before this workflow existed, nothing was actually triggering
+# this route in production, which means real builders likely stopped
+# receiving their morning brief email at whatever point the app moved to
+# Railway (or was never receiving it there at all). Once this workflow's
+# secrets are configured, it WILL resume sending real emails to real
+# builders on the schedule below — this is the intended, correct behavior,
+# not a side effect, but flagged here since it's a meaningfully visible
+# change from "silently not running."
+#
+# Requires two repo secrets: APP_URL (the app's real, currently-live URL —
+# check Railway → Networking) and CRON_SECRET (must match the value set on
+# Railway → Variables for this service).
+
+on:
+  schedule:
+    - cron: '45 20 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: morning-brief-cron
+  cancel-in-progress: false
+
+jobs:
+  trigger-morning-brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Trigger morning brief
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          ROUTE_PATH: /api/cron/morning-brief
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/trigger-cron-route.mjs

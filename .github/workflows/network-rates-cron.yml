@@ -1,0 +1,42 @@
+name: Network rates cron
+
+# Fires GET /api/cron/network-rates daily at 15:00 UTC — nightly Tier-5 rate
+# aggregation (anonymised P25/P50/P75 of learned rates across builders).
+# Schedule mirrors vercel.json's original entry for this route.
+#
+# Same gap as morning-brief-cron.yml: this app is hosted on Railway, not
+# Vercel (see CLAUDE.md's "Hosting" note), so vercel.json's cron entry for
+# this route was never actually firing anything. Low-risk to resume (pure
+# internal aggregation, no client-visible side effect), but worth knowing
+# network_rate_aggregates was likely stale/not updating until this workflow
+# started running.
+#
+# Requires two repo secrets: APP_URL (the app's real, currently-live URL —
+# check Railway → Networking) and CRON_SECRET (must match the value set on
+# Railway → Variables for this service).
+
+on:
+  schedule:
+    - cron: '0 15 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: network-rates-cron
+  cancel-in-progress: false
+
+jobs:
+  trigger-network-rates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Trigger network rates aggregation
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          ROUTE_PATH: /api/cron/network-rates
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/trigger-cron-route.mjs
