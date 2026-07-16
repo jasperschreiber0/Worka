@@ -30,7 +30,10 @@ the rest of the app.
 
 ## Git Rules
 
-- **Always commit directly to `main`** — Vercel auto-deploys from main to getworka.com
+- **Always commit directly to `main`** — Vercel auto-deploys from main to `www.getworka.com` (the
+  Production environment's actual attached domain — Vercel Project Settings → Environments; the
+  bare `getworka.com` may or may not redirect depending on domain config, don't assume it's
+  equivalent when constructing URLs like `APP_URL` for external cron triggers)
 - When given a feature branch, develop there then merge to main before finishing
 - Run `npm run type-check` before every commit; fix all new errors (pre-existing module-not-found errors from missing node_modules are acceptable)
 - Push with `git push -u origin <branch>` or `git push origin main`
