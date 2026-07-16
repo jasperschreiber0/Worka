@@ -19,6 +19,8 @@ import {
   pairSupersededFacts,
   MAX_FACTS_IN_PROMPT,
   SEMANTIC_DUPLICATE_THRESHOLD,
+  isRetryableApiError,
+  withTimeoutAndRetry,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -438,4 +440,79 @@ test('pairSupersededFacts: chain collapsing is order-dependent on its documented
   const changes = pairSupersededFacts(active, oldestFirst)
   assert.equal(changes.length, 1)
   assert.equal(changes[0].oldValue, '120', 'with the precondition violated, the function reports v1 as if it were the most recent predecessor')
+})
+
+// ─── isRetryableApiError / withTimeoutAndRetry ─────────────────────────────
+
+test('isRetryableApiError: abort (timeout), 429, and 5xx are retryable', () => {
+  const abortErr = new Error('The operation was aborted')
+  abortErr.name = 'AbortError'
+  assert.equal(isRetryableApiError(abortErr), true)
+  assert.equal(isRetryableApiError({ status: 429 }), true)
+  assert.equal(isRetryableApiError({ status: 500 }), true)
+  assert.equal(isRetryableApiError({ status: 529 }), true, '529 overloaded_error is >= 500')
+})
+
+test('isRetryableApiError: 400/401/404 and plain errors are not retryable', () => {
+  assert.equal(isRetryableApiError({ status: 400 }), false)
+  assert.equal(isRetryableApiError({ status: 401 }), false)
+  assert.equal(isRetryableApiError(new Error('boom')), false)
+  assert.equal(isRetryableApiError(null), false)
+})
+
+test('withTimeoutAndRetry: returns the result on first success, no retry', async () => {
+  let calls = 0
+  const result = await withTimeoutAndRetry(async () => { calls++; return 'ok' }, { maxRetries: 2 })
+  assert.equal(result, 'ok')
+  assert.equal(calls, 1)
+})
+
+test('withTimeoutAndRetry: retries a transient failure then succeeds', async () => {
+  let calls = 0
+  const failures: Array<{ attempt: number; retryable: boolean }> = []
+  const result = await withTimeoutAndRetry(
+    async () => {
+      calls++
+      if (calls < 2) { const err = { status: 500 }; throw err }
+      return 'ok'
+    },
+    {
+      maxRetries: 2,
+      onAttemptFailed: (info) => failures.push({ attempt: info.attempt, retryable: info.retryable }),
+    },
+  )
+  assert.equal(result, 'ok')
+  assert.equal(calls, 2)
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].retryable, true)
+})
+
+test('withTimeoutAndRetry: a non-retryable error throws immediately without retrying', async () => {
+  let calls = 0
+  await assert.rejects(
+    withTimeoutAndRetry(async () => { calls++; throw { status: 400 } }, { maxRetries: 3 }),
+  )
+  assert.equal(calls, 1)
+})
+
+test('withTimeoutAndRetry: exhausting all retries rethrows the last error', async () => {
+  let calls = 0
+  await assert.rejects(
+    withTimeoutAndRetry(async () => { calls++; throw { status: 503 } }, { maxRetries: 2 }),
+    (err: unknown) => {
+      assert.deepEqual(err, { status: 503 })
+      return true
+    },
+  )
+  assert.equal(calls, 3) // initial attempt + 2 retries
+})
+
+test('withTimeoutAndRetry: aborts the call via the signal once timeoutMs elapses', async () => {
+  const result = await withTimeoutAndRetry(
+    (signal) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+    }).catch((e) => { throw e }),
+    { timeoutMs: 10, maxRetries: 0 },
+  ).catch((e) => e)
+  assert.equal((result as Error).name, 'AbortError')
 })

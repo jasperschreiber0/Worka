@@ -434,7 +434,18 @@ export async function GET(
       // a hung run doesn't make the builder wait the full 15 minutes to
       // find out. Generous enough that a single slow Claude call on a large
       // batch (observed up to ~90s for a 60k-token call) is nowhere close.
-      const STUCK_TIMEOUT_MS = 5 * 60_000
+      //
+      // Set comfortably above the independent recovery cron's own worst-case
+      // detection+action latency (app/api/cron/intake-recovery/route.ts,
+      // scheduled every 5 min in vercel.json; document_processing_jobs'
+      // staleness window is 3 min — see reclaim_stale_document_jobs) rather
+      // than close to it: a client that gives up right as the cron is about
+      // to fix things would show the builder a false "timed out" for a run
+      // that was, in fact, seconds from completing on its own. This value
+      // does not gate recovery itself — the cron runs on its own schedule
+      // regardless of whether any client is even still connected — it only
+      // controls how long a connected client waits before showing an error.
+      const STUCK_TIMEOUT_MS = 9 * 60_000
 
       try {
         if (!alreadyTriggered && !alreadyProcessing) {

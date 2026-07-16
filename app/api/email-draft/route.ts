@@ -4,6 +4,7 @@ import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -312,11 +313,14 @@ Respond with ONLY valid JSON in this exact format:
   "body": "the full email body text"
 }`
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 512,
-    messages: [{ role: 'user', content: prompt }],
-  })
+  const response = await withTimeoutAndRetry(
+    (signal) => anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 512,
+      messages: [{ role: 'user', content: prompt }],
+    }, { signal }),
+    { timeoutMs: 45_000, maxRetries: 1, label: 'email_draft' }
+  )
 
   const content = response.content[0]
   if (content.type !== 'text') {

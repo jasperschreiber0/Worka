@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import type { ScopeHint, ProjectMetadata } from '@/lib/types/estimation.types'
 import { SCOPE_HINTS_BY_TYPE, DEMO_SCOPE_HINTS } from '@/lib/estimation-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 interface ScopePatternRow {
   renovation_type: string | null
@@ -122,11 +123,14 @@ Return ONLY valid JSON:
 
 Maximum 5 items. Only include items with confidence ≥ 65. Order by confidence descending.`
 
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }],
-    })
+    const response = await withTimeoutAndRetry(
+      (signal) => client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }],
+      }, { signal }),
+      { timeoutMs: 45_000, maxRetries: 1, label: 'scope_hints' }
+    )
 
     const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
     const jsonMatch = text.match(/\{[\s\S]*\}/)

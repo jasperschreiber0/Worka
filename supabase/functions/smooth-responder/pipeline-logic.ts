@@ -540,6 +540,85 @@ export function nextRetryState(currentAttempts: number, maxAttempts: number = MA
   return { status: 'pending', attempts, delayMs: RETRY_DELAYS_MS[attempts] ?? RETRY_DELAYS_MS[2] }
 }
 
+// ─── AI call timeout + retry ────────────────────────────────────────────────
+//
+// No Claude (or any provider) call anywhere in this codebase had an explicit
+// timeout — a hung upstream TCP connection blocks purely on I/O wait, which
+// Supabase's CPU-time governor (metered CPU, not wall clock) never
+// interrupts, and Vercel's function timeout is the only backstop on the
+// Next.js side (300s, far too coarse to recover gracefully or retry). This
+// wraps any such call with an AbortController-backed timeout and a bounded,
+// backed-off retry for genuinely transient failures (429/5xx/timeout) —
+// dependency-free (only the AbortController/setTimeout globals both Deno and
+// Node provide) so it's the one implementation shared by smooth-responder's
+// callTool and every Next.js route that calls the Anthropic SDK, rather than
+// N slightly-different copies.
+//
+// Deliberately NOT retried: anything that isn't one of the specific
+// transient signals below (e.g. a 400 invalid-request, a 401 bad key) —
+// retrying those wastes the timeout budget on a call that will never
+// succeed and delays the caller's own failure handling for no benefit.
+
+export interface TimedRetryOptions {
+  timeoutMs?: number
+  maxRetries?: number
+  label?: string
+  onAttemptFailed?: (info: { attempt: number; durationMs: number; retryable: boolean; error: unknown }) => void
+}
+
+/**
+ * True for errors worth retrying: an abort (our own timeout firing), a rate
+ * limit, or a 5xx from the provider. Everything else (bad request, auth,
+ * content policy) fails immediately — retrying a deterministic failure only
+ * burns the caller's own timeout/latency budget.
+ */
+export function isRetryableApiError(err: unknown): boolean {
+  if (err instanceof Error && (err.name === 'AbortError' || /aborted/i.test(err.message))) return true
+  const status = (err as { status?: number } | null | undefined)?.status
+  if (typeof status === 'number' && (status === 429 || status >= 500)) return true
+  return false
+}
+
+/**
+ * Runs `call` with a hard timeout (aborted via the AbortSignal it's handed —
+ * callers MUST pass this signal into the underlying SDK call for the abort
+ * to actually cut the in-flight request, not just abandon it locally while
+ * it keeps running server-side) and retries transient failures with
+ * exponential backoff (1s, 2s, 4s, ...) up to maxRetries times. Always
+ * rethrows the last error once retries are exhausted — callers are
+ * responsible for their own graceful-failure/DB-update handling on that
+ * rethrow, exactly as they already handle any other exception from the
+ * call they're wrapping.
+ */
+export async function withTimeoutAndRetry<T>(
+  call: (signal: AbortSignal) => Promise<T>,
+  options: TimedRetryOptions = {},
+): Promise<T> {
+  const { timeoutMs = 60_000, maxRetries = 1, label = 'api_call', onAttemptFailed } = options
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const startedAt = Date.now()
+    try {
+      const result = await call(controller.signal)
+      clearTimeout(timer)
+      return result
+    } catch (err) {
+      clearTimeout(timer)
+      lastErr = err
+      const canRetry = attempt <= maxRetries && isRetryableApiError(err)
+      onAttemptFailed?.({ attempt, durationMs: Date.now() - startedAt, retryable: canRetry, error: err })
+      if (!canRetry) throw err
+      await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** (attempt - 1)))
+    }
+  }
+  // Unreachable — the loop above always either returns or throws — but kept
+  // so this compiles under both stripped-TS runtimes without a non-null
+  // assertion.
+  throw lastErr
+}
+
 export type ChildJobStatus = 'pending' | 'running' | 'completed' | 'failed'
 export type ParentBatchStatus = 'pending' | 'running' | 'completed' | 'completed_with_failures' | 'failed'
 

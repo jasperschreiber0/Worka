@@ -188,6 +188,20 @@ export default function IntakeProgress({
       try {
         const data = JSON.parse(e.data) as { documents: DocumentProgressItem[] }
         setDocumentProgress(data.documents)
+        // Per-document extraction (the document-worker queue phase) doesn't
+        // change files.intake_stage/pct at all — those only start moving
+        // once classification takes over — so the 'progress' handler above
+        // never fires here and lastProgressAtRef was previously frozen at
+        // whatever it was when this component mounted for the entire
+        // duration of document processing. That meant the "last_progress_at"
+        // this ref seeds into the next SSE reconnect's URL (every ~260s, see
+        // the effect below) was stale by construction, not just possibly
+        // stale — the server's shouldGiveUp check would see a large, ever-
+        // growing gap on every reconnect during this phase and could give up
+        // on a run that was, in fact, still genuinely progressing one
+        // document at a time. A per-document status snapshot changing IS
+        // real progress — treat it as such.
+        lastProgressAtRef.current = Date.now()
       } catch {
         // Ignore parse errors — the stage-based progress bar below still
         // reflects overall progress even if this per-document detail is lost.

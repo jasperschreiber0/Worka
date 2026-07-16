@@ -316,6 +316,7 @@ This table is now generated to match `app/api/**/route.ts` exactly — a prior v
 | `POST /api/assumptions/[quoteId]/resolve` | Resolve an assumption (accept/adjust/exclude); advances the quote to `pending_review` when all are resolved |
 | `GET /api/cron/morning-brief` | Vercel Cron target — emails the daily brief to every builder (guarded by `CRON_SECRET`, fails closed if unset in real mode) |
 | `GET /api/cron/network-rates` | Vercel Cron target — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`, fails closed if unset in real mode) |
+| `GET /api/cron/intake-recovery` | Vercel Cron target, every 5 min — the independent intake-pipeline recovery service. See "Independent Intake Recovery Service" below. |
 
 **Rate limiting**: `lib/rate-limit.ts` caps requests per builder on the Claude-backed routes (`chat`, `classify-document`, `email-draft`) — a DB-backed atomic counter in real mode (`api_rate_limits` table, migration 021), an in-memory fixed window in demo mode.
 
@@ -475,6 +476,18 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 analogue of job_intake_locks' own staleness reclaim,
                                 migration 033) — see "Production readiness automation"
                                 below.
+037_intake_recovery_service.sql — document_processing_jobs.locked_by (worker
+                                attribution); find_batches_with_claimable_work(),
+                                recompute_stalled_batches(), find_stale_job_intake_locks(),
+                                acquire_or_reclaim_job_intake_lock(),
+                                find_stuck_files_needing_classification_retry(), and the
+                                intake_recovery_runs audit table — the primitives behind
+                                GET /api/cron/intake-recovery, which closes the deadlock
+                                migration 036's reclaim left open (that reclaim only ever
+                                runs INSIDE a live document-worker invocation, so a batch
+                                whose entire worker chain died — e.g. any single-document
+                                upload — had nothing left to ever trigger it). See
+                                "Independent Intake Recovery Service" below.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -612,8 +625,8 @@ retrofit of the whole 36-migration history.
 
 | File | Runs | Purpose |
 |------|------|---------|
-| `supabase/verification/schema_assertions.sql` | `supabase-migrate.yml`, after every push to `main` | Asserts required tables/columns/CHECK constraints/foreign keys/indexes exist, and that `claim_next_document_job`, `complete_document_job`, `retry_or_fail_document_job`, `recompute_parent_batch_status`, and `reclaim_stale_document_jobs` exist with their expected signatures **and are actually callable** (each probed with a bogus uuid that matches zero real rows — never a no-op existence check alone). `RAISE EXCEPTION`s on the first failure, failing the workflow loudly instead of a gap surfacing later as a runtime "not found in schema cache" error (see the 008_/021/026 incident above). |
-| `supabase/verification/health_monitoring_views.sql` | Same workflow, immediately after | `CREATE OR REPLACE VIEW/FUNCTION` (idempotent, no data mutated) for: `stuck_document_jobs`, `failed_document_jobs_recent`, `document_job_retry_rate()`, `document_processing_latency_stats()`, `document_batch_failure_summary()`, `document_batch_completion_latency()`, and a single-row rollup `document_processing_health_summary()` for a dashboard tile or alert cron. |
+| `supabase/verification/schema_assertions.sql` | `supabase-migrate.yml`, after every push to `main` | Asserts required tables/columns/CHECK constraints/foreign keys/indexes exist, and that `claim_next_document_job`, `complete_document_job`, `retry_or_fail_document_job`, `recompute_parent_batch_status`, `reclaim_stale_document_jobs`, and (migration 037) `find_batches_with_claimable_work`, `recompute_stalled_batches`, `find_stale_job_intake_locks`, `acquire_or_reclaim_job_intake_lock`, `find_stuck_files_needing_classification_retry` exist with their expected signatures **and are actually callable** (each probed with a bogus uuid that matches zero real rows, or — for the one function that mutates on success — an expected-and-caught foreign key violation; never a no-op existence check alone). `RAISE EXCEPTION`s on the first failure, failing the workflow loudly instead of a gap surfacing later as a runtime "not found in schema cache" error (see the 008_/021/026 incident above). |
+| `supabase/verification/health_monitoring_views.sql` | Same workflow, immediately after | `CREATE OR REPLACE VIEW/FUNCTION` (idempotent, no data mutated) for: `stuck_document_jobs`, `stuck_job_intake_locks`, `failed_document_jobs_recent`, `document_job_retry_rate()`, `document_processing_latency_stats()`, `document_batch_failure_summary()`, `document_batch_completion_latency()`, `intake_recovery_activity_summary()`, and a single-row rollup `document_processing_health_summary()` for a dashboard tile or alert cron. |
 | `scripts/synthetic-intake-health-check.mjs` | `.github/workflows/intake-pipeline-health-check.yml`, scheduled every 6h (`workflow_dispatch` also available) | Exercises the real, deployed pipeline end to end — upload → `document_processing_batches`/`jobs` creation → `document-worker` claim → extraction → `classification_triggered` flip → smooth-responder reachability — against a disposable synthetic job/file, cleaned up in a `finally` regardless of outcome. See the script's own header comment for exactly what a pass does and doesn't certify (plumbing, not extraction accuracy). |
 | `supabase/migrations/036_document_job_stale_reclaim.sql` | Applied like any other migration | Closes the stuck-running-job gap (below). |
 
@@ -648,6 +661,119 @@ the synthetic health check's header comment explicitly declines to certify; and 
 non-empty `stuck_document_jobs`/`failed_document_jobs_recent` result operationally (is this one bad
 PDF or a systemic regression) still needs a human, the views only remove the need to hand-write the
 SQL to see it.
+
+---
+
+## Independent Intake Recovery Service
+
+Every recovery mechanism up through migration 036 shared one structural flaw: each was only ever
+**invoked** by the same chain of triggers that could fail in the first place.
+`reclaim_stale_document_jobs()` only runs inside `claim_next_document_job()`, which only runs inside
+a *live* `document-worker` invocation — but the scenario it exists to recover from is exactly "the
+document-worker chain has stopped invoking itself entirely." A single-document upload (the most
+common real case — one plan PDF) fires exactly one `document-worker` invocation
+(`WORKER_CONCURRENCY = min(2, N)`, `app/api/intake/[fileId]/route.ts`); if that one invocation is
+killed mid-extraction by Supabase's external, uncatchable CPU-time governor, `triggerNext()` (the
+line immediately after the kill point in `document-worker/index.ts`) never runs, so nothing ever
+calls `claim_next_document_job()` again for that batch — the reclaim sweep that would have fixed it
+never fires. The row sits at `status='running'` forever, `document_processing_batches.status` never
+leaves `running`, `classification_triggered` never flips, `smooth-responder` never starts, and
+`files.intake_status` never leaves `processing` — a permanent deadlock, not a slow recovery. The same
+shape of gap existed one layer up: `job_intake_locks`' staleness check only runs inside
+`tryAcquireJobLock`, which only runs when a *new* upload arrives for the same job — a builder who
+just waits gets no second trigger, ever. And `document-worker`'s `triggerNext`/`triggerClassification`
+fetches are fire-and-forget with a swallowed `catch` — a lost network call has no retry at all.
+
+**`GET /api/cron/intake-recovery`** (`app/api/cron/intake-recovery/route.ts`, scheduled every 5 min
+in `vercel.json`) is the fix, and it is deliberately independent of all of the above: it reads
+current DB state cold, on a fixed schedule, and decides what to reclaim/resume with no dependency on
+any previous invocation, worker, lock holder, or connected client still being alive. Five steps, all
+using SQL primitives from migration 037:
+
+1. `reclaim_stale_document_jobs()` (no batch filter — sweeps every builder's batches in one pass) —
+   requeues (or permanently fails, past 3 attempts) any `document_processing_jobs` row stuck
+   `running` past 3 minutes.
+2. `recompute_stalled_batches()` — defense-in-depth re-derivation for a batch stuck `pending`/`running`
+   with no non-terminal children; should be a no-op in steady state since `recompute_parent_batch_status`
+   already runs transactionally with every child completion.
+3. `find_batches_with_claimable_work()` — batches with a claimable (reclaimed, or simply never
+   claimed) pending job. One fresh `document-worker` invocation per batch is enough: `triggerNext`
+   keeps the chain going from there exactly as it would have originally.
+4. `find_stale_job_intake_locks()` → `acquire_or_reclaim_job_intake_lock()` (atomic — re-verifies
+   staleness under `FOR UPDATE` at the moment of reclaim, not just at the earlier read, so a lock
+   that made real progress in between is correctly left alone) — reclaims a dead `smooth-responder`
+   run's lock and re-triggers the pipeline for that file (via its `processing_batch_id` when the
+   queue model was used, so Stage 1/2 re-reads each document's already-persisted extraction result
+   instead of re-downloading/re-parsing).
+5. `find_stuck_files_needing_classification_retry()` — closes the `triggerClassification`-fetch-lost
+   gap: a batch that finished and flipped `classification_triggered`, but no `job_intake_locks` row
+   ever appeared for the job, means `smooth-responder` was never actually reached. Re-fired directly,
+   itself gated through `acquire_or_reclaim_job_intake_lock` so it can never race a run already in
+   flight.
+
+**Why this can't double-process.** Every primitive above is either a plain read, an atomic
+conditional `UPDATE` (`claim_next_document_job` row-locks via `FOR UPDATE SKIP LOCKED`), or an atomic
+acquire-or-reclaim (`acquire_or_reclaim_job_intake_lock`, which unifies what used to be two
+independently-implemented, slightly-racy "steal a stale lock" code paths — the pre-existing
+`tryAcquireJobLock` REST dance and this cron — into one SQL function with one definition of
+staleness). Running this route twice concurrently, or every 5 minutes forever, never claims the same
+row twice or fires a duplicate `smooth-responder` run for a job already in flight. `intake_recovery_runs`
+(migration 037) is a persistent, queryable audit row per cron execution — counts reclaimed/resumed/
+retried, duration, and any per-stage errors — so a later incident is diagnosable from SQL history,
+not just whatever's left of the function's own log retention.
+
+**Bounded per run** (`MAX_BATCHES_PER_RUN` / `MAX_LOCKS_PER_RUN` / `MAX_STUCK_FILES_PER_RUN` = 20/10/10
+in the route): deliberate backpressure so a systemic outage (e.g. Anthropic down, every batch
+stalling) can't turn one cron run into an unbounded re-trigger storm — a capped run still makes
+visible, logged progress, and the next scheduled run picks up the rest.
+
+**AI call timeouts, the other half of "no request can hang indefinitely."** Before this work, no
+Claude call anywhere in the codebase had an explicit timeout — a hung upstream connection blocks on
+I/O wait, which Supabase's CPU-time governor (metered CPU, not wall clock) never interrupts. Every
+`anthropic.messages.create` call (smooth-responder's shared `callTool`, and each of the ten Next.js
+route call sites — chat's three, email-draft, email-sync parse/simulate, scope-hints,
+rates/extract-pdf, classify-document, estimation/history) now goes through `withTimeoutAndRetry`
+(`supabase/functions/smooth-responder/pipeline-logic.ts` — dependency-free, so it's the one shared
+implementation importable identically from Deno and from Next.js via the same relative-path pattern
+`shouldGiveUp` already used): an `AbortController`-backed timeout (the signal is passed into the SDK
+call itself, so the abort actually cancels the in-flight HTTP request) plus one bounded, backed-off
+retry for transient failures only (429/5xx/abort — see `isRetryableApiError`; a 400/401 fails
+immediately rather than wasting the retry budget on a deterministic failure). `smooth-responder`'s
+stages use 150s (large multi-thousand-token reasoning calls); the Next.js routes use 30–90s depending
+on payload size. A failure that survives the retry rethrows exactly as before — every call site's
+existing graceful-failure handling (fallback to keyword routing, a 500 with a clear message, etc.) is
+unchanged, only now bounded in time rather than unbounded.
+
+**Frontend: the stuck-detection signal was unreliable, not just slow.** `IntakeProgress.tsx`'s
+give-up clock (`lastProgressAtRef`) only updated on `progress` (stage/pct) events — during the
+document-worker queue phase, `files.intake_stage`/`intake_pct` don't move at all (only classification
+writes those), so the ref was frozen at component-mount time for that entire phase and reconnects
+(mandatory every ~260s) could see an ever-growing, stale gap even while the pipeline was genuinely
+processing one document after another. The `document_progress` event handler now also bumps this ref
+— a per-document status change IS real progress. Separately, `STUCK_TIMEOUT_MS` (the server-side
+give-up point, `app/api/intake/[fileId]/route.ts`) moved from 5 to 9 minutes — comfortably above the
+recovery cron's own worst-case detection+action latency (3 min staleness window + up to 5 min until
+the next scheduled run) — so a connected client doesn't show a false "timed out" for a run recovery
+was seconds from fixing on its own. Recovery itself never depends on this value; it only controls how
+long a *connected* client waits before surfacing an error.
+
+**Operational considerations:**
+- **Vercel plan**: sub-daily cron schedules (`*/5 * * * *`) require a Pro (or higher) plan — Hobby
+  limits cron to once per day. On Hobby, either upgrade or trigger this route from an external
+  scheduler (GitHub Actions on a schedule, same pattern as `intake-pipeline-health-check.yml`) hitting
+  it with the `CRON_SECRET` bearer token.
+- **CRON_SECRET**: this route fails closed (503) in real mode if unset, identical to the other two
+  cron routes — never silently skips recovery.
+- **Monitoring**: `intake_recovery_runs` is the first place to look during an incident — a healthy
+  system shows frequent rows with all-zero counts (nothing to recover); a spike in
+  `document_jobs_reclaimed`/`job_locks_reclaimed` is an early signal of a systemic extraction/Claude
+  problem worth investigating via `stuck_document_jobs`/`document_processing_health_summary()`
+  (`supabase/verification/health_monitoring_views.sql`), not just something this service quietly
+  papers over forever.
+- **Alerting** (not yet wired to a paging system — a natural next step, not implemented here): a
+  non-zero `errors` array on a recent `intake_recovery_runs` row, or `stuck_jobs_count`/
+  `batch_failure_rate_pct_7d` from `document_processing_health_summary()` trending up over several
+  cron runs, are the two signals worth alerting on.
 
 ---
 

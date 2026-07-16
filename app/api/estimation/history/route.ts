@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode as isDemo } from '@/lib/auth/api-auth'
 import { DEMO_PROJECT_MEMORY } from '@/lib/estimation-demo'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Estimation history — the corpus behind the parametric estimator ──────────
 //
@@ -140,23 +141,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const systemPrompt = `You are cataloguing a completed Australian residential building job from its priced quote / trade breakdown, to store as a historical reference. Extract the project's high-level characteristics and its delivered contract price. The contract price EXCLUDES GST (use the subtotal + margin figure, not the GST-inclusive grand total). Floor area is the built/renovated area in m². If the document is not a priced residential building job, still return your best assessment.`
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response: any = await (client.messages.create as any)({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: systemPrompt,
-      tools: [{ name: 'catalogue_job', description: 'Return the project characteristics and delivered price', input_schema: EXTRACT_SCHEMA }],
-      tool_choice: { type: 'tool', name: 'catalogue_job' },
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
-            ...(hasUsableText(textLayer) ? [buildTextLayerBlock(textLayer)] : []),
-            { type: 'text', text: 'Catalogue this completed job. Use the catalogue_job tool.' },
-          ],
-        },
-      ],
-    })
+    const response: any = await withTimeoutAndRetry(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (signal) => (client.messages.create as any)({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        system: systemPrompt,
+        tools: [{ name: 'catalogue_job', description: 'Return the project characteristics and delivered price', input_schema: EXTRACT_SCHEMA }],
+        tool_choice: { type: 'tool', name: 'catalogue_job' },
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
+              ...(hasUsableText(textLayer) ? [buildTextLayerBlock(textLayer)] : []),
+              { type: 'text', text: 'Catalogue this completed job. Use the catalogue_job tool.' },
+            ],
+          },
+        ],
+      }, { signal }),
+      { timeoutMs: 60_000, maxRetries: 1, label: 'estimation_history_catalogue' }
+    )
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const block = response.content?.find((b: any) => b.type === 'tool_use' && b.name === 'catalogue_job')

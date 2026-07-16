@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 import { addCommEntry } from '@/lib/comms-demo'
 import { createClient } from '@supabase/supabase-js'
 import { randomUUID } from 'crypto'
@@ -276,11 +277,14 @@ Respond ONLY with valid JSON:
   "confidence": <number 0-100>
 }`
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 128,
-    messages: [{ role: 'user', content: prompt }],
-  })
+  const response = await withTimeoutAndRetry(
+    (signal) => anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 128,
+      messages: [{ role: 'user', content: prompt }],
+    }, { signal }),
+    { timeoutMs: 30_000, maxRetries: 1, label: 'email_sync_parse_classify' }
+  )
 
   const content = response.content[0]
   if (content.type !== 'text') {

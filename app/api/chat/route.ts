@@ -16,6 +16,7 @@ import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { buildProjectContext, persistContext } from '@/lib/project-context'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -395,12 +396,23 @@ async function extractActions(
 ): Promise<ExtractedAction[]> {
   const todayIso = new Date().toISOString().split('T')[0]
   const systemPrompt = EXTRACT_ACTIONS_PROMPT.replace(/REPLACE_TODAY/g, todayIso)
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 512,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: message }],
-  })
+  // No AI call in this route previously had an explicit timeout — a hung
+  // upstream connection blocked purely on I/O wait until whatever outer
+  // platform ceiling eventually killed the function, far too coarse to
+  // recover from cleanly. withTimeoutAndRetry (shared with the estimating
+  // engine — see pipeline-logic.ts) bounds this to 45s + one retry for a
+  // transient failure; the caller (extractActions' own caller, below)
+  // already falls back to keyword routing on any thrown error, so this
+  // wrapper only changes HOW FAST that fallback kicks in, not what it does.
+  const response = await withTimeoutAndRetry(
+    (signal) => anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 512,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: message }],
+    }, { signal }),
+    { timeoutMs: 45_000, maxRetries: 1, label: 'chat_extract_actions' }
+  )
 
   const content = response.content[0]
   if (content.type !== 'text') {
@@ -1283,12 +1295,15 @@ async function handleProjectQuestion(
   const startedAt = Date.now()
   let answer: string
   try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 400,
-      system: PROJECT_QUESTION_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userContent }],
-    })
+    const response = await withTimeoutAndRetry(
+      (signal) => anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 400,
+        system: PROJECT_QUESTION_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userContent }],
+      }, { signal }),
+      { timeoutMs: 45_000, maxRetries: 1, label: 'chat_project_question' }
+    )
     const block = response.content[0]
     answer = block.type === 'text' ? block.text.trim() : "I couldn't work out an answer from the project facts on file."
   } catch (err) {
@@ -2607,12 +2622,15 @@ Rules:
 
   const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
   try {
-    const resp = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 500,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: message }],
-    })
+    const resp = await withTimeoutAndRetry(
+      (signal) => anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: message }],
+      }, { signal }),
+      { timeoutMs: 45_000, maxRetries: 1, label: 'chat_fallback_intent' }
+    )
     const text = resp.content[0].type === 'text' ? resp.content[0].text : null
     return {
       intent: 'unknown',

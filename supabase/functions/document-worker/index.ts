@@ -222,9 +222,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
   edgeFnBaseUrl.pathname = edgeFnBaseUrl.pathname.replace(/\/document-worker\/?$/, '')
   const edgeFnUrl = edgeFnBaseUrl.toString().replace(/\/$/, '')
 
-  console.log(JSON.stringify({ event: 'worker_started', parent_job_id, builder_id }))
+  // Random per-invocation id, not tied to any infrastructure identifier —
+  // purely so structured logs and document_processing_jobs.locked_by can be
+  // correlated across the several log lines one invocation emits, and so a
+  // stuck_document_jobs row found later in an incident can be traced back to
+  // which invocation (crashed one) last touched it.
+  const workerId = crypto.randomUUID()
+  const invocationStartedAt = Date.now()
 
-  const { data: claimed, error: claimErr } = await supabase.rpc('claim_next_document_job', { p_parent_job_id: parent_job_id })
+  console.log(JSON.stringify({ event: 'worker_started', worker_id: workerId, parent_job_id, builder_id }))
+
+  const { data: claimed, error: claimErr } = await supabase.rpc('claim_next_document_job', { p_parent_job_id: parent_job_id, p_worker_id: workerId })
   if (claimErr) {
     console.error('document-worker: claim_next_document_job failed', claimErr)
     return new Response(JSON.stringify({ status: 'error', error: claimErr.message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -241,45 +249,70 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   EdgeRuntime.waitUntil((async () => {
-    const outcome = await processOneDocument(supabase, job, builder_id)
+    // This whole callback is where the failure mode migration 034/036/037
+    // exist for actually happens: if it's killed externally (Supabase's
+    // CPU-time governor) partway through, NOTHING below this point runs —
+    // no catch, no finally, no triggerNext. That's not fixable from inside
+    // this function (an uncatchable kill is, by definition, uncatchable);
+    // the defense is structural — app/api/cron/intake-recovery/route.ts
+    // independently notices this job never left 'running' and both
+    // reclaims it AND re-fires a fresh document-worker invocation, with no
+    // dependency on this callback (or any sibling invocation) still being
+    // alive. The try/catch below only guards against a genuinely catchable
+    // exception in this callback's OWN logic (e.g. an unexpected throw from
+    // a client call) so that case at least logs clearly instead of becoming
+    // a silent unhandled rejection — it is not a substitute for the cron.
+    try {
+      const outcome = await processOneDocument(supabase, job, builder_id)
 
-    let shouldTriggerClassification = false
-    let retryDelayMs = 0
+      let shouldTriggerClassification = false
+      let retryDelayMs = 0
 
-    if (outcome.outcome === 'completed') {
-      const { data, error } = await supabase.rpc('complete_document_job', { p_job_id: job.id, p_result: outcome.result })
-      if (error) console.error('document-worker: complete_document_job failed', error)
-      shouldTriggerClassification = Boolean(data?.[0]?.should_trigger_classification)
-      console.log(JSON.stringify({ event: 'worker_completed', job_id: job.id, document_id: job.document_id, attempt: job.attempts + 1 }))
-    } else {
-      const { data, error } = await supabase.rpc('retry_or_fail_document_job', { p_job_id: job.id, p_error: outcome.error ?? 'unknown error' })
-      if (error) console.error('document-worker: retry_or_fail_document_job failed', error)
-      const row = data?.[0]
-      shouldTriggerClassification = Boolean(row?.should_trigger_classification)
-      if (outcome.outcome === 'retry' && row?.next_run_after) {
-        retryDelayMs = Math.max(0, new Date(row.next_run_after).getTime() - Date.now())
-        console.log(JSON.stringify({ event: 'worker_retry', job_id: job.id, document_id: job.document_id, attempt: job.attempts + 1, retry_delay_ms: retryDelayMs }))
+      if (outcome.outcome === 'completed') {
+        const { data, error } = await supabase.rpc('complete_document_job', { p_job_id: job.id, p_result: outcome.result })
+        if (error) console.error(JSON.stringify({ event: 'complete_document_job_rpc_failed', worker_id: workerId, job_id: job.id, error: error.message }))
+        shouldTriggerClassification = Boolean(data?.[0]?.should_trigger_classification)
+        console.log(JSON.stringify({ event: 'worker_completed', worker_id: workerId, job_id: job.id, document_id: job.document_id, attempt: job.attempts + 1 }))
+      } else {
+        const { data, error } = await supabase.rpc('retry_or_fail_document_job', { p_job_id: job.id, p_error: outcome.error ?? 'unknown error' })
+        if (error) console.error(JSON.stringify({ event: 'retry_or_fail_document_job_rpc_failed', worker_id: workerId, job_id: job.id, error: error.message }))
+        const row = data?.[0]
+        shouldTriggerClassification = Boolean(row?.should_trigger_classification)
+        if (outcome.outcome === 'retry' && row?.next_run_after) {
+          retryDelayMs = Math.max(0, new Date(row.next_run_after).getTime() - Date.now())
+          console.log(JSON.stringify({ event: 'worker_retry', worker_id: workerId, job_id: job.id, document_id: job.document_id, attempt: job.attempts + 1, retry_delay_ms: retryDelayMs }))
+        } else if (outcome.outcome === 'failed') {
+          console.log(JSON.stringify({ event: 'worker_permanently_failed', worker_id: workerId, job_id: job.id, document_id: job.document_id, attempts: job.attempts + 1, error: outcome.error }))
+        }
       }
-    }
 
-    // Immediately try to claim whatever else is ready now (covers sibling
-    // documents in the same batch) — this is what turns a single claim
-    // into a self-sustaining chain, each hop a fresh invocation/CPU budget.
-    await triggerNext(edgeFnUrl, anonKey, parent_job_id, builder_id, 0)
+      // Immediately try to claim whatever else is ready now (covers sibling
+      // documents in the same batch) — this is what turns a single claim
+      // into a self-sustaining chain, each hop a fresh invocation/CPU budget.
+      await triggerNext(edgeFnUrl, anonKey, parent_job_id, builder_id, 0)
 
-    // This specific job may have just been scheduled for a delayed retry —
-    // also wake the chain up specifically at that delay, in case by then
-    // every sibling is already done and this is the only job left.
-    if (retryDelayMs > 0) {
-      await triggerNext(edgeFnUrl, anonKey, parent_job_id, builder_id, retryDelayMs)
-    }
+      // This specific job may have just been scheduled for a delayed retry —
+      // also wake the chain up specifically at that delay, in case by then
+      // every sibling is already done and this is the only job left.
+      if (retryDelayMs > 0) {
+        await triggerNext(edgeFnUrl, anonKey, parent_job_id, builder_id, retryDelayMs)
+      }
 
-    if (shouldTriggerClassification) {
-      await triggerClassification(edgeFnUrl, anonKey, parent_job_id)
+      if (shouldTriggerClassification) {
+        await triggerClassification(edgeFnUrl, anonKey, parent_job_id)
+      }
+
+      console.log(JSON.stringify({ event: 'worker_invocation_complete', worker_id: workerId, job_id: job.id, invocation_duration_ms: Date.now() - invocationStartedAt }))
+    } catch (err) {
+      console.error(JSON.stringify({
+        event: 'worker_invocation_uncaught_error', worker_id: workerId, job_id: job.id, document_id: job.document_id,
+        invocation_duration_ms: Date.now() - invocationStartedAt,
+        error: err instanceof Error ? err.message : String(err),
+      }))
     }
   })())
 
-  return new Response(JSON.stringify({ status: 'claimed', job_id: job.id, document_id: job.document_id }), {
+  return new Response(JSON.stringify({ status: 'claimed', worker_id: workerId, job_id: job.id, document_id: job.document_id }), {
     status: 202,
     headers: { ...CORS, 'Content-Type': 'application/json' },
   })

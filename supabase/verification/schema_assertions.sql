@@ -3,7 +3,7 @@
 -- ============================================================
 -- Automates the "database verification" section of the manual production
 -- runbook for the document-processing-queue / project-memory feature set
--- (migrations 026, 030, 033-036). Run this immediately after `supabase db
+-- (migrations 026, 030, 033-037). Run this immediately after `supabase db
 -- push` (see .github/workflows/supabase-migrate.yml) — every assertion
 -- RAISEs EXCEPTION on failure, so the workflow step fails loudly instead of
 -- a missing table/column/index/policy silently reaching production and only
@@ -53,6 +53,11 @@ DO $$ BEGIN
      WHERE table_schema = 'public' AND table_name = 'job_intake_locks') = 1,
     'job_intake_locks table is missing'
   );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'intake_recovery_runs') = 1,
+    'intake_recovery_runs table is missing (migration 037)'
+  );
 END $$;
 
 -- ─── Required columns exist with the expected type ─────────────────────────
@@ -88,6 +93,21 @@ DO $$ BEGIN
      WHERE table_schema = 'public' AND table_name = 'jobs'
        AND column_name IN ('knowledge_confidence', 'knowledge_missing_count', 'knowledge_updated_at')) = 3,
     'jobs is missing one or more knowledge_* columns (migration 035)'
+  );
+
+  PERFORM pg_temp.assert(
+    (SELECT data_type FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'document_processing_jobs' AND column_name = 'locked_by') = 'text',
+    'document_processing_jobs.locked_by is missing or has the wrong type (migration 037)'
+  );
+
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'intake_recovery_runs'
+       AND column_name IN ('run_started_at', 'run_finished_at', 'duration_ms', 'document_jobs_reclaimed',
+                            'stalled_batches_recomputed', 'batches_resumed', 'job_locks_reclaimed',
+                            'stuck_files_retried', 'errors')) = 9,
+    'intake_recovery_runs is missing one or more required columns (migration 037)'
   );
 END $$;
 
@@ -154,9 +174,13 @@ END $$;
 
 -- ─── Functions exist with the expected argument signature ──────────────────
 DO $$ BEGIN
+  -- Migration 037 added an optional p_worker_id text parameter (for
+  -- document_processing_jobs.locked_by attribution) — LIKE, not an exact
+  -- match, so this doesn't depend on Postgres's exact DEFAULT-clause
+  -- rendering, only that the second parameter genuinely exists.
   PERFORM pg_temp.assert(
-    (SELECT count(*) FROM pg_proc WHERE proname = 'claim_next_document_job' AND pg_get_function_arguments(oid) = 'p_parent_job_id uuid') = 1,
-    'claim_next_document_job(uuid) function is missing or its signature changed'
+    (SELECT count(*) FROM pg_proc WHERE proname = 'claim_next_document_job' AND pg_get_function_arguments(oid) LIKE 'p_parent_job_id uuid, p_worker_id text%') = 1,
+    'claim_next_document_job(uuid, text) function is missing or its signature changed (migration 037 added p_worker_id)'
   );
   PERFORM pg_temp.assert(
     (SELECT count(*) FROM pg_proc WHERE proname = 'complete_document_job' AND pg_get_function_arguments(oid) = 'p_job_id uuid, p_result jsonb') = 1,
@@ -173,6 +197,26 @@ DO $$ BEGIN
   PERFORM pg_temp.assert(
     (SELECT count(*) FROM pg_proc WHERE proname = 'reclaim_stale_document_jobs') = 1,
     'reclaim_stale_document_jobs function is missing (migration 036)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'find_batches_with_claimable_work') = 1,
+    'find_batches_with_claimable_work function is missing (migration 037)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'recompute_stalled_batches') = 1,
+    'recompute_stalled_batches function is missing (migration 037)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'find_stale_job_intake_locks') = 1,
+    'find_stale_job_intake_locks function is missing (migration 037)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'acquire_or_reclaim_job_intake_lock') = 1,
+    'acquire_or_reclaim_job_intake_lock function is missing (migration 037)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'find_stuck_files_needing_classification_retry') = 1,
+    'find_stuck_files_needing_classification_retry function is missing (migration 037)'
   );
 END $$;
 
@@ -194,8 +238,32 @@ BEGIN
   PERFORM * FROM complete_document_job(v_bogus_uuid, '{}'::jsonb);
   PERFORM * FROM retry_or_fail_document_job(v_bogus_uuid, 'schema_assertions.sql callability probe', 3);
   PERFORM * FROM reclaim_stale_document_jobs(interval '100 years', v_bogus_uuid);
+  PERFORM * FROM find_batches_with_claimable_work();
+  PERFORM * FROM recompute_stalled_batches();
+  PERFORM * FROM find_stale_job_intake_locks();
+  PERFORM * FROM find_stuck_files_needing_classification_retry();
 EXCEPTION WHEN OTHERS THEN
-  RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: one or more document-processing functions are not callable: %', SQLERRM;
+  RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: one or more document-processing/recovery functions are not callable: %', SQLERRM;
+END $$;
+
+-- acquire_or_reclaim_job_intake_lock mutates job_intake_locks on success, so
+-- it can't be probed with the same "bogus uuid touches zero rows" trick as
+-- the read/conditional-UPDATE functions above — a bogus job_id/file_id here
+-- hits job_intake_locks' own foreign key constraints (job_id -> jobs,
+-- file_id -> files) instead of silently matching nothing. That FK violation
+-- IS the expected, confirming signal: it proves the function is callable
+-- with the right argument shape and reached its real INSERT logic, rather
+-- than failing earlier with "function does not exist" or a parameter
+-- mismatch — and critically, it never actually writes a row either way.
+DO $$
+DECLARE
+  v_bogus_uuid uuid := '00000000-0000-0000-0000-000000000000';
+BEGIN
+  PERFORM * FROM acquire_or_reclaim_job_intake_lock(v_bogus_uuid, v_bogus_uuid);
+  RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: acquire_or_reclaim_job_intake_lock did not raise the expected foreign_key_violation against bogus ids — job_intake_locks may be missing its foreign key constraints';
+EXCEPTION
+  WHEN foreign_key_violation THEN
+    NULL; -- expected — confirms the function is callable and reached the INSERT
 END $$;
 
 -- ─── RLS enabled + policies exist ───────────────────────────────────────────

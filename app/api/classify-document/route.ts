@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 export interface ClassificationResult {
   type: 'plan' | 'receipt' | 'supplier_quote' | 'variation_request' | 'certificate' | 'contract' | 'photo' | 'unknown'
@@ -150,16 +151,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response = await (client.messages.create as any)({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      messages: [
-        {
-          role: 'user',
-          content: [contentBlock, { type: 'text', text: PROMPT }],
-        },
-      ],
-    })
+    const response: any = await withTimeoutAndRetry(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (signal) => (client.messages.create as any)({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [
+          {
+            role: 'user',
+            content: [contentBlock, { type: 'text', text: PROMPT }],
+          },
+        ],
+      }, { signal }),
+      { timeoutMs: 60_000, maxRetries: 1, label: 'classify_document' }
+    )
 
     const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
     const jsonMatch = text.match(/\{[\s\S]*\}/)

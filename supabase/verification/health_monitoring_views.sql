@@ -167,22 +167,80 @@ $$ LANGUAGE sql STABLE;
 COMMENT ON FUNCTION document_batch_completion_latency IS
   'Wall-clock time from batch creation to terminal status, across every document in the batch and however many worker-chain hops that took. This is the number closest to what IntakeProgress.tsx''s builder-facing progress bar actually experienced end to end.';
 
+-- ─── Stuck job_intake_locks (migration 037) ────────────────────────────────
+-- The job-lock analogue of stuck_document_jobs: a lock whose last_progress_at
+-- is old enough that GET /api/cron/intake-recovery's find_stale_job_intake_
+-- locks() (migration 037) would treat it as a candidate for reclaim. In
+-- steady state this should self-clear within one recovery-cron cycle
+-- (5 min, see vercel.json); a persistently non-empty result means the
+-- recovery cron itself isn't running (check CRON_SECRET / Vercel plan —
+-- see CLAUDE.md "Independent Intake Recovery Service") rather than the
+-- underlying smooth-responder failure recurring indefinitely.
+CREATE OR REPLACE VIEW stuck_job_intake_locks AS
+SELECT
+  l.job_id,
+  l.file_id,
+  l.started_at,
+  l.last_progress_at,
+  now() - l.last_progress_at AS stale_for
+FROM job_intake_locks l
+WHERE (now() - l.last_progress_at > interval '6 minutes')
+   OR (now() - l.started_at > interval '16 minutes')
+ORDER BY l.last_progress_at;
+
+COMMENT ON VIEW stuck_job_intake_locks IS
+  'job_intake_locks rows past the staleness window find_stale_job_intake_locks() (migration 037) uses. Should self-clear within one GET /api/cron/intake-recovery cycle; persistent rows mean the recovery cron itself is not running.';
+
+-- ─── Recent recovery cron activity (migration 037) ─────────────────────────
+CREATE OR REPLACE FUNCTION intake_recovery_activity_summary(p_window interval DEFAULT interval '24 hours')
+RETURNS TABLE(
+  window_start timestamptz,
+  run_count bigint,
+  runs_with_errors bigint,
+  total_document_jobs_reclaimed bigint,
+  total_batches_resumed bigint,
+  total_job_locks_reclaimed bigint,
+  total_stuck_files_retried bigint,
+  last_run_at timestamptz
+) AS $$
+  SELECT
+    now() - p_window,
+    count(*),
+    count(*) FILTER (WHERE jsonb_array_length(errors) > 0),
+    coalesce(sum(document_jobs_reclaimed), 0),
+    coalesce(sum(batches_resumed), 0),
+    coalesce(sum(job_locks_reclaimed), 0),
+    coalesce(sum(stuck_files_retried), 0),
+    max(run_started_at)
+  FROM intake_recovery_runs
+  WHERE run_started_at > now() - p_window;
+$$ LANGUAGE sql STABLE;
+
+COMMENT ON FUNCTION intake_recovery_activity_summary IS
+  'Rollup of GET /api/cron/intake-recovery activity over the trailing window. last_run_at going stale (older than a few multiples of the 5-minute schedule) means the cron itself has stopped firing — check Vercel cron config / CRON_SECRET first, before assuming the pipeline has no stuck jobs to find.';
+
 -- ─── Single-query rollup for a dashboard/alert cron ────────────────────────
 CREATE OR REPLACE FUNCTION document_processing_health_summary()
 RETURNS TABLE(
   stuck_jobs_count bigint,
+  stuck_job_locks_count bigint,
   failed_jobs_last_24h bigint,
   retry_rate_pct_24h numeric,
   latency_p95_ms_24h numeric,
-  batch_failure_rate_pct_7d numeric
+  batch_failure_rate_pct_7d numeric,
+  recovery_runs_last_24h bigint,
+  recovery_last_run_at timestamptz
 ) AS $$
   SELECT
     (SELECT count(*) FROM stuck_document_jobs),
+    (SELECT count(*) FROM stuck_job_intake_locks),
     (SELECT count(*) FROM failed_document_jobs_recent),
     (SELECT retry_rate_pct FROM document_job_retry_rate(interval '24 hours')),
     (SELECT p95_ms FROM document_processing_latency_stats(interval '24 hours')),
-    (SELECT failure_rate_pct FROM document_batch_failure_summary(interval '7 days'));
+    (SELECT failure_rate_pct FROM document_batch_failure_summary(interval '7 days')),
+    (SELECT run_count FROM intake_recovery_activity_summary(interval '24 hours')),
+    (SELECT last_run_at FROM intake_recovery_activity_summary(interval '24 hours'));
 $$ LANGUAGE sql STABLE;
 
 COMMENT ON FUNCTION document_processing_health_summary IS
-  'One-row rollup of every health signal above, for a single-query dashboard tile or alert-cron check rather than five separate queries.';
+  'One-row rollup of every health signal above, for a single-query dashboard tile or alert-cron check rather than several separate queries. recovery_last_run_at is the fastest way to tell "pipeline is healthy" apart from "recovery cron stopped firing so nothing is being checked."';

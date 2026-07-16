@@ -37,6 +37,7 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 import {
   splitIntoBatches, mergeFacts, selectFactsForPrompt,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
+  withTimeoutAndRetry,
   type BatchableFile, type FactRow,
 } from './pipeline-logic.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -484,7 +485,26 @@ const ESTIMATE_GENERATION_TOOL = {
 }
 
 // ─── Claude call wrapper ────────────────────────────────────────────────────────
-
+//
+// No Claude call anywhere in this pipeline previously had an explicit
+// timeout — a hung upstream connection would block purely on I/O wait,
+// which Supabase's CPU-time governor (metered CPU, not wall clock) never
+// interrupts, leaving the whole EdgeRuntime.waitUntil background task
+// stuck with no external kill to even trigger the existing crash-recovery
+// paths (job_intake_locks staleness, the document-worker queue). Every
+// call now goes through withTimeoutAndRetry (pipeline-logic.ts):
+// AbortController-backed timeout (the signal is passed into the SDK call
+// itself so the abort actually cancels the in-flight HTTP request, not
+// just gives up locally) plus one bounded retry for transient failures
+// (429/5xx/timeout — see isRetryableApiError). timeoutMs is generous
+// (150s) because these are large, multi-thousand-token reasoning calls —
+// route.ts's own STUCK_TIMEOUT_MS comment records up to ~90s observed for
+// a single 60k-token call, so 150s plus one retry still comfortably fits
+// inside the SSE poller's 5-minute stuck-timeout window for a single
+// stage. A failure that survives the retry propagates up to runPipeline's
+// existing try/catch, which already marks the file failed and releases
+// the job lock — this wrapper only prevents "stuck," it doesn't change
+// what a genuine failure does downstream.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function callTool(
   anthropic: Anthropic,
@@ -496,15 +516,34 @@ async function callTool(
   maxTokens: number
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: maxTokens,
-    system,
-    tools: [tool],
-    tool_choice: { type: 'tool', name: tool.name },
-    messages: [{ role: 'user', content }],
-  })
-  console.log(`callTool ${tool.name}: stop_reason=${response.stop_reason} usage=${JSON.stringify(response.usage)}`)
+  const startedAt = Date.now()
+  const response = await withTimeoutAndRetry(
+    (signal) => anthropic.messages.create(
+      {
+        model: 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        system,
+        tools: [tool],
+        tool_choice: { type: 'tool', name: tool.name },
+        messages: [{ role: 'user', content }],
+      },
+      { signal }
+    ),
+    {
+      timeoutMs: 150_000,
+      maxRetries: 1,
+      label: tool.name,
+      onAttemptFailed: (info) => console.log(JSON.stringify({
+        event: 'claude_call_attempt_failed', tool: tool.name, attempt: info.attempt,
+        duration_ms: info.durationMs, retryable: info.retryable,
+        error: info.error instanceof Error ? info.error.message : String(info.error),
+      })),
+    }
+  )
+  console.log(JSON.stringify({
+    event: 'claude_call_complete', tool: tool.name, stop_reason: response.stop_reason,
+    usage: response.usage, duration_ms: Date.now() - startedAt,
+  }))
   if (response.stop_reason === 'max_tokens') {
     // A truncated tool call means partial/malformed input (e.g. an empty
     // array where the model just hadn't reached that field yet) rather than

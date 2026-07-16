@@ -10,6 +10,7 @@ import {
 } from '../parse/route'
 import Anthropic from '@anthropic-ai/sdk'
 import type { EmailIntent } from '../parse/route'
+import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Demo email scenarios ─────────────────────────────────────────────────────
 
@@ -90,11 +91,14 @@ Respond ONLY with valid JSON:
   "confidence": <number 0-100>
 }`
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 128,
-    messages: [{ role: 'user', content: prompt }],
-  })
+  const response = await withTimeoutAndRetry(
+    (signal) => anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 128,
+      messages: [{ role: 'user', content: prompt }],
+    }, { signal }),
+    { timeoutMs: 30_000, maxRetries: 1, label: 'email_sync_simulate_classify' }
+  )
 
   const content = response.content[0]
   if (content.type !== 'text') {
