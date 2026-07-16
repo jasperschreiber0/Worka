@@ -758,12 +758,30 @@ was seconds from fixing on its own. Recovery itself never depends on this value;
 long a *connected* client waits before surfacing an error.
 
 **Operational considerations:**
-- **Vercel plan**: sub-daily cron schedules (`*/5 * * * *`) require a Pro (or higher) plan — Hobby
-  limits cron to once per day. On Hobby, either upgrade or trigger this route from an external
-  scheduler (GitHub Actions on a schedule, same pattern as `intake-pipeline-health-check.yml`) hitting
-  it with the `CRON_SECRET` bearer token.
+- **Vercel plan**: sub-daily cron schedules (`*/5 * * * *`, as configured in `vercel.json`) require a
+  Pro (or higher) plan — Hobby limits cron to once per day, which means `vercel.json`'s entry alone
+  effectively does nothing on Hobby. The route itself is plan-agnostic — it's just an authenticated
+  `GET` endpoint — so on Hobby, trigger it externally instead:
+  - **`scripts/trigger-intake-recovery.mjs`** — a small standalone script (`APP_URL` +
+    `CRON_SECRET` env vars, zero dependencies beyond global `fetch`) that makes the one HTTP call
+    and exits non-zero on failure, for any scheduler that can run `node` on a timer.
+  - **Railway Cron Job**: create a Railway "Cron Job" service in the same project (or a standalone
+    one) pointed at this repo, start command `node scripts/trigger-intake-recovery.mjs`, schedule
+    e.g. `*/5 * * * *`, with `APP_URL` and `CRON_SECRET` set as service variables (`CRON_SECRET` must
+    match the value on the Vercel app exactly). This does **not** require moving the Next.js app off
+    Vercel — Railway is only running the tiny trigger script, hitting the deployed Vercel URL.
+  - **GitHub Actions** — `.github/workflows/intake-recovery-cron.yml` runs the same script on a
+    `*/5 * * * *` schedule, live as soon as the `APP_URL` and `CRON_SECRET` repo secrets are set
+    (Settings → Secrets and variables → Actions). Same pattern as `intake-pipeline-health-check.yml`.
+    Simplest zero-new-infra option, but GitHub's own scheduler is best-effort and can slip by several
+    minutes under load — acceptable here since every run is idempotent and a late/skipped run just
+    means recovery takes one cycle longer, not incorrect; use Railway instead if you need a tighter
+    guarantee.
 - **CRON_SECRET**: this route fails closed (503) in real mode if unset, identical to the other two
-  cron routes — never silently skips recovery.
+  cron routes — never silently skips recovery. The same secret value must be set in three possible
+  places depending on which trigger path(s) are active: the Vercel app's own env (required, this is
+  what the route checks against), and GitHub Actions repo secrets and/or Railway service variables
+  for whichever external trigger you use.
 - **Monitoring**: `intake_recovery_runs` is the first place to look during an incident — a healthy
   system shows frequent rows with all-zero counts (nothing to recover); a spike in
   `document_jobs_reclaimed`/`job_locks_reclaimed` is an early signal of a systemic extraction/Claude

@@ -1,0 +1,47 @@
+name: Intake recovery cron
+
+# Fires GET /api/cron/intake-recovery on a schedule — see
+# scripts/trigger-intake-recovery.mjs and CLAUDE.md's "Independent Intake
+# Recovery Service" for what that route does and why it needs to run
+# frequently (its own staleness windows are 3-6 minutes; a stuck upload
+# should self-heal within one cycle of this schedule).
+#
+# This exists because Vercel Cron below the Pro plan only fires once a day —
+# far too coarse for this route's job — and is deliberately NOT tied to the
+# app's own hosting: any scheduler that can hit an authenticated URL works
+# (this workflow, a Railway Cron Job running the same script, a plain
+# crontab entry). See CLAUDE.md for the Railway alternative if GitHub
+# Actions' scheduling latency (schedules are best-effort and can slip by
+# several minutes under GitHub's own load — acceptable here since the
+# route's own re-derivation is idempotent and safe to run late or skipped
+# occasionally, not acceptable if you need a tight, guaranteed interval).
+#
+# Requires two repo secrets: APP_URL (e.g. https://getworka.com) and
+# CRON_SECRET (must match the value configured on the Vercel app — the
+# route fails closed with 401 if this doesn't match, 503 if the app has no
+# CRON_SECRET configured at all).
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # every 5 minutes — GitHub Actions' documented minimum interval
+  workflow_dispatch: {}
+
+concurrency:
+  group: intake-recovery-cron
+  cancel-in-progress: false
+
+jobs:
+  trigger-recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Trigger intake recovery
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/trigger-intake-recovery.mjs
