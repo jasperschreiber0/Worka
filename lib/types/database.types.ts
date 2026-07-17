@@ -258,6 +258,21 @@ export interface NetworkRateAggregate {
   updated_at: string
 }
 
+/**
+ * Controlled vocabulary for variations.origin_reason (Phase 2B, still
+ * migration 039's column — validated in application code, not a DB CHECK
+ * constraint, so existing rows/older clients are never invalidated).
+ */
+export type VariationOriginReason =
+  | 'estimating_error'
+  | 'missing_scope'
+  | 'client_change'
+  | 'site_condition'
+  | 'design_change'
+  | 'supplier_price_change'
+  | 'regulatory_requirement'
+  | 'other'
+
 export interface Variation {
   id: string
   job_id: string
@@ -282,7 +297,7 @@ export interface Variation {
    */
   trade_category_id: number | null
   line_item_id: string | null
-  origin_reason: string | null
+  origin_reason: VariationOriginReason | null
   /** Migration 018 — client-facing share link auth */
   share_token_hash: string | null
   share_token_expires_at: string | null
@@ -343,6 +358,20 @@ export interface File {
   created_at: string
 }
 
+/**
+ * Controlled vocabulary for assumptions.resolution_reason (migration 040).
+ * Validated in application code, not a DB CHECK constraint — see
+ * app/api/assumptions/[quoteId]/resolve/route.ts.
+ */
+export type AssumptionResolutionReason =
+  | 'scope_missing'
+  | 'document_unclear'
+  | 'builder_adjustment'
+  | 'market_rate_change'
+  | 'client_change'
+  | 'ai_extraction_error'
+  | 'other'
+
 export interface Assumption {
   id: string
   quote_id: string
@@ -363,6 +392,8 @@ export interface Assumption {
   original_value: { quantity: number | null; unit: string | null; rate: number | null; total: number | null } | null
   /** Optional builder free-text reason for the correction. Never required. */
   resolution_note: string | null
+  /** Structured "why" (migration 040) — optional, never required. */
+  resolution_reason: AssumptionResolutionReason | null
 }
 
 // ─── Job workers, milestones, invoicing, proof (migrations 005, 007) ─────────

@@ -55,6 +55,7 @@ type DemoResolution = {
   adjusted_quantity?: number
   adjusted_unit?: string
   resolution_note?: string
+  resolution_reason?: string
 }
 
 // Kept on globalThis so every route bundle shares one map — Next.js can give

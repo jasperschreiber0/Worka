@@ -3,6 +3,7 @@ import React from 'react'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { AssumptionItem } from '@/lib/assumptions-demo'
+import type { AssumptionResolutionReason } from '@/lib/types/database.types'
 import type { SimilarProject, ScopeHint } from '@/lib/types/estimation.types'
 import SimilarJobsCard from '@/components/estimation/SimilarJobsCard'
 import ScopeIntelligenceCard from '@/components/estimation/ScopeIntelligenceCard'
@@ -24,6 +25,19 @@ export interface AssumptionReviewProps {
 // ─── Unit options ─────────────────────────────────────────────────────────────
 
 const UNIT_OPTIONS = ['each', 'sqm', 'lm', 'm³', 'hr', 'day', 'week', 'tonne', 'kg', 'lot']
+
+// ─── Resolution reason options (learning-loop foundation, migration 040) ──────
+// Optional everywhere — never required to accept, adjust, or exclude an item.
+
+const RESOLUTION_REASON_OPTIONS: { value: AssumptionResolutionReason; label: string }[] = [
+  { value: 'scope_missing', label: 'Scope missing from documents' },
+  { value: 'document_unclear', label: 'Document unclear' },
+  { value: 'builder_adjustment', label: 'Builder judgement call' },
+  { value: 'market_rate_change', label: 'Market rate change' },
+  { value: 'client_change', label: 'Client requested change' },
+  { value: 'ai_extraction_error', label: 'AI extraction error' },
+  { value: 'other', label: 'Other' },
+]
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
@@ -70,6 +84,52 @@ const selectStyle: React.CSSProperties = {
   color: 'var(--text-primary)',
 }
 
+// ─── Reason + note fields (shared by the Adjust and Exclude flows) ───────────
+// Optional, controlled-vocabulary reason plus a free-text note — learning-loop
+// foundation (migration 040). Reuses the existing selectStyle/inputStyle so
+// this doesn't introduce new design language.
+
+interface ReasonNoteFieldsProps {
+  reason: AssumptionResolutionReason | ''
+  onReasonChange: (reason: AssumptionResolutionReason | '') => void
+  note: string
+  onNoteChange: (note: string) => void
+  label: string
+}
+
+function ReasonNoteFields({ reason, onReasonChange, note, onNoteChange, label }: ReasonNoteFieldsProps) {
+  return (
+    <div className="space-y-2">
+      <div>
+        <p className="text-sm font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
+          {label}
+        </p>
+        <select
+          value={reason}
+          onChange={(e) => onReasonChange(e.target.value as AssumptionResolutionReason | '')}
+          className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+          style={selectStyle}
+        >
+          <option value="">Select a reason (optional)</option>
+          {RESOLUTION_REASON_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <textarea
+        value={note}
+        onChange={(e) => onNoteChange(e.target.value)}
+        placeholder="Add a note (optional)"
+        rows={2}
+        className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-400 focus:border-transparent"
+        style={inputStyle}
+      />
+    </div>
+  )
+}
+
 // ─── Card component for a single assumption ───────────────────────────────────
 
 interface AssumptionCardProps {
@@ -81,7 +141,9 @@ interface AssumptionCardProps {
     assumptionId: string,
     resolution: 'accepted' | 'adjusted' | 'excluded',
     adjustedQuantity?: number,
-    adjustedUnit?: string
+    adjustedUnit?: string,
+    resolutionReason?: AssumptionResolutionReason,
+    resolutionNote?: string
   ) => Promise<void>
   isSubmitting: boolean
   transitionClass: string
@@ -114,6 +176,12 @@ function AssumptionCard({
   const [adjustUnit, setAdjustUnit] = useState<string>(
     assumption.current_unit ?? UNIT_OPTIONS[0]
   )
+  const [adjustReason, setAdjustReason] = useState<AssumptionResolutionReason | ''>('')
+  const [adjustNote, setAdjustNote] = useState('')
+
+  const [showExcludeConfirm, setShowExcludeConfirm] = useState(false)
+  const [excludeReason, setExcludeReason] = useState<AssumptionResolutionReason | ''>('')
+  const [excludeNote, setExcludeNote] = useState('')
 
   // ── Gate 1: no unit ──────────────────────────────────────────────────────
   if (gate === 1) {
@@ -128,11 +196,15 @@ function AssumptionCard({
       }
       const qty = parseFloat(adjustQty)
       if (isNaN(qty)) return
-      onResolve(assumption.id, 'adjusted', qty, adjustUnit)
+      onResolve(assumption.id, 'adjusted', qty, adjustUnit, adjustReason || undefined, adjustNote || undefined)
     }
 
     const handleExclude = () => {
-      onResolve(assumption.id, 'excluded')
+      if (!showExcludeConfirm) {
+        setShowExcludeConfirm(true)
+        return
+      }
+      onResolve(assumption.id, 'excluded', undefined, undefined, excludeReason || undefined, excludeNote || undefined)
     }
 
     return (
@@ -216,6 +288,34 @@ function AssumptionCard({
                   ))}
                 </select>
               </div>
+              <ReasonNoteFields
+                reason={adjustReason}
+                onReasonChange={setAdjustReason}
+                note={adjustNote}
+                onNoteChange={setAdjustNote}
+                label="Why the adjustment?"
+              />
+            </div>
+          )}
+
+          {/* Exclude confirm (shown when exclude is clicked) */}
+          {showExcludeConfirm && (
+            <div className="space-y-2 rounded-lg px-3 py-2.5" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}>
+              <ReasonNoteFields
+                reason={excludeReason}
+                onReasonChange={setExcludeReason}
+                note={excludeNote}
+                onNoteChange={setExcludeNote}
+                label="Why exclude this item?"
+              />
+              <button
+                onClick={() => setShowExcludeConfirm(false)}
+                disabled={isSubmitting}
+                className="w-full py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ color: 'var(--text-tertiary)' }}
+              >
+                Cancel
+              </button>
             </div>
           )}
 
@@ -241,7 +341,7 @@ function AssumptionCard({
               className="w-full py-2.5 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ color: 'var(--status-red)' }}
             >
-              Exclude from quote
+              {showExcludeConfirm ? 'Confirm exclude' : 'Exclude from quote'}
             </button>
           </div>
         </div>
@@ -264,11 +364,15 @@ function AssumptionCard({
       }
       const qty = parseFloat(adjustQty)
       if (isNaN(qty)) return
-      onResolve(assumption.id, 'adjusted', qty, adjustUnit)
+      onResolve(assumption.id, 'adjusted', qty, adjustUnit, adjustReason || undefined, adjustNote || undefined)
     }
 
     const handleExclude = () => {
-      onResolve(assumption.id, 'excluded')
+      if (!showExcludeConfirm) {
+        setShowExcludeConfirm(true)
+        return
+      }
+      onResolve(assumption.id, 'excluded', undefined, undefined, excludeReason || undefined, excludeNote || undefined)
     }
 
     return (
@@ -358,6 +462,34 @@ function AssumptionCard({
                   ))}
                 </select>
               </div>
+              <ReasonNoteFields
+                reason={adjustReason}
+                onReasonChange={setAdjustReason}
+                note={adjustNote}
+                onNoteChange={setAdjustNote}
+                label="Why the adjustment?"
+              />
+            </div>
+          )}
+
+          {/* Exclude confirm (shown when exclude is clicked) */}
+          {showExcludeConfirm && (
+            <div className="space-y-2 rounded-lg px-3 py-2.5" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}>
+              <ReasonNoteFields
+                reason={excludeReason}
+                onReasonChange={setExcludeReason}
+                note={excludeNote}
+                onNoteChange={setExcludeNote}
+                label="Why exclude this item?"
+              />
+              <button
+                onClick={() => setShowExcludeConfirm(false)}
+                disabled={isSubmitting}
+                className="w-full py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ color: 'var(--text-tertiary)' }}
+              >
+                Cancel
+              </button>
             </div>
           )}
 
@@ -383,7 +515,7 @@ function AssumptionCard({
               className="w-full py-2.5 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ color: 'var(--status-red)' }}
             >
-              Exclude from quote
+              {showExcludeConfirm ? 'Confirm exclude' : 'Exclude from quote'}
             </button>
           </div>
         </div>
@@ -395,11 +527,15 @@ function AssumptionCard({
   const handleAddToQuote = () => {
     const qty = parseFloat(quantityInput)
     if (isNaN(qty) || qty <= 0) return
-    onResolve(assumption.id, 'adjusted', qty, assumption.current_unit ?? undefined)
+    onResolve(assumption.id, 'adjusted', qty, assumption.current_unit ?? undefined, adjustReason || undefined, adjustNote || undefined)
   }
 
   const handleKeepExcluded = () => {
-    onResolve(assumption.id, 'excluded')
+    if (!showExcludeConfirm) {
+      setShowExcludeConfirm(true)
+      return
+    }
+    onResolve(assumption.id, 'excluded', undefined, undefined, excludeReason || undefined, excludeNote || undefined)
   }
 
   return (
@@ -461,6 +597,38 @@ function AssumptionCard({
           </div>
         </div>
 
+        {/* Reason + note for adding to quote */}
+        {quantityInput && parseFloat(quantityInput) > 0 && (
+          <ReasonNoteFields
+            reason={adjustReason}
+            onReasonChange={setAdjustReason}
+            note={adjustNote}
+            onNoteChange={setAdjustNote}
+            label="Why the correction?"
+          />
+        )}
+
+        {/* Exclude confirm (shown when keep excluded is clicked) */}
+        {showExcludeConfirm && (
+          <div className="space-y-2 rounded-lg px-3 py-2.5" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}>
+            <ReasonNoteFields
+              reason={excludeReason}
+              onReasonChange={setExcludeReason}
+              note={excludeNote}
+              onNoteChange={setExcludeNote}
+              label="Why keep this excluded?"
+            />
+            <button
+              onClick={() => setShowExcludeConfirm(false)}
+              disabled={isSubmitting}
+              className="w-full py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
         {/* Actions */}
         <div className="space-y-2 pt-1">
           {quantityInput && parseFloat(quantityInput) > 0 && (
@@ -478,7 +646,7 @@ function AssumptionCard({
             className="w-full py-2.5 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ color: 'var(--status-red)' }}
           >
-            Keep excluded
+            {showExcludeConfirm ? 'Confirm keep excluded' : 'Keep excluded'}
           </button>
         </div>
       </div>
@@ -632,7 +800,9 @@ function AssumptionReviewInner({
       assumptionId: string,
       resolution: 'accepted' | 'adjusted' | 'excluded',
       adjustedQuantity?: number,
-      adjustedUnit?: string
+      adjustedUnit?: string,
+      resolutionReason?: AssumptionResolutionReason,
+      resolutionNote?: string
     ) => {
       setIsSubmitting(true)
       try {
@@ -645,6 +815,8 @@ function AssumptionReviewInner({
             adjusted_quantity: adjustedQuantity,
             adjusted_unit: adjustedUnit,
             builder_id: builderId,
+            resolution_reason: resolutionReason,
+            resolution_note: resolutionNote,
           }),
         })
         const data = await res.json() as { all_resolved: boolean }

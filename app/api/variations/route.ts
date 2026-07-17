@@ -4,6 +4,18 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 import { requirePermission } from '@/lib/auth/role-guard'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { recordProofEvent } from '@/lib/proof'
+import type { VariationOriginReason } from '@/lib/types/database.types'
+
+const ALLOWED_ORIGIN_REASONS: readonly VariationOriginReason[] = [
+  'estimating_error',
+  'missing_scope',
+  'client_change',
+  'site_condition',
+  'design_change',
+  'supplier_price_change',
+  'regulatory_requirement',
+  'other',
+]
 
 function formatAud(amount: number): string {
   return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
@@ -34,7 +46,7 @@ interface CreateVariationBody {
    */
   trade_category_id?: number
   line_item_id?: string
-  origin_reason?: string
+  origin_reason?: VariationOriginReason
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -129,6 +141,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!job_id || !title || !description || amount === undefined) {
     return NextResponse.json(
       { error: 'job_id, title, description, and amount are required' },
+      { status: 400 }
+    )
+  }
+
+  // origin_reason is optional — never required — but if a caller sends one,
+  // it must be a real value from the controlled vocabulary, not an arbitrary
+  // string that would silently poison future attribution analysis.
+  if (body.origin_reason !== undefined && !ALLOWED_ORIGIN_REASONS.includes(body.origin_reason)) {
+    return NextResponse.json(
+      { error: `origin_reason must be one of: ${ALLOWED_ORIGIN_REASONS.join(', ')}` },
       { status: 400 }
     )
   }

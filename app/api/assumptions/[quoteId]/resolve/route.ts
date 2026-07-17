@@ -1,8 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_ASSUMPTIONS, demoResolutionState } from '@/lib/assumptions-demo'
+import type { AssumptionResolutionReason } from '@/lib/types/database.types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+const ALLOWED_RESOLUTION_REASONS: readonly AssumptionResolutionReason[] = [
+  'scope_missing',
+  'document_unclear',
+  'builder_adjustment',
+  'market_rate_change',
+  'client_change',
+  'ai_extraction_error',
+  'other',
+]
 
 interface ResolveInput {
   assumption_id: string
@@ -12,6 +23,8 @@ interface ResolveInput {
   builder_id: string
   /** Optional — never required, never blocks the resolve action. Learning-loop foundation (migration 039). */
   resolution_note?: string
+  /** Optional, controlled vocabulary — never required. Learning-loop foundation (migration 040). */
+  resolution_reason?: AssumptionResolutionReason
 }
 
 interface ResolvedAssumption {
@@ -48,7 +61,7 @@ export async function POST(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { assumption_id, resolution, adjusted_quantity, adjusted_unit, resolution_note } = body
+  const { assumption_id, resolution, adjusted_quantity, adjusted_unit, resolution_note, resolution_reason } = body
 
   if (!assumption_id || !resolution) {
     return NextResponse.json(
@@ -60,6 +73,16 @@ export async function POST(
   if (resolution === 'adjusted' && adjusted_quantity === undefined) {
     return NextResponse.json(
       { error: 'adjusted_quantity is required when resolution is "adjusted"' },
+      { status: 400 }
+    )
+  }
+
+  // resolution_reason is optional — never required — but if a caller sends
+  // one, it must be a real value from the controlled vocabulary, not an
+  // arbitrary string that would silently poison future attribution analysis.
+  if (resolution_reason !== undefined && !ALLOWED_RESOLUTION_REASONS.includes(resolution_reason)) {
+    return NextResponse.json(
+      { error: `resolution_reason must be one of: ${ALLOWED_RESOLUTION_REASONS.join(', ')}` },
       { status: 400 }
     )
   }
@@ -81,6 +104,7 @@ export async function POST(
       adjusted_quantity,
       adjusted_unit,
       resolution_note,
+      resolution_reason,
     })
 
     // Check if all demo assumptions are now resolved
@@ -184,6 +208,7 @@ export async function POST(
         resolved_by: builder_id,
         original_value: originalValue,
         resolution_note: resolution_note ?? null,
+        resolution_reason: resolution_reason ?? null,
       })
       .eq('id', assumption_id)
       .eq('quote_id', quoteId)

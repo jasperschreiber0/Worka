@@ -660,7 +660,7 @@ function SummaryCard({ summary }: SummaryCardProps) {
 // Renders quote.evidence (built in app/api/quotes/[quoteId]/route.ts by
 // aggregating project_documents / files / scope_items / quote_line_items —
 // no new computation, see buildEstimateEvidence there). Answers "what
-// information did NWT receive / extract" — the two Trust Model questions
+// information did WorkA receive / extract" — the two Trust Model questions
 // the QA report itself doesn't cover.
 
 function EvidenceRow({ ok, children }: { ok: boolean; children: ReactNode }) {
@@ -700,7 +700,7 @@ function EstimateEvidenceSection({
       </p>
 
       {/*
-        Terminology note: every label here describes what NWT *did*
+        Terminology note: every label here describes what WorkA *did*
         (reviewed, identified, generated), never what it *confirmed* — this
         section is coverage, not a validation or correctness claim. See the
         captions under each heading for the specific caveat.
@@ -903,7 +903,7 @@ function QAReviewPanel({ qa, evidence, qualityGate, unresolvedCount, assumptionC
         </>
       )}
 
-      {/* Estimate Evidence — what information NWT received and extracted,
+      {/* Estimate Evidence — what information WorkA received and extracted,
           independent of whether QA has run */}
       <EstimateEvidenceSection evidence={evidence} exposure={qualityGate.exposure} />
     </div>
