@@ -3,6 +3,8 @@
 // the GET handler and any future mutation routes without exporting from a
 // Next.js route file.
 
+import type { QAReport } from '@/lib/types/database.types'
+
 export type DemoPricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
 
 export interface DemoQuoteLineItem {
@@ -40,6 +42,14 @@ export interface DemoQuote {
   version: number
   created_at: string
   quote_ref?: string
+  /**
+   * Stage 6 QA pass output — see lib/estimating/qa.ts. Null until QA has run.
+   * Optional: only the quote GET route (which builds the QAReviewPanel data)
+   * populates these — send/export-pdf build a DemoQuote for their own
+   * narrower purpose and don't need QA data.
+   */
+  qa_report?: QAReport | null
+  overall_confidence?: number | null
 }
 
 // ─── Demo quote ───────────────────────────────────────────────────────────────
@@ -58,6 +68,20 @@ export const DEMO_QUOTE: DemoQuote = {
   version: 1,
   created_at: new Date().toISOString(),
   quote_ref: 'QT-JOB-2025-003-v1',
+  // Mirrors what runQualityAssurance (lib/estimating/qa.ts) would actually
+  // compute for DEMO_LINE_ITEMS below — not fabricated copy. Two items sit
+  // below the 50% confidence threshold (li-06-02 feature wall plasterboard
+  // at 45%, li-12-01 GPO points at 0% pending a unit), and li-12-01 also has
+  // no resolved rate (no unit means it can't be priced). No missing-trade or
+  // duplicate-description checks fire against this line item set.
+  qa_report: {
+    top_risks: ['2 line items are below 50% confidence.'],
+    review_items: ['1 line item could not be priced from any rate tier.'],
+    recommended_actions: ['Review low-confidence line items before sending this quote to the client.'],
+    missing_trades: [],
+    duplicate_descriptions: [],
+  },
+  overall_confidence: 45,
 }
 
 // ─── Demo line items ──────────────────────────────────────────────────────────

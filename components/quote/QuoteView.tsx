@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import type { QAReport } from '@/lib/types/database.types'
 import { applyMargin } from '@/lib/pricing'
 import SendQuoteModal from './SendQuoteModal'
 
@@ -39,10 +40,16 @@ interface QuoteSummary {
   can_send: boolean
 }
 
+/** Stage 6 QA pass output (lib/estimating/qa.ts), passed through by the API unchanged. */
+interface QASummary extends QAReport {
+  overall_confidence: number | null
+}
+
 interface QuoteApiResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
+  qa: QASummary | null
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -286,8 +293,9 @@ function LineItemRow({ item }: LineItemRowProps) {
       )}
       {isAllowance && <div className="flex-shrink-0 w-14 sm:w-20" />}
 
-      {/* Rate */}
-      <div className="flex-shrink-0 text-right w-16 sm:w-20 hidden sm:block">
+      {/* Rate — visible on all viewports; pricing context a builder needs
+          before sending shouldn't be desktop-only */}
+      <div className="flex-shrink-0 text-right w-14 sm:w-20">
         <span
           className="text-[13px] tabular-nums"
           style={{
@@ -318,8 +326,8 @@ function LineItemRow({ item }: LineItemRowProps) {
         )}
       </div>
 
-      {/* Confidence indicator */}
-      <div className="hidden sm:flex flex-shrink-0 w-24 justify-end">
+      {/* Confidence indicator — visible on all viewports, not just desktop */}
+      <div className="flex flex-shrink-0 w-16 sm:w-24 justify-end">
         <ConfidenceIndicator
           confidence={item.confidence}
           isAssumption={item.is_assumption}
@@ -569,7 +577,7 @@ function SummaryCard({ summary }: SummaryCardProps) {
           <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Confidence</span>
           <div className="flex items-center gap-2">
             <OverallConfidenceBadge score={summary.confidence_score} />
-            <span className="text-[11px] hidden sm:inline" style={{ color: 'var(--text-tertiary)' }}>{confidenceLabel}</span>
+            <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{confidenceLabel}</span>
           </div>
         </div>
         {summary.unresolved_count > 0 && (
@@ -632,6 +640,126 @@ function SummaryCard({ summary }: SummaryCardProps) {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ─── QA review panel ──────────────────────────────────────────────────────────
+// Renders quotes.qa_report / overall_confidence (lib/estimating/qa.ts) — never
+// recomputes anything, purely translates what QA already found into
+// builder-facing language. Answers, from existing data: what assumptions were
+// made (summary.assumption_count/unresolved_count), what risks could affect
+// price (qa.top_risks), and what needs review before sending
+// (qa.review_items + qa.recommended_actions).
+
+interface QAReviewPanelProps {
+  qa: QASummary | null
+  unresolvedCount: number
+  assumptionCount: number
+  hasFlaggedItems: boolean
+  onJumpToFlagged: () => void
+}
+
+function QAReviewPanel({ qa, unresolvedCount, assumptionCount, hasFlaggedItems, onJumpToFlagged }: QAReviewPanelProps) {
+  // QA hasn't run yet (e.g. quote just priced, backfill pending) — nothing to show
+  if (!qa) return null
+
+  const confidence = qa.overall_confidence ?? 0
+  const beforeSendingItems = [...qa.top_risks, ...qa.review_items]
+  const isClear = unresolvedCount === 0 && beforeSendingItems.length === 0
+
+  let statusLabel: string
+  let statusColor: string
+  if (unresolvedCount > 0) {
+    statusLabel = 'Needs your input'
+    statusColor = 'var(--status-red)'
+  } else if (isClear && confidence >= 80) {
+    statusLabel = 'Ready to send'
+    statusColor = 'var(--status-green)'
+  } else if (confidence >= 60) {
+    statusLabel = 'Ready to review'
+    statusColor = 'var(--status-amber)'
+  } else {
+    statusLabel = 'High risk — review before sending'
+    statusColor = 'var(--status-red)'
+  }
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden shadow-sm" style={{ border: '1px solid var(--bg-border)' }}>
+      {/* Confidence + readiness — always visible, no hidden columns on mobile */}
+      <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
+          Estimate Confidence
+        </h3>
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <span className="text-[20px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>{confidence}%</span>
+          <span
+            className="text-[12px] font-semibold px-2 py-0.5 rounded-full"
+            style={{ color: statusColor, backgroundColor: 'var(--bg-surface)', border: `1px solid ${statusColor}` }}
+          >
+            {statusLabel}
+          </span>
+        </div>
+        {assumptionCount > 0 && (
+          <p className="text-[12px] mt-1.5" style={{ color: 'var(--text-tertiary)' }}>
+            {assumptionCount} line item{assumptionCount !== 1 ? 's are' : ' is'} based on an assumption rather than confirmed evidence
+            {unresolvedCount > 0 ? `, ${unresolvedCount} still unresolved` : ''}.
+          </p>
+        )}
+      </div>
+
+      {/* Before sending — the merged, plain-language risk + review list */}
+      {beforeSendingItems.length > 0 ? (
+        <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)' }}>
+          <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
+            Before sending
+          </p>
+          <ul className="space-y-1.5">
+            {beforeSendingItems.map((item, i) => (
+              <li key={i} className="flex items-start gap-2 text-[13px] leading-snug" style={{ color: 'var(--text-secondary)' }}>
+                <span aria-hidden="true" className="flex-shrink-0" style={{ color: 'var(--status-amber)' }}>⚠</span>
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+          {hasFlaggedItems && (
+            <button
+              type="button"
+              onClick={onJumpToFlagged}
+              className="mt-3 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+              style={{ color: 'var(--orange-primary)', border: '1px solid var(--orange-primary)' }}
+              onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--orange-subtle)')}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
+            >
+              Jump to flagged items
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="px-4 py-3 flex items-center gap-2" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
+          <svg className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--status-green)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+          <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
+            No risks flagged — this estimate is ready for review.
+          </span>
+        </div>
+      )}
+
+      {/* Recommended — informational, not separately-clickable per item (the
+          underlying qa_report doesn't carry per-action targets) */}
+      {qa.recommended_actions.length > 0 && (
+        <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
+          <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
+            Recommended
+          </p>
+          <ul className="space-y-1">
+            {qa.recommended_actions.map((action, i) => (
+              <li key={i} className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{action}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }
@@ -877,6 +1005,23 @@ function QuoteViewInner({
     })
   }, [])
 
+  // A "flagged" item is exactly what the QA panel's warnings describe:
+  // an unresolved assumption, or a line item below the 50% confidence
+  // threshold qa.ts itself uses for its low-confidence risk.
+  const isFlaggedItem = (item: DemoQuoteLineItem) =>
+    (item.is_assumption && item.assumption_status === 'unresolved') || item.confidence < 50
+
+  const hasFlaggedItems = data?.line_items_by_category.some((g) => g.items.some(isFlaggedItem)) ?? false
+
+  const jumpToFlagged = useCallback(() => {
+    if (!data) return
+    const flaggedIds = data.line_items_by_category
+      .filter((g) => g.items.some(isFlaggedItem))
+      .map((g) => g.category_id)
+    setExpandedCategories(new Set(flaggedIds))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
+
   if (!mounted) return null
 
   return (
@@ -1028,6 +1173,15 @@ function QuoteViewInner({
             <div className="pt-4 pb-2">
               {/* Summary card */}
               <SummaryCard summary={data.summary} />
+
+              {/* QA review — confidence, risks, and what needs review before sending */}
+              <QAReviewPanel
+                qa={data.qa}
+                unresolvedCount={data.summary.unresolved_count}
+                assumptionCount={data.summary.assumption_count}
+                hasFlaggedItems={hasFlaggedItems}
+                onJumpToFlagged={jumpToFlagged}
+              />
 
               {/* PC/PS register */}
               {(() => {

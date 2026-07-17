@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import type { QAReport } from '@/lib/types/database.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { applyMargin, ensureQuotePriced } from '@/lib/pricing'
 
@@ -26,10 +27,20 @@ interface QuoteSummary {
   can_send: boolean
 }
 
+/**
+ * Stage 6 QA pass output (lib/estimating/qa.ts), passed through unchanged —
+ * this route never recomputes QA, only reads what runQualityAssurance already
+ * persisted to quotes.qa_report / quotes.overall_confidence.
+ */
+interface QASummary extends QAReport {
+  overall_confidence: number | null
+}
+
 interface QuoteResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
+  qa: QASummary | null
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -70,6 +81,19 @@ function groupByCategory(items: DemoQuoteLineItem[]): LineItemsByCategory[] {
   return Array.from(map.values()).sort((a, b) => a.category_id - b.category_id)
 }
 
+// ─── Helper: build QA summary ─────────────────────────────────────────────────
+// Pure pass-through of quotes.qa_report / quotes.overall_confidence — never
+// recomputed here. runQualityAssurance (lib/estimating/qa.ts) is the one
+// place QA is calculated.
+
+function buildQASummary(
+  qaReport: QAReport | null | undefined,
+  overallConfidence: number | null | undefined
+): QASummary | null {
+  if (!qaReport) return null
+  return { ...qaReport, overall_confidence: overallConfidence ?? null }
+}
+
 // ─── Helper: compute summary ──────────────────────────────────────────────────
 
 function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[]): QuoteSummary {
@@ -107,11 +131,13 @@ export async function GET(
   if (isDemoMode()) {
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
     const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
+    const qa = buildQASummary(DEMO_QUOTE.qa_report, DEMO_QUOTE.overall_confidence)
 
     const response: QuoteResponse = {
       quote: DEMO_QUOTE,
       line_items_by_category,
       summary,
+      qa,
     }
 
     return NextResponse.json(response)
@@ -138,6 +164,8 @@ export async function GET(
         confidence_score,
         version,
         created_at,
+        qa_report,
+        overall_confidence,
         jobs (
           address
         )
@@ -264,6 +292,8 @@ export async function GET(
       confidence_score: quoteRow.confidence_score ?? 0,
       version: quoteRow.version ?? 1,
       created_at: quoteRow.created_at,
+      qa_report: (quoteRow.qa_report as QAReport | null) ?? null,
+      overall_confidence: quoteRow.overall_confidence ?? null,
     }
 
     const items: DemoQuoteLineItem[] = (lineRows ?? []).map((row) => {
@@ -294,11 +324,13 @@ export async function GET(
 
     const line_items_by_category = groupByCategory(items)
     const summary = computeSummary(quote, items)
+    const qa = buildQASummary(quote.qa_report, quote.overall_confidence)
 
     const response: QuoteResponse = {
       quote,
       line_items_by_category,
       summary,
+      qa,
     }
 
     return NextResponse.json(response)
