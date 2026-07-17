@@ -115,12 +115,29 @@ export async function POST(
     // The quote must belong to the authenticated builder
     const { data: ownedQuote } = await supabase
       .from('quotes')
-      .select('id')
+      .select('id, status')
       .eq('id', quoteId)
       .eq('builder_id', builder_id)
       .single()
     if (!ownedQuote) {
       return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+    }
+
+    // A sent quote's line items (and thus its total, and whatever a prior
+    // risk_acknowledgement_snapshot described) must not change after the
+    // client has received it — that's the one thing the whole Proof trail
+    // exists to guarantee. Resolving an assumption here would silently
+    // change quote_line_items/total_cost via recomputeQuoteTotals below with
+    // no new acknowledgement and no Proof event. Use Revise to create a new
+    // quote version, or a Variation for scope changes after the client has
+    // already agreed to this one.
+    if (ownedQuote.status !== 'draft' && ownedQuote.status !== 'pending_review') {
+      return NextResponse.json(
+        {
+          error: `This quote is already ${ownedQuote.status} and can't be modified. Use "Revise" to create a new version, or record scope changes as a variation.`,
+        },
+        { status: 422 }
+      )
     }
 
     // 1. Update assumptions table — constrained to this quote

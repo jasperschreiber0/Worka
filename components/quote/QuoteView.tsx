@@ -975,7 +975,9 @@ function ActionBar({ quoteId, summary, qualityGate, onSend, onRevise, onExportPd
         <button
           type="button"
           onClick={() => onExportPdf(quoteId)}
-          className="btn-secondary px-4 py-2 text-[13px] flex-1 sm:flex-none"
+          disabled={isBlocked}
+          title={isBlocked ? qualityGate.blocked_reasons.join(' ') : 'Export a client-facing PDF'}
+          className="btn-secondary px-4 py-2 text-[13px] flex-1 sm:flex-none disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Export PDF
         </button>
@@ -1136,11 +1138,31 @@ function QuoteViewInner({
     onSend(quoteId)
   }, [quoteId, onSend])
 
-  // Export PDF — open in new tab
+  // Export PDF — open in new tab. Gated the same way sending is: the
+  // ActionBar button is disabled entirely when BLOCKED, and REVIEW_REQUIRED
+  // (not yet acknowledged) asks for explicit confirmation naming the
+  // specific exposure before appending ?risk_acknowledged=true — the server
+  // re-checks this regardless (see export-pdf/route.ts), this is just so
+  // the builder isn't surprised by what exporting records.
   const handleExportPdfClick = useCallback((_qId: string) => {
-    window.open(`/api/quotes/${quoteId}/export-pdf`, '_blank')
+    if (!data) return
+    const gate = data.quality_gate
+    const alreadyAcknowledged = Boolean(data.quote.risk_acknowledged_at)
+
+    let url = `/api/quotes/${quoteId}/export-pdf`
+    if (gate.state === 'review_required' && !alreadyAcknowledged) {
+      const confirmed = window.confirm(
+        `This quote has flagged risks — $${gate.exposure.exposed_value.toLocaleString('en-AU')} ` +
+        `(${gate.exposure.exposed_pct}% of quote value) exposed to PC/PS allowances or assumptions.\n\n` +
+        `Exporting this PDF will record that you've reviewed and accepted these risks. Continue?`
+      )
+      if (!confirmed) return
+      url += '?risk_acknowledged=true'
+    }
+
+    window.open(url, '_blank')
     onExportPdf(quoteId)
-  }, [quoteId, onExportPdf])
+  }, [quoteId, onExportPdf, data])
 
   // Revise — close and let the parent (ChatInterface.handleQuoteViewRevise)
   // make the single POST to /revise and report the outcome. This component

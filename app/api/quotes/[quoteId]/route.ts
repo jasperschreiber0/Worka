@@ -149,7 +149,12 @@ function buildEstimateEvidence(
     missing_documents: missingDocuments,
     scope_items_identified: scopeItemsIdentified,
     line_items_generated: items.length,
-    fixed_price_count: items.filter((i) => i.pricing_type === 'measured' && !i.is_assumption).length,
+    // rate !== null matters here — a measured, non-assumption item with no
+    // resolved rate is an integrity failure (see quality-gate.ts's BLOCKED
+    // "unpriced" reason), not a confidently fixed price. Without this check,
+    // Estimate Evidence and the Quality Gate could describe the identical
+    // line item two contradictory ways.
+    fixed_price_count: items.filter((i) => i.pricing_type === 'measured' && !i.is_assumption && i.rate !== null).length,
     pc_ps_count: items.filter((i) => i.pricing_type === 'pc_allowance' || i.pricing_type === 'provisional_sum').length,
     assumed_count: items.filter((i) => i.is_assumption).length,
     needs_review_count: items.filter((i) => i.is_assumption && i.assumption_status === 'unresolved').length,

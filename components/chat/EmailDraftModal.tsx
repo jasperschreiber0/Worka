@@ -26,6 +26,7 @@ interface EmailDraft {
   body: string
   job_id: string | null
   job_address: string | null
+  quote_id: string | null
 }
 
 interface EmailDraftResponse {
@@ -90,6 +91,7 @@ export default function EmailDraftModal({
   const [draftBody, setDraftBody] = useState('')
   const [jobAddress, setJobAddress] = useState<string | null>(null)
   const [resolvedJobId, setResolvedJobId] = useState<string | null>(null)
+  const [resolvedQuoteId, setResolvedQuoteId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const panelRef = useRef<HTMLDivElement>(null)
@@ -105,6 +107,7 @@ export default function EmailDraftModal({
     setDraftBody('')
     setJobAddress(null)
     setResolvedJobId(null)
+    setResolvedQuoteId(null)
 
     async function fetchDraft() {
       try {
@@ -133,6 +136,7 @@ export default function EmailDraftModal({
         setDraftBody(data.draft.body)
         setJobAddress(data.draft.job_address)
         setResolvedJobId(data.draft.job_id)
+        setResolvedQuoteId(data.draft.quote_id)
         setStep('draft')
       } catch {
         setLoadError('Something went wrong generating the draft.')
@@ -211,6 +215,7 @@ export default function EmailDraftModal({
           to: draftTo,
           subject: draftSubject,
           body: draftBody,
+          linked_quote_id: resolvedQuoteId ?? undefined,
         }),
       })
 
@@ -228,7 +233,7 @@ export default function EmailDraftModal({
       setLoadError('Something went wrong sending the email.')
       setStep('error')
     }
-  }, [builderId, resolvedJobId, draftTo, draftSubject, draftBody, jobAddress, onClose, onSent])
+  }, [builderId, resolvedJobId, resolvedQuoteId, draftTo, draftSubject, draftBody, jobAddress, onClose, onSent])
 
   if (!isOpen) return null
 

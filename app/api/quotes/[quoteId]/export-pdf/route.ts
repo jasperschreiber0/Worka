@@ -3,6 +3,13 @@ import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { applyMargin } from '@/lib/pricing'
+import {
+  loadQuoteQualityGate,
+  loadDemoQuoteQualityGate,
+  decideQuoteSendPolicy,
+  buildRiskAcknowledgementSnapshot,
+} from '@/lib/estimating/quote-quality-policy'
+import { recordProofEvent } from '@/lib/proof'
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
@@ -415,7 +422,7 @@ function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { quoteId: string } }
 ): Promise<NextResponse> {
   const builderId = await getAuthenticatedBuilderId()
@@ -424,11 +431,25 @@ export async function GET(
   }
 
   const { quoteId } = params
+  // Explicit acknowledgement for THIS request — only matters the first time
+  // a REVIEW_REQUIRED quote is exported; once risk_acknowledged_at is set
+  // (from this or a prior send/export), later exports don't need to ask again.
+  const queryAcknowledged = request.nextUrl.searchParams.get('risk_acknowledged') === 'true'
 
   let quote: DemoQuote
   let items: DemoQuoteLineItem[]
 
   if (quoteId === 'demo-quote-id') {
+    // Same enforcement as real mode — never a special-cased demo bypass.
+    const { gate: demoGate } = loadDemoQuoteQualityGate()
+    const demoDecision = decideQuoteSendPolicy(demoGate, queryAcknowledged)
+    if (!demoDecision.allowed) {
+      return NextResponse.json(
+        { error: demoDecision.reason ?? 'This quote cannot be exported yet.', quality_gate: demoGate },
+        { status: 403 }
+      )
+    }
+
     quote = DEMO_QUOTE
     items = DEMO_LINE_ITEMS
   } else {
@@ -438,6 +459,47 @@ export async function GET(
 
     const { createClient } = await import('@supabase/supabase-js')
     const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+
+    // Gate check first — one shared fetch+evaluate, same as confirm-send.
+    // BLOCKED/unacknowledged REVIEW_REQUIRED quotes never reach the PDF
+    // renderer below; this closes the export-pdf bypass the production
+    // trust audit found (no gate check existed here at all previously).
+    const loaded = await loadQuoteQualityGate(sb, quoteId, builderId)
+    if (!loaded) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+
+    const alreadyAcknowledged = loaded.quote.riskAcknowledgedAt !== null
+    const decision = decideQuoteSendPolicy(loaded.gate, alreadyAcknowledged || queryAcknowledged)
+    if (!decision.allowed) {
+      return NextResponse.json(
+        { error: decision.reason ?? 'This quote cannot be exported yet.', quality_gate: loaded.gate },
+        { status: 403 }
+      )
+    }
+
+    // First time this quote version's risk is being accepted (via export,
+    // not send) — write it now, same shape confirm-send would write, plus
+    // its own distinct Proof event.
+    if (decision.requiresAcknowledgement && !alreadyAcknowledged) {
+      const acknowledgedAt = new Date().toISOString()
+      const snapshot = buildRiskAcknowledgementSnapshot(quoteId, loaded.quote, loaded.gate, acknowledgedAt)
+      await sb
+        .from('quotes')
+        .update({ risk_acknowledged_at: acknowledgedAt, risk_acknowledgement_snapshot: snapshot })
+        .eq('id', quoteId)
+      await recordProofEvent({
+        jobId: loaded.quote.jobId,
+        builderId,
+        eventType: 'quote_sent_with_risk_acknowledged',
+        description: `Builder acknowledged ${snapshot.reasons_accepted.length} flagged risk(s) ($${snapshot.exposure.exposed_value.toLocaleString('en-AU')} exposed, ${snapshot.exposure.exposed_pct}% of quote value) before exporting a client-facing PDF`,
+        metadata: {
+          quote_id: quoteId,
+          version: snapshot.version,
+          exposure: snapshot.exposure,
+          reasons_accepted: snapshot.reasons_accepted,
+          affected_line_items: snapshot.affected_line_items,
+        },
+      })
+    }
 
     const [{ data: quoteRow }, { data: lineItems }] = await Promise.all([
       sb.from('quotes')

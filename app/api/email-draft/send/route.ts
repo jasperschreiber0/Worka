@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto'
 import { requirePermission } from '@/lib/auth/role-guard'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { loadQuoteQualityGate, loadDemoQuoteQualityGate, decideQuoteSendPolicy } from '@/lib/estimating/quote-quality-policy'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,15 @@ interface SendEmailRequestBody {
   body: string
   linked_variation_id?: string
   linked_invoice_id?: string
+  /**
+   * Set by EmailDraftModal when the draft referenced a quote (draft.quote_id
+   * from /api/email-draft). Re-verified fresh here, server-side — this is
+   * the fix for the production trust audit's finding that this route could
+   * send a quote-related email with zero gate awareness. Scoped to READY
+   * only: this generic assistant has no acknowledgement UI, so anything
+   * needing review must go through the quote's own Send flow instead.
+   */
+  linked_quote_id?: string
 }
 
 interface SendEmailResponse {
@@ -38,7 +48,7 @@ export async function POST(
 
   try {
     const body = (await request.json()) as SendEmailRequestBody
-    const { job_id, to, subject, body: emailBody, linked_variation_id, linked_invoice_id } = body
+    const { job_id, to, subject, body: emailBody, linked_variation_id, linked_invoice_id, linked_quote_id } = body
 
     if (!to || !subject || !emailBody) {
       return NextResponse.json(
@@ -68,6 +78,32 @@ export async function POST(
         .single()
       if (!jobRow) {
         return NextResponse.json({ error: 'Job not found or unauthorized' }, { status: 403 })
+      }
+    }
+
+    // Re-verify the linked quote's gate fresh at send time — never trust
+    // that it was still 'ready' when the draft was prepared. This generic
+    // assistant has no acknowledgement UI, so anything short of READY is
+    // refused outright rather than half-supported here.
+    if (linked_quote_id) {
+      const gate = linked_quote_id === 'demo-quote-id'
+        ? loadDemoQuoteQualityGate().gate
+        : (supabaseUrl && serviceRoleKey)
+          ? (await loadQuoteQualityGate(
+              createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } }),
+              linked_quote_id,
+              builder_id
+            ))?.gate ?? null
+          : null
+
+      if (gate) {
+        const decision = decideQuoteSendPolicy(gate, false)
+        if (!decision.allowed) {
+          return NextResponse.json(
+            { error: decision.reason ?? 'This quote isn\'t ready to send to the client yet — open the quote and use "Send to client" there instead.' },
+            { status: 422 }
+          )
+        }
       }
     }
 

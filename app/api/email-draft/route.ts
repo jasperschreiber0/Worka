@@ -5,6 +5,9 @@ import { checkRateLimit } from '@/lib/rate-limit'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { resolveClientPrice } from '@/lib/pricing'
+import { loadQuoteQualityGate } from '@/lib/estimating/quote-quality-policy'
+import type { QualityState } from '@/lib/estimating/quality-gate'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +28,9 @@ interface EmailDraft {
   body: string
   job_id: string | null
   job_address: string | null
+  /** So /api/email-draft/send can re-verify the quote's quality gate fresh
+   * at send time, not just trust what was true when the draft was prepared. */
+  quote_id: string | null
 }
 
 interface ContextUsed {
@@ -57,8 +63,17 @@ interface JobContext {
   invoice_amount: number | null
   invoice_status: string | null
   invoice_days_overdue: number | null
+  /** Client-facing price (via resolveClientPrice) — never raw cost. Null
+   * both when there's no quote AND when the quote's gate isn't 'ready',
+   * so a not-yet-safe-to-share figure is never fed to the drafting prompt. */
   quote_amount: number | null
   quote_sent_display: string | null
+  quote_id: string | null
+  /** Null when there's no quote to gate, or (real mode) always populated
+   * when one exists. Demo mode (job-snapshot-demo.ts fixtures) has no
+   * line-item/qa_report data to compute a real gate from — documented
+   * limitation, not silently assumed 'ready'. */
+  quote_gate_state: QualityState | null
   latest_variation_title: string | null
   latest_variation_amount: number | null
 }
@@ -87,8 +102,15 @@ function loadDemoJobContext(jobId: string): JobContext | null {
     invoice_amount: invoice?.amount ?? null,
     invoice_status: invoice?.status ?? null,
     invoice_days_overdue: invoiceDaysOverdue,
-    quote_amount: snapshot.quote?.total_cost ?? null,
+    // job-snapshot-demo.ts's quote fixture has no margin_pct field —
+    // resolveClientPrice falls back to DEFAULT_MARGIN_PCT rather than
+    // leaking the raw total_cost the way this used to.
+    quote_amount: snapshot.quote ? resolveClientPrice({ total_cost: snapshot.quote.total_cost, margin_pct: null }) : null,
     quote_sent_display: snapshot.quote?.sent_at ?? null,
+    quote_id: snapshot.quote?.id ?? null,
+    // This demo fixture carries no line items/qa_report to compute a real
+    // gate from — see the JobContext doc comment. Not silently 'ready'.
+    quote_gate_state: null,
     latest_variation_title: variation?.title ?? null,
     latest_variation_amount: variation?.amount ?? null,
   }
@@ -134,7 +156,7 @@ async function loadRealJobContext(
   if (!job) return null
 
   const [{ data: quotes }, { data: variations }, { data: invoices }] = await Promise.all([
-    sb.from('quotes').select('total_cost, sent_at, version, status').eq('job_id', jobId).order('version', { ascending: false }).limit(1),
+    sb.from('quotes').select('id, total_cost, margin_pct, sent_at, version, status').eq('job_id', jobId).order('version', { ascending: false }).limit(1),
     sb.from('variations').select('title, amount').eq('job_id', jobId).eq('status', 'pending').order('created_at', { ascending: false }).limit(1),
     sb.from('invoices').select('amount, status, due_date').eq('job_id', jobId).order('created_at', { ascending: false }).limit(1),
   ])
@@ -148,6 +170,21 @@ async function loadRealJobContext(
     invoiceDaysOverdue = Math.floor((Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24))
   }
 
+  // Gate check + client-facing price — same shared policy every other
+  // external quote surface uses (lib/estimating/quote-quality-policy.ts).
+  // quote_amount stays null whenever the gate isn't 'ready', so a
+  // not-yet-safe-to-share figure never reaches the drafting prompt,
+  // regardless of intent_hint.
+  let quoteGateState: QualityState | null = null
+  let quoteAmount: number | null = null
+  if (quote) {
+    const loaded = await loadQuoteQualityGate(sb, quote.id, builderId)
+    quoteGateState = loaded?.gate.state ?? null
+    if (quoteGateState === 'ready') {
+      quoteAmount = resolveClientPrice({ total_cost: quote.total_cost, margin_pct: quote.margin_pct })
+    }
+  }
+
   return {
     job_id: jobId,
     job_address: job.address,
@@ -156,8 +193,10 @@ async function loadRealJobContext(
     invoice_amount: invoice?.amount ?? null,
     invoice_status: invoice?.status ?? null,
     invoice_days_overdue: invoiceDaysOverdue,
-    quote_amount: quote?.total_cost ?? null,
+    quote_amount: quoteAmount,
     quote_sent_display: quote?.sent_at ?? null,
+    quote_id: quote?.id ?? null,
+    quote_gate_state: quoteGateState,
     latest_variation_title: variation?.title ?? null,
     latest_variation_amount: variation?.amount ?? null,
   }
@@ -191,7 +230,7 @@ Please let me know if you have any questions or if you'd like to arrange payment
 
 ${builderName}
 ${businessName}`
-    return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress }
+    return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress, quote_id: ctx?.quote_id ?? null }
   }
 
   if (intentHint === 'quote_followup') {
@@ -205,7 +244,7 @@ Happy to answer any questions or walk through anything in more detail.
 
 ${builderName}
 ${businessName}`
-    return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress }
+    return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress, quote_id: ctx?.quote_id ?? null }
   }
 
   if (intentHint === 'variation') {
@@ -224,7 +263,7 @@ Let me know if you'd like to discuss further.
 
 ${builderName}
 ${businessName}`
-    return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress }
+    return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: jobAddress, quote_id: ctx?.quote_id ?? null }
   }
 
   // general
@@ -239,7 +278,7 @@ I wanted to follow up regarding ${projectRef}. Please let me know if you have an
 Kind regards,
 ${builderName}
 ${businessName}`
-  return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: ctx?.job_address ?? null }
+  return { to: toEmail, to_name: toName, subject, body, job_id: ctx?.job_id ?? null, job_address: ctx?.job_address ?? null, quote_id: ctx?.quote_id ?? null }
 }
 
 // ─── AI-generated draft ───────────────────────────────────────────────────────
@@ -337,6 +376,7 @@ Respond with ONLY valid JSON in this exact format:
       body: parsed.body,
       job_id: ctx?.job_id ?? null,
       job_address: ctx?.job_address ?? null,
+      quote_id: ctx?.quote_id ?? null,
     }
   } catch {
     return buildFallbackDraft(ctx, intentHint, recipientName, builder)
@@ -380,6 +420,19 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
       const sb = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
       builder = await loadBuilderIdentity(sb, builderId)
       jobCtx = job_id ? await loadRealJobContext(sb, job_id, builderId) : null
+    }
+
+    // A quote-follow-up email's whole purpose is to discuss the quote — if
+    // its gate isn't 'ready', chat's generic email assistant is not the
+    // place to handle risk acknowledgement (SendQuoteModal already does
+    // that properly). Refuse rather than draft around it. Demo-mode job
+    // fixtures have no gate data (quote_gate_state stays null there) so
+    // this only applies where a real gate was actually computed.
+    if (intent_hint === 'quote_followup' && jobCtx?.quote_gate_state && jobCtx.quote_gate_state !== 'ready') {
+      return NextResponse.json(
+        { error: 'This quote has unresolved issues or flagged risks and isn\'t ready to discuss with the client yet. Open the quote and use "Send to client" there instead.' },
+        { status: 422 }
+      )
     }
 
     const contextUsed: ContextUsed = {

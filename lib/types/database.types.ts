@@ -152,7 +152,15 @@ export interface RiskAcknowledgementSnapshot {
     exposed_value: number
     exposed_pct: number
   }
-  top_risks: string[]
+  /**
+   * The complete list of reasons shown to and accepted by the builder
+   * (quality-gate.ts's review_reasons — confidence threshold, exposure
+   * threshold, and qa_report.top_risks combined), not qa_report.top_risks
+   * alone. That distinction matters: a quote can be REVIEW_REQUIRED purely
+   * on confidence or exposure with qa_report.top_risks empty, and this field
+   * must still describe what was actually accepted in that case.
+   */
+  reasons_accepted: string[]
   review_items: string[]
   affected_line_items: Array<{
     id: string

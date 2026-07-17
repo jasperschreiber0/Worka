@@ -272,6 +272,19 @@ export function applyMargin(cost: number, marginPct: number): number {
 }
 
 /**
+ * The one function any client-facing surface should call for a quote's
+ * dollar figure — takes the whole quote-shaped record (not a bare number)
+ * specifically so a call site can't accidentally hand it raw total_cost
+ * instead of the marked-up price. app/api/email-draft/route.ts used to read
+ * quote.total_cost directly for this; that was the bug this function exists
+ * to make harder to repeat.
+ */
+export function resolveClientPrice(quote: { total_cost: number | null; margin_pct: number | null }): number | null {
+  if (quote.total_cost === null) return null
+  return applyMargin(quote.total_cost, quote.margin_pct ?? DEFAULT_MARGIN_PCT)
+}
+
+/**
  * Price a batch of extracted line items. Returns each item with rate and total
  * filled in where a rate could be resolved (null otherwise — never throws).
  */

@@ -76,7 +76,15 @@ export async function POST(
 
     const {
       id: _oldId, created_at: _oldCreatedAt, sent_at: _sentAt, approved_at: _approvedAt,
-      version: _oldVersion, status: _oldStatus, ...quoteFields
+      version: _oldVersion, status: _oldStatus,
+      // Risk acceptance applies to the exact quote version it was given for —
+      // a revised quote is a different set of line items and must start with
+      // no acknowledgement, never inherit the prior version's. This was
+      // missing when migration 038 added these columns, so a revised quote
+      // silently carried the old version's acknowledgement forward. See the
+      // Phase 1.2 production trust audit.
+      risk_acknowledged_at: _oldRiskAcknowledgedAt, risk_acknowledgement_snapshot: _oldRiskSnapshot,
+      ...quoteFields
     } = existingQuote as Record<string, unknown>
 
     const { data: newQuote, error: insertQuoteErr } = await supabase
