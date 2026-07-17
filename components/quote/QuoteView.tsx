@@ -689,8 +689,14 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
         Estimate Evidence
       </p>
 
+      {/*
+        Terminology note: every label here describes what NWT *did*
+        (reviewed, identified, generated), never what it *confirmed* — this
+        section is coverage, not a validation or correctness claim. See the
+        captions under each heading for the specific caveat.
+      */}
       <p className="text-[11px] font-medium uppercase tracking-wide mt-2 mb-1" style={{ color: 'var(--text-tertiary)' }}>
-        Documents reviewed
+        Sources reviewed
       </p>
       <ul className="space-y-1">
         {documents_processed > 0 ? (
@@ -699,7 +705,7 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
             {document_types.length > 0 ? ` (${document_types.join(', ')})` : ''}
           </EvidenceRow>
         ) : (
-          <EvidenceRow ok={false}>No documents on record for this job — quantities came from a plain-English description.</EvidenceRow>
+          <EvidenceRow ok={false}>No sources reviewed for this job — quantities came from a plain-English description.</EvidenceRow>
         )}
         {missing_documents.length > 0 && (
           <EvidenceRow ok={false}>
@@ -709,7 +715,7 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
       </ul>
 
       <p className="text-[11px] font-medium uppercase tracking-wide mt-3 mb-1" style={{ color: 'var(--text-tertiary)' }}>
-        Scope captured
+        Scope identified
       </p>
       <ul className="space-y-1">
         <EvidenceRow ok={scope_items_identified > 0}>
@@ -726,7 +732,10 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
       </ul>
 
       <p className="text-[11px] font-medium uppercase tracking-wide mt-3 mb-1" style={{ color: 'var(--text-tertiary)' }}>
-        Pricing confidence
+        Pricing breakdown
+      </p>
+      <p className="text-[11px] mb-1.5" style={{ color: 'var(--text-tertiary)' }}>
+        A fixed price means a rate was resolved — not that the quantity or rate is guaranteed correct.
       </p>
       <ul className="space-y-1">
         <EvidenceRow ok>
@@ -734,13 +743,13 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
         </EvidenceRow>
         {pc_ps_count > 0 && (
           <EvidenceRow ok={false}>
-            {pc_ps_count} PC/PS item{pc_ps_count !== 1 ? 's' : ''} — final cost depends on client selection or actual scope
+            {pc_ps_count} provisional sum{pc_ps_count !== 1 ? 's' : ''} — final cost depends on client selection or actual scope
           </EvidenceRow>
         )}
         {assumed_count > 0 && (
           <EvidenceRow ok={false}>
-            {assumed_count} item{assumed_count !== 1 ? 's' : ''} based on an assumption
-            {needs_review_count > 0 ? ` (${needs_review_count} still requiring review)` : ' (resolved)'}
+            {assumed_count} assumption{assumed_count !== 1 ? 's' : ''} — a visible uncertainty, not an error
+            {needs_review_count > 0 ? `; ${needs_review_count} still requiring review` : ' (already reviewed)'}
           </EvidenceRow>
         )}
       </ul>
