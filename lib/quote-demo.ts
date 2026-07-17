@@ -3,7 +3,7 @@
 // the GET handler and any future mutation routes without exporting from a
 // Next.js route file.
 
-import type { QAReport } from '@/lib/types/database.types'
+import type { QAReport, RiskAcknowledgementSnapshot } from '@/lib/types/database.types'
 
 export type DemoPricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
 
@@ -77,6 +77,9 @@ export interface DemoQuote {
   overall_confidence?: number | null
   /** See EstimateEvidence above. Same optionality reasoning as qa_report. */
   evidence?: EstimateEvidence | null
+  /** Risk acceptance audit trail — see lib/estimating/quality-gate.ts */
+  risk_acknowledged_at?: string | null
+  risk_acknowledgement_snapshot?: RiskAcknowledgementSnapshot | null
 }
 
 // ─── Demo quote ───────────────────────────────────────────────────────────────
@@ -126,6 +129,8 @@ export const DEMO_QUOTE: DemoQuote = {
     assumed_count: 3,
     needs_review_count: 2,
   },
+  risk_acknowledged_at: null,
+  risk_acknowledgement_snapshot: null,
 }
 
 // ─── Demo line items ──────────────────────────────────────────────────────────

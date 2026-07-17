@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import type { QualityGateResult } from '@/lib/estimating/quality-gate'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -8,6 +9,8 @@ export interface SendQuoteModalProps {
   quoteId: string
   builderId: string
   isOpen: boolean
+  /** Null only while the parent's quote data hasn't loaded yet. */
+  qualityGate: QualityGateResult | null
   onClose: () => void
   onSent: (sentAt: string) => void
 }
@@ -72,11 +75,15 @@ export default function SendQuoteModal({
   quoteId,
   builderId,
   isOpen,
+  qualityGate,
   onClose,
   onSent,
 }: SendQuoteModalProps) {
   // ── Step state ──────────────────────────────────────────────────────────────
-  type Step = 'loading' | 'draft' | 'confirm' | 'sending' | 'error'
+  // 'acknowledge' only appears when qualityGate.state === 'review_required' —
+  // a required stop between reading the draft and confirming, naming the
+  // specific risks being accepted. 'blocked' is terminal — no path forward.
+  type Step = 'loading' | 'draft' | 'acknowledge' | 'confirm' | 'sending' | 'error' | 'blocked'
   const [step, setStep] = useState<Step>('loading')
 
   // ── Draft fields (editable by builder) ─────────────────────────────────────
@@ -84,6 +91,9 @@ export default function SendQuoteModal({
   const [draftSubject, setDraftSubject] = useState('')
   const [draftBody, setDraftBody] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
+  // Explicit acceptance checkbox — required before "Send" is reachable when
+  // qualityGate.state === 'review_required'. Never pre-checked.
+  const [riskAccepted, setRiskAccepted] = useState(false)
 
   const panelRef = useRef<HTMLDivElement>(null)
   const firstFocusRef = useRef<HTMLButtonElement | null>(null)
@@ -93,11 +103,19 @@ export default function SendQuoteModal({
     if (!isOpen) return
 
     // Reset state when opening
-    setStep('loading')
     setLoadError(null)
     setDraftTo('')
     setDraftSubject('')
     setDraftBody('')
+    setRiskAccepted(false)
+
+    // BLOCKED never gets a draft at all — nothing to send yet.
+    if (qualityGate?.state === 'blocked') {
+      setStep('blocked')
+      return
+    }
+
+    setStep('loading')
 
     async function fetchDraft() {
       try {
@@ -126,7 +144,7 @@ export default function SendQuoteModal({
     }
 
     fetchDraft()
-  }, [isOpen, quoteId, builderId])
+  }, [isOpen, quoteId, builderId, qualityGate])
 
   // ── Focus first element when step changes ───────────────────────────────────
   useEffect(() => {
@@ -147,6 +165,8 @@ export default function SendQuoteModal({
 
       if (e.key === 'Escape') {
         if (step === 'confirm') {
+          setStep(qualityGate?.state === 'review_required' ? 'acknowledge' : 'draft')
+        } else if (step === 'acknowledge') {
           setStep('draft')
         } else {
           onClose()
@@ -174,7 +194,7 @@ export default function SendQuoteModal({
         }
       }
     },
-    [isOpen, step, onClose]
+    [isOpen, step, onClose, qualityGate]
   )
 
   useEffect(() => {
@@ -194,6 +214,10 @@ export default function SendQuoteModal({
           to: draftTo,
           subject: draftSubject,
           body: draftBody,
+          // Only meaningful (and only ever true) when the checkbox on the
+          // acknowledge step was ticked — the server re-derives the gate
+          // fresh and rejects this if it doesn't actually apply.
+          risk_acknowledged: qualityGate?.state === 'review_required' ? riskAccepted : undefined,
         }),
       })
 
@@ -211,7 +235,7 @@ export default function SendQuoteModal({
       setLoadError('Something went wrong sending the email.')
       setStep('error')
     }
-  }, [quoteId, builderId, draftTo, draftSubject, draftBody, onClose, onSent])
+  }, [quoteId, builderId, draftTo, draftSubject, draftBody, onClose, onSent, qualityGate, riskAccepted])
 
   if (!isOpen) return null
 
@@ -235,11 +259,11 @@ export default function SendQuoteModal({
           style={{ borderBottom: '1px solid var(--bg-border)' }}
         >
           <div className="flex items-center gap-3">
-            {(step === 'confirm' || step === 'sending') && (
+            {(step === 'confirm' || step === 'sending' || step === 'acknowledge') && (
               <button
                 ref={firstFocusRef}
                 type="button"
-                onClick={() => setStep('draft')}
+                onClick={() => setStep(step === 'confirm' && qualityGate?.state === 'review_required' ? 'acknowledge' : 'draft')}
                 disabled={step === 'sending'}
                 className="w-7 h-7 flex items-center justify-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ color: 'var(--text-tertiary)' }}
@@ -251,7 +275,7 @@ export default function SendQuoteModal({
                   e.currentTarget.style.color = 'var(--text-tertiary)'
                   e.currentTarget.style.backgroundColor = ''
                 }}
-                aria-label="Back to draft"
+                aria-label="Back"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
@@ -261,14 +285,18 @@ export default function SendQuoteModal({
             <h2 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
               {step === 'loading' && 'Preparing draft…'}
               {step === 'draft' && 'Review before sending'}
-              {step === 'confirm' || step === 'sending' ? 'Confirm send' : null}
+              {step === 'acknowledge' && 'Risks identified'}
+              {(step === 'confirm' || step === 'sending') && 'Confirm send'}
               {step === 'error' && 'Something went wrong'}
+              {step === 'blocked' && 'Cannot send yet'}
             </h2>
           </div>
           <div className="flex items-center gap-3">
-            {(step === 'draft' || step === 'confirm') && (
+            {(step === 'draft' || step === 'acknowledge' || step === 'confirm') && (
               <span className="text-[11px] font-medium" style={{ color: 'var(--text-tertiary)' }}>
-                Step {step === 'draft' ? '1' : '2'} of 2
+                {qualityGate?.state === 'review_required'
+                  ? `Step ${step === 'draft' ? '1' : step === 'acknowledge' ? '2' : '3'} of 3`
+                  : `Step ${step === 'draft' ? '1' : '2'} of 2`}
               </span>
             )}
             <button
@@ -318,6 +346,38 @@ export default function SendQuoteModal({
                 type="button"
                 onClick={onClose}
                 className="mt-2 px-4 py-2 text-[13px] font-medium rounded-lg transition-colors"
+                style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
+                onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-elevated)')}
+                onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
+              >
+                Close
+              </button>
+            </div>
+          )}
+
+          {/* Blocked — estimate integrity failures, no way to proceed from here */}
+          {step === 'blocked' && qualityGate && (
+            <div className="px-5 py-6 space-y-4">
+              <div className="flex items-start gap-2.5 p-3 rounded-lg" style={{ backgroundColor: 'rgba(244,67,54,0.1)', border: '1px solid rgba(244,67,54,0.25)' }}>
+                <svg className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: 'var(--status-red)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                </svg>
+                <p className="text-[13px] font-medium" style={{ color: 'var(--status-red)' }}>
+                  This quote can&apos;t be sent yet — it has issues that need fixing, not just reviewing.
+                </p>
+              </div>
+              <ul className="space-y-2">
+                {qualityGate.blocked_reasons.map((reason, i) => (
+                  <li key={i} className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--text-secondary)' }}>
+                    <span aria-hidden="true" className="flex-shrink-0" style={{ color: 'var(--status-red)' }}>✕</span>
+                    <span>{reason}</span>
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors"
                 style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
                 onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-elevated)')}
                 onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
@@ -388,6 +448,39 @@ export default function SendQuoteModal({
             </div>
           )}
 
+          {/* Acknowledge — REVIEW_REQUIRED only. Names the specific risks and
+              dollar exposure, not a generic "send anyway" — this is a risk
+              acceptance record, not an override. */}
+          {step === 'acknowledge' && qualityGate && (
+            <div className="px-5 py-5 space-y-4">
+              <div className="p-3 rounded-lg" style={{ backgroundColor: 'rgba(255,152,0,0.08)', border: '1px solid rgba(255,152,0,0.25)' }}>
+                <p className="text-[13px] font-medium mb-2" style={{ color: 'var(--status-amber)' }}>
+                  ${qualityGate.exposure.exposed_value.toLocaleString('en-AU')} ({qualityGate.exposure.exposed_pct}% of quote value) is exposed to the following:
+                </p>
+                <ul className="space-y-1.5">
+                  {qualityGate.review_reasons.map((reason, i) => (
+                    <li key={i} className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--text-secondary)' }}>
+                      <span aria-hidden="true" className="flex-shrink-0" style={{ color: 'var(--status-amber)' }}>⚠</span>
+                      <span>{reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={riskAccepted}
+                  onChange={(e) => setRiskAccepted(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 flex-shrink-0"
+                />
+                <span className="text-[13px] leading-relaxed" style={{ color: 'var(--text-primary)' }}>
+                  I&apos;ve reviewed these flagged risks and the ${qualityGate.exposure.exposed_value.toLocaleString('en-AU')} in estimated exposure, and I accept responsibility for sending this quote as-is.
+                </span>
+              </label>
+            </div>
+          )}
+
           {/* Step 2 — Confirm */}
           {(step === 'confirm' || step === 'sending') && (
             <div className="px-5 py-6 space-y-5">
@@ -445,7 +538,7 @@ export default function SendQuoteModal({
             </button>
             <button
               type="button"
-              onClick={() => setStep('confirm')}
+              onClick={() => setStep(qualityGate?.state === 'review_required' ? 'acknowledge' : 'confirm')}
               disabled={!draftTo.trim()}
               className="flex items-center gap-2 px-5 py-2 text-[13px] font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}
@@ -453,6 +546,38 @@ export default function SendQuoteModal({
               onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
             >
               Looks good
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+              </svg>
+            </button>
+          </div>
+        )}
+
+        {step === 'acknowledge' && (
+          <div
+            className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+            style={{ borderTop: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
+          >
+            <button
+              type="button"
+              onClick={() => setStep('draft')}
+              className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors"
+              style={{ color: 'var(--text-secondary)', border: '1px solid var(--bg-border)' }}
+              onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-elevated)')}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              onClick={() => setStep('confirm')}
+              disabled={!riskAccepted}
+              className="flex items-center gap-2 px-5 py-2 text-[13px] font-semibold rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ backgroundColor: 'var(--status-amber)', color: '#fff' }}
+              onMouseEnter={e => { if (riskAccepted) e.currentTarget.style.opacity = '0.9' }}
+              onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
+            >
+              Continue
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
               </svg>

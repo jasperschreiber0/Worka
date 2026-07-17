@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem, EstimateEvidence } from '@/lib/quote-demo'
 import type { QAReport } from '@/lib/types/database.types'
+import type { QualityGateResult } from '@/lib/estimating/quality-gate'
 import { applyMargin } from '@/lib/pricing'
 import SendQuoteModal from './SendQuoteModal'
 
@@ -52,6 +53,7 @@ interface QuoteApiResponse {
   summary: QuoteSummary
   qa: QASummary | null
   evidence: EstimateEvidence | null
+  quality_gate: QualityGateResult
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -672,7 +674,13 @@ function EvidenceRow({ ok, children }: { ok: boolean; children: ReactNode }) {
   )
 }
 
-function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | null }) {
+function EstimateEvidenceSection({
+  evidence,
+  exposure,
+}: {
+  evidence: EstimateEvidence | null
+  exposure: QualityGateResult['exposure'] | null
+}) {
   if (!evidence) return null
 
   const {
@@ -682,6 +690,8 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
   } = evidence
 
   const scopeGap = scope_items_identified - line_items_generated
+  const pcPsValue = exposure ? exposure.pc_allowance_value + exposure.provisional_sum_value : null
+  const assumptionValue = exposure ? exposure.unresolved_assumption_value + exposure.resolved_assumption_value : null
 
   return (
     <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
@@ -743,13 +753,20 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
         </EvidenceRow>
         {pc_ps_count > 0 && (
           <EvidenceRow ok={false}>
-            {pc_ps_count} provisional sum{pc_ps_count !== 1 ? 's' : ''} — final cost depends on client selection or actual scope
+            {pc_ps_count} provisional sum{pc_ps_count !== 1 ? 's' : ''}
+            {pcPsValue !== null ? ` — ${formatCurrency(pcPsValue)}` : ''} — final cost depends on client selection or actual scope
           </EvidenceRow>
         )}
         {assumed_count > 0 && (
           <EvidenceRow ok={false}>
-            {assumed_count} assumption{assumed_count !== 1 ? 's' : ''} — a visible uncertainty, not an error
+            {assumed_count} assumption{assumed_count !== 1 ? 's' : ''}
+            {assumptionValue !== null ? ` — ${formatCurrency(assumptionValue)}` : ''} — a visible uncertainty, not an error
             {needs_review_count > 0 ? `; ${needs_review_count} still requiring review` : ' (already reviewed)'}
+          </EvidenceRow>
+        )}
+        {exposure && (
+          <EvidenceRow ok={exposure.exposed_pct < 10}>
+            {formatCurrency(exposure.exposed_value)} total ({exposure.exposed_pct}% of quote value) is exposed to PC/PS allowances or assumptions
           </EvidenceRow>
         )}
       </ul>
@@ -760,35 +777,49 @@ function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | nu
 interface QAReviewPanelProps {
   qa: QASummary | null
   evidence: EstimateEvidence | null
+  qualityGate: QualityGateResult
   unresolvedCount: number
   assumptionCount: number
   hasFlaggedItems: boolean
   onJumpToFlagged: () => void
 }
 
-function QAReviewPanel({ qa, evidence, unresolvedCount, assumptionCount, hasFlaggedItems, onJumpToFlagged }: QAReviewPanelProps) {
+function QAReviewPanel({ qa, evidence, qualityGate, unresolvedCount, assumptionCount, hasFlaggedItems, onJumpToFlagged }: QAReviewPanelProps) {
   // Neither QA nor evidence has anything to show yet (e.g. quote just
   // priced, QA/evidence backfill pending) — nothing to render.
   if (!qa && !evidence) return null
 
   const confidence = qa?.overall_confidence ?? 0
-  const beforeSendingItems = qa ? [...qa.top_risks, ...qa.review_items] : []
-  const isClear = unresolvedCount === 0 && beforeSendingItems.length === 0
 
+  // "Before sending" mirrors exactly what's gating the send button
+  // (qualityGate.blocked_reasons / review_reasons), not a separately-derived
+  // qa.top_risks list — same reason a mismatch between what's shown and
+  // what's enforced would be the exact bug this phase exists to close.
+  // qa.review_items is always informational-only regardless of state (see
+  // the note on top_risks gating in lib/estimating/quality-gate.ts) and is
+  // shown separately below, never folded into the gating reasons.
+  const gatingReasons =
+    qualityGate.state === 'blocked' ? qualityGate.blocked_reasons
+    : qualityGate.state === 'review_required' ? qualityGate.review_reasons
+    : []
+  const reviewItems = qa?.review_items ?? []
+  const beforeSendingItems = [...gatingReasons, ...reviewItems]
+
+  // Status label is driven by the SAME quality_gate the send button itself
+  // is gated on (lib/estimating/quality-gate.ts) — previously this panel
+  // derived its own confidence-band heuristic here, which could drift from
+  // what actually gated sending. One decision, one place, two renderings.
   let statusLabel: string
   let statusColor: string
-  if (unresolvedCount > 0) {
-    statusLabel = 'Needs your input'
+  if (qualityGate.state === 'blocked') {
+    statusLabel = 'Blocked — must be fixed before sending'
     statusColor = 'var(--status-red)'
-  } else if (isClear && confidence >= 80) {
-    statusLabel = 'Ready to send'
-    statusColor = 'var(--status-green)'
-  } else if (confidence >= 60) {
-    statusLabel = 'Ready to review'
+  } else if (qualityGate.state === 'review_required') {
+    statusLabel = 'Review required before sending'
     statusColor = 'var(--status-amber)'
   } else {
-    statusLabel = 'High risk — review before sending'
-    statusColor = 'var(--status-red)'
+    statusLabel = 'Ready to send'
+    statusColor = 'var(--status-green)'
   }
 
   return (
@@ -874,7 +905,7 @@ function QAReviewPanel({ qa, evidence, unresolvedCount, assumptionCount, hasFlag
 
       {/* Estimate Evidence — what information NWT received and extracted,
           independent of whether QA has run */}
-      <EstimateEvidenceSection evidence={evidence} />
+      <EstimateEvidenceSection evidence={evidence} exposure={qualityGate.exposure} />
     </div>
   )
 }
@@ -884,21 +915,25 @@ function QAReviewPanel({ qa, evidence, unresolvedCount, assumptionCount, hasFlag
 interface ActionBarProps {
   quoteId: string
   summary: QuoteSummary
+  qualityGate: QualityGateResult
   onSend: (quoteId: string) => void
   onRevise: (quoteId: string) => void
   onExportPdf: (quoteId: string) => void
 }
 
-function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBarProps) {
+function ActionBar({ quoteId, summary, qualityGate, onSend, onRevise, onExportPdf }: ActionBarProps) {
+  const isBlocked = qualityGate.state === 'blocked'
+  const isReviewRequired = qualityGate.state === 'review_required'
+
   return (
     <div
       className="flex-shrink-0 px-4 py-3"
       style={{ borderTop: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}
     >
-      {!summary.can_send && (
-        <p className="text-[13px] font-medium mb-2 flex items-center gap-1.5" style={{ color: 'var(--status-red)' }}>
+      {isBlocked && (
+        <p className="text-[13px] font-medium mb-2 flex items-start gap-1.5" style={{ color: 'var(--status-red)' }}>
           <svg
-            className="w-4 h-4 flex-shrink-0"
+            className="w-4 h-4 flex-shrink-0 mt-0.5"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -911,21 +946,29 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
               d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
             />
           </svg>
-          {summary.unresolved_count} item
-          {summary.unresolved_count !== 1 ? 's' : ''} need your input first
+          <span>{qualityGate.blocked_reasons.join(' ')}</span>
+        </p>
+      )}
+      {isReviewRequired && (
+        <p className="text-[13px] font-medium mb-2 flex items-center gap-1.5" style={{ color: 'var(--status-amber)' }}>
+          <span aria-hidden="true">⚠</span>
+          <span>Flagged risks require your acknowledgement before sending.</span>
         </p>
       )}
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => onSend(quoteId)}
-          disabled={!summary.can_send}
+          disabled={isBlocked}
           title={
-            summary.can_send
-              ? 'Send quote to client'
-              : `Resolve ${summary.unresolved_count} item${summary.unresolved_count !== 1 ? 's' : ''} first`
+            isBlocked
+              ? qualityGate.blocked_reasons.join(' ')
+              : isReviewRequired
+              ? 'Review flagged risks before sending'
+              : 'Send quote to client'
           }
           className="btn-primary px-4 py-2 text-[13px] disabled:opacity-40 disabled:cursor-not-allowed flex-1 sm:flex-none"
+          style={isReviewRequired ? { backgroundColor: 'var(--status-amber)' } : undefined}
         >
           Send to client
         </button>
@@ -1293,6 +1336,7 @@ function QuoteViewInner({
               <QAReviewPanel
                 qa={data.qa}
                 evidence={data.evidence}
+                qualityGate={data.quality_gate}
                 unresolvedCount={data.summary.unresolved_count}
                 assumptionCount={data.summary.assumption_count}
                 hasFlaggedItems={hasFlaggedItems}
@@ -1326,6 +1370,7 @@ function QuoteViewInner({
           <ActionBar
             quoteId={quoteId}
             summary={data.summary}
+            qualityGate={data.quality_gate}
             onSend={handleSendClick}
             onRevise={handleReviseClick}
             onExportPdf={handleExportPdfClick}
@@ -1337,6 +1382,7 @@ function QuoteViewInner({
           quoteId={quoteId}
           builderId={builderId}
           isOpen={sendModalOpen}
+          qualityGate={data?.quality_gate ?? null}
           onClose={() => setSendModalOpen(false)}
           onSent={handleSent}
         />

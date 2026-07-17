@@ -119,6 +119,9 @@ export interface Quote {
   /** Stage 6 QA pass output — see lib/estimating/qa.ts */
   qa_report: QAReport | null
   overall_confidence: number | null
+  /** Risk acceptance audit trail — see lib/estimating/quality-gate.ts */
+  risk_acknowledged_at: string | null
+  risk_acknowledgement_snapshot: RiskAcknowledgementSnapshot | null
 }
 
 export interface QAReport {
@@ -127,6 +130,37 @@ export interface QAReport {
   recommended_actions: string[]
   missing_trades: number[]
   duplicate_descriptions: string[]
+}
+
+/**
+ * Self-contained record of what a builder accepted when sending a
+ * REVIEW_REQUIRED quote — captures quote identity + the full gate state at
+ * the moment of acknowledgement, not just a boolean. See
+ * lib/estimating/quality-gate.ts for how exposure/affected_line_items are
+ * computed, and app/api/quotes/[quoteId]/confirm-send/route.ts for where
+ * this is written.
+ */
+export interface RiskAcknowledgementSnapshot {
+  quote_id: string
+  version: number
+  overall_confidence: number | null
+  exposure: {
+    pc_allowance_value: number
+    provisional_sum_value: number
+    unresolved_assumption_value: number
+    resolved_assumption_value: number
+    exposed_value: number
+    exposed_pct: number
+  }
+  top_risks: string[]
+  review_items: string[]
+  affected_line_items: Array<{
+    id: string
+    description: string
+    value: number | null
+    reason: string
+  }>
+  acknowledged_at: string
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'

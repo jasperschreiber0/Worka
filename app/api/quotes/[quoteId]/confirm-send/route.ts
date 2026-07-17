@@ -5,6 +5,10 @@ import { requirePermission } from '@/lib/auth/role-guard'
 import { randomUUID } from 'crypto'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
+import { evaluateQualityGate } from '@/lib/estimating/quality-gate'
+import type { QualityGateLineItem } from '@/lib/estimating/quality-gate'
+import type { RiskAcknowledgementSnapshot } from '@/lib/types/database.types'
 
 // Quote job IDs for proof recording in demo mode
 const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
@@ -26,12 +30,24 @@ interface ConfirmSendBody {
   to: string
   subject: string
   body: string
+  /** Required when the quality gate is REVIEW_REQUIRED — the builder has
+   * seen the specific risks/exposure and consciously accepts them. Ignored
+   * (and never needed) when the gate is READY; rejected as insufficient
+   * when the gate is BLOCKED — no acknowledgement can bypass that state. */
+  risk_acknowledged?: boolean
 }
 
 interface ConfirmSendResponse {
   sent: true
   sent_at: string
   communication_id: string
+}
+
+/** Returned on 422 when the quality gate prevents sending, so the client can
+ * render the specific reasons (BLOCKED) or the acceptance screen (REVIEW_REQUIRED). */
+interface QualityGateBlockedResponse {
+  error: string
+  quality_gate: ReturnType<typeof evaluateQualityGate>
 }
 
 // ─── Route handler ─────────────────────────────────────────────────────────────
@@ -79,6 +95,31 @@ export async function POST(
         { status: 422 }
       )
     }
+
+    // Same live gate re-evaluation as real mode — never trust a client-side
+    // quality_gate read earlier; recompute from DEMO_QUOTE/DEMO_LINE_ITEMS here.
+    const demoGate = evaluateQualityGate({
+      overall_confidence: DEMO_QUOTE.overall_confidence ?? null,
+      unresolved_count: DEMO_LINE_ITEMS.filter((i) => i.is_assumption && i.assumption_status === 'unresolved').length,
+      missing_trades: DEMO_QUOTE.qa_report?.missing_trades ?? [],
+      top_risks: DEMO_QUOTE.qa_report?.top_risks ?? [],
+      total_cost: DEMO_QUOTE.total_cost,
+      items: DEMO_LINE_ITEMS,
+    })
+
+    if (demoGate.state === 'blocked') {
+      return NextResponse.json<QualityGateBlockedResponse>(
+        { error: 'This quote has unresolved issues that must be fixed before sending.', quality_gate: demoGate },
+        { status: 422 }
+      )
+    }
+    if (demoGate.state === 'review_required' && !body.risk_acknowledged) {
+      return NextResponse.json<QualityGateBlockedResponse>(
+        { error: 'This quote has flagged risks that require acknowledgement before sending.', quality_gate: demoGate },
+        { status: 422 }
+      )
+    }
+
     demoQuoteStatusMap.set(quoteId, { status: 'sent', sent_at: sentAt })
     const commId = randomUUID()
     addCommEntry({
@@ -104,6 +145,15 @@ export async function POST(
         description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
         metadata: { quote_id: quoteId, to: body.to, subject: body.subject, communication_id: commId },
       })
+      if (demoGate.state === 'review_required') {
+        await recordProofEvent({
+          jobId: demoJobId,
+          builderId: sessionBuilderId,
+          eventType: 'quote_sent_with_risk_acknowledged',
+          description: `Builder acknowledged ${demoGate.review_reasons.length} flagged risk(s) ($${demoGate.exposure.exposed_value.toLocaleString('en-AU')} exposed) before sending`,
+          metadata: { quote_id: quoteId, exposure: demoGate.exposure, top_risks: demoGate.review_reasons },
+        })
+      }
     }
 
     return NextResponse.json<ConfirmSendResponse>({ sent: true, sent_at: sentAt, communication_id: commId })
@@ -118,7 +168,7 @@ export async function POST(
   // 1. Verify quote exists and belongs to this builder
   const { data: quoteRow, error: fetchErr } = await supabase
     .from('quotes')
-    .select('id, status, job_id')
+    .select('id, status, job_id, version, total_cost, overall_confidence, qa_report')
     .eq('id', quoteId)
     .eq('builder_id', sessionBuilderId)
     .single()
@@ -131,6 +181,42 @@ export async function POST(
   if (quoteRow.status !== 'pending_review') {
     return NextResponse.json(
       { error: `Quote is already ${quoteRow.status} — cannot send again` },
+      { status: 422 }
+    )
+  }
+
+  // 2b. Quality gate — re-evaluated fresh here, never trusted from an
+  // earlier client-side read. Same evaluateQualityGate call the GET route
+  // uses (lib/estimating/quality-gate.ts) — one decision function, two call
+  // sites (display vs. enforcement).
+  const { data: gateLineRows } = await supabase
+    .from('quote_line_items')
+    .select('id, description, total, rate, pricing_type, is_assumption, assumption_status')
+    .eq('quote_id', quoteId)
+
+  const qaReport = quoteRow.qa_report as { top_risks?: string[]; review_items?: string[]; missing_trades?: number[] } | null
+  const unresolvedCount = (gateLineRows ?? []).filter(
+    (i) => i.is_assumption && i.assumption_status === 'unresolved'
+  ).length
+
+  const qualityGate = evaluateQualityGate({
+    overall_confidence: quoteRow.overall_confidence ?? null,
+    unresolved_count: unresolvedCount,
+    missing_trades: qaReport?.missing_trades ?? [],
+    top_risks: qaReport?.top_risks ?? [],
+    total_cost: quoteRow.total_cost ?? 0,
+    items: (gateLineRows ?? []) as QualityGateLineItem[],
+  })
+
+  if (qualityGate.state === 'blocked') {
+    return NextResponse.json<QualityGateBlockedResponse>(
+      { error: 'This quote has unresolved issues that must be fixed before sending.', quality_gate: qualityGate },
+      { status: 422 }
+    )
+  }
+  if (qualityGate.state === 'review_required' && !body.risk_acknowledged) {
+    return NextResponse.json<QualityGateBlockedResponse>(
+      { error: 'This quote has flagged risks that require acknowledgement before sending.', quality_gate: qualityGate },
       { status: 422 }
     )
   }
@@ -152,10 +238,30 @@ export async function POST(
     }
   }
 
-  // 4. Atomic status update — eq('status', 'pending_review') prevents double-sends
+  // 4. Atomic status update — eq('status', 'pending_review') prevents double-sends.
+  // When REVIEW_REQUIRED, the risk acceptance is written in the SAME atomic
+  // update as the status change — the acknowledgement and the send are one
+  // transaction, never a separate follow-up write that could fail apart from it.
+  const updatePayload: Record<string, unknown> = { status: 'sent', sent_at: sentAt }
+  let riskSnapshot: RiskAcknowledgementSnapshot | null = null
+  if (qualityGate.state === 'review_required') {
+    riskSnapshot = {
+      quote_id: quoteId,
+      version: quoteRow.version ?? 1,
+      overall_confidence: quoteRow.overall_confidence ?? null,
+      exposure: qualityGate.exposure,
+      top_risks: qaReport?.top_risks ?? [],
+      review_items: qaReport?.review_items ?? [],
+      affected_line_items: qualityGate.affected_line_items,
+      acknowledged_at: sentAt,
+    }
+    updatePayload.risk_acknowledged_at = sentAt
+    updatePayload.risk_acknowledgement_snapshot = riskSnapshot
+  }
+
   const { data: updated } = await supabase
     .from('quotes')
-    .update({ status: 'sent', sent_at: sentAt })
+    .update(updatePayload)
     .eq('id', quoteId)
     .eq('status', 'pending_review')
     .select('id')
@@ -195,6 +301,20 @@ export async function POST(
     description: `Quote sent to ${body.to} for approval — "${body.subject}"`,
     metadata: { quote_id: quoteId, to: body.to, subject: body.subject, communication_id: communicationId },
   })
+
+  // WorkA Proof: a second, distinct event for the risk acceptance itself —
+  // not folded into quote_sent's metadata, so it shows up on its own in the
+  // Proof trail as exactly what it is: a conscious risk acceptance, not a
+  // routine send.
+  if (riskSnapshot) {
+    await recordProofEvent({
+      jobId: quoteRow.job_id,
+      builderId: sessionBuilderId,
+      eventType: 'quote_sent_with_risk_acknowledged',
+      description: `Builder acknowledged ${riskSnapshot.top_risks.length} flagged risk(s) ($${riskSnapshot.exposure.exposed_value.toLocaleString('en-AU')} exposed, ${riskSnapshot.exposure.exposed_pct}% of quote value) before sending`,
+      metadata: { quote_id: quoteId, version: riskSnapshot.version, exposure: riskSnapshot.exposure, top_risks: riskSnapshot.top_risks },
+    })
+  }
 
   return NextResponse.json<ConfirmSendResponse>({
     sent: true,

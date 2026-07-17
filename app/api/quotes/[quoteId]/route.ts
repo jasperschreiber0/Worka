@@ -4,6 +4,8 @@ import type { DemoQuote, DemoQuoteLineItem, EstimateEvidence } from '@/lib/quote
 import type { QAReport } from '@/lib/types/database.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { applyMargin, ensureQuotePriced } from '@/lib/pricing'
+import { evaluateQualityGate } from '@/lib/estimating/quality-gate'
+import type { QualityGateResult } from '@/lib/estimating/quality-gate'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -42,6 +44,7 @@ interface QuoteResponse {
   summary: QuoteSummary
   qa: QASummary | null
   evidence: EstimateEvidence | null
+  quality_gate: QualityGateResult
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -169,6 +172,9 @@ function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[]): QuoteSumm
     confidence_score: quote.confidence_score,
     unresolved_count,
     assumption_count,
+    // Naive default — overwritten below from evaluateQualityGate's richer
+    // BLOCKED/REVIEW_REQUIRED/READY decision (unresolved_count === 0 is one
+    // of several BLOCKED conditions, not the only one).
     can_send: unresolved_count === 0,
   }
 }
@@ -192,6 +198,18 @@ export async function GET(
     const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
     const qa = buildQASummary(DEMO_QUOTE.qa_report, DEMO_QUOTE.overall_confidence)
     const evidence = DEMO_QUOTE.evidence ?? null
+    // Same evaluateQualityGate call as real mode — no separate hand-authored
+    // demo gate result, since this is pure arithmetic over data demo mode
+    // already has (unlike qa_report, which really is an external artifact).
+    const quality_gate = evaluateQualityGate({
+      overall_confidence: DEMO_QUOTE.overall_confidence ?? null,
+      unresolved_count: summary.unresolved_count,
+      missing_trades: qa?.missing_trades ?? [],
+      top_risks: qa?.top_risks ?? [],
+      total_cost: DEMO_QUOTE.total_cost,
+      items: DEMO_LINE_ITEMS,
+    })
+    summary.can_send = quality_gate.state !== 'blocked'
 
     const response: QuoteResponse = {
       quote: DEMO_QUOTE,
@@ -199,6 +217,7 @@ export async function GET(
       summary,
       qa,
       evidence,
+      quality_gate,
     }
 
     return NextResponse.json(response)
@@ -227,6 +246,8 @@ export async function GET(
         created_at,
         qa_report,
         overall_confidence,
+        risk_acknowledged_at,
+        risk_acknowledgement_snapshot,
         jobs (
           address
         )
@@ -355,6 +376,8 @@ export async function GET(
       created_at: quoteRow.created_at,
       qa_report: (quoteRow.qa_report as QAReport | null) ?? null,
       overall_confidence: quoteRow.overall_confidence ?? null,
+      risk_acknowledged_at: quoteRow.risk_acknowledged_at ?? null,
+      risk_acknowledgement_snapshot: quoteRow.risk_acknowledgement_snapshot ?? null,
     }
 
     const items: DemoQuoteLineItem[] = (lineRows ?? []).map((row) => {
@@ -401,12 +424,23 @@ export async function GET(
       items
     )
 
+    const quality_gate = evaluateQualityGate({
+      overall_confidence: quote.overall_confidence ?? null,
+      unresolved_count: summary.unresolved_count,
+      missing_trades: qa?.missing_trades ?? [],
+      top_risks: qa?.top_risks ?? [],
+      total_cost: quote.total_cost,
+      items,
+    })
+    summary.can_send = quality_gate.state !== 'blocked'
+
     const response: QuoteResponse = {
       quote,
       line_items_by_category,
       summary,
       qa,
       evidence,
+      quality_gate,
     }
 
     return NextResponse.json(response)
