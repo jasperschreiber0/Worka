@@ -1,8 +1,9 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import type { DemoQuote, DemoQuoteLineItem, EstimateEvidence } from '@/lib/quote-demo'
 import type { QAReport } from '@/lib/types/database.types'
 import { applyMargin } from '@/lib/pricing'
 import SendQuoteModal from './SendQuoteModal'
@@ -50,6 +51,7 @@ interface QuoteApiResponse {
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
   qa: QASummary | null
+  evidence: EstimateEvidence | null
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -652,20 +654,116 @@ function SummaryCard({ summary }: SummaryCardProps) {
 // price (qa.top_risks), and what needs review before sending
 // (qa.review_items + qa.recommended_actions).
 
+// ─── Estimate Evidence — Phase 1.5 ────────────────────────────────────────────
+// Renders quote.evidence (built in app/api/quotes/[quoteId]/route.ts by
+// aggregating project_documents / files / scope_items / quote_line_items —
+// no new computation, see buildEstimateEvidence there). Answers "what
+// information did NWT receive / extract" — the two Trust Model questions
+// the QA report itself doesn't cover.
+
+function EvidenceRow({ ok, children }: { ok: boolean; children: ReactNode }) {
+  return (
+    <li className="flex items-start gap-2 text-[13px] leading-snug" style={{ color: 'var(--text-secondary)' }}>
+      <span aria-hidden="true" className="flex-shrink-0" style={{ color: ok ? 'var(--status-green)' : 'var(--status-amber)' }}>
+        {ok ? '✓' : '⚠'}
+      </span>
+      <span>{children}</span>
+    </li>
+  )
+}
+
+function EstimateEvidenceSection({ evidence }: { evidence: EstimateEvidence | null }) {
+  if (!evidence) return null
+
+  const {
+    documents_processed, document_types, missing_documents,
+    scope_items_identified, line_items_generated,
+    fixed_price_count, pc_ps_count, assumed_count, needs_review_count,
+  } = evidence
+
+  const scopeGap = scope_items_identified - line_items_generated
+
+  return (
+    <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
+      <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
+        Estimate Evidence
+      </p>
+
+      <p className="text-[11px] font-medium uppercase tracking-wide mt-2 mb-1" style={{ color: 'var(--text-tertiary)' }}>
+        Documents reviewed
+      </p>
+      <ul className="space-y-1">
+        {documents_processed > 0 ? (
+          <EvidenceRow ok>
+            {documents_processed} document{documents_processed !== 1 ? 's' : ''} processed
+            {document_types.length > 0 ? ` (${document_types.join(', ')})` : ''}
+          </EvidenceRow>
+        ) : (
+          <EvidenceRow ok={false}>No documents on record for this job — quantities came from a plain-English description.</EvidenceRow>
+        )}
+        {missing_documents.length > 0 && (
+          <EvidenceRow ok={false}>
+            {missing_documents.length} file{missing_documents.length !== 1 ? 's' : ''} could not be processed: {missing_documents.join(', ')}
+          </EvidenceRow>
+        )}
+      </ul>
+
+      <p className="text-[11px] font-medium uppercase tracking-wide mt-3 mb-1" style={{ color: 'var(--text-tertiary)' }}>
+        Scope captured
+      </p>
+      <ul className="space-y-1">
+        <EvidenceRow ok={scope_items_identified > 0}>
+          {scope_items_identified} scope item{scope_items_identified !== 1 ? 's' : ''} identified
+        </EvidenceRow>
+        <EvidenceRow ok>
+          {line_items_generated} priced line item{line_items_generated !== 1 ? 's' : ''} generated
+        </EvidenceRow>
+        {scopeGap > 0 && (
+          <EvidenceRow ok={false}>
+            {scopeGap} scope item{scopeGap !== 1 ? 's' : ''} identified but not yet reflected in a priced line item
+          </EvidenceRow>
+        )}
+      </ul>
+
+      <p className="text-[11px] font-medium uppercase tracking-wide mt-3 mb-1" style={{ color: 'var(--text-tertiary)' }}>
+        Pricing confidence
+      </p>
+      <ul className="space-y-1">
+        <EvidenceRow ok>
+          {fixed_price_count} fixed-price item{fixed_price_count !== 1 ? 's' : ''}
+        </EvidenceRow>
+        {pc_ps_count > 0 && (
+          <EvidenceRow ok={false}>
+            {pc_ps_count} PC/PS item{pc_ps_count !== 1 ? 's' : ''} — final cost depends on client selection or actual scope
+          </EvidenceRow>
+        )}
+        {assumed_count > 0 && (
+          <EvidenceRow ok={false}>
+            {assumed_count} item{assumed_count !== 1 ? 's' : ''} based on an assumption
+            {needs_review_count > 0 ? ` (${needs_review_count} still requiring review)` : ' (resolved)'}
+          </EvidenceRow>
+        )}
+      </ul>
+    </div>
+  )
+}
+
 interface QAReviewPanelProps {
   qa: QASummary | null
+  evidence: EstimateEvidence | null
   unresolvedCount: number
   assumptionCount: number
   hasFlaggedItems: boolean
   onJumpToFlagged: () => void
 }
 
-function QAReviewPanel({ qa, unresolvedCount, assumptionCount, hasFlaggedItems, onJumpToFlagged }: QAReviewPanelProps) {
-  // QA hasn't run yet (e.g. quote just priced, backfill pending) — nothing to show
-  if (!qa) return null
+function QAReviewPanel({ qa, evidence, unresolvedCount, assumptionCount, hasFlaggedItems, onJumpToFlagged }: QAReviewPanelProps) {
+  // Neither QA nor evidence has anything to show yet (e.g. quote just
+  // priced, QA/evidence backfill pending) — nothing to render.
+  if (!qa && !evidence) return null
 
-  const confidence = qa.overall_confidence ?? 0
-  const beforeSendingItems = [...qa.top_risks, ...qa.review_items]
+  const confidence = qa?.overall_confidence ?? 0
+  const beforeSendingItems = qa ? [...qa.top_risks, ...qa.review_items] : []
   const isClear = unresolvedCount === 0 && beforeSendingItems.length === 0
 
   let statusLabel: string
@@ -686,80 +784,88 @@ function QAReviewPanel({ qa, unresolvedCount, assumptionCount, hasFlaggedItems, 
 
   return (
     <div className="mx-4 mb-4 rounded-xl overflow-hidden shadow-sm" style={{ border: '1px solid var(--bg-border)' }}>
-      {/* Confidence + readiness — always visible, no hidden columns on mobile */}
-      <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
-          Estimate Confidence
-        </h3>
-        <div className="flex items-center gap-2 mt-1 flex-wrap">
-          <span className="text-[20px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>{confidence}%</span>
-          <span
-            className="text-[12px] font-semibold px-2 py-0.5 rounded-full"
-            style={{ color: statusColor, backgroundColor: 'var(--bg-surface)', border: `1px solid ${statusColor}` }}
-          >
-            {statusLabel}
-          </span>
-        </div>
-        {assumptionCount > 0 && (
-          <p className="text-[12px] mt-1.5" style={{ color: 'var(--text-tertiary)' }}>
-            {assumptionCount} line item{assumptionCount !== 1 ? 's are' : ' is'} based on an assumption rather than confirmed evidence
-            {unresolvedCount > 0 ? `, ${unresolvedCount} still unresolved` : ''}.
-          </p>
-        )}
-      </div>
+      {qa && (
+        <>
+          {/* Confidence + readiness — always visible, no hidden columns on mobile */}
+          <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
+              Estimate Confidence
+            </h3>
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              <span className="text-[20px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>{confidence}%</span>
+              <span
+                className="text-[12px] font-semibold px-2 py-0.5 rounded-full"
+                style={{ color: statusColor, backgroundColor: 'var(--bg-surface)', border: `1px solid ${statusColor}` }}
+              >
+                {statusLabel}
+              </span>
+            </div>
+            {assumptionCount > 0 && (
+              <p className="text-[12px] mt-1.5" style={{ color: 'var(--text-tertiary)' }}>
+                {assumptionCount} line item{assumptionCount !== 1 ? 's are' : ' is'} based on an assumption rather than confirmed evidence
+                {unresolvedCount > 0 ? `, ${unresolvedCount} still unresolved` : ''}.
+              </p>
+            )}
+          </div>
 
-      {/* Before sending — the merged, plain-language risk + review list */}
-      {beforeSendingItems.length > 0 ? (
-        <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)' }}>
-          <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
-            Before sending
-          </p>
-          <ul className="space-y-1.5">
-            {beforeSendingItems.map((item, i) => (
-              <li key={i} className="flex items-start gap-2 text-[13px] leading-snug" style={{ color: 'var(--text-secondary)' }}>
-                <span aria-hidden="true" className="flex-shrink-0" style={{ color: 'var(--status-amber)' }}>⚠</span>
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-          {hasFlaggedItems && (
-            <button
-              type="button"
-              onClick={onJumpToFlagged}
-              className="mt-3 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
-              style={{ color: 'var(--orange-primary)', border: '1px solid var(--orange-primary)' }}
-              onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--orange-subtle)')}
-              onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
-            >
-              Jump to flagged items
-            </button>
+          {/* Before sending — the merged, plain-language risk + review list */}
+          {beforeSendingItems.length > 0 ? (
+            <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)' }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
+                Before sending
+              </p>
+              <ul className="space-y-1.5">
+                {beforeSendingItems.map((item, i) => (
+                  <li key={i} className="flex items-start gap-2 text-[13px] leading-snug" style={{ color: 'var(--text-secondary)' }}>
+                    <span aria-hidden="true" className="flex-shrink-0" style={{ color: 'var(--status-amber)' }}>⚠</span>
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+              {hasFlaggedItems && (
+                <button
+                  type="button"
+                  onClick={onJumpToFlagged}
+                  className="mt-3 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: 'var(--orange-primary)', border: '1px solid var(--orange-primary)' }}
+                  onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--orange-subtle)')}
+                  onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
+                >
+                  Jump to flagged items
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="px-4 py-3 flex items-center gap-2" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
+              <svg className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--status-green)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+              <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
+                No risks flagged — this estimate is ready for review.
+              </span>
+            </div>
           )}
-        </div>
-      ) : (
-        <div className="px-4 py-3 flex items-center gap-2" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
-          <svg className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--status-green)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
-            No risks flagged — this estimate is ready for review.
-          </span>
-        </div>
+
+          {/* Recommended — informational, not separately-clickable per item (the
+              underlying qa_report doesn't carry per-action targets) */}
+          {qa.recommended_actions.length > 0 && (
+            <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
+                Recommended
+              </p>
+              <ul className="space-y-1">
+                {qa.recommended_actions.map((action, i) => (
+                  <li key={i} className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{action}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
       )}
 
-      {/* Recommended — informational, not separately-clickable per item (the
-          underlying qa_report doesn't carry per-action targets) */}
-      {qa.recommended_actions.length > 0 && (
-        <div className="px-4 py-3" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
-          <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>
-            Recommended
-          </p>
-          <ul className="space-y-1">
-            {qa.recommended_actions.map((action, i) => (
-              <li key={i} className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{action}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {/* Estimate Evidence — what information NWT received and extracted,
+          independent of whether QA has run */}
+      <EstimateEvidenceSection evidence={evidence} />
     </div>
   )
 }
@@ -1177,6 +1283,7 @@ function QuoteViewInner({
               {/* QA review — confidence, risks, and what needs review before sending */}
               <QAReviewPanel
                 qa={data.qa}
+                evidence={data.evidence}
                 unresolvedCount={data.summary.unresolved_count}
                 assumptionCount={data.summary.assumption_count}
                 hasFlaggedItems={hasFlaggedItems}

@@ -30,6 +30,31 @@ export interface DemoQuoteLineItem {
     plant_cost: number | null
 }
 
+/**
+ * "Estimate Evidence" — Phase 1.5 of the estimating trust audit. Every field
+ * here is a count/list over data that already exists (project_documents,
+ * files.skipped_sibling_filenames/failed_sibling_filenames, scope_items,
+ * quote_line_items) — this is NOT a new computation layer, just an
+ * aggregation of existing rows for display. See buildEstimateEvidence in
+ * app/api/quotes/[quoteId]/route.ts for the real-mode queries.
+ */
+export interface EstimateEvidence {
+  // Source coverage — job-level (a job's documents predate any one quote version)
+  documents_processed: number
+  document_types: string[]
+  missing_documents: string[]
+  // Extraction coverage — job-level
+  scope_items_identified: number
+  // Extraction coverage — quote-level (this quote's own line items)
+  line_items_generated: number
+  // Pricing evidence — quote-level, counted from quote_line_items already
+  // fetched by the route (pricing_type / is_assumption / assumption_status)
+  fixed_price_count: number
+  pc_ps_count: number
+  assumed_count: number
+  needs_review_count: number
+}
+
 export interface DemoQuote {
   id: string
   job_id: string
@@ -50,6 +75,8 @@ export interface DemoQuote {
    */
   qa_report?: QAReport | null
   overall_confidence?: number | null
+  /** See EstimateEvidence above. Same optionality reasoning as qa_report. */
+  evidence?: EstimateEvidence | null
 }
 
 // ─── Demo quote ───────────────────────────────────────────────────────────────
@@ -82,6 +109,23 @@ export const DEMO_QUOTE: DemoQuote = {
     duplicate_descriptions: [],
   },
   overall_confidence: 45,
+  // Pricing-evidence counts below are hand-derived from DEMO_LINE_ITEMS
+  // (24 total: 22 measured + 1 pc_allowance + 1 provisional_sum; 3 items
+  // carry is_assumption=true, of which 2 are still unresolved) — genuinely
+  // accurate for this demo dataset, not placeholder numbers. Document/scope
+  // counts ARE illustrative — demo mode has no real project_documents or
+  // scope_items rows to count, since there's no Supabase project behind it.
+  evidence: {
+    documents_processed: 4,
+    document_types: ['Floor plan', 'Elevation', 'Specification'],
+    missing_documents: [],
+    scope_items_identified: 26,
+    line_items_generated: 24,
+    fixed_price_count: 19,
+    pc_ps_count: 2,
+    assumed_count: 3,
+    needs_review_count: 2,
+  },
 }
 
 // ─── Demo line items ──────────────────────────────────────────────────────────

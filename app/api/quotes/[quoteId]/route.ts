@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
-import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
+import type { DemoQuote, DemoQuoteLineItem, EstimateEvidence } from '@/lib/quote-demo'
 import type { QAReport } from '@/lib/types/database.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { applyMargin, ensureQuotePriced } from '@/lib/pricing'
@@ -41,6 +41,7 @@ interface QuoteResponse {
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
   qa: QASummary | null
+  evidence: EstimateEvidence | null
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -94,6 +95,64 @@ function buildQASummary(
   return { ...qaReport, overall_confidence: overallConfidence ?? null }
 }
 
+// ─── Helper: build estimate evidence ──────────────────────────────────────────
+// Phase 1.5 — pure aggregation over data that already exists (project_documents,
+// files.skipped/failed_sibling_filenames, scope_items, and the quote's own
+// line items already fetched below). No new computation, no estimation logic —
+// counting existing flags, same spirit as computeSummary below.
+
+interface ProjectDocumentRow {
+  document_type: string | null
+  is_duplicate: boolean
+  is_superseded: boolean
+}
+
+interface FileSiblingsRow {
+  skipped_sibling_filenames: string[] | null
+  failed_sibling_filenames: string[] | null
+}
+
+interface ScopeItemRow {
+  included_scope: string[] | null
+}
+
+function buildEstimateEvidence(
+  docRows: ProjectDocumentRow[],
+  fileRows: FileSiblingsRow[],
+  scopeRows: ScopeItemRow[],
+  items: DemoQuoteLineItem[]
+): EstimateEvidence {
+  // A duplicate/superseded document didn't independently contribute
+  // evidence — don't double-count it as a separate document processed.
+  const activeDocs = docRows.filter((d) => !d.is_duplicate && !d.is_superseded)
+  const documentTypes = Array.from(
+    new Set(activeDocs.map((d) => d.document_type).filter((t): t is string => !!t))
+  )
+
+  const missingDocuments = Array.from(
+    new Set(
+      fileRows.flatMap((f) => [
+        ...(f.skipped_sibling_filenames ?? []),
+        ...(f.failed_sibling_filenames ?? []),
+      ])
+    )
+  )
+
+  const scopeItemsIdentified = scopeRows.reduce((sum, s) => sum + (s.included_scope?.length ?? 0), 0)
+
+  return {
+    documents_processed: activeDocs.length,
+    document_types: documentTypes,
+    missing_documents: missingDocuments,
+    scope_items_identified: scopeItemsIdentified,
+    line_items_generated: items.length,
+    fixed_price_count: items.filter((i) => i.pricing_type === 'measured' && !i.is_assumption).length,
+    pc_ps_count: items.filter((i) => i.pricing_type === 'pc_allowance' || i.pricing_type === 'provisional_sum').length,
+    assumed_count: items.filter((i) => i.is_assumption).length,
+    needs_review_count: items.filter((i) => i.is_assumption && i.assumption_status === 'unresolved').length,
+  }
+}
+
 // ─── Helper: compute summary ──────────────────────────────────────────────────
 
 function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[]): QuoteSummary {
@@ -132,12 +191,14 @@ export async function GET(
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
     const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
     const qa = buildQASummary(DEMO_QUOTE.qa_report, DEMO_QUOTE.overall_confidence)
+    const evidence = DEMO_QUOTE.evidence ?? null
 
     const response: QuoteResponse = {
       quote: DEMO_QUOTE,
       line_items_by_category,
       summary,
       qa,
+      evidence,
     }
 
     return NextResponse.json(response)
@@ -326,11 +387,26 @@ export async function GET(
     const summary = computeSummary(quote, items)
     const qa = buildQASummary(quote.qa_report, quote.overall_confidence)
 
+    // Estimate Evidence (Phase 1.5) — three independent reads scoped to the
+    // job, run in parallel. None of this feeds back into pricing or QA.
+    const [{ data: docRows }, { data: fileRows }, { data: scopeRows }] = await Promise.all([
+      supabase.from('project_documents').select('document_type, is_duplicate, is_superseded').eq('job_id', quote.job_id),
+      supabase.from('files').select('skipped_sibling_filenames, failed_sibling_filenames').eq('job_id', quote.job_id),
+      supabase.from('scope_items').select('included_scope').eq('job_id', quote.job_id),
+    ])
+    const evidence = buildEstimateEvidence(
+      (docRows ?? []) as ProjectDocumentRow[],
+      (fileRows ?? []) as FileSiblingsRow[],
+      (scopeRows ?? []) as ScopeItemRow[],
+      items
+    )
+
     const response: QuoteResponse = {
       quote,
       line_items_by_category,
       summary,
       qa,
+      evidence,
     }
 
     return NextResponse.json(response)
