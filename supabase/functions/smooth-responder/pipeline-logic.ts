@@ -670,3 +670,28 @@ export function deriveParentBatchStatus(childStatuses: ChildJobStatus[]): Parent
   if (anyFailed) return 'failed'
   return 'completed'
 }
+
+// ─── Per-document display state (observability) ────────────────────────────
+//
+// document_processing_jobs only has four DB statuses (pending/running/
+// completed/failed) — a document backing off before an automatic retry
+// (retry_or_fail_document_job sets it back to 'pending' with attempts > 0
+// and a future run_after) is stored identically to a document that simply
+// hasn't been claimed yet (also 'pending', attempts = 0). Before this, the
+// intake UI showed both as the same plain "waiting" row, so a document that
+// had already failed once and was about to be retried looked no different
+// from one nothing had gone wrong with — the builder had no way to tell
+// "still working through the queue" from "hit a snag, retrying automatically."
+// This distinguishes them using the same `attempts` column already recorded
+// by the DB, no schema change needed.
+export type DocumentDisplayState = 'completed' | 'failed' | 'running' | 'retrying' | 'waiting'
+
+export function documentDisplayState(status: ChildJobStatus, attempts: number): DocumentDisplayState {
+  if (status === 'completed') return 'completed'
+  if (status === 'failed') return 'failed'
+  if (status === 'running') return 'running'
+  // status === 'pending': attempts > 0 means a prior attempt already failed
+  // and this row is backed off, waiting for retry_or_fail_document_job's
+  // scheduled run_after to elapse — not merely unclaimed.
+  return attempts > 0 ? 'retrying' : 'waiting'
+}

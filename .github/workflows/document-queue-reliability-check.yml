@@ -1,0 +1,48 @@
+name: Document queue reliability check
+
+# Runs scripts/document-queue-reliability-check.mjs against the live
+# production Supabase project's document_processing_jobs/batches RPCs —
+# concurrent claiming, stale-job reclaim, retry exhaustion, and partial-
+# batch-failure aggregation (migrations 034, 036, 037). See that script's
+# own header comment for exactly which production incident this guards
+# against and what each scenario proves.
+#
+# Unlike scripts/synthetic-intake-health-check.mjs (scheduled every 6h),
+# this makes no Claude API calls and never invokes document-worker or
+# smooth-responder — it drives the queue RPCs directly, so it's cheap
+# enough to run on every push that touches the queue subsystem, not just
+# on a schedule.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/034_document_processing_jobs.sql'
+      - 'supabase/migrations/036_document_job_stale_reclaim.sql'
+      - 'supabase/migrations/037_intake_recovery_service.sql'
+      - 'supabase/functions/document-worker/**'
+      - 'scripts/document-queue-reliability-check.mjs'
+  workflow_dispatch: {}
+
+concurrency:
+  group: document-queue-reliability-check
+  cancel-in-progress: false
+
+jobs:
+  queue-reliability-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci --omit=dev
+
+      - name: Run document queue reliability check
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/document-queue-reliability-check.mjs

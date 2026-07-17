@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import ClarifyingQuestionsPanel, { type ClarifyingQuestion } from './ClarifyingQuestionsPanel'
+import { documentDisplayState } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ interface DocumentProgressItem {
   document_id: string
   filename: string
   status: 'pending' | 'running' | 'completed' | 'failed'
+  attempts: number
   error_message?: string | null
 }
 
@@ -412,40 +414,54 @@ export default function IntakeProgress({
       {/* Per-document extraction checklist */}
       {documentProgress && documentProgress.length > 1 && (
         <ul className="space-y-1.5" aria-label="Document processing status">
-          {documentProgress.map((doc) => (
-            <li key={doc.document_id} className="flex items-center gap-2 text-[12px]">
-              {doc.status === 'completed' && (
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
-                  <path d="M2 6l2.5 2.5L10 3" stroke="#4caf50" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              )}
-              {doc.status === 'failed' && (
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
-                  <path d="M3 3l6 6M9 3l-6 6" stroke="#f44336" strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-              )}
-              {doc.status === 'running' && (
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0 animate-spin">
-                  <path d="M6 1v2M6 9v2M1 6h2M9 6h2" stroke="#ff6b2b" strokeWidth="1.25" strokeLinecap="round" />
-                </svg>
-              )}
-              {doc.status === 'pending' && (
-                <span className="w-3 h-3 rounded-full border border-[#555555] flex-shrink-0 animate-pulse" aria-hidden="true" />
-              )}
-              <span
-                className={
-                  doc.status === 'completed' ? 'text-[#4caf50]'
-                    : doc.status === 'failed' ? 'text-[#f44336]'
-                    : doc.status === 'running' ? 'text-[#ff6b2b] font-medium'
-                    : 'text-[#555555]'
-                }
-              >
-                {doc.filename}
-                {doc.status === 'running' && ' — processing'}
-                {doc.status === 'failed' && ' — needs review'}
-              </span>
-            </li>
-          ))}
+          {documentProgress.map((doc) => {
+            // Reuses the same shared, unit-tested classification the SSE
+            // route's data is built from (pipeline-logic.ts) rather than
+            // re-deriving "pending + attempts > 0 means retrying" here —
+            // see documentDisplayState's own comment for why raw DB status
+            // alone can't tell "never attempted" from "backing off before
+            // an automatic retry."
+            const display = documentDisplayState(doc.status, doc.attempts)
+            return (
+              <li key={doc.document_id} className="flex items-center gap-2 text-[12px]">
+                {display === 'completed' && (
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
+                    <path d="M2 6l2.5 2.5L10 3" stroke="#4caf50" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+                {display === 'failed' && (
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
+                    <path d="M3 3l6 6M9 3l-6 6" stroke="#f44336" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                )}
+                {display === 'running' && (
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0 animate-spin">
+                    <path d="M6 1v2M6 9v2M1 6h2M9 6h2" stroke="#ff6b2b" strokeWidth="1.25" strokeLinecap="round" />
+                  </svg>
+                )}
+                {display === 'retrying' && (
+                  <span className="flex-shrink-0 text-[#ffb020] font-semibold leading-none" aria-hidden="true">!</span>
+                )}
+                {display === 'waiting' && (
+                  <span className="w-3 h-3 rounded-full border border-[#555555] flex-shrink-0 animate-pulse" aria-hidden="true" />
+                )}
+                <span
+                  className={
+                    display === 'completed' ? 'text-[#4caf50]'
+                      : display === 'failed' ? 'text-[#f44336]'
+                      : display === 'running' ? 'text-[#ff6b2b] font-medium'
+                      : display === 'retrying' ? 'text-[#ffb020] font-medium'
+                      : 'text-[#555555]'
+                  }
+                >
+                  {doc.filename}
+                  {display === 'running' && ' — processing'}
+                  {display === 'retrying' && ` — retrying (attempt ${doc.attempts + 1} of 3)`}
+                  {display === 'failed' && ' — needs review'}
+                </span>
+              </li>
+            )
+          })}
         </ul>
       )}
 

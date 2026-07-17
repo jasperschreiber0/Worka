@@ -52,6 +52,11 @@ interface DocumentProgressItem {
   document_id: string
   filename: string
   status: 'pending' | 'running' | 'completed' | 'failed'
+  // Distinguishes "backing off before an automatic retry" (pending,
+  // attempts > 0) from "not yet claimed" (pending, attempts = 0) — see
+  // documentDisplayState in pipeline-logic.ts, which the client uses this
+  // field to compute the same way.
+  attempts: number
   error_message?: string | null
 }
 
@@ -255,6 +260,7 @@ interface DocumentProcessingJobRow {
   document_id: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   error_message: string | null
+  attempts: number
 }
 
 async function fetchBatchJobStatuses(
@@ -264,7 +270,7 @@ async function fetchBatchJobStatuses(
   batchId: string
 ): Promise<DocumentProcessingJobRow[]> {
   const res = await fetch(
-    `${supabaseUrl}/rest/v1/document_processing_jobs?parent_job_id=eq.${encodeURIComponent(batchId)}&select=document_id,status,error_message`,
+    `${supabaseUrl}/rest/v1/document_processing_jobs?parent_job_id=eq.${encodeURIComponent(batchId)}&select=document_id,status,error_message,attempts`,
     { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
   )
   if (!res.ok) return []
@@ -676,6 +682,7 @@ export async function GET(
                   document_id: j.document_id,
                   filename: filenameByDocumentId.get(j.document_id) ?? j.document_id,
                   status: j.status,
+                  attempts: j.attempts,
                   error_message: j.error_message,
                 }))
                 const documentProgress: DocumentProgressEvent = { stage: 'document_progress', documents }

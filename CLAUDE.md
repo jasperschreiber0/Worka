@@ -540,6 +540,16 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 whose entire worker chain died — e.g. any single-document
                                 upload — had nothing left to ever trigger it). See
                                 "Independent Intake Recovery Service" below.
+038_intake_recovery_pg_cron.sql — enables pg_cron + pg_net and schedules
+                                trigger_intake_recovery() every minute, calling the same
+                                GET /api/cron/intake-recovery route the GitHub Actions workflow
+                                calls. Added after production run history showed that workflow's
+                                nominal 5-minute schedule actually firing roughly once an HOUR —
+                                see "Independent Intake Recovery Service" below for why this
+                                makes recovery latency ~1 minute worst-case instead of ~1 hour.
+                                Requires a one-time `vault.create_secret(...)` for the app URL and
+                                CRON_SECRET, run once via the Supabase SQL editor (never committed
+                                to git) — see the migration's own header comment.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -680,6 +690,7 @@ retrofit of the whole 36-migration history.
 | `supabase/verification/schema_assertions.sql` | `supabase-migrate.yml`, after every push to `main` | Asserts required tables/columns/CHECK constraints/foreign keys/indexes exist, and that `claim_next_document_job`, `complete_document_job`, `retry_or_fail_document_job`, `recompute_parent_batch_status`, `reclaim_stale_document_jobs`, and (migration 037) `find_batches_with_claimable_work`, `recompute_stalled_batches`, `find_stale_job_intake_locks`, `acquire_or_reclaim_job_intake_lock`, `find_stuck_files_needing_classification_retry` exist with their expected signatures **and are actually callable** (each probed with a bogus uuid that matches zero real rows, or — for the one function that mutates on success — an expected-and-caught foreign key violation; never a no-op existence check alone). `RAISE EXCEPTION`s on the first failure, failing the workflow loudly instead of a gap surfacing later as a runtime "not found in schema cache" error (see the 008_/021/026 incident above). |
 | `supabase/verification/health_monitoring_views.sql` | Same workflow, immediately after | `CREATE OR REPLACE VIEW/FUNCTION` (idempotent, no data mutated) for: `stuck_document_jobs`, `stuck_job_intake_locks`, `failed_document_jobs_recent`, `document_job_retry_rate()`, `document_processing_latency_stats()`, `document_batch_failure_summary()`, `document_batch_completion_latency()`, `intake_recovery_activity_summary()`, and a single-row rollup `document_processing_health_summary()` for a dashboard tile or alert cron. |
 | `scripts/synthetic-intake-health-check.mjs` | `.github/workflows/intake-pipeline-health-check.yml`, scheduled every 6h (`workflow_dispatch` also available) | Exercises the real, deployed pipeline end to end — upload → `document_processing_batches`/`jobs` creation → `document-worker` claim → extraction → `classification_triggered` flip → smooth-responder reachability — against a disposable synthetic job/file, cleaned up in a `finally` regardless of outcome. See the script's own header comment for exactly what a pass does and doesn't certify (plumbing, not extraction accuracy). |
+| `scripts/document-queue-reliability-check.mjs` | `.github/workflows/document-queue-reliability-check.yml`, on push to the queue subsystem's own files + `workflow_dispatch` | Drives `document_processing_jobs`/`batches` RPCs directly (no document-worker/smooth-responder invocation, no Claude calls, so cheap enough for every push unlike the 6-hourly script above): two concurrent `claim_next_document_job` calls on one pending job resolve to exactly one winner; a simulated stale `running` row is reclaimed and its retried attempt actually succeeds; a batch left with only a lost-`triggerNext()` remainder is still discoverable via `find_batches_with_claimable_work` and completes correctly once resumed; a permanently-failed sibling document doesn't block the batch or its siblings (`completed_with_failures`, not `failed`). |
 | `supabase/migrations/036_document_job_stale_reclaim.sql` | Applied like any other migration | Closes the stuck-running-job gap (below). |
 
 **The stuck-running-job gap, and the fix.** `document-worker`'s HTTP handler returns `202 claimed`
@@ -810,16 +821,21 @@ was seconds from fixing on its own. Recovery itself never depends on this value;
 long a *connected* client waits before surfacing an error.
 
 **Operational considerations:**
-- **Actual trigger, live today**: `.github/workflows/intake-recovery-cron.yml` calls
-  `scripts/trigger-cron-route.mjs` (`ROUTE_PATH=/api/cron/intake-recovery`) every 5 minutes against
-  the real Railway URL — confirmed working end to end (a manual `workflow_dispatch` run found and
-  resumed 2 stuck batches + 1 stuck lock in production on first trigger). `vercel.json`'s cron entry
-  for this route is not what's running it — see "Hosting" above; Vercel isn't even deploying `main`.
-  GitHub's own scheduler is best-effort and can slip by several minutes under load — acceptable here
-  since every run is idempotent and a late/skipped run just means recovery takes one cycle longer,
-  not incorrect. A Railway-native Cron Job service (`node scripts/trigger-cron-route.mjs` with
-  `ROUTE_PATH=/api/cron/intake-recovery`, `APP_URL`, `CRON_SECRET` as service variables) is the
-  tighter-guarantee alternative if GitHub's scheduling slop ever matters.
+- **Actual trigger, live today**: `supabase/migrations/038_intake_recovery_pg_cron.sql` — `pg_cron`
+  (a first-party Supabase Postgres extension, no new infrastructure) calls the same
+  `GET /api/cron/intake-recovery` route every minute via `pg_net`, database-native, independent of
+  any external CI provider's own scheduler. This replaced `.github/workflows/intake-recovery-cron.yml`
+  as the *primary* trigger after production run history showed that workflow's nominal 5-minute
+  schedule actually firing roughly once an HOUR (GitHub Actions' scheduler queue degrading far past
+  "a few minutes' slip" for a low-traffic repo) — functionally no recovery for up to an hour after a
+  lost `triggerNext()`/`triggerClassification()` call, which is what produced a real stuck-batch
+  incident. The GitHub Actions workflow is left in place as a harmless redundant secondary trigger
+  (every RPC this route calls is idempotent, so double-firing is a no-op) rather than deleted —
+  same pattern this file already documents for `vercel.json`'s inert cron entries. `vercel.json`'s
+  cron entry for this route was never what ran it either way — see "Hosting" above; Vercel isn't
+  even deploying `main`. Requires a one-time Vault setup (`vault.create_secret` for the app URL and
+  `CRON_SECRET`, run once via the Supabase SQL editor — see migration 038's header comment); until
+  that's done, `trigger_intake_recovery()` logs a `WARNING` and skips each tick rather than erroring.
 - **CRON_SECRET**: this route fails closed (503) in real mode if unset. Must be set on **Railway →
   Variables** for the `worka` service — that's the app that's actually running and actually checks
   this value. Setting it only on Vercel (easy mistake, since this file used to say Vercel was

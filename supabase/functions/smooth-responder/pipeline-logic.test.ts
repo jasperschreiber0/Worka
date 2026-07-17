@@ -22,6 +22,7 @@ import {
   isRetryableApiError,
   withTimeoutAndRetry,
   documentPhaseProgress,
+  documentDisplayState,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -272,6 +273,28 @@ test('deriveParentBatchStatus: one failed document among otherwise-completed one
 
 test('deriveParentBatchStatus: every child failed is a genuine batch failure', () => {
   assert.equal(deriveParentBatchStatus(['failed', 'failed']), 'failed')
+})
+
+// ─── documentDisplayState ───────────────────────────────────────────────────
+// Regression coverage for the "stuck at 14%, indistinguishable from healthy"
+// observability gap: a document backing off before an automatic retry is
+// stored as status='pending' with attempts > 0 — identical, at the raw
+// status level, to a document that has never been attempted at all.
+
+test('documentDisplayState: terminal statuses pass through regardless of attempts', () => {
+  assert.equal(documentDisplayState('completed', 0), 'completed')
+  assert.equal(documentDisplayState('completed', 2), 'completed')
+  assert.equal(documentDisplayState('failed', 3), 'failed')
+  assert.equal(documentDisplayState('running', 1), 'running')
+})
+
+test('documentDisplayState: pending with zero attempts is waiting, never attempted', () => {
+  assert.equal(documentDisplayState('pending', 0), 'waiting')
+})
+
+test('documentDisplayState: pending with attempts > 0 is retrying, not waiting', () => {
+  assert.equal(documentDisplayState('pending', 1), 'retrying')
+  assert.equal(documentDisplayState('pending', 2), 'retrying')
 })
 
 // ─── selectFactsForPrompt ───────────────────────────────────────────────────
