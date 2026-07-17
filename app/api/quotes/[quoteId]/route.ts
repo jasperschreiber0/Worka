@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
+import { DEMO_QUOTE, DEMO_LINE_ITEMS, getDemoQuoteById } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem, EstimateEvidence } from '@/lib/quote-demo'
 import type { QAReport } from '@/lib/types/database.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
@@ -198,26 +198,32 @@ export async function GET(
   const { quoteId } = params
 
   // ── Demo mode ──────────────────────────────────────────────────────────────
+  // Trust Workflow Demo Fixture: resolves to whichever of the three demo
+  // quotes (READY / REVIEW_REQUIRED / the original BLOCKED one) quoteId
+  // refers to — see getDemoQuoteById in lib/quote-demo.ts. Falls back to the
+  // original BLOCKED quote for any unrecognised demo id, matching prior
+  // behaviour rather than 404ing.
   if (isDemoMode()) {
-    const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
-    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
-    const qa = buildQASummary(DEMO_QUOTE.qa_report, DEMO_QUOTE.overall_confidence)
-    const evidence = DEMO_QUOTE.evidence ?? null
+    const { quote: demoQuote, items: demoItems } = getDemoQuoteById(quoteId) ?? { quote: DEMO_QUOTE, items: DEMO_LINE_ITEMS }
+    const line_items_by_category = groupByCategory(demoItems)
+    const summary = computeSummary(demoQuote, demoItems)
+    const qa = buildQASummary(demoQuote.qa_report, demoQuote.overall_confidence)
+    const evidence = demoQuote.evidence ?? null
     // Same evaluateQualityGate call as real mode — no separate hand-authored
     // demo gate result, since this is pure arithmetic over data demo mode
     // already has (unlike qa_report, which really is an external artifact).
     const quality_gate = evaluateQualityGate({
-      overall_confidence: DEMO_QUOTE.overall_confidence ?? null,
+      overall_confidence: demoQuote.overall_confidence ?? null,
       unresolved_count: summary.unresolved_count,
       missing_trades: qa?.missing_trades ?? [],
       top_risks: qa?.top_risks ?? [],
-      total_cost: DEMO_QUOTE.total_cost,
-      items: DEMO_LINE_ITEMS,
+      total_cost: demoQuote.total_cost,
+      items: demoItems,
     })
     summary.can_send = quality_gate.state !== 'blocked'
 
     const response: QuoteResponse = {
-      quote: DEMO_QUOTE,
+      quote: demoQuote,
       line_items_by_category,
       summary,
       qa,

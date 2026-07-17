@@ -6,6 +6,7 @@ import { requirePermission } from '@/lib/auth/role-guard'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { loadQuoteQualityGate, loadDemoQuoteQualityGate, decideQuoteSendPolicy } from '@/lib/estimating/quote-quality-policy'
+import { getDemoQuoteById } from '@/lib/quote-demo'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,8 +87,8 @@ export async function POST(
     // assistant has no acknowledgement UI, so anything short of READY is
     // refused outright rather than half-supported here.
     if (linked_quote_id) {
-      const gate = linked_quote_id === 'demo-quote-id'
-        ? loadDemoQuoteQualityGate().gate
+      const gate = getDemoQuoteById(linked_quote_id)
+        ? loadDemoQuoteQualityGate(linked_quote_id).gate
         : (supabaseUrl && serviceRoleKey)
           ? (await loadQuoteQualityGate(
               createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } }),

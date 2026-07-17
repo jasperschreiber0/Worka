@@ -12,7 +12,7 @@
 // discipline.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
+import { DEMO_QUOTE, getDemoQuoteById } from '@/lib/quote-demo'
 import { evaluateQualityGate } from './quality-gate'
 import type { QualityGateResult, QualityGateLineItem } from './quality-gate'
 import type { RiskAcknowledgementSnapshot } from '@/lib/types/database.types'
@@ -81,28 +81,34 @@ export async function loadQuoteQualityGate(
   }
 }
 
-/** Demo-mode equivalent — same evaluateQualityGate call over DEMO_QUOTE/
- * DEMO_LINE_ITEMS, so demo and real mode can never disagree on the decision
- * logic (no separate hand-authored demo gate result). */
-export function loadDemoQuoteQualityGate(): { quote: LoadedQuoteForGate; gate: QualityGateResult } {
-  const items = DEMO_LINE_ITEMS as unknown as QualityGateLineItem[]
+/** Demo-mode equivalent — same evaluateQualityGate call, over whichever of
+ * the three Trust Workflow Demo quotes quoteId resolves to (getDemoQuoteById,
+ * lib/quote-demo.ts), so demo and real mode can never disagree on the
+ * decision logic (no separate hand-authored demo gate result per quote).
+ * Defaults to the original BLOCKED demo quote for backward compatibility
+ * with call sites that don't pass a quoteId. */
+export function loadDemoQuoteQualityGate(quoteId: string = DEMO_QUOTE.id): { quote: LoadedQuoteForGate; gate: QualityGateResult } {
+  const resolved = getDemoQuoteById(quoteId) ?? getDemoQuoteById(DEMO_QUOTE.id)!
+  const demoQuote = resolved.quote
+  const items = resolved.items as unknown as QualityGateLineItem[]
+
   const gate = evaluateQualityGate({
-    overall_confidence: DEMO_QUOTE.overall_confidence ?? null,
+    overall_confidence: demoQuote.overall_confidence ?? null,
     unresolved_count: items.filter((i) => i.is_assumption && i.assumption_status === 'unresolved').length,
-    missing_trades: DEMO_QUOTE.qa_report?.missing_trades ?? [],
-    top_risks: DEMO_QUOTE.qa_report?.top_risks ?? [],
-    total_cost: DEMO_QUOTE.total_cost,
+    missing_trades: demoQuote.qa_report?.missing_trades ?? [],
+    top_risks: demoQuote.qa_report?.top_risks ?? [],
+    total_cost: demoQuote.total_cost,
     items,
   })
   return {
     quote: {
-      jobId: DEMO_QUOTE.job_id,
-      version: DEMO_QUOTE.version,
-      totalCost: DEMO_QUOTE.total_cost,
-      overallConfidence: DEMO_QUOTE.overall_confidence ?? null,
-      status: DEMO_QUOTE.status,
-      riskAcknowledgedAt: DEMO_QUOTE.risk_acknowledged_at ?? null,
-      qaReport: DEMO_QUOTE.qa_report ?? null,
+      jobId: demoQuote.job_id,
+      version: demoQuote.version,
+      totalCost: demoQuote.total_cost,
+      overallConfidence: demoQuote.overall_confidence ?? null,
+      status: demoQuote.status,
+      riskAcknowledgedAt: demoQuote.risk_acknowledged_at ?? null,
+      qaReport: demoQuote.qa_report ?? null,
       items,
     },
     gate,

@@ -133,6 +133,151 @@ export const DEMO_QUOTE: DemoQuote = {
   risk_acknowledgement_snapshot: null,
 }
 
+// ─── Trust Workflow Demo Fixture ────────────────────────────────────────────
+// Two more demo quotes, reusing the quote IDs already assigned to the
+// Fitzroy and Toorak demo jobs in lib/job-snapshot-demo.ts — clicking
+// "View Quote" on either already navigates here via the existing job list
+// flow, so no new UI/navigation is needed to reach all three quality states.
+// (The GET/confirm-send/export-pdf demo branches previously ignored quoteId
+// entirely and always returned DEMO_QUOTE above — ​these two IDs existed in
+// job-snapshot-demo.ts but silently resolved to the wrong, BLOCKED quote
+// data. getDemoQuoteById below fixes that dispatch as a side effect.)
+//
+// Each state's numbers are real arithmetic over its own line items — not
+// hand-waved. No quality rule is bent to make any of these three "work":
+// READY is ready because nothing about it is uncertain; REVIEW_REQUIRED
+// trips purely on exposure (%) with qa_report.top_risks left deliberately
+// empty, demonstrating the exact case that used to be silently mis-recorded
+// before the proof-accuracy fix; BLOCKED (above) is genuinely blocked.
+
+export const DEMO_QUOTE_READY: DemoQuote = {
+  id: 'demo-fitzroy-quote',
+  job_id: '00000000-0000-0000-0000-000000000010',
+  job_address: '14 Merri St, Fitzroy VIC 3065',
+  builder_id: '00000000-0000-0000-0000-000000000001',
+  status: 'pending_review',
+  total_cost: 142000,
+  margin_pct: 18,
+  // No line item below 85% — the floor, not an average, drives this number.
+  confidence_score: 85,
+  version: 1,
+  created_at: new Date().toISOString(),
+  quote_ref: 'QT-JOB-2025-001-v1',
+  qa_report: {
+    top_risks: [],
+    review_items: [],
+    recommended_actions: ['No material risks detected — this estimate is ready for review.'],
+    missing_trades: [],
+    duplicate_descriptions: [],
+  },
+  overall_confidence: 85,
+  evidence: {
+    documents_processed: 5,
+    document_types: ['Floor plan', 'Elevation', 'Specification', 'Structural engineering'],
+    missing_documents: [],
+    scope_items_identified: 15,
+    line_items_generated: 15,
+    fixed_price_count: 15,
+    pc_ps_count: 0,
+    assumed_count: 0,
+    needs_review_count: 0,
+  },
+  risk_acknowledged_at: null,
+  risk_acknowledgement_snapshot: null,
+}
+
+export const DEMO_LINE_ITEMS_READY: DemoQuoteLineItem[] = [
+  { id: 'ry-01', quote_id: 'demo-fitzroy-quote', trade_category_id: 1, trade_category_name: 'Site Works & Concrete', description: 'Excavation & earthworks', quantity: 38, unit: 'm³', rate: 110.53, total: 4200, confidence: 90, dimensions_string: '8m × 5m × 0.95m avg', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-02', quote_id: 'demo-fitzroy-quote', trade_category_id: 1, trade_category_name: 'Site Works & Concrete', description: 'Concrete slab', quantity: 64, unit: 'sqm', rate: 175, total: 11200, confidence: 88, dimensions_string: '8m × 8m', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-03', quote_id: 'demo-fitzroy-quote', trade_category_id: 2, trade_category_name: 'Framing', description: 'Wall framing', quantity: 200, unit: 'lm', rate: 43, total: 8600, confidence: 91, dimensions_string: 'perimeter + internal walls', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-04', quote_id: 'demo-fitzroy-quote', trade_category_id: 2, trade_category_name: 'Framing', description: 'Roof framing', quantity: 92, unit: 'sqm', rate: 106.52, total: 9800, confidence: 87, dimensions_string: '8m × 8m hip', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-05', quote_id: 'demo-fitzroy-quote', trade_category_id: 3, trade_category_name: 'Roofing', description: 'Colorbond roof sheeting', quantity: 108, unit: 'sqm', rate: 85.19, total: 9200, confidence: 93, dimensions_string: '8m × 8m + 15% waste', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-06', quote_id: 'demo-fitzroy-quote', trade_category_id: 4, trade_category_name: 'External Cladding', description: 'Brick veneer', quantity: 195, unit: 'sqm', rate: 94.87, total: 18500, confidence: 89, dimensions_string: 'perimeter walls', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-07', quote_id: 'demo-fitzroy-quote', trade_category_id: 6, trade_category_name: 'Internal Linings', description: 'Plasterboard walls & ceilings', quantity: 407, unit: 'sqm', rate: 28.01, total: 11400, confidence: 90, dimensions_string: 'wall+ceiling calc', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-08', quote_id: 'demo-fitzroy-quote', trade_category_id: 8, trade_category_name: 'Cabinetry', description: 'Kitchen cabinetry (full joinery + benchtop)', quantity: 1, unit: 'lot', rate: 31000, total: 31000, confidence: 86, dimensions_string: 'A4.2 joinery schedule', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: 'A4.2', margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-09', quote_id: 'demo-fitzroy-quote', trade_category_id: 9, trade_category_name: 'Paint', description: 'Internal paint', quantity: 407, unit: 'sqm', rate: 17.69, total: 7200, confidence: 92, dimensions_string: 'wall+ceiling', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-10', quote_id: 'demo-fitzroy-quote', trade_category_id: 10, trade_category_name: 'Flooring', description: 'Tiles — wet areas', quantity: 51, unit: 'sqm', rate: 100, total: 5100, confidence: 88, dimensions_string: 'bathroom+laundry', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-11', quote_id: 'demo-fitzroy-quote', trade_category_id: 10, trade_category_name: 'Flooring', description: 'Timber flooring', quantity: 62, unit: 'sqm', rate: 109.68, total: 6800, confidence: 85, dimensions_string: 'living+beds', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-12', quote_id: 'demo-fitzroy-quote', trade_category_id: 11, trade_category_name: 'Fixtures & Tapware', description: 'Bathroom fixtures', quantity: 1, unit: 'lot', rate: 4600, total: 4600, confidence: 87, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-13', quote_id: 'demo-fitzroy-quote', trade_category_id: 12, trade_category_name: 'Electrical', description: 'General electrical fit-off', quantity: 1, unit: 'lot', rate: 9200, total: 9200, confidence: 89, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-14', quote_id: 'demo-fitzroy-quote', trade_category_id: 13, trade_category_name: 'Preliminaries', description: 'Permits & council fees', quantity: 1, unit: 'lot', rate: 3400, total: 3400, confidence: 96, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'ry-15', quote_id: 'demo-fitzroy-quote', trade_category_id: 13, trade_category_name: 'Preliminaries', description: 'Site insurance', quantity: 1, unit: 'lot', rate: 1800, total: 1800, confidence: 96, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+]
+
+export const DEMO_QUOTE_REVIEW_REQUIRED: DemoQuote = {
+  id: 'demo-quote-id-toorak',
+  job_id: '00000000-0000-0000-0000-000000000011',
+  job_address: '8 Burnside Rd, Toorak VIC 3142',
+  builder_id: '00000000-0000-0000-0000-000000000001',
+  status: 'pending_review',
+  total_cost: 127500,
+  margin_pct: 18,
+  // Deliberately high — this quote is REVIEW_REQUIRED on exposure alone
+  // (14.9% of value in PC/PS), not confidence. See qa_report.top_risks
+  // below: left empty on purpose.
+  confidence_score: 88,
+  version: 1,
+  created_at: new Date().toISOString(),
+  quote_ref: 'QT-JOB-2025-002-v1',
+  // top_risks is genuinely empty here — this is the case
+  // buildRiskAcknowledgementSnapshot's reasons_accepted fix (using
+  // gate.review_reasons, not qa_report.top_risks) exists for: confidence and
+  // exposure can trigger REVIEW_REQUIRED with nothing in top_risks at all.
+  qa_report: {
+    top_risks: [],
+    review_items: [],
+    recommended_actions: ['Review the PC allowance and provisional sum items before sending — final cost may vary from these estimates.'],
+    missing_trades: [],
+    duplicate_descriptions: [],
+  },
+  overall_confidence: 88,
+  evidence: {
+    documents_processed: 5,
+    document_types: ['Floor plan', 'Elevation', 'Specification'],
+    missing_documents: [],
+    scope_items_identified: 16,
+    line_items_generated: 16,
+    fixed_price_count: 14,
+    pc_ps_count: 2,
+    assumed_count: 0,
+    needs_review_count: 0,
+  },
+  risk_acknowledged_at: null,
+  risk_acknowledgement_snapshot: null,
+}
+
+export const DEMO_LINE_ITEMS_REVIEW_REQUIRED: DemoQuoteLineItem[] = [
+  { id: 'rr-01', quote_id: 'demo-quote-id-toorak', trade_category_id: 1, trade_category_name: 'Site Works & Concrete', description: 'Excavation & earthworks', quantity: 37, unit: 'm³', rate: 110.81, total: 4100, confidence: 88, dimensions_string: '8m × 5m × 0.9m avg', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-02', quote_id: 'demo-quote-id-toorak', trade_category_id: 1, trade_category_name: 'Site Works & Concrete', description: 'Concrete slab', quantity: 62, unit: 'sqm', rate: 174.19, total: 10800, confidence: 86, dimensions_string: '8m × 7.75m', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-03', quote_id: 'demo-quote-id-toorak', trade_category_id: 2, trade_category_name: 'Framing', description: 'Wall framing', quantity: 190, unit: 'lm', rate: 43.16, total: 8200, confidence: 89, dimensions_string: 'perimeter + internal walls', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-04', quote_id: 'demo-quote-id-toorak', trade_category_id: 2, trade_category_name: 'Framing', description: 'Roof framing', quantity: 88, unit: 'sqm', rate: 103.41, total: 9100, confidence: 85, dimensions_string: '8m × 7.75m hip', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-05', quote_id: 'demo-quote-id-toorak', trade_category_id: 3, trade_category_name: 'Roofing', description: 'Colorbond roof sheeting', quantity: 102, unit: 'sqm', rate: 85.29, total: 8700, confidence: 91, dimensions_string: '8m × 7.75m + 15% waste', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-06', quote_id: 'demo-quote-id-toorak', trade_category_id: 4, trade_category_name: 'External Cladding', description: 'Brick veneer', quantity: 171, unit: 'sqm', rate: 94.74, total: 16200, confidence: 87, dimensions_string: 'perimeter walls', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-07', quote_id: 'demo-quote-id-toorak', trade_category_id: 6, trade_category_name: 'Internal Linings', description: 'Plasterboard walls & ceilings', quantity: 371, unit: 'sqm', rate: 28.03, total: 10400, confidence: 90, dimensions_string: 'wall+ceiling calc', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-08', quote_id: 'demo-quote-id-toorak', trade_category_id: 8, trade_category_name: 'Cabinetry', description: 'Kitchen cabinetry (joinery only)', quantity: 1, unit: 'lot', rate: 13000, total: 13000, confidence: 84, dimensions_string: 'A4.2 joinery schedule', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: 'A4.2', margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-09', quote_id: 'demo-quote-id-toorak', trade_category_id: 8, trade_category_name: 'Cabinetry', description: 'Kitchen appliances — PC allowance', quantity: 1, unit: 'lot', rate: 9500, total: 9500, confidence: 82, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'pc_allowance', source_ref: 'A4.2', margin_pct: 0.15, labour_cost: null, material_cost: 9500, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-10', quote_id: 'demo-quote-id-toorak', trade_category_id: 8, trade_category_name: 'Cabinetry', description: 'Stone benchtops — provisional sum', quantity: 1, unit: 'lot', rate: 9500, total: 9500, confidence: 80, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'provisional_sum', source_ref: 'SK-02', margin_pct: 0, labour_cost: null, material_cost: 9500, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-11', quote_id: 'demo-quote-id-toorak', trade_category_id: 9, trade_category_name: 'Paint', description: 'Internal paint', quantity: 371, unit: 'sqm', rate: 18.33, total: 6800, confidence: 91, dimensions_string: 'wall+ceiling', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-12', quote_id: 'demo-quote-id-toorak', trade_category_id: 10, trade_category_name: 'Flooring', description: 'Tiles — wet areas', quantity: 44, unit: 'sqm', rate: 100, total: 4400, confidence: 87, dimensions_string: 'bathroom+laundry', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-13', quote_id: 'demo-quote-id-toorak', trade_category_id: 10, trade_category_name: 'Flooring', description: 'Timber flooring', quantity: 55, unit: 'sqm', rate: 110.91, total: 6100, confidence: 84, dimensions_string: 'living+beds', is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-14', quote_id: 'demo-quote-id-toorak', trade_category_id: 12, trade_category_name: 'Electrical', description: 'General electrical fit-off', quantity: 1, unit: 'lot', rate: 5700, total: 5700, confidence: 86, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-15', quote_id: 'demo-quote-id-toorak', trade_category_id: 13, trade_category_name: 'Preliminaries', description: 'Permits & council fees', quantity: 1, unit: 'lot', rate: 3300, total: 3300, confidence: 95, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+  { id: 'rr-16', quote_id: 'demo-quote-id-toorak', trade_category_id: 13, trade_category_name: 'Preliminaries', description: 'Site insurance', quantity: 1, unit: 'lot', rate: 1700, total: 1700, confidence: 95, dimensions_string: null, is_assumption: false, assumption_status: null, pricing_type: 'measured', source_ref: null, margin_pct: 0.15, labour_cost: null, material_cost: null, subcontract_cost: null, plant_cost: null },
+]
+
+/**
+ * Look up which of the three Trust Workflow Demo quotes a quoteId refers to.
+ * Used by the demo branches of GET /api/quotes/[quoteId], confirm-send, and
+ * export-pdf so all three quality states are reachable via their real
+ * quoteIds rather than every demo request silently returning DEMO_QUOTE.
+ */
+export function getDemoQuoteById(quoteId: string): { quote: DemoQuote; items: DemoQuoteLineItem[] } | null {
+  if (quoteId === DEMO_QUOTE.id) return { quote: DEMO_QUOTE, items: DEMO_LINE_ITEMS }
+  if (quoteId === DEMO_QUOTE_READY.id) return { quote: DEMO_QUOTE_READY, items: DEMO_LINE_ITEMS_READY }
+  if (quoteId === DEMO_QUOTE_REVIEW_REQUIRED.id) return { quote: DEMO_QUOTE_REVIEW_REQUIRED, items: DEMO_LINE_ITEMS_REVIEW_REQUIRED }
+  return null
+}
+
 // ─── Demo line items ──────────────────────────────────────────────────────────
 // All 13 trade categories. Realistic Australian residential renovation.
 

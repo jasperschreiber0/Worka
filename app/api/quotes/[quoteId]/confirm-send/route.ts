@@ -14,10 +14,13 @@ import {
 import type { QualityGateResult } from '@/lib/estimating/quality-gate'
 import type { RiskAcknowledgementSnapshot } from '@/lib/types/database.types'
 
-// Quote job IDs for proof recording in demo mode
+// Quote job IDs for proof recording in demo mode. Trust Workflow Demo
+// Fixture: 'demo-fitzroy-quote' (READY) added alongside the existing two —
+// see lib/quote-demo.ts's getDemoQuoteById for the quote data itself.
 const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
   'demo-quote-id': '00000000-0000-0000-0000-000000000011',
   'demo-quote-id-toorak': '00000000-0000-0000-0000-000000000011',
+  'demo-fitzroy-quote': '00000000-0000-0000-0000-000000000010',
 }
 
 // ─── In-memory demo quote status map ─────────────────────────────────────────
@@ -25,6 +28,7 @@ const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
 const demoQuoteStatusMap: Map<string, { status: string; sent_at: string | null }> = new Map([
   ['demo-quote-id', { status: 'pending_review', sent_at: null }],
   ['demo-quote-id-toorak', { status: 'pending_review', sent_at: null }],
+  ['demo-fitzroy-quote', { status: 'pending_review', sent_at: null }],
 ])
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -102,7 +106,7 @@ export async function POST(
 
     // Same shared loader + policy decision as real mode — never trust a
     // client-side quality_gate read earlier.
-    const { quote: demoQuoteForGate, gate: demoGate } = loadDemoQuoteQualityGate()
+    const { quote: demoQuoteForGate, gate: demoGate } = loadDemoQuoteQualityGate(quoteId)
     const demoDecision = decideQuoteSendPolicy(demoGate, Boolean(body.risk_acknowledged))
 
     if (!demoDecision.allowed) {

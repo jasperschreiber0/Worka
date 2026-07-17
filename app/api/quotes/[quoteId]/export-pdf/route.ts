@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
+import { getDemoQuoteById } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { applyMargin } from '@/lib/pricing'
 import {
@@ -439,9 +439,12 @@ export async function GET(
   let quote: DemoQuote
   let items: DemoQuoteLineItem[]
 
-  if (quoteId === 'demo-quote-id') {
+  const demoLookup = getDemoQuoteById(quoteId)
+  if (demoLookup) {
     // Same enforcement as real mode — never a special-cased demo bypass.
-    const { gate: demoGate } = loadDemoQuoteQualityGate()
+    // Trust Workflow Demo Fixture: covers all three quality states, not
+    // just the original BLOCKED quote (see lib/quote-demo.ts).
+    const { gate: demoGate } = loadDemoQuoteQualityGate(quoteId)
     const demoDecision = decideQuoteSendPolicy(demoGate, queryAcknowledged)
     if (!demoDecision.allowed) {
       return NextResponse.json(
@@ -450,8 +453,13 @@ export async function GET(
       )
     }
 
-    quote = DEMO_QUOTE
-    items = DEMO_LINE_ITEMS
+    quote = demoLookup.quote
+    items = demoLookup.items
+  } else if (quoteId.startsWith('demo-')) {
+    // Unrecognised demo id — 404 rather than falling through to the
+    // real-mode branch below, which would otherwise 404 anyway for lack
+    // of Supabase config but with a less accurate error path.
+    return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
   } else {
     const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
     const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
