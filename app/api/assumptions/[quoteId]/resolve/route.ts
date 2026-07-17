@@ -10,6 +10,8 @@ interface ResolveInput {
   adjusted_quantity?: number
   adjusted_unit?: string
   builder_id: string
+  /** Optional — never required, never blocks the resolve action. Learning-loop foundation (migration 039). */
+  resolution_note?: string
 }
 
 interface ResolvedAssumption {
@@ -46,7 +48,7 @@ export async function POST(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { assumption_id, resolution, adjusted_quantity, adjusted_unit } = body
+  const { assumption_id, resolution, adjusted_quantity, adjusted_unit, resolution_note } = body
 
   if (!assumption_id || !resolution) {
     return NextResponse.json(
@@ -78,6 +80,7 @@ export async function POST(
       resolution_type: resolution,
       adjusted_quantity,
       adjusted_unit,
+      resolution_note,
     })
 
     // Check if all demo assumptions are now resolved
@@ -140,13 +143,47 @@ export async function POST(
       )
     }
 
-    // 1. Update assumptions table — constrained to this quote
+    // 1a. Look up the assumption first (read-only) so we know which line
+    // item it points at, and can snapshot its pre-correction values below —
+    // this is the AI's/document's original quantity/rate, about to be
+    // overwritten by step 2 and otherwise lost with no audit trail.
+    const { data: existingAssumption } = await supabase
+      .from('assumptions')
+      .select('id, line_item_id')
+      .eq('id', assumption_id)
+      .eq('quote_id', quoteId)
+      .single()
+
+    if (!existingAssumption) {
+      return NextResponse.json({ error: 'Assumption not found' }, { status: 404 })
+    }
+
+    let originalValue: { quantity: number | null; unit: string | null; rate: number | null; total: number | null } | null = null
+    if (existingAssumption.line_item_id) {
+      const { data: preEditLineItem } = await supabase
+        .from('quote_line_items')
+        .select('quantity, unit, rate, total')
+        .eq('id', existingAssumption.line_item_id)
+        .single()
+      if (preEditLineItem) {
+        originalValue = {
+          quantity: preEditLineItem.quantity,
+          unit: preEditLineItem.unit,
+          rate: preEditLineItem.rate,
+          total: preEditLineItem.total,
+        }
+      }
+    }
+
+    // 1b. Update assumptions table — constrained to this quote
     const { data: assumptionRow, error: assumptionErr } = await supabase
       .from('assumptions')
       .update({
         resolution_type: resolution,
         resolved_at: now,
         resolved_by: builder_id,
+        original_value: originalValue,
+        resolution_note: resolution_note ?? null,
       })
       .eq('id', assumption_id)
       .eq('quote_id', quoteId)

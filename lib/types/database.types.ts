@@ -274,6 +274,15 @@ export interface Variation {
   labour_cost: number | null
   materials_cost: number | null
   submitted_by: string | null
+  /**
+   * Learning-loop foundation (migration 039) — links this variation back to
+   * the estimating taxonomy so it can feed scope-gap learning. All three
+   * nullable: not every variation maps cleanly to one trade/line item, and
+   * origin_reason is builder-supplied, never required.
+   */
+  trade_category_id: number | null
+  line_item_id: string | null
+  origin_reason: string | null
   /** Migration 018 — client-facing share link auth */
   share_token_hash: string | null
   share_token_expires_at: string | null
@@ -345,6 +354,15 @@ export interface Assumption {
   resolved_at: string | null
   resolved_by: string | null
   created_at: string
+  /**
+   * Learning-loop foundation (migration 039) — snapshot of
+   * {quantity, unit, rate, total} from quote_line_items immediately before
+   * this resolution overwrote it. Null for resolutions recorded before this
+   * column existed, or if the item was never priced to begin with.
+   */
+  original_value: { quantity: number | null; unit: string | null; rate: number | null; total: number | null } | null
+  /** Optional builder free-text reason for the correction. Never required. */
+  resolution_note: string | null
 }
 
 // ─── Job workers, milestones, invoicing, proof (migrations 005, 007) ─────────

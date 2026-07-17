@@ -19,6 +19,10 @@ export interface DemoVariation {
   labour_cost?: number
   materials_cost?: number
   submitted_by?: string
+  /** Learning-loop foundation (migration 039) — see database.types.ts's Variation. */
+  trade_category_id?: number | null
+  line_item_id?: string | null
+  origin_reason?: string | null
 }
 
 export const DEMO_VARIATIONS: DemoVariation[] = [

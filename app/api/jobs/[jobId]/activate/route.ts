@@ -262,7 +262,7 @@ async function handleLiveActivation(
   // 1. Fetch and validate the quote
   const { data: quoteRow, error: quoteError } = await supabase
     .from('quotes')
-    .select('id, job_id, status, total_cost, version')
+    .select('id, job_id, status, total_cost, margin_pct, version')
     .eq('id', quoteId)
     .eq('builder_id', builderId)
     .single()
@@ -271,7 +271,7 @@ async function handleLiveActivation(
     return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
   }
 
-  const quote = quoteRow as { id: string; job_id: string; status: string; total_cost: number; version: number }
+  const quote = quoteRow as { id: string; job_id: string; status: string; total_cost: number; margin_pct: number | null; version: number }
 
   if (quote.status !== 'sent' && quote.status !== 'approved') {
     return NextResponse.json(
@@ -310,6 +310,45 @@ async function handleLiveActivation(
   // builder_learned_rates (best-effort, never blocks activation)
   const { captureLearnedRates } = await import('@/lib/pricing')
   await captureLearnedRates(supabase, quoteId)
+
+  // 4c. Learning-loop foundation (migration 039 era) — seed project_memory
+  // with the QUOTED side of this job at the one moment it's final and known:
+  // activation. This reuses the exact trigger point captureLearnedRates
+  // already fires on, rather than inventing a new one. final_cost/
+  // final_margin_pct/status='completed' are deliberately left for a later
+  // reconciliation step (POST /api/estimation/reconcile) — activation only
+  // knows the quoted side, not the eventual actual cost. Best-effort: never
+  // blocks activation.
+  try {
+    const { data: activationLineItems } = await supabase
+      .from('quote_line_items')
+      .select('trade_category_id, total, assumption_status')
+      .eq('quote_id', quoteId)
+
+    const tradeBreakdown: Record<string, number> = {}
+    for (const item of activationLineItems ?? []) {
+      if (item.assumption_status === 'excluded') continue
+      const key = String(item.trade_category_id)
+      tradeBreakdown[key] = (tradeBreakdown[key] ?? 0) + (item.total ?? 0)
+    }
+
+    await supabase
+      .from('project_memory')
+      .upsert(
+        {
+          builder_id: builderId,
+          job_id: jobId,
+          quote_id: quoteId,
+          quoted_cost: quote.total_cost,
+          quoted_margin_pct: quote.margin_pct,
+          trade_breakdown: tradeBreakdown,
+          status: 'active',
+        },
+        { onConflict: 'job_id' }
+      )
+  } catch (err) {
+    console.error('[jobs/activate] project_memory seed failed (non-blocking):', err)
+  }
 
   // 5. Generate and insert milestones
   const milestones = generateMilestones(jobId, quote.total_cost)

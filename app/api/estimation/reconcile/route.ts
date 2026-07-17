@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { CostReconciliationEntry } from '@/lib/types/estimation.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { recordProofEvent } from '@/lib/proof'
 
 interface ReconcilePayload {
   job_id: string
@@ -104,6 +105,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             updated_at: new Date().toISOString(),
           }, { onConflict: 'builder_id' })
       }
+
+      // Learning-loop foundation — reuses the existing Proof/event
+      // architecture rather than a new notification mechanism. This is the
+      // one place "estimate vs. actual" data is ever recorded, so it belongs
+      // in the same tamper-evident trail as everything else that matters for
+      // this job, not just a row in cost_reconciliation nobody's told about.
+      await recordProofEvent({
+        jobId: job_id,
+        builderId: builder_id,
+        eventType: 'estimate_reconciled',
+        description: `Actual costs reconciled against the estimate — ${entries.length} trade${entries.length !== 1 ? 's' : ''} recorded${accuracyPct !== null ? `, ${Math.round(accuracyPct)}% accuracy` : ''}`,
+        metadata: {
+          quote_id,
+          entries: entries.map((e) => ({
+            trade_category_id: e.trade_category_id,
+            estimated_cost: e.estimated_cost,
+            actual_cost: e.actual_cost,
+          })),
+          final_cost: final_cost ?? null,
+          accuracy_pct: accuracyPct,
+        },
+      })
     }
 
     return NextResponse.json({ ok: true, message: 'Actual costs recorded. Estimation memory updated.' })

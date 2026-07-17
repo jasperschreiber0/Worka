@@ -25,6 +25,16 @@ interface CreateVariationBody {
   amount: number
   labour_cost?: number
   materials_cost?: number
+  /**
+   * Learning-loop foundation (migration 039) — links this variation back to
+   * the estimating taxonomy. All optional: not every variation maps cleanly
+   * to one trade/line item, and this route doesn't try to infer them —
+   * whatever creates the variation (currently no UI passes these yet; a
+   * natural follow-up) supplies them if known.
+   */
+  trade_category_id?: number
+  line_item_id?: string
+  origin_reason?: string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -62,7 +72,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<Variations
 
     let query = supabase
       .from('variations')
-      .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost')
+      .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, trade_category_id, line_item_id, origin_reason')
       .eq('builder_id', builderId)
       .order('created_at', { ascending: false })
 
@@ -156,6 +166,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       amount,
       labour_cost: body.labour_cost ?? null,
       materials_cost: body.materials_cost ?? null,
+      trade_category_id: body.trade_category_id ?? null,
+      line_item_id: body.line_item_id ?? null,
+      origin_reason: body.origin_reason ?? null,
       status: 'draft',
     })
     .select()
