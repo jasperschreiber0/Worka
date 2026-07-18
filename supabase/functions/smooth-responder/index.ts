@@ -514,7 +514,16 @@ async function callTool(
   content: any[],
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tool: any,
-  maxTokens: number
+  maxTokens: number,
+  // Override for stages whose call shape genuinely needs more room than the
+  // 150s default — currently only Scope Reasoning (see its call site). Unlike
+  // Stage 1/2, that stage has no per-file "shrink and retry smaller" lever
+  // (it reasons over the whole accumulated fact base in one call, not a
+  // batch of files), so on a fact-heavy project the identical-payload retry
+  // that follows a timeout is guaranteed to hit the same wall again — a
+  // wider ceiling is the only lever that can actually help. Still well
+  // inside Supabase's real 400s isolate wall-clock limit.
+  timeoutMs = 150_000
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
   const startedAt = Date.now()
@@ -555,7 +564,7 @@ async function callTool(
       { signal }
     ),
     {
-      timeoutMs: 150_000,
+      timeoutMs,
       maxRetries: 1,
       label: tool.name,
       onAttemptFailed: (info) => {
@@ -1315,7 +1324,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
       // on a real 75-fact project reasoning across 13 trades. Match the other
       // two stages' proven 16000 rather than guessing at yet another cap.
-      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000)
+      //
+      // timeoutMs widened from the 150s default to 220s: confirmed in
+      // production on a 108-fact, 4-document project — the call was cleanly
+      // aborted by OUR OWN AbortController at exactly 150002ms
+      // (classification: application_timeout), then retried on the next
+      // invocation with the byte-for-byte identical fact block and failed
+      // identically, because unlike Stage 1/2 there is no per-file "make the
+      // next attempt smaller" lever here — this stage reasons over the whole
+      // accumulated fact base in a single call, so retrying can only help if
+      // it's given more room, not a smaller payload. 220s stays well inside
+      // Supabase's real 400s isolate wall-clock ceiling even when this stage
+      // runs after Stage 1/2 in the same invocation (a fresh, non-resumed
+      // upload) — see callTool's own comment for why this is safe to widen
+      // per-stage rather than globally.
+      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000)
     } catch (err) {
       const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
       const errMessage = err instanceof Error ? err.message : String(err)
