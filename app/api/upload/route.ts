@@ -167,6 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     failed_sibling_filenames: null,
     intake_batch_index: null,
     intake_batch_count: null,
+    intake_recovery_attempts: 0,
     created_at: new Date().toISOString(),
   }
 
