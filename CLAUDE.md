@@ -676,6 +676,19 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 locking. Relaxed to UNIQUE(builder_id, job_ref) — two builders can
                                 each have their own "JOB-2026-001", exactly like two companies each
                                 having their own "Invoice #1". No change to the ref format.
+049_robust_job_ref_generation.sql — third fix in this sequence: the collision recurred even after
+                                048's correctly-scoped constraint, on a single non-concurrent
+                                attempt, meaning COUNT(*)-based numbering was landing on an
+                                already-taken value for that builder — most likely COUNT(*) WHERE
+                                ... AND EXTRACT(YEAR FROM created_at) = ... silently excluding a row
+                                whose created_at doesn't line up with its own job_ref's embedded
+                                year, undercounting and recomputing the same "next" number every
+                                retry. generate_job_ref() now derives the next number from the
+                                actual job_ref strings already in use by that builder (source of
+                                truth, immune to created_at inconsistency) instead of a separate
+                                row count, wrapped in a small bounded retry loop (up to 20 attempts)
+                                as a defensive backstop alongside the advisory lock from migration
+                                047. No change to the ref format.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
