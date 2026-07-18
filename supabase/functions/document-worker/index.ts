@@ -310,12 +310,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey)
-  // Functions live at <project>/functions/v1/<name> — this invocation's own
-  // URL already has that shape, so strip the last path segment to get the
-  // shared base rather than hardcoding the project ref.
-  const edgeFnBaseUrl = new URL(req.url)
-  edgeFnBaseUrl.pathname = edgeFnBaseUrl.pathname.replace(/\/document-worker\/?$/, '')
-  const edgeFnUrl = edgeFnBaseUrl.toString().replace(/\/$/, '')
+  // Root cause of a real production freeze: this used to derive the base
+  // URL by parsing req.url and stripping "/document-worker" off the end,
+  // on the assumption that req.url has the same
+  // "<project>/functions/v1/<name>" shape external callers use. It
+  // doesn't — Supabase's edge runtime hands the function a req.url that
+  // does NOT include the "/functions/v1/" prefix the gateway itself
+  // requires for routing, so every self-chained call
+  // (triggerNext/triggerClassification) was silently hitting a malformed
+  // URL and getting back 404 "requested path is invalid" — a rejected
+  // response, not a thrown exception, so the old code (which only caught
+  // network-level throws) never logged anything either. This is exactly
+  // why only the ORIGINAL WORKER_CONCURRENCY invocations (fired by
+  // app/api/intake/[fileId]/route.ts and the recovery cron, both of which
+  // already hardcode this same "${supabaseUrl}/functions/v1" shape) ever
+  // ran — nothing self-chained beyond them. Use the same hardcoded,
+  // proven-correct construction every other caller in this codebase
+  // already uses, instead of trying to reconstruct it from the request.
+  const edgeFnUrl = `${supabaseUrl}/functions/v1`
 
   // Random per-invocation id, not tied to any infrastructure identifier —
   // purely so structured logs and document_processing_jobs.locked_by can be
