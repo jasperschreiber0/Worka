@@ -79,30 +79,50 @@ function log(event: string, fields: Record<string, unknown> = {}) {
   console.log(JSON.stringify({ event, ts: new Date().toISOString(), ...fields }))
 }
 
-// ── EMERGENCY KILL SWITCH ────────────────────────────────────────────────
-// This route was found repeatedly re-triggering smooth-responder against a
-// batch that deterministically times out on every attempt (the 16 Alfred
-// St Woonona job — a 6-document batch including Kitchen Elevation.pdf),
-// burning real Anthropic spend on every cycle. Hard-disabled here as an
-// immediate, deploy-time stop independent of the pg_cron unschedule
-// (migration 041) and the GitHub Actions workflow, since this route is the
-// one thing every trigger path (pg_cron, GitHub Actions, manual curl) has
-// in common. Remove this block only after the underlying stuck batch/file
-// has been identified and resolved, and MAX_RECOVERY_ATTEMPTS has been
-// verified to actually stop a repeat.
-const RECOVERY_DISABLED = true
+// ── TWO INDEPENDENT KILL SWITCHES ────────────────────────────────────────
+// Split, deliberately, along the one boundary that matters for spend
+// safety: whether a step can ever call Anthropic.
+//
+//   DOCUMENT_RECOVERY_DISABLED gates steps 1-3 (reclaim_stale_document_
+//   jobs, recompute_stalled_batches, find_batches_with_claimable_work).
+//   None of these call Anthropic — they only reclaim/resume
+//   document-worker's own text-extraction queue. This is what actually
+//   unsticks a batch stuck in "Reading documents..." (a crashed extraction
+//   worker, or a lost triggerNext/triggerClassification fetch downstream
+//   of it never being resumed) — the everyday, harmless failure mode.
+//
+//   AI_RECOVERY_DISABLED gates steps 4-5 (find_stale_job_intake_locks +
+//   acquire_or_reclaim_job_intake_lock, find_stuck_files_needing_
+//   classification_retry) — both ultimately fire smooth-responder, which
+//   calls Anthropic. This is the axis the production incident lived on
+//   (a batch that timed out deterministically getting re-triggered here
+//   forever) and the axis the classification/retry-cap redesign (see
+//   CLAUDE.md "Anthropic failure classification and retry redesign") and
+//   its three follow-up correctness fixes (solo-retry reachability,
+//   chunked-file dedup, atomic counter) were built to close. Kept
+//   disabled here until that redesign has been observed under a real,
+//   manually-watched production run — see the "run one complete 7-document
+//   estimate with AI recovery disabled" verification step.
+//
+// Before this split, ONE flag gated both — meaning the emergency stop for
+// the AI-spend bug also silently disabled the everyday, zero-cost
+// document-extraction recovery, leaving ordinary stuck uploads with no
+// automatic fix either. That coupling is exactly what this split removes.
+const DOCUMENT_RECOVERY_DISABLED = false
+const AI_RECOVERY_DISABLED = true
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  if (RECOVERY_DISABLED) {
-    return NextResponse.json({ ran: false, skipped: 'recovery temporarily disabled — see RECOVERY_DISABLED in route.ts' })
-  }
-
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   const isRealMode = Boolean(supabaseUrl && supabaseKey)
 
   // ── Auth guard — fail closed in real mode, exactly like the other crons ──
+  // Runs unconditionally, before either kill switch is consulted — a prior
+  // version of this route short-circuited on RECOVERY_DISABLED before this
+  // check, so an unauthenticated request got a 200 instead of a 401 while
+  // recovery was off. Neither kill switch should ever change the auth
+  // contract of this endpoint.
   const cronSecret = process.env.CRON_SECRET
   if (isRealMode && !cronSecret) {
     return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
@@ -129,242 +149,251 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const supabase = createClient(supabaseUrl, supabaseKey)
 
-  // ── 1. Reclaim document_processing_jobs rows stuck at 'running' ─────────
-  // Sweeps every batch (no parent_job_id filter) — a worker crash mid-
-  // extraction leaves locked_at frozen; anything past the 3-minute
-  // staleness window is requeued (or permanently failed, past 3 attempts)
-  // by the exact same logic a genuine catchable failure gets.
-  try {
-    const { data, error } = await supabase.rpc('reclaim_stale_document_jobs')
-    if (error) throw error
-    summary.document_jobs_reclaimed = data?.length ?? 0
-    if (summary.document_jobs_reclaimed > 0) {
-      log('recovery_document_jobs_reclaimed', { count: summary.document_jobs_reclaimed, jobs: data })
+  if (DOCUMENT_RECOVERY_DISABLED) {
+    log('recovery_document_steps_skipped', { reason: 'DOCUMENT_RECOVERY_DISABLED' })
+  } else {
+    // ── 1. Reclaim document_processing_jobs rows stuck at 'running' ─────────
+    // Sweeps every batch (no parent_job_id filter) — a worker crash mid-
+    // extraction leaves locked_at frozen; anything past the 3-minute
+    // staleness window is requeued (or permanently failed, past 3 attempts)
+    // by the exact same logic a genuine catchable failure gets.
+    try {
+      const { data, error } = await supabase.rpc('reclaim_stale_document_jobs')
+      if (error) throw error
+      summary.document_jobs_reclaimed = data?.length ?? 0
+      if (summary.document_jobs_reclaimed > 0) {
+        log('recovery_document_jobs_reclaimed', { count: summary.document_jobs_reclaimed, jobs: data })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      summary.errors.push({ stage: 'reclaim_stale_document_jobs', message })
+      log('recovery_stage_failed', { stage: 'reclaim_stale_document_jobs', error: message })
     }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    summary.errors.push({ stage: 'reclaim_stale_document_jobs', message })
-    log('recovery_stage_failed', { stage: 'reclaim_stale_document_jobs', error: message })
-  }
 
-  // ── 2. Defense-in-depth: recompute any batch stuck 'running'/'pending'
-  //      with no non-terminal children (should be a no-op in steady state).
-  try {
-    const { data, error } = await supabase.rpc('recompute_stalled_batches')
-    if (error) throw error
-    summary.stalled_batches_recomputed = data?.length ?? 0
-    if (summary.stalled_batches_recomputed > 0) {
-      log('recovery_stalled_batches_recomputed', { count: summary.stalled_batches_recomputed, batches: data })
+    // ── 2. Defense-in-depth: recompute any batch stuck 'running'/'pending'
+    //      with no non-terminal children (should be a no-op in steady state).
+    try {
+      const { data, error } = await supabase.rpc('recompute_stalled_batches')
+      if (error) throw error
+      summary.stalled_batches_recomputed = data?.length ?? 0
+      if (summary.stalled_batches_recomputed > 0) {
+        log('recovery_stalled_batches_recomputed', { count: summary.stalled_batches_recomputed, batches: data })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      summary.errors.push({ stage: 'recompute_stalled_batches', message })
+      log('recovery_stage_failed', { stage: 'recompute_stalled_batches', error: message })
     }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    summary.errors.push({ stage: 'recompute_stalled_batches', message })
-    log('recovery_stage_failed', { stage: 'recompute_stalled_batches', error: message })
-  }
 
-  // ── 3. Resume batches whose worker chain has stopped self-sustaining ────
-  // reclaim above may have just requeued rows; equally, a batch's ONE
-  // worker (single-document upload) may have died before ever calling
-  // claim_next_document_job a second time, so nothing has swept it yet
-  // either — find_batches_with_claimable_work catches both. Firing one
-  // fresh document-worker invocation per batch is enough: triggerNext
-  // (document-worker/index.ts) keeps the chain going from there.
-  try {
-    const { data, error } = await supabase.rpc('find_batches_with_claimable_work')
-    if (error) throw error
-    const batches = (data ?? []) as Array<{ parent_job_id: string; job_id: string; builder_id: string; pending_count: number }>
-    const toResume = batches.slice(0, MAX_BATCHES_PER_RUN)
-    if (batches.length > MAX_BATCHES_PER_RUN) {
-      log('recovery_batch_cap_hit', { candidates: batches.length, capped_to: MAX_BATCHES_PER_RUN })
-    }
-    const results = await Promise.allSettled(
-      toResume.map((b) =>
-        fetch(`${supabaseUrl}/functions/v1/document-worker`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-          body: JSON.stringify({ parent_job_id: b.parent_job_id, builder_id: b.builder_id }),
-        })
+    // ── 3. Resume batches whose worker chain has stopped self-sustaining ────
+    // reclaim above may have just requeued rows; equally, a batch's ONE
+    // worker (single-document upload) may have died before ever calling
+    // claim_next_document_job a second time, so nothing has swept it yet
+    // either — find_batches_with_claimable_work catches both. Firing one
+    // fresh document-worker invocation per batch is enough: triggerNext
+    // (document-worker/index.ts) keeps the chain going from there. Never
+    // calls smooth-responder — no Anthropic exposure.
+    try {
+      const { data, error } = await supabase.rpc('find_batches_with_claimable_work')
+      if (error) throw error
+      const batches = (data ?? []) as Array<{ parent_job_id: string; job_id: string; builder_id: string; pending_count: number }>
+      const toResume = batches.slice(0, MAX_BATCHES_PER_RUN)
+      if (batches.length > MAX_BATCHES_PER_RUN) {
+        log('recovery_batch_cap_hit', { candidates: batches.length, capped_to: MAX_BATCHES_PER_RUN })
+      }
+      const results = await Promise.allSettled(
+        toResume.map((b) =>
+          fetch(`${supabaseUrl}/functions/v1/document-worker`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+            body: JSON.stringify({ parent_job_id: b.parent_job_id, builder_id: b.builder_id }),
+          })
+        )
       )
-    )
-    summary.batches_resumed = results.filter((r) => r.status === 'fulfilled' && (r.value as Response).ok).length
-    if (toResume.length > 0) {
-      log('recovery_batches_resumed', {
-        attempted: toResume.length, succeeded: summary.batches_resumed,
-        parent_job_ids: toResume.map((b) => b.parent_job_id),
-      })
+      summary.batches_resumed = results.filter((r) => r.status === 'fulfilled' && (r.value as Response).ok).length
+      if (toResume.length > 0) {
+        log('recovery_batches_resumed', {
+          attempted: toResume.length, succeeded: summary.batches_resumed,
+          parent_job_ids: toResume.map((b) => b.parent_job_id),
+        })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      summary.errors.push({ stage: 'find_batches_with_claimable_work', message })
+      log('recovery_stage_failed', { stage: 'find_batches_with_claimable_work', error: message })
     }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    summary.errors.push({ stage: 'find_batches_with_claimable_work', message })
-    log('recovery_stage_failed', { stage: 'find_batches_with_claimable_work', error: message })
   }
 
-  // ── 4. Reclaim stale job_intake_locks and resume the pipeline itself ────
-  // A dead smooth-responder run (its own EdgeRuntime.waitUntil killed
-  // externally) leaves job_intake_locks held with a frozen last_progress_at
-  // and the file stuck at intake_status='processing' — indefinitely, since
-  // the only prior recovery for this (tryAcquireJobLock) only fires when a
-  // NEW upload arrives for the same job. acquire_or_reclaim_job_intake_lock
-  // re-verifies staleness atomically at the moment of reclaim (not just at
-  // this read), so a lock that made real progress between the read below
-  // and the RPC call is correctly left alone.
-  try {
-    const { data, error } = await supabase.rpc('find_stale_job_intake_locks')
-    if (error) throw error
-    const candidates = (data ?? []) as Array<{ job_id: string; file_id: string }>
-    const toReclaim = candidates.slice(0, MAX_LOCKS_PER_RUN)
-    if (candidates.length > MAX_LOCKS_PER_RUN) {
-      log('recovery_lock_cap_hit', { candidates: candidates.length, capped_to: MAX_LOCKS_PER_RUN })
-    }
-
-    for (const candidate of toReclaim) {
+  if (AI_RECOVERY_DISABLED) {
+    log('recovery_ai_steps_skipped', { reason: 'AI_RECOVERY_DISABLED' })
+  } else {
+      // ── 4. Reclaim stale job_intake_locks and resume the pipeline itself ────
+      // A dead smooth-responder run (its own EdgeRuntime.waitUntil killed
+      // externally) leaves job_intake_locks held with a frozen last_progress_at
+      // and the file stuck at intake_status='processing' — indefinitely, since
+      // the only prior recovery for this (tryAcquireJobLock) only fires when a
+      // NEW upload arrives for the same job. acquire_or_reclaim_job_intake_lock
+      // re-verifies staleness atomically at the moment of reclaim (not just at
+      // this read), so a lock that made real progress between the read below
+      // and the RPC call is correctly left alone.
       try {
-        const { data: reclaimData, error: reclaimErr } = await supabase.rpc('acquire_or_reclaim_job_intake_lock', {
-          p_job_id: candidate.job_id,
-          p_file_id: candidate.file_id,
-        })
-        if (reclaimErr) throw reclaimErr
-        const reclaimed = reclaimData?.[0]
-        if (!reclaimed?.acquired) {
-          // Raced with the run making progress, or another recovery pass —
-          // correctly left alone.
-          continue
+        const { data, error } = await supabase.rpc('find_stale_job_intake_locks')
+        if (error) throw error
+        const candidates = (data ?? []) as Array<{ job_id: string; file_id: string }>
+        const toReclaim = candidates.slice(0, MAX_LOCKS_PER_RUN)
+        if (candidates.length > MAX_LOCKS_PER_RUN) {
+          log('recovery_lock_cap_hit', { candidates: candidates.length, capped_to: MAX_LOCKS_PER_RUN })
         }
 
-        // Already terminal? Nothing to resume — the lock was just leaked
-        // past the pipeline's own release (shouldn't happen given its
-        // try/finally, but a stuck lock alone is harmless to release).
-        const { data: fileRow } = await supabase
-          .from('files')
-          .select('id, intake_status, builder_id, processing_batch_id, intake_recovery_attempts')
-          .eq('id', candidate.file_id)
-          .single()
-        if (!fileRow || ['extracted', 'failed', 'needs_info'].includes(fileRow.intake_status)) {
-          await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
-          continue
+        for (const candidate of toReclaim) {
+          try {
+            const { data: reclaimData, error: reclaimErr } = await supabase.rpc('acquire_or_reclaim_job_intake_lock', {
+              p_job_id: candidate.job_id,
+              p_file_id: candidate.file_id,
+            })
+            if (reclaimErr) throw reclaimErr
+            const reclaimed = reclaimData?.[0]
+            if (!reclaimed?.acquired) {
+              // Raced with the run making progress, or another recovery pass —
+              // correctly left alone.
+              continue
+            }
+
+            // Already terminal? Nothing to resume — the lock was just leaked
+            // past the pipeline's own release (shouldn't happen given its
+            // try/finally, but a stuck lock alone is harmless to release).
+            const { data: fileRow } = await supabase
+              .from('files')
+              .select('id, intake_status, builder_id, processing_batch_id, intake_recovery_attempts')
+              .eq('id', candidate.file_id)
+              .single()
+            if (!fileRow || ['extracted', 'failed', 'needs_info'].includes(fileRow.intake_status)) {
+              await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
+              continue
+            }
+
+            // Retry cap: a lock that keeps going stale means the pipeline run
+            // it's protecting keeps dying (or failing) every single time — most
+            // often a transient outage (e.g. Anthropic credits) that recovery
+            // cannot fix by re-running the same expensive AI call again. Stop
+            // after MAX_RECOVERY_ATTEMPTS rather than retrying forever.
+            if (fileRow.intake_recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
+              await supabase
+                .from('files')
+                .update({
+                  intake_status: 'failed',
+                  failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while reclaiming a stale processing lock — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
+                })
+                .eq('id', candidate.file_id)
+              await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
+              summary.files_permanently_failed++
+              log('recovery_retry_cap_reached', {
+                stage: 'stale_lock_reclaim', job_id: candidate.job_id, file_id: candidate.file_id,
+                attempts: fileRow.intake_recovery_attempts,
+              })
+              continue
+            }
+            await supabase
+              .from('files')
+              .update({ intake_recovery_attempts: fileRow.intake_recovery_attempts + 1 })
+              .eq('id', candidate.file_id)
+
+            summary.job_locks_reclaimed++
+            log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id, recovery_attempts: fileRow.intake_recovery_attempts + 1 })
+
+            // Prefer the queue-model resume path (re-reads each document's
+            // already-persisted extraction result — no re-download/re-parse of
+            // the CPU-bound step) when this file went through document-worker;
+            // fall back to the legacy direct-invocation shape otherwise.
+            const triggerBody = fileRow.processing_batch_id
+              ? { parent_job_id: fileRow.processing_batch_id }
+              : { file_id: fileRow.id, job_id: candidate.job_id, builder_id: fileRow.builder_id, resume: false }
+
+            await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              body: JSON.stringify(triggerBody),
+            }).catch((fetchErr) => {
+              log('recovery_smooth_responder_trigger_failed', { job_id: candidate.job_id, error: String(fetchErr) })
+            })
+          } catch (innerErr) {
+            const message = innerErr instanceof Error ? innerErr.message : String(innerErr)
+            summary.errors.push({ stage: `reclaim_job_lock:${candidate.job_id}`, message })
+            log('recovery_stage_failed', { stage: 'reclaim_job_lock', job_id: candidate.job_id, error: message })
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        summary.errors.push({ stage: 'find_stale_job_intake_locks', message })
+        log('recovery_stage_failed', { stage: 'find_stale_job_intake_locks', error: message })
+      }
+
+      // ── 5. Retry classification for batches that finished but never actually
+      //      reached smooth-responder (triggerClassification's fetch was lost).
+      try {
+        const { data, error } = await supabase.rpc('find_stuck_files_needing_classification_retry')
+        if (error) throw error
+        const stuckFiles = (data ?? []) as Array<{ file_id: string; job_id: string; builder_id: string; processing_batch_id: string }>
+        const toRetry = stuckFiles.slice(0, MAX_STUCK_FILES_PER_RUN)
+        if (stuckFiles.length > MAX_STUCK_FILES_PER_RUN) {
+          log('recovery_stuck_files_cap_hit', { candidates: stuckFiles.length, capped_to: MAX_STUCK_FILES_PER_RUN })
         }
 
-        // Retry cap: a lock that keeps going stale means the pipeline run
-        // it's protecting keeps dying (or failing) every single time — most
-        // often a transient outage (e.g. Anthropic credits) that recovery
-        // cannot fix by re-running the same expensive AI call again. Stop
-        // after MAX_RECOVERY_ATTEMPTS rather than retrying forever.
-        if (fileRow.intake_recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
+        for (const f of toRetry) {
+          // acquire_or_reclaim_job_intake_lock also guards this path — if a
+          // fresh upload or a step 4 reclaim just started a run for this same
+          // job, this simply fails to acquire and is skipped, never double-fires.
+          const { data: lockData, error: lockErr } = await supabase.rpc('acquire_or_reclaim_job_intake_lock', {
+            p_job_id: f.job_id,
+            p_file_id: f.file_id,
+          })
+          if (lockErr || !lockData?.[0]?.acquired) continue
+
+          const { data: stuckFileRow } = await supabase
+            .from('files')
+            .select('intake_recovery_attempts')
+            .eq('id', f.file_id)
+            .single()
+          const attempts = stuckFileRow?.intake_recovery_attempts ?? 0
+
+          // Same retry cap as step 4 — a file that keeps needing a
+          // classification retry is failing every time it's re-triggered, not
+          // recovering from a one-off lost network call.
+          if (attempts >= MAX_RECOVERY_ATTEMPTS) {
+            await supabase
+              .from('files')
+              .update({
+                intake_status: 'failed',
+                failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
+              })
+              .eq('id', f.file_id)
+            await supabase.from('job_intake_locks').delete().eq('job_id', f.job_id)
+            summary.files_permanently_failed++
+            log('recovery_retry_cap_reached', {
+              stage: 'stuck_classification_retry', job_id: f.job_id, file_id: f.file_id, attempts,
+            })
+            continue
+          }
           await supabase
             .from('files')
-            .update({
-              intake_status: 'failed',
-              failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while reclaiming a stale processing lock — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
-            })
-            .eq('id', candidate.file_id)
-          await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
-          summary.files_permanently_failed++
-          log('recovery_retry_cap_reached', {
-            stage: 'stale_lock_reclaim', job_id: candidate.job_id, file_id: candidate.file_id,
-            attempts: fileRow.intake_recovery_attempts,
+            .update({ intake_recovery_attempts: attempts + 1 })
+            .eq('id', f.file_id)
+
+          summary.stuck_files_retried++
+          log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id, recovery_attempts: attempts + 1 })
+          await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+            body: JSON.stringify({ parent_job_id: f.processing_batch_id }),
+          }).catch((fetchErr) => {
+            log('recovery_smooth_responder_trigger_failed', { job_id: f.job_id, error: String(fetchErr) })
           })
-          continue
         }
-        await supabase
-          .from('files')
-          .update({ intake_recovery_attempts: fileRow.intake_recovery_attempts + 1 })
-          .eq('id', candidate.file_id)
-
-        summary.job_locks_reclaimed++
-        log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id, recovery_attempts: fileRow.intake_recovery_attempts + 1 })
-
-        // Prefer the queue-model resume path (re-reads each document's
-        // already-persisted extraction result — no re-download/re-parse of
-        // the CPU-bound step) when this file went through document-worker;
-        // fall back to the legacy direct-invocation shape otherwise.
-        const triggerBody = fileRow.processing_batch_id
-          ? { parent_job_id: fileRow.processing_batch_id }
-          : { file_id: fileRow.id, job_id: candidate.job_id, builder_id: fileRow.builder_id, resume: false }
-
-        await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-          body: JSON.stringify(triggerBody),
-        }).catch((fetchErr) => {
-          log('recovery_smooth_responder_trigger_failed', { job_id: candidate.job_id, error: String(fetchErr) })
-        })
-      } catch (innerErr) {
-        const message = innerErr instanceof Error ? innerErr.message : String(innerErr)
-        summary.errors.push({ stage: `reclaim_job_lock:${candidate.job_id}`, message })
-        log('recovery_stage_failed', { stage: 'reclaim_job_lock', job_id: candidate.job_id, error: message })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        summary.errors.push({ stage: 'find_stuck_files_needing_classification_retry', message })
+        log('recovery_stage_failed', { stage: 'find_stuck_files_needing_classification_retry', error: message })
       }
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    summary.errors.push({ stage: 'find_stale_job_intake_locks', message })
-    log('recovery_stage_failed', { stage: 'find_stale_job_intake_locks', error: message })
-  }
-
-  // ── 5. Retry classification for batches that finished but never actually
-  //      reached smooth-responder (triggerClassification's fetch was lost).
-  try {
-    const { data, error } = await supabase.rpc('find_stuck_files_needing_classification_retry')
-    if (error) throw error
-    const stuckFiles = (data ?? []) as Array<{ file_id: string; job_id: string; builder_id: string; processing_batch_id: string }>
-    const toRetry = stuckFiles.slice(0, MAX_STUCK_FILES_PER_RUN)
-    if (stuckFiles.length > MAX_STUCK_FILES_PER_RUN) {
-      log('recovery_stuck_files_cap_hit', { candidates: stuckFiles.length, capped_to: MAX_STUCK_FILES_PER_RUN })
-    }
-
-    for (const f of toRetry) {
-      // acquire_or_reclaim_job_intake_lock also guards this path — if a
-      // fresh upload or a step 4 reclaim just started a run for this same
-      // job, this simply fails to acquire and is skipped, never double-fires.
-      const { data: lockData, error: lockErr } = await supabase.rpc('acquire_or_reclaim_job_intake_lock', {
-        p_job_id: f.job_id,
-        p_file_id: f.file_id,
-      })
-      if (lockErr || !lockData?.[0]?.acquired) continue
-
-      const { data: stuckFileRow } = await supabase
-        .from('files')
-        .select('intake_recovery_attempts')
-        .eq('id', f.file_id)
-        .single()
-      const attempts = stuckFileRow?.intake_recovery_attempts ?? 0
-
-      // Same retry cap as step 4 — a file that keeps needing a
-      // classification retry is failing every time it's re-triggered, not
-      // recovering from a one-off lost network call.
-      if (attempts >= MAX_RECOVERY_ATTEMPTS) {
-        await supabase
-          .from('files')
-          .update({
-            intake_status: 'failed',
-            failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
-          })
-          .eq('id', f.file_id)
-        await supabase.from('job_intake_locks').delete().eq('job_id', f.job_id)
-        summary.files_permanently_failed++
-        log('recovery_retry_cap_reached', {
-          stage: 'stuck_classification_retry', job_id: f.job_id, file_id: f.file_id, attempts,
-        })
-        continue
-      }
-      await supabase
-        .from('files')
-        .update({ intake_recovery_attempts: attempts + 1 })
-        .eq('id', f.file_id)
-
-      summary.stuck_files_retried++
-      log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id, recovery_attempts: attempts + 1 })
-      await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-        body: JSON.stringify({ parent_job_id: f.processing_batch_id }),
-      }).catch((fetchErr) => {
-        log('recovery_smooth_responder_trigger_failed', { job_id: f.job_id, error: String(fetchErr) })
-      })
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    summary.errors.push({ stage: 'find_stuck_files_needing_classification_retry', message })
-    log('recovery_stage_failed', { stage: 'find_stuck_files_needing_classification_retry', error: message })
   }
 
   const durationMs = Date.now() - runStartedAt
@@ -387,7 +416,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (error) log('recovery_audit_log_write_failed', { error: error.message })
   })
 
-  log('recovery_run_complete', { duration_ms: durationMs, ...summary })
+  log('recovery_run_complete', {
+    duration_ms: durationMs,
+    document_recovery_enabled: !DOCUMENT_RECOVERY_DISABLED,
+    ai_recovery_enabled: !AI_RECOVERY_DISABLED,
+    ...summary,
+  })
 
-  return NextResponse.json({ ran: true, duration_ms: durationMs, ...summary })
+  return NextResponse.json({
+    ran: true,
+    duration_ms: durationMs,
+    document_recovery_enabled: !DOCUMENT_RECOVERY_DISABLED,
+    ai_recovery_enabled: !AI_RECOVERY_DISABLED,
+    ...summary,
+  })
 }

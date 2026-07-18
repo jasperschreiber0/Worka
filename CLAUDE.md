@@ -599,6 +599,35 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 "Anthropic failure classification and retry redesign" below for the
                                 full fix — these two columns are the cross-invocation half of it (the
                                 per-call half lives entirely in pipeline-logic.ts, no schema needed).
+043_atomic_ai_failure_counter.sql — record_ai_failure(uuid, text, text, integer) RPC, replacing
+                                a JS-side SELECT-then-UPDATE in recordAiFailure (smooth-responder/
+                                index.ts) with a single atomic function (SELECT ... FOR UPDATE),
+                                following the same pattern as retry_or_fail_document_job (migration
+                                034). Production readiness review finding: two overlapping
+                                smooth-responder invocations for the same job (reclaiming a stale
+                                job_intake_lock does not kill the physical old invocation still
+                                running server-side) could race the old non-atomic counter and lose
+                                an increment, undermining the exact safety cap it exists to provide.
+                                Paired with two pipeline-logic.ts fixes from the same review: (1)
+                                maxConsecutiveOccurrences replaces shouldStopRetrying's old
+                                `!isRetryableClassification` check, which stopped an
+                                application_timeout/context_window_exceeded file on its very FIRST
+                                occurrence — making the solo-batch-retry path unreachable for
+                                exactly the classification the original incident exhibited; now
+                                those two classifications get one more attempt (at a genuinely
+                                smaller, solo size) before stopping on a second identical failure.
+                                (2) dedupeRealFileIds, so a page-chunked PDF's multiple batch
+                                entries (`${realId}#pStart-End`) record ONE occurrence per real
+                                Claude-call failure, not one per chunk. See "Anthropic failure
+                                classification and retry redesign" below for the full writeup.
+044_resume_document_recovery_cron.sql — re-schedules the pg_cron job unscheduled by migration
+                                041, now that GET /api/cron/intake-recovery splits recovery into two
+                                independently-gated halves (DOCUMENT_RECOVERY_DISABLED for steps
+                                1-3, AI_RECOVERY_DISABLED for steps 4-5 — see "Independent Intake
+                                Recovery Service" below). Safe to re-schedule on its own: steps 1-3
+                                never call Anthropic, and AI_RECOVERY_DISABLED stays true in the
+                                route regardless of how often the cron fires, so re-enabling the
+                                schedule cannot by itself reintroduce the spend incident.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -766,8 +795,9 @@ a billing-halt classification; now halts the whole run immediately on one. (3)
 `GET /api/cron/intake-recovery`'s stale-lock reclaim and stuck-classification retry (migration 037)
 — already capped per-run (`MAX_BATCHES_PER_RUN`/`MAX_LOCKS_PER_RUN`/`MAX_STUCK_FILES_PER_RUN`) and,
 since the incident this followed, per-file across runs (`files.intake_recovery_attempts`, migration
-040) — see "Independent Intake Recovery Service" above; currently disabled entirely
-(`RECOVERY_DISABLED`, migration 041) pending verification of this redesign. (4)
+040) — see "Independent Intake Recovery Service" above; the AI-calling half of this (steps 4-5)
+remains disabled via `AI_RECOVERY_DISABLED` pending a manually-observed production run of this
+redesign (the document-recovery half, steps 1-3, was restored by migration 044 — see below). (4)
 `document-worker`'s `retry_or_fail_document_job` (migration 034) — unaffected; that axis is PDF
 extraction retries, not Anthropic calls, and was never implicated in this incident.
 
@@ -1006,6 +1036,23 @@ recovery cron's own worst-case detection+action latency (3 min staleness window 
 the next scheduled run) — so a connected client doesn't show a false "timed out" for a run recovery
 was seconds from fixing on its own. Recovery itself never depends on this value; it only controls how
 long a *connected* client waits before surfacing an error.
+
+**Split into two independently-gated halves (as of the `AI_RECOVERY_DISABLED` incident and its
+follow-up).** `GET /api/cron/intake-recovery` (route.ts) has two module-level constants, not one:
+`DOCUMENT_RECOVERY_DISABLED` (steps 1-3: `reclaim_stale_document_jobs`, `recompute_stalled_batches`,
+`find_batches_with_claimable_work` — none call Anthropic, they only reclaim/resume document-worker's
+text-extraction queue) and `AI_RECOVERY_DISABLED` (steps 4-5: `find_stale_job_intake_locks` +
+`acquire_or_reclaim_job_intake_lock`, `find_stuck_files_needing_classification_retry` — both can fire
+`smooth-responder`, which calls Anthropic). Before this split, one `RECOVERY_DISABLED` flag gated
+both, so the emergency stop for the AI-spend incident also silently disabled the everyday,
+zero-cost document-extraction recovery — an ordinary stuck upload (a crashed extraction worker, or
+a lost `triggerNext`/`triggerClassification` fetch) had no automatic fix either while that flag was
+on. Current state: `DOCUMENT_RECOVERY_DISABLED = false` (restored by migration 044, safe — this
+half has never been implicated in any incident), `AI_RECOVERY_DISABLED = true` (stays off pending a
+manually-observed production run of the classification/retry-cap redesign — see "Anthropic failure
+classification and retry redesign" above). The pg_cron schedule firing does not by itself imply
+Anthropic calls can happen; `AI_RECOVERY_DISABLED` is checked inside the route regardless of how the
+route was invoked (pg_cron, GitHub Actions, or a manual curl).
 
 **Operational considerations:**
 - **Actual trigger, live today**: `supabase/migrations/038_intake_recovery_pg_cron.sql` — `pg_cron`
