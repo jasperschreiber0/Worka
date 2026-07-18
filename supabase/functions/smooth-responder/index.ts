@@ -781,6 +781,36 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
   const startedAt = Date.now()
 
+  // ── Wall-clock safety ceiling ─────────────────────────────────────────
+  // Supabase Edge Functions have a real, external isolate wall-clock
+  // lifetime (~400s) — separate from the 2000ms CPU-time budget
+  // ExtractionBudget guards elsewhere in this pipeline. Confirmed in
+  // production: two back-to-back Stage 1/2 batches each hit their own
+  // AbortController ceiling (~150s apart), leaving ~300s already spent
+  // before Stage 3 ever fired — Stage 3 then fired anyway, and the
+  // isolate was killed externally (a bare "shutdown" log, no
+  // claude_call_complete/attempt_failed for that call) before its own
+  // 220s timeout could ever resolve cleanly. Unlike a clean
+  // AbortController timeout, an external platform kill skips this
+  // pipeline's try/finally entirely — job_intake_locks leaks until
+  // staleness reclaim (minutes), instead of being releasable immediately.
+  // Checked before every remaining Claude call in this invocation; if
+  // there isn't enough safe room left for one, the run stops itself
+  // cleanly instead — nothing is marked permanently failed (this is a
+  // scheduling/capacity condition, not a verdict on any file, same
+  // philosophy as haltForBilling below), so the lock releases via the
+  // existing finally and the very next SSE reconnect can retrigger with a
+  // full, fresh wall-clock budget rather than waiting on a platform kill
+  // and the slower staleness-based recovery path.
+  const WALL_CLOCK_SAFETY_MS = 340_000 // 60s margin under the real ~400s ceiling
+  const hasWallClockBudget = (neededMs: number) => (Date.now() - startedAt) + neededMs <= WALL_CLOCK_SAFETY_MS
+  const bailForWallClockBudget = (stage: string, neededMs: number) => {
+    console.log(JSON.stringify({
+      event: 'wall_clock_budget_exhausted', stage, needed_ms: neededMs,
+      elapsed_ms: Date.now() - startedAt, job_id: jobId, file_id: fileId,
+    }))
+  }
+
   try {
     await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId)
     await setStage('reading')
@@ -1056,6 +1086,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           .map((bf) => blockById.get(bf.fileId))
           .filter((f): f is LoadedFile => Boolean(f))
 
+        // A solo batch (forced by a prior AI failure — see forcedSoloInput
+        // above) gets the wider 220s budget: confirmed in production that a
+        // genuinely large/complex document (a full structural drawing set)
+        // can still exceed the standard 150s even completely alone, and
+        // retrying it identically at the same 150s ceiling is guaranteed to
+        // reproduce the identical timeout. A bundled (non-solo) batch stays
+        // at 150s — MAX_BATCHES already bounds how many of these one
+        // invocation can attempt, and widening every batch risks the same
+        // wall-clock exhaustion this budget guard exists to prevent.
+        const batchTimeoutMs = batchFiles.length === 1 ? 220_000 : 150_000
+        if (!hasWallClockBudget(batchTimeoutMs)) {
+          bailForWallClockBudget('classifying_documents', batchTimeoutMs)
+          break
+        }
+
         await supabase.from('files').update({ intake_batch_index: batchIdx + 1 }).eq('id', fileId)
         await touchLockProgress()
         await setStage('classifying_documents')
@@ -1099,7 +1144,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // plus supporting documents (confirmed via the stop_reason=max_tokens
           // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
           // 16000 for this same model/API rather than guessing at another cap.
-          docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000)
+          docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
         } catch (err) {
           // A single batch's Claude call failing (a transient API error, a
           // truncated/malformed response) used to abort the ENTIRE run via
@@ -1318,6 +1363,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     const scopeUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${TRADE_CATEGORIES.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.` }]
 
+    if (!hasWallClockBudget(220_000)) {
+      bailForWallClockBudget('reasoning_scope', 220_000)
+      return
+    }
+
     const scopeStartedAt = Date.now()
     let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
     try {
@@ -1421,6 +1471,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     const estimateSystemPrompt = `You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project facts and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Produce a complete takeoff across all in-scope trades (typically 80-250 line items for a full residential project — fewer for a small job, do not pad to hit a number). Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured (derived from a dimension/schedule), pc_allowance (prime cost item), or provisional_sum (scope TBD by others). If the source documents are themselves a priced estimate/BOQ, extract the printed unit rate and line total into document_rate/document_total as COST figures (exclude margin and GST) — otherwise leave them null so the platform's rate engine can price the line.`
 
     const estimateUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
+
+    if (!hasWallClockBudget(150_000)) {
+      bailForWallClockBudget('generating_estimate', 150_000)
+      return
+    }
 
     const estimateStartedAt = Date.now()
     let estimateResult: { line_items?: unknown[] } | null = null
