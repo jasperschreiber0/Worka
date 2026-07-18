@@ -517,6 +517,30 @@ async function callTool(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
   const startedAt = Date.now()
+
+  // TEMPORARY DIAGNOSTIC LOGGING — investigating a Stage 3 (Scope Reasoning)
+  // 400 invalid_request_error on a real production upload. Added here, in
+  // the one shared call site every stage uses, rather than duplicated per
+  // stage, so the next failure (any stage) captures the same fields without
+  // guessing which stage will fail next. Purely additive — no request
+  // parameter below is changed by this logging.
+  const textBlocks = content.filter((b) => b && b.type === 'text') as Array<{ text: string }>
+  const nonTextBlockTypes = content.filter((b) => b && b.type !== 'text').map((b) => b.type)
+  const userContentChars = textBlocks.reduce((sum, b) => sum + (b.text?.length ?? 0), 0)
+  const systemChars = system.length
+  // Rough, explicitly-approximate estimate (chars/4 is a common English-text
+  // heuristic) — good enough to distinguish "obviously fine" from "possibly
+  // near a limit" without adding a tokenizer dependency for temporary logging.
+  const approxInputTokens = Math.ceil((systemChars + userContentChars) / 4)
+  console.log(JSON.stringify({
+    event: 'claude_call_request', tool: tool.name, model: 'claude-sonnet-4-6',
+    max_tokens: maxTokens, tool_choice: tool.name,
+    system_chars: systemChars, user_text_chars: userContentChars,
+    non_text_block_types: nonTextBlockTypes, non_text_block_count: nonTextBlockTypes.length,
+    approx_input_tokens: approxInputTokens,
+    tool_schema: tool.input_schema,
+  }))
+
   const response = await withTimeoutAndRetry(
     (signal) => anthropic.messages.create(
       {
@@ -533,11 +557,24 @@ async function callTool(
       timeoutMs: 150_000,
       maxRetries: 1,
       label: tool.name,
-      onAttemptFailed: (info) => console.log(JSON.stringify({
-        event: 'claude_call_attempt_failed', tool: tool.name, attempt: info.attempt,
-        duration_ms: info.durationMs, retryable: info.retryable,
-        error: info.error instanceof Error ? info.error.message : String(info.error),
-      })),
+      onAttemptFailed: (info) => {
+        // TEMPORARY DIAGNOSTIC LOGGING — capture the Anthropic SDK error's
+        // own structured fields (status + parsed error body), not just
+        // `.message`. The SDK's APIError already puts the full JSON body
+        // into `.message` as text (that's what's been landing in
+        // files.failure_reason, truncated to 500 chars there) — logging
+        // `.status`/`.error` explicitly here means the next failure doesn't
+        // depend on that 500-char cap or on re-parsing a string to find out
+        // which field Anthropic actually rejected.
+        const err = info.error as { status?: number; error?: unknown; message?: string } | undefined
+        console.log(JSON.stringify({
+          event: 'claude_call_attempt_failed', tool: tool.name, attempt: info.attempt,
+          duration_ms: info.durationMs, retryable: info.retryable,
+          anthropic_status: err?.status ?? null,
+          anthropic_error_body: err?.error ?? null,
+          error: info.error instanceof Error ? info.error.message : String(info.error),
+        }))
+      },
     }
   )
   console.log(JSON.stringify({
