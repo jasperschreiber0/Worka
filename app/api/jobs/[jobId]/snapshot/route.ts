@@ -145,6 +145,27 @@ export async function GET(
     .eq('job_id', jobId)
     .order('created_at', { ascending: false })
 
+  // Open blocking clarifying questions — the estimating engine paused here
+  // (Stage 4/5) and won't resume until these are answered. Previously only
+  // ever visible inside the live upload SSE session; surfaced here so a
+  // builder who closed that panel isn't stuck with no way back to it.
+  const { data: openQuestions } = await sb
+    .from('clarifying_questions')
+    .select('id, question, reason')
+    .eq('job_id', jobId)
+    .eq('blocking', true)
+    .eq('status', 'open')
+    .order('created_at', { ascending: true })
+
+  const { data: pausedFile } = await sb
+    .from('files')
+    .select('id')
+    .eq('job_id', jobId)
+    .eq('intake_status', 'needs_info')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
   // Last activity: most recent of comms, files, or job.updated_at
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const timestamps = [job.updated_at, ...(comms ?? []).map((c: any) => c.timestamp), ...(files ?? []).map((f: any) => f.created_at)].filter(Boolean)
@@ -171,6 +192,11 @@ export async function GET(
 
   if (quote && unresolvedCount > 0) {
     risks.push({ level: 'high', message: `${unresolvedCount} assumption${unresolvedCount > 1 ? 's' : ''} unresolved — quote cannot advance to pending review.` })
+  }
+
+  if ((openQuestions ?? []).length > 0) {
+    const n = (openQuestions ?? []).length
+    risks.push({ level: 'high', message: `${n} question${n > 1 ? 's' : ''} need your answer before the estimate can be generated.` })
   }
 
   const typedFiles = (files ?? []) as Array<{ intake_status: string }>
@@ -274,6 +300,13 @@ export async function GET(
     risks,
     job_health: deriveJobHealth(risks),
     milestones_count: milestonesCount ?? 0,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    pending_clarifying_questions: (openQuestions ?? []).map((q: any) => ({
+      id: q.id,
+      question: q.question,
+      reason: q.reason,
+    })),
+    clarify_file_id: pausedFile?.id ?? null,
   }
 
   return NextResponse.json({ snapshot })

@@ -120,6 +120,15 @@ export interface JobSnapshot {
   // Count of job_milestones rows — real signal for the "Work Scheduled"
   // timeline step (milestones are generated on job activation).
   milestones_count: number
+  // Open blocking clarifying_questions (Stage 4/5) — the estimating engine
+  // paused here and won't resume until these are answered. Previously only
+  // ever surfaced inside the live upload SSE session (IntakeProgress); a
+  // builder who closed that panel or reloaded the page had no way back to
+  // it. clarify_file_id is whatever files.id the /clarify route needs in its
+  // URL — it re-derives the real paused file itself, so any file belonging
+  // to the job works.
+  pending_clarifying_questions: Array<{ id: string; question: string; reason: string }>
+  clarify_file_id: string | null
 }
 
 export interface TimelineStep {
@@ -291,6 +300,8 @@ const JOB_1_FITZROY: Omit<JobSnapshot, 'job_health'> = {
     proof_events: [],
   },
   milestones_count: 8,
+  pending_clarifying_questions: [],
+  clarify_file_id: null,
   risks: [
     { level: 'high', message: '2 variations pending approval.' },
     { level: 'high', message: 'Invoice for $28,000 overdue 3 days.' },
@@ -385,6 +396,8 @@ const JOB_2_TOORAK: Omit<JobSnapshot, 'job_health'> = {
     ],
   },
   milestones_count: 0,
+  pending_clarifying_questions: [],
+  clarify_file_id: null,
   risks: [
     { level: 'medium', message: 'Quote sent 5 days ago with no response from Tom Caruso.' },
     { level: 'low', message: 'Client email on file — ready to follow up.' },
@@ -438,6 +451,8 @@ const JOB_3_BRUNSWICK: Omit<JobSnapshot, 'job_health'> = {
     proof_events: [],
   },
   milestones_count: 0,
+  pending_clarifying_questions: [],
+  clarify_file_id: null,
   risks: [
     { level: 'medium', message: 'Budget noted ($380,000) but no plans uploaded yet.' },
     { level: 'medium', message: '2 assumptions need resolving before quote can be sent.' },

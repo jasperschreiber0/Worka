@@ -8,6 +8,7 @@ import ActivationModal, { type ActivationResult } from '@/components/job/Activat
 import ProofTab from '@/components/job/tabs/ProofTab'
 import Timeline from '@/components/dashboard/Timeline'
 import AIInsightCard from '@/components/dashboard/AIInsightCard'
+import ClarifyingQuestionsPanel from '@/components/chat/ClarifyingQuestionsPanel'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -152,6 +153,9 @@ export default function JobSnapshotPanel({
   const [activationModal, setActivationModal] = useState<ActivationModalState>({ isOpen: false, quote: null })
   const [activatedJobStatus, setActivatedJobStatus] = useState<string | null>(null)
   const [pulse, setPulse] = useState<AggregatePulse | null>(null)
+  const [answeringQuestions, setAnsweringQuestions] = useState(false)
+  const [clarifySubmitting, setClarifySubmitting] = useState(false)
+  const [clarifyError, setClarifyError] = useState<string | null>(null)
 
   // Fetch aggregate pulse once for the no-job empty state
   useEffect(() => {
@@ -172,26 +176,60 @@ export default function JobSnapshotPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const fetchSnapshot = useCallback((jobId: string) => {
+    setLoading(true)
+    return fetch(`/api/jobs/${jobId}/snapshot`)
+      .then((r) => r.json())
+      .then((data: { snapshot: JobSnapshot }) => {
+        setSnapshot(data.snapshot)
+        setLoading(false)
+        return data.snapshot
+      })
+      .catch(() => {
+        setLoading(false)
+        return null
+      })
+  }, [])
+
   useEffect(() => {
     if (!job) {
       setSnapshot(null)
       return
     }
-    setLoading(true)
-    fetch(`/api/jobs/${job.id}/snapshot`)
-      .then((r) => r.json())
-      .then((data: { snapshot: JobSnapshot }) => {
-        setSnapshot(data.snapshot)
-        setLoading(false)
-      })
-      .catch(() => {
-        setLoading(false)
-      })
-  }, [job?.id])
+    fetchSnapshot(job.id)
+  }, [job?.id, fetchSnapshot])
 
   useEffect(() => {
     setActivatedJobStatus(null)
+    setAnsweringQuestions(false)
+    setClarifyError(null)
   }, [job?.id])
+
+  const handleClarifyAnswers = useCallback(
+    async (answers: Array<{ question_id: string; answer: string }>) => {
+      if (!job || !snapshot?.clarify_file_id) return
+      setClarifySubmitting(true)
+      setClarifyError(null)
+      try {
+        const res = await fetch(`/api/intake/${encodeURIComponent(snapshot.clarify_file_id)}/clarify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: job.id, answers }),
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({ error: 'Could not continue' }))
+          throw new Error((body as { error?: string }).error ?? 'Could not continue')
+        }
+        setAnsweringQuestions(false)
+        await fetchSnapshot(job.id)
+      } catch (err) {
+        setClarifyError(err instanceof Error ? err.message : 'Could not continue — please try again.')
+      } finally {
+        setClarifySubmitting(false)
+      }
+    },
+    [job, snapshot?.clarify_file_id, fetchSnapshot],
+  )
 
   const handleActivated = useCallback(
     (result: ActivationResult) => {
@@ -234,6 +272,7 @@ export default function JobSnapshotPanel({
 
   const pendingVariations = snapshot?.variations.filter((v) => v.status === 'pending') ?? []
   const overdueInvoices = snapshot?.invoices.filter((i) => i.status === 'overdue') ?? []
+  const pendingQuestions = snapshot?.pending_clarifying_questions ?? []
   const hasPending = pendingVariations.length > 0 || overdueInvoices.length > 0
 
   const paidSentInvoiceTotal = (snapshot?.invoices ?? [])
@@ -650,6 +689,45 @@ export default function JobSnapshotPanel({
                 <Timeline steps={timelineSteps} />
               </div>
             </SectionGroup>
+
+            {/* ── 3.5. CLARIFYING QUESTIONS — the estimating engine paused here
+                 (Stage 4/5) and won't resume until these are answered. Previously
+                 only ever visible inside the live upload SSE session
+                 (IntakeProgress) — a builder who closed that panel or reloaded
+                 the page had no way back to it. See snapshot route for
+                 pending_clarifying_questions / clarify_file_id. ── */}
+            {pendingQuestions.length > 0 && (
+              <SectionGroup label="Needs your input">
+                {answeringQuestions ? (
+                  <ClarifyingQuestionsPanel
+                    message="The estimate is paused until these are answered."
+                    questions={pendingQuestions}
+                    submitting={clarifySubmitting}
+                    error={clarifyError}
+                    onSubmit={handleClarifyAnswers}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setAnsweringQuestions(true)}
+                    style={{
+                      width: '100%',
+                      textAlign: 'left',
+                      ...CARD_STYLE,
+                      border: '1px solid rgba(255,152,0,0.3)',
+                      backgroundColor: 'rgba(255,152,0,0.06)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: 600, color: '#ff9800' }}>
+                      {pendingQuestions.length} question{pendingQuestions.length > 1 ? 's' : ''} need{pendingQuestions.length > 1 ? '' : 's'} your answer
+                    </span>
+                    <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 3 }}>
+                      Tap to answer — the estimate won&apos;t generate until this is resolved.
+                    </p>
+                  </button>
+                )}
+              </SectionGroup>
+            )}
 
             {/* ── 4. PENDING ACTIONS ──────────────────────────────────────── */}
             {hasPending && (
