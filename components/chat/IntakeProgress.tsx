@@ -540,7 +540,7 @@ export default function IntakeProgress({
                 viewBox="0 0 12 12"
                 fill="none"
                 aria-hidden="true"
-                className="flex-shrink-0"
+                className="flex-shrink-0 animate-spin"
               >
                 <path
                   d="M6 1v2M6 9v2M1 6h2M9 6h2M2.636 2.636l1.414 1.414M7.95 7.95l1.414 1.414M2.636 9.364l1.414-1.414M7.95 4.05l1.414-1.414"
