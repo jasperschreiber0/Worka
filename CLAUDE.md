@@ -689,6 +689,47 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 row count, wrapped in a small bounded retry loop (up to 20 attempts)
                                 as a defensive backstop alongside the advisory lock from migration
                                 047. No change to the ref format.
+050_atomic_stage12_completion.sql — architectural fix, not a timeout fix, for the actual root
+                                cause behind a full session of intake-pipeline retry failures: no
+                                single durable signal existed for "has this document already been
+                                classified." files.intake_status only ever reaches 'extracted' for
+                                the primary file of a fully-successful run (never siblings, never a
+                                partial success); document_processing_jobs is scoped to
+                                parent_job_id, and every retry minted a brand-new
+                                document_processing_batches row with no history check
+                                (createDocumentProcessingBatch had none); and project_documents /
+                                project_facts — the only genuinely durable, cross-retry state — were
+                                written as three sequential non-atomic steps (project_documents
+                                upsert -> an external Voyage AI embeddings call -> project_facts
+                                insert), so an external kill between them could leave a false
+                                "classified" signal with no facts behind it. Confirmed in production:
+                                a structural drawing set was reclassified from scratch on a later
+                                retry despite having already succeeded (56 facts extracted) on an
+                                earlier one. Adds project_documents.extraction_status ('pending' |
+                                'complete' | 'invalidated'), backfilled from ACTUAL fact existence
+                                (not a blanket flag flip, to avoid grandfathering in any pre-existing
+                                false-complete row); persist_document_classification(), one atomic
+                                RPC replacing the three-step write — either the document metadata
+                                and every one of its facts land together, or none of it does, closing
+                                the false-completion window at the source (this also fixes a latent
+                                project_facts correctness bug independent of performance: mergeFacts
+                                supersedes on any value mismatch, so blind reclassification of an
+                                unchanged document could already spuriously supersede a good fact
+                                with a non-deterministically-reworded restatement); and
+                                invalidate_document_classification(), the escape hatch — resets a
+                                file back to 'pending' without deleting its history, for a future
+                                builder-requested re-read or a deliberate prompt/schema-version
+                                reclassification (not yet wired to any UI flow). Consuming code:
+                                app/api/intake/[fileId]/route.ts now filters already-'complete'
+                                files out of a retry's document list before creating any
+                                document_processing_jobs — if that leaves nothing to process, it
+                                triggers smooth-responder directly with resume: true (the same path
+                                the clarify-answer flow already used to skip Stage 1/2 and operate
+                                on persisted facts, just reached from a second caller now) instead of
+                                going through document-worker at all. smooth-responder's own
+                                exclusion filter also checks extraction_status='complete' as a
+                                defensive second layer, matching its existing intake_status='failed'
+                                check's own stated philosophy.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**

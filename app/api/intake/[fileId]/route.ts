@@ -517,46 +517,91 @@ export async function GET(
           // here, not from whenever lock-wait or connection began.
           lastProgressAt = Date.now()
 
-          // Create the batch + one document_processing_jobs row per file,
-          // then kick off a small number of parallel document-worker
-          // chains — each claim is atomic (FOR UPDATE SKIP LOCKED, migration
-          // 034) so these can never collide on the same document. This is
-          // what replaces one shared smooth-responder invocation extracting
-          // every file in-process: each document now gets its own Edge
-          // Function invocation and its own fresh Supabase CPU budget.
-          const allDocumentIds = [fileId, ...sibling_file_ids]
-          const batchId = await createDocumentProcessingBatch(
-            supabaseUrl!, supabaseKey!, anonKey, job_id, builder_id, fileId, allDocumentIds
+          // Skip files that already have a durable Stage 1/2 completion
+          // marker (project_documents.extraction_status = 'complete',
+          // migration 050) — a retry used to create a fresh
+          // document_processing_batches/jobs row for every requested file
+          // unconditionally (createDocumentProcessingBatch had no history
+          // check), which re-ran document-worker extraction AND smooth-
+          // responder's Claude classification for documents that had
+          // already succeeded, sometimes in the very same job seconds
+          // earlier. extraction_status is only ever set to 'complete'
+          // atomically with its project_facts (see that migration's
+          // header), so this check is safe to trust — it can't read
+          // 'complete' for a document whose facts never actually landed.
+          // (allDocumentIds is the same list already computed above, near
+          // the top of the request handler, for the filename lookup.)
+          const completeRes = await fetch(
+            `${supabaseUrl}/rest/v1/project_documents?job_id=eq.${encodeURIComponent(job_id)}&extraction_status=eq.complete&file_id=in.(${allDocumentIds.map(encodeURIComponent).join(',')})&select=file_id`,
+            { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
           )
-          if (!batchId) {
-            // The batch never started, so nothing will ever release this
-            // lock via its own completion — release it here instead of
-            // leaving the job locked until the staleness timeout.
-            await releaseJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id)
-            emit('error', { message: 'Failed to start processing' })
-            controller.close()
-            return
-          }
+          const alreadyCompleteIds = new Set(
+            completeRes.ok ? (await completeRes.json() as Array<{ file_id: string }>).map((r) => r.file_id) : []
+          )
+          const documentIdsNeedingProcessing = allDocumentIds.filter((id) => !alreadyCompleteIds.has(id))
 
-          // 4 parallel chains, capped at the document count. Was 2 — fine
-          // for small residential uploads, but a 20-30 document commercial
-          // set meant each chain serially processing 10-15 documents, and a
-          // single chain death (CPU-kill on one pathological PDF) orphaned
-          // half the batch until recovery's next cycle. More chains =
-          // faster drain AND smaller blast radius per chain death. Claims
-          // are FOR UPDATE SKIP LOCKED (migration 034), so concurrency here
-          // can never double-process a document, and each invocation gets
-          // its own CPU budget regardless of how many run at once.
-          const WORKER_CONCURRENCY = Math.min(4, allDocumentIds.length)
-          await Promise.all(
-            Array.from({ length: WORKER_CONCURRENCY }, () =>
-              fetch(`${supabaseUrl}/functions/v1/document-worker`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
-                body: JSON.stringify({ parent_job_id: batchId, builder_id }),
-              }).catch((err) => console.error('document-worker trigger failed', err))
+          if (documentIdsNeedingProcessing.length === 0) {
+            // Every requested file is already durably classified — nothing
+            // for document-worker to extract or for Stage 1/2 to
+            // reclassify. Trigger smooth-responder directly with
+            // resume: true, the same path the clarify-answer flow already
+            // uses to skip straight to Scope Reasoning against persisted
+            // project_facts — see supabase/functions/smooth-responder's
+            // `if (!resume)` gate. No document_processing_batches row is
+            // created at all; there is nothing for one to track.
+            const triggerRes = await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              body: JSON.stringify({ file_id: fileId, job_id, builder_id, resume: true }),
+            })
+            if (!triggerRes.ok) {
+              await releaseJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id)
+              emit('error', { message: 'Failed to start processing' })
+              controller.close()
+              return
+            }
+          } else {
+            // Create the batch + one document_processing_jobs row per
+            // still-incomplete file, then kick off a small number of
+            // parallel document-worker chains — each claim is atomic (FOR
+            // UPDATE SKIP LOCKED, migration 034) so these can never
+            // collide on the same document. This is what replaces one
+            // shared smooth-responder invocation extracting every file
+            // in-process: each document now gets its own Edge Function
+            // invocation and its own fresh Supabase CPU budget.
+            const batchId = await createDocumentProcessingBatch(
+              supabaseUrl!, supabaseKey!, anonKey, job_id, builder_id, fileId, documentIdsNeedingProcessing
             )
-          )
+            if (!batchId) {
+              // The batch never started, so nothing will ever release this
+              // lock via its own completion — release it here instead of
+              // leaving the job locked until the staleness timeout.
+              await releaseJobLock(supabaseUrl!, supabaseKey!, anonKey, job_id)
+              emit('error', { message: 'Failed to start processing' })
+              controller.close()
+              return
+            }
+
+            // 4 parallel chains, capped at the document count. Was 2 — fine
+            // for small residential uploads, but a 20-30 document commercial
+            // set meant each chain serially processing 10-15 documents, and a
+            // single chain death (CPU-kill on one pathological PDF) orphaned
+            // half the batch until recovery's next cycle. More chains =
+            // faster drain AND smaller blast radius per chain death. Claims
+            // are FOR UPDATE SKIP LOCKED (migration 034), so concurrency here
+            // can never double-process a document, and each invocation gets
+            // its own CPU budget regardless of how many run at once.
+            const WORKER_CONCURRENCY = Math.min(4, documentIdsNeedingProcessing.length)
+            await Promise.all(
+              Array.from({ length: WORKER_CONCURRENCY }, () =>
+                fetch(`${supabaseUrl}/functions/v1/document-worker`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+                  body: JSON.stringify({ parent_job_id: batchId, builder_id }),
+                }).catch((err) => console.error('document-worker trigger failed', err))
+              )
+            )
+          }
         }
 
         // Emit initial stage immediately

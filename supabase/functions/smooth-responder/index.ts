@@ -925,29 +925,35 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         allLoaded = [primary, ...loadedSiblings]
       }
 
-      // ── Exclude files that have already proven deterministically unprocessable ──
-      // How many identical failures are tolerated before a file is
-      // permanently excluded now varies by classification — 0 for a
-      // deterministic-content failure, 1 for a deterministic-size failure
-      // (one more attempt at a smaller size is worth it), 2 for a
-      // classification that already survived one in-call retry (see
-      // maxConsecutiveOccurrences, pipeline-logic.ts). So the authoritative
-      // signal for "already exhausted" is intake_status='failed' itself —
-      // record_ai_failure (migration 043) sets that atomically the moment
-      // the threshold for THIS file's classification is reached, whatever
-      // that threshold is — rather than re-deriving a fixed count cutoff
-      // here that would be wrong for at least two of the three tiers. This
-      // is a defensive second check for a same-run re-read (both load
-      // paths above load documents by id, not by intake_status), and it's
-      // what actually breaks the "same document batch is later processed
-      // again by recovery" loop for a resumed/re-triggered run that
-      // includes this file as a sibling rather than as the primary trigger.
+      // ── Exclude files that have already proven deterministically unprocessable, or that are already durably classified ──
+      // Two independent exclusions here, both defensive second checks —
+      // the PRIMARY place each is enforced now is a layer up:
+      //   - "already exhausted its retries": the authoritative signal is
+      //     intake_status='failed' itself — record_ai_failure (migration
+      //     043) sets that atomically once maxConsecutiveOccurrences
+      //     (pipeline-logic.ts) is reached for this file's classification.
+      //   - "already classified": app/api/intake/[fileId]/route.ts now
+      //     filters this out before a document_processing_jobs row is even
+      //     created (see that route's own comment) — this is a same-run
+      //     re-read for whatever slipped through anyway, e.g. the legacy
+      //     direct-invocation path (no parentJobId) that doesn't go
+      //     through that filtering at all. extraction_status='complete' is
+      //     only ever set inside persist_document_classification
+      //     (migration 050), atomically with the project_facts it depends
+      //     on, so it's safe to trust here. Reclassifying an already-
+      //     complete file has nothing to gain and real risk to lose:
+      //     re-running Stage 1/2 on an unchanged document can spuriously
+      //     supersede a perfectly good fact with a differently-worded (but
+      //     not actually different) restatement, since mergeFacts treats
+      //     any value mismatch as a real correction — LLM output isn't
+      //     guaranteed byte-identical across calls.
       let priorFailureCounts = new Map<string, { classification: AnthropicFailureClassification | null; count: number }>()
       if (allLoaded.length > 0) {
+        const uniqueRealIds = Array.from(new Set(allLoaded.map((f) => f.fileId.split('#')[0])))
         const { data: historyRows } = await supabase
           .from('files')
           .select('id, ai_failure_classification, ai_failure_count, intake_status')
-          .in('id', Array.from(new Set(allLoaded.map((f) => f.fileId.split('#')[0]))))
+          .in('id', uniqueRealIds)
         priorFailureCounts = new Map(
           (historyRows ?? []).map((r: Record<string, unknown>) => [
             r.id as string,
@@ -955,12 +961,24 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           ])
         )
         const alreadyFailed = new Set((historyRows ?? []).filter((r: Record<string, unknown>) => r.intake_status === 'failed').map((r: Record<string, unknown>) => r.id as string))
+
+        const { data: completedDocs } = await supabase
+          .from('project_documents')
+          .select('file_id')
+          .eq('job_id', jobId)
+          .eq('extraction_status', 'complete')
+          .in('file_id', uniqueRealIds)
+        const alreadyComplete = new Set((completedDocs ?? []).map((r: Record<string, unknown>) => r.file_id as string))
+
         const stillEligible: LoadedFile[] = []
         for (const f of allLoaded) {
-          const history = priorFailureCounts.get(f.fileId.split('#')[0])
-          if (alreadyFailed.has(f.fileId.split('#')[0])) {
+          const realId = f.fileId.split('#')[0]
+          const history = priorFailureCounts.get(realId)
+          if (alreadyFailed.has(realId)) {
             failedToLoadSiblings.push(f.filename)
             console.log(JSON.stringify({ document: f.filename, status: 'skipped_exhausted_retries', prior_classification: history?.classification ?? null, prior_count: history?.count ?? 0 }))
+          } else if (alreadyComplete.has(realId)) {
+            console.log(JSON.stringify({ document: f.filename, status: 'skipped_already_classified' }))
           } else {
             stillEligible.push(f)
           }
@@ -1242,12 +1260,6 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             notes: d.notes ?? null,
           }))
 
-        let insertedDocs: Array<{ id: string; file_id: string }> = []
-        if (documentInserts.length > 0) {
-          const { data } = await supabase.from('project_documents').upsert(documentInserts, { onConflict: 'file_id' }).select('id, file_id')
-          insertedDocs = data ?? []
-        }
-        const fileIdToDocId = new Map(insertedDocs.map((d) => [d.file_id, d.id]))
         for (const d of docRows) {
           const title = (d.drawing_title as string) ?? (d.document_type as string)
           if (title) processedDocTitles.push(title)
@@ -1256,56 +1268,91 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // Persist Stage 2 — new facts (this batch), merged against both
         // pre-existing DB facts and facts extracted by earlier batches in
         // this same run (facts, kept up to date after every batch below).
+        // source_file_id carries the real file id, not a project_documents
+        // id — persist_document_classification (migration 050) resolves
+        // file_id -> project_document_id itself, atomically with the
+        // document upsert it does in the same call, so there's no need to
+        // pre-resolve it here the way the old two-step write required.
         const factRows = (docResult.facts ?? []) as Array<Record<string, unknown>>
         const factInsertsBase = factRows.map((f) => ({
           job_id: jobId,
           category: f.category as string,
           key: f.key as string,
           value: String(f.value),
-          source_document_id: typeof f.source_file_index === 'number' ? (fileIdToDocId.get(realFileId(fileIndexToId[f.source_file_index as number])) ?? null) : null,
+          source_file_id: typeof f.source_file_index === 'number' ? realFileId(fileIndexToId[f.source_file_index as number]) : null,
           page_reference: (f.page_reference as string) ?? null,
           evidence: (f.evidence as string) ?? null,
           confidence: (f.confidence as number) ?? 70,
         }))
 
-        if (factInsertsBase.length > 0) {
-          // P2: embed each new fact's text for semantic near-duplicate
-          // detection, best-effort — see embedTexts above. Voyage bills per
-          // call, so this is one batched request per document batch.
-          const voyageApiKey = Deno.env.get('VOYAGE_API_KEY')
-          const factTexts = factInsertsBase.map((f) => `[${f.category}] ${f.key}: ${f.value}`)
-          const embeddings = await embedTexts(factTexts, voyageApiKey)
-          const factInserts: FactRow[] = factInsertsBase.map((f, i) => ({ ...f, embedding: embeddings[i] }))
+        // duplicateIdx/merge need embeddings first (unchanged) — but
+        // mergeFacts only compares category/key/value/embedding, so
+        // swapping source_document_id for source_file_id above doesn't
+        // affect its behaviour.
+        const voyageApiKey = Deno.env.get('VOYAGE_API_KEY')
+        const factTexts = factInsertsBase.map((f) => `[${f.category}] ${f.key}: ${f.value}`)
+        const embeddings = factInsertsBase.length > 0 ? await embedTexts(factTexts, voyageApiKey) : []
+        type FactInsertWithSourceFile = Omit<FactRow, 'source_document_id'> & { source_file_id: string | null }
+        const factInserts: FactInsertWithSourceFile[] = factInsertsBase.map((f, i) => ({ ...f, embedding: embeddings[i] ?? null }))
 
-          // Auto-supersede: a new fact for the same job_id + category + key
-          // with a different value replaces the prior one instead of both
-          // accumulating forever, or (below the exact-key check) a semantic
-          // near-duplicate under a different label — see mergeFacts. Merges
-          // against `facts`, which already includes both DB-persisted facts
-          // and anything extracted by earlier batches in this run.
-          const merge = mergeFacts(facts, factInserts, SEMANTIC_DUPLICATE_THRESHOLD)
+        // Auto-supersede: a new fact for the same job_id + category + key
+        // with a different value replaces the prior one instead of both
+        // accumulating forever, or (below the exact-key check) a semantic
+        // near-duplicate under a different label — see mergeFacts. Merges
+        // against `facts`, which already includes both DB-persisted facts
+        // and anything extracted by earlier batches in this run.
+        // FactInsertWithSourceFile satisfies FactRow structurally (every
+        // FactRow field it doesn't carry — source_document_id — is
+        // optional there; mergeFacts itself only ever reads
+        // category/key/value/embedding/id), so no cast is needed.
+        const merge = mergeFacts(facts, factInserts, SEMANTIC_DUPLICATE_THRESHOLD)
 
-          if (merge.supersededIds.length > 0) {
-            await supabase.from('project_facts').update({ superseded: true }).in('id', merge.supersededIds)
+        // Skip exact restatements (same category+key+value as an existing
+        // active fact) — inserting them would double-count the same
+        // real-world fact and let a re-uploaded document burn prompt-budget
+        // slots other documents should have had.
+        const duplicateIdx = new Set(merge.duplicateNewFactIndexes)
+        const factsToInsert = factInserts.filter((_, i) => !duplicateIdx.has(i))
+        if (duplicateIdx.size > 0) {
+          console.log(JSON.stringify({ stage: 'understanding_project', duplicate_restatements_skipped: duplicateIdx.size }))
+        }
+
+        // Single atomic write: document metadata (extraction_status set to
+        // 'complete' inside the function) and every surviving fact for
+        // this batch, together — see migration 050. Either both land, or
+        // neither does; there is no window where extraction_status can
+        // read 'complete' while its facts are missing, which is exactly
+        // the false-completion bug that let retries silently reprocess
+        // already-classified documents.
+        if (documentInserts.length > 0 || factsToInsert.length > 0) {
+          const { data: persistResult, error: persistError } = await supabase.rpc('persist_document_classification', {
+            p_job_id: jobId,
+            p_documents: documentInserts,
+            p_facts: factsToInsert.map((f) => ({
+              source_file_id: f.source_file_id,
+              category: f.category, key: f.key, value: f.value,
+              page_reference: f.page_reference, evidence: f.evidence,
+              confidence: f.confidence, embedding: f.embedding,
+            })),
+            p_superseded_ids: merge.supersededIds,
+          })
+          if (persistError) {
+            console.error('persist_document_classification RPC failed:', persistError)
+          } else {
+            const result = persistResult as { documents: Array<{ file_id: string; project_document_id: string }>; fact_ids: string[] }
+            const fileIdToDocId = new Map((result.documents ?? []).map((d) => [d.file_id, d.project_document_id]))
+            const insertedIds = result.fact_ids ?? []
+
+            facts = [
+              ...facts.filter((f) => !merge.supersededKeys.includes(`${f.category}::${f.key}`)),
+              ...factsToInsert.map((f, i) => ({
+                category: f.category, key: f.key, value: f.value,
+                evidence: f.evidence, confidence: f.confidence, embedding: f.embedding,
+                id: insertedIds[i],
+                source_document_id: f.source_file_id ? (fileIdToDocId.get(f.source_file_id) ?? null) : null,
+              })),
+            ]
           }
-          // Skip exact restatements (same category+key+value as an existing
-          // active fact) — inserting them would double-count the same
-          // real-world fact and let a re-uploaded document burn prompt-budget
-          // slots other documents should have had.
-          const duplicateIdx = new Set(merge.duplicateNewFactIndexes)
-          const factsToInsert = factInserts.filter((_, i) => !duplicateIdx.has(i))
-          if (duplicateIdx.size > 0) {
-            console.log(JSON.stringify({ stage: 'understanding_project', duplicate_restatements_skipped: duplicateIdx.size }))
-          }
-          const { data: insertedFactRows } = factsToInsert.length > 0
-            ? await supabase.from('project_facts').insert(factsToInsert).select('id')
-            : { data: [] }
-          const insertedIds = (insertedFactRows ?? []).map((r: Record<string, unknown>) => r.id as string)
-
-          facts = [
-            ...facts.filter((f) => !merge.supersededKeys.includes(`${f.category}::${f.key}`)),
-            ...factsToInsert.map((f, i) => ({ ...f, id: insertedIds[i] })),
-          ]
         }
       }
 
