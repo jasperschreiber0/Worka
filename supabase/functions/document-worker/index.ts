@@ -108,8 +108,22 @@ async function processOneDocument(
       let pageCount: number | null = null
       try {
         pageCount = await getPdfPageCount(rawBytes)
-      } catch {
+      } catch (pageCountErr) {
+        // TEMPORARY DIAGNOSTIC LOGGING — this catch already fails gracefully
+        // (falls back to pageCount = null, processing continues normally),
+        // but it previously did so completely silently: a malformed PDF
+        // (pdf-lib throwing e.g. "Invalid object ref: N 0 R" / "Trying to
+        // parse invalid object" on a broken xref table) left zero trace that
+        // anything was ever wrong with this specific file. getPdfPageCount
+        // uses pdf-lib, a separate pure-JS parser from unpdf/pdf.js below —
+        // these are ordinary catchable exceptions, not the uncatchable
+        // CPU-governor kill pdf.js's font interpreter can trigger.
         pageCount = null
+        console.log(JSON.stringify({
+          event: 'page_count_failed', document_id: job.document_id, filename: fileRow.filename,
+          attempt: job.attempts + 1,
+          error: pageCountErr instanceof Error ? pageCountErr.message : String(pageCountErr),
+        }))
       }
 
       console.log(JSON.stringify({
@@ -154,6 +168,21 @@ async function processOneDocument(
         event: 'extraction_complete', document_id: job.document_id, filename: fileRow.filename,
         extraction_cpu_duration: durationMs, skipped_reason: skippedReason ?? undefined, text_length: text.length,
       }))
+      // TEMPORARY DIAGNOSTIC LOGGING — flags a single extraction call that
+      // took an unusually long time, named by document_id + filename so a
+      // hanging/pathological PDF is identifiable from logs alone rather than
+      // inferred from an aggregate queue-stuck symptom. Does not change
+      // control flow: extractPdfTextGated already returned by this point
+      // (this can only ever fire on a genuinely slow-but-completed call —
+      // it cannot catch a call that never returns because the isolate was
+      // externally CPU-killed mid-parse; see this file's own retry-safeguard
+      // comment above for why no in-process timeout can do that).
+      if (durationMs > 30_000) {
+        console.log(JSON.stringify({
+          event: 'extraction_slow', document_id: job.document_id, filename: fileRow.filename,
+          extraction_cpu_duration: durationMs, threshold_ms: 30_000,
+        }))
+      }
       if (skippedReason) {
         console.log(JSON.stringify({ event: 'extraction_skipped', document_id: job.document_id, filename: fileRow.filename, reason: skippedReason }))
       }
@@ -175,10 +204,22 @@ async function processOneDocument(
       result = { blockType: 'image', text: null, hasUsableText: false, pageCount: null, durationMs: 0 }
     }
 
+    const totalDurationMs = Date.now() - processStartedAt
     console.log(JSON.stringify({
       event: 'document_processing_duration', document_id: job.document_id, filename: fileRow.filename,
-      duration_ms: Date.now() - processStartedAt,
+      duration_ms: totalDurationMs,
     }))
+    // TEMPORARY DIAGNOSTIC LOGGING — same 30s threshold, but on the whole
+    // per-document invocation (download + page count + extraction +
+    // fallback decision), not just the text-extraction call — catches a
+    // slow Storage download or a slow getPdfPageCount too, not only a slow
+    // extractPdfTextGated call.
+    if (totalDurationMs > 30_000) {
+      console.log(JSON.stringify({
+        event: 'document_processing_slow', document_id: job.document_id, filename: fileRow.filename,
+        duration_ms: totalDurationMs, threshold_ms: 30_000, attempt: job.attempts + 1,
+      }))
+    }
     return { outcome: 'completed', result }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
