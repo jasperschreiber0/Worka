@@ -222,6 +222,10 @@ DO $$ BEGIN
     (SELECT count(*) FROM pg_proc WHERE proname = 'record_ai_failure' AND pg_get_function_arguments(oid) = 'p_file_id uuid, p_classification text, p_reason text, p_max_occurrences integer') = 1,
     'record_ai_failure(uuid, text, text, integer) function is missing or its signature changed (migration 043)'
   );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'release_stale_job_intake_lock' AND pg_get_function_arguments(oid) LIKE 'p_job_id uuid%') = 1,
+    'release_stale_job_intake_lock(uuid, ...) function is missing or its signature changed (migration 045)'
+  );
 END $$;
 
 -- ─── Functions are actually callable (not just present) ────────────────────
@@ -250,6 +254,9 @@ BEGIN
   -- file_id, hits its own NOT FOUND branch, and returns without mutating —
   -- same safe-to-run-in-production shape as retry_or_fail_document_job above.
   PERFORM * FROM record_ai_failure(v_bogus_uuid, 'unknown', 'schema_assertions.sql callability probe', 0);
+  -- release_stale_job_intake_lock's SELECT...FOR UPDATE also matches zero
+  -- rows for a bogus job_id, hits NOT FOUND, and returns without mutating.
+  PERFORM * FROM release_stale_job_intake_lock(v_bogus_uuid);
 EXCEPTION WHEN OTHERS THEN
   RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: one or more document-processing/recovery functions are not callable: %', SQLERRM;
 END $$;

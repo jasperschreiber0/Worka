@@ -628,6 +628,20 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 never call Anthropic, and AI_RECOVERY_DISABLED stays true in the
                                 route regardless of how often the cron fires, so re-enabling the
                                 schedule cannot by itself reintroduce the spend incident.
+045_safe_stale_lock_release.sql — release_stale_job_intake_lock(uuid, ...) RPC +
+                                intake_recovery_runs.stale_locks_released. Closes the actual root
+                                cause of a real production freeze: job_intake_locks is created by
+                                the upload route BEFORE processing starts, but only ever released
+                                from inside smooth-responder's own try/finally — if the handoff
+                                into smooth-responder is lost (document-worker's triggerClassification
+                                fire-and-forget fetch never lands), nothing ever releases the lock,
+                                and it blocks every future attempt on that job with no worker
+                                running and no visible failure. Added as step 3b in the
+                                DOCUMENT_RECOVERY (not AI_RECOVERY) path of
+                                GET /api/cron/intake-recovery — deletes only, via an atomic
+                                SELECT...FOR UPDATE re-check (not a plain DELETE off an earlier
+                                read, which would race a genuinely new acquire in the gap), never
+                                re-acquires the lock, never calls smooth-responder or Anthropic.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**

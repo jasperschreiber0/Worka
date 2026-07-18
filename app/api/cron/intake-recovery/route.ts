@@ -69,6 +69,7 @@ interface RunSummary {
   document_jobs_reclaimed: number
   stalled_batches_recomputed: number
   batches_resumed: number
+  stale_locks_released: number
   job_locks_reclaimed: number
   stuck_files_retried: number
   files_permanently_failed: number
@@ -141,6 +142,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     document_jobs_reclaimed: 0,
     stalled_batches_recomputed: 0,
     batches_resumed: 0,
+    stale_locks_released: 0,
     job_locks_reclaimed: 0,
     stuck_files_retried: 0,
     files_permanently_failed: 0,
@@ -221,6 +223,81 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const message = err instanceof Error ? err.message : String(err)
       summary.errors.push({ stage: 'find_batches_with_claimable_work', message })
       log('recovery_stage_failed', { stage: 'find_batches_with_claimable_work', error: message })
+    }
+
+    // ── 3b. Release stale job_intake_locks (SAFE — deletes only, never
+    //      re-acquires and never triggers smooth-responder) ─────────────────
+    // Root cause of the intake-pipeline freeze this closes: the lock is
+    // created by the upload route (app/api/intake/[fileId]/route.ts,
+    // tryAcquireJobLock) BEFORE the processing chain starts, but is only
+    // ever DELETED from inside smooth-responder's own try/finally. If the
+    // handoff into smooth-responder is lost (the exact failure this session
+    // diagnosed — extraction finishes, but triggerClassification's
+    // fire-and-forget fetch never lands), smooth-responder never starts, so
+    // nothing ever reaches the code that releases the lock — it sits open
+    // forever. No worker is running, no progress is happening, and no
+    // user-visible failure exists: the job just looks permanently frozen.
+    // tryAcquireJobLock already has its OWN inline steal-if-stale check, but
+    // that only runs when a NEW upload happens to arrive for the same job —
+    // a builder who doesn't retry gets no second chance at it. This step is
+    // the independent, scheduled equivalent: it runs on this cron's own
+    // fixed cadence regardless of whether anyone uploads again.
+    //
+    // Deliberately just a DELETE, not acquire_or_reclaim_job_intake_lock
+    // (used by the AI-gated step below) — that RPC also INSERTS a new lock
+    // for the caller to immediately act on, which is correct when the
+    // caller is about to trigger smooth-responder itself, but wrong here:
+    // this step has no new run to hand the lock to, so inserting one would
+    // just create a second, differently-shaped stuck lock. A plain delete
+    // leaves the job unlocked so the next legitimate trigger (a fresh
+    // upload, or — once AI recovery is re-enabled — step 5 below, whose own
+    // find_stuck_files_needing_classification_retry query explicitly
+    // requires NO job_intake_locks row to match) can proceed cleanly.
+    // find_stale_job_intake_locks is a plain read (migration 037) — same
+    // staleness definition (6min no-progress / 16min absolute) already used
+    // by tryAcquireJobLock's own inline check, so a lock is only ever
+    // considered reclaimable once a run would already be considered dead by
+    // every other part of this codebase. There is no separate "is a worker
+    // still physically running" check anywhere in this system (smooth-
+    // responder is an ephemeral Edge Function invocation with no PID to
+    // query) — that staleness window IS the proxy for it, consistent with
+    // how job_intake_locks staleness has always been defined here. Never
+    // calls Anthropic, never fetches smooth-responder or document-worker.
+    try {
+      const { data, error } = await supabase.rpc('find_stale_job_intake_locks')
+      if (error) throw error
+      const staleLocks = (data ?? []) as Array<{ job_id: string; file_id: string; started_at: string; last_progress_at: string; stale_for: string }>
+      for (const lock of staleLocks) {
+        // release_stale_job_intake_lock re-verifies staleness atomically
+        // (FOR UPDATE) at the moment it deletes — this read above can be
+        // momentarily stale by the time we act on it (a genuinely new run
+        // could have reclaimed this exact job_id in between); the RPC is
+        // what actually decides whether to delete, not this loop.
+        const { data: releaseData, error: releaseErr } = await supabase.rpc('release_stale_job_intake_lock', {
+          p_job_id: lock.job_id,
+        })
+        if (releaseErr) {
+          summary.errors.push({ stage: `release_stale_lock:${lock.job_id}`, message: releaseErr.message })
+          log('recovery_stage_failed', { stage: 'release_stale_lock', job_id: lock.job_id, error: releaseErr.message })
+          continue
+        }
+        const result = releaseData?.[0]
+        if (!result?.released) continue // already gone, or made real progress since the read above — correctly left alone
+
+        summary.stale_locks_released++
+        log('stale_lock_reclaimed', {
+          job_id: lock.job_id,
+          file_id: result.file_id,
+          started_at: result.started_at,
+          last_progress_at: result.last_progress_at,
+          previous_lock_age: result.stale_for,
+          reason: 'stale_lock_reclaimed',
+        })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      summary.errors.push({ stage: 'find_stale_job_intake_locks_safe', message })
+      log('recovery_stage_failed', { stage: 'find_stale_job_intake_locks_safe', error: message })
     }
   }
 
@@ -408,6 +485,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     document_jobs_reclaimed: summary.document_jobs_reclaimed,
     stalled_batches_recomputed: summary.stalled_batches_recomputed,
     batches_resumed: summary.batches_resumed,
+    stale_locks_released: summary.stale_locks_released,
     job_locks_reclaimed: summary.job_locks_reclaimed,
     stuck_files_retried: summary.stuck_files_retried,
     files_permanently_failed: summary.files_permanently_failed,
