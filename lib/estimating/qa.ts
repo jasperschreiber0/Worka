@@ -170,11 +170,37 @@ export async function runQualityAssurance(
 
     const { data: quote } = await supabase
       .from('quotes')
-      .select('confidence_score')
+      .select('confidence_score, document_contribution')
       .eq('id', quoteId)
       .single()
 
     const overallConfidence = quote?.confidence_score ?? null
+
+    // ── Documents that contributed nothing ──
+    // The engine's contribution report (migration 039) records, per source
+    // document, how many facts it yielded and how many reached the estimate
+    // prompt. With balanced selection a processed document can only end up
+    // at zero USED facts if it yielded zero facts at all — which means its
+    // scope is simply not in this estimate. The builder must hear that from
+    // WorkA, not discover it on site.
+    const contribution = quote?.document_contribution as {
+      documents?: Array<{ name: string; facts_extracted: number; facts_used: number }>
+      excluded?: string[]
+      failed?: string[]
+    } | null
+    if (contribution) {
+      const silentDocs = (contribution.documents ?? []).filter((d) => d.facts_used === 0)
+      for (const d of silentDocs.slice(0, 5)) {
+        topRisks.push(`Nothing usable could be read from "${d.name}" — whatever it covers is NOT in this estimate. Check that document's scope by hand.`)
+      }
+      const notProcessed = [...(contribution.excluded ?? []), ...(contribution.failed ?? [])]
+      if (notProcessed.length > 0) {
+        topRisks.push(`${notProcessed.length} document${notProcessed.length !== 1 ? 's were' : ' was'} not processed at all: ${notProcessed.slice(0, 5).join(', ')}${notProcessed.length > 5 ? ', …' : ''}. Their scope is missing from this estimate.`)
+      }
+      if (silentDocs.length > 0 || notProcessed.length > 0) {
+        recommendedActions.push('Review the "What WorkA read" panel — some documents did not influence this estimate.')
+      }
+    }
 
     if (recommendedActions.length === 0) {
       recommendedActions.push('No material risks detected — this estimate is ready for review.')

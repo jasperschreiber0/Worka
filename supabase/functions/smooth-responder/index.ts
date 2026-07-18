@@ -35,7 +35,7 @@
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
-  splitIntoBatches, mergeFacts, selectFactsForPrompt,
+  splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry,
   type BatchableFile, type FactRow,
@@ -690,7 +690,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Existing state for this job (incremental upload / resume support) ─
     const { data: existingFacts } = await supabase
       .from('project_facts')
-      .select('id, category, key, value, evidence, confidence, embedding')
+      .select('id, category, key, value, evidence, confidence, embedding, source_document_id')
       .eq('job_id', jobId)
       .eq('superseded', false)
 
@@ -709,6 +709,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         category: f.category as string, key: f.key as string, value: f.value as string,
         evidence: (f.evidence as string) ?? null, confidence: f.confidence as number,
         embedding: (f.embedding as number[] | null) ?? null,
+        // Without this, every fact loaded from a PRIOR upload would land in
+        // the "no source" group of the balanced selector below — collapsing
+        // per-document representation exactly on the incremental uploads
+        // where the fact base is biggest and balance matters most.
+        source_document_id: (f.source_document_id as string | null) ?? null,
       }))
 
     // ── Stage 1 + 2: Document Intelligence + Project Understanding ────────
@@ -884,7 +889,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // (matched by category+key or semantic similarity), not by asking
         // the model to self-report it.
         const priorFactsBlock = facts.length > 0
-          ? selectFactsForPrompt(facts).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
+          ? selectFactsBalancedBySource(facts).map((f) => `- [${f.category}] ${f.key}: ${f.value}`).join('\n')
           : ''
 
         const existingDocsNote = processedDocTitles.length > 0
@@ -1031,12 +1036,23 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           if (merge.supersededIds.length > 0) {
             await supabase.from('project_facts').update({ superseded: true }).in('id', merge.supersededIds)
           }
-          const { data: insertedFactRows } = await supabase.from('project_facts').insert(factInserts).select('id')
+          // Skip exact restatements (same category+key+value as an existing
+          // active fact) — inserting them would double-count the same
+          // real-world fact and let a re-uploaded document burn prompt-budget
+          // slots other documents should have had.
+          const duplicateIdx = new Set(merge.duplicateNewFactIndexes)
+          const factsToInsert = factInserts.filter((_, i) => !duplicateIdx.has(i))
+          if (duplicateIdx.size > 0) {
+            console.log(JSON.stringify({ stage: 'understanding_project', duplicate_restatements_skipped: duplicateIdx.size }))
+          }
+          const { data: insertedFactRows } = factsToInsert.length > 0
+            ? await supabase.from('project_facts').insert(factsToInsert).select('id')
+            : { data: [] }
           const insertedIds = (insertedFactRows ?? []).map((r: Record<string, unknown>) => r.id as string)
 
           facts = [
             ...facts.filter((f) => !merge.supersededKeys.includes(`${f.category}::${f.key}`)),
-            ...factInserts.map((f, i) => ({ ...f, id: insertedIds[i] })),
+            ...factsToInsert.map((f, i) => ({ ...f, id: insertedIds[i] })),
           ]
         }
       }
@@ -1067,11 +1083,27 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Stage 3 + 4: Scope Reasoning + Gap Detection ───────────────────────
     await setStage('reasoning_scope')
 
-    // Near-duplicate merging above keeps real-world fact count bounded as
-    // documents accumulate; this is the backstop for a project that
-    // genuinely has more distinct facts than that — keep the
-    // highest-confidence ones rather than an unbounded prompt.
-    const factsForPrompt = selectFactsForPrompt(facts)
+    // Document-balanced selection, NOT global confidence ordering. Global
+    // ordering had a proven failure: past the fact cap, the lowest-
+    // confidence facts are evicted first, and confidence tracks document
+    // READABILITY — so a scanned engineering set could lose its entire
+    // contribution (0% survival) while crisp schedules kept 100%, silently
+    // reverting the estimate to plans-only for exactly the trades where
+    // wrong quantities are most expensive. Every source document is now
+    // guaranteed its floor of the budget; the remainder still goes to the
+    // highest-confidence facts. See selectFactsBalancedBySource.
+    const factsForPrompt = selectFactsBalancedBySource(facts)
+
+    // Per-document survival accounting — the number pair ("38 extracted,
+    // 12 used") that makes "did WorkA actually use my drawings?" answerable
+    // from logs and, via quotes.document_contribution below, from the UI.
+    const factSelectionSummary = summarizeFactSelection(facts, factsForPrompt)
+    console.log(JSON.stringify({
+      stage: 'fact_selection',
+      facts_active: facts.length,
+      facts_in_prompt: factsForPrompt.length,
+      per_source: factSelectionSummary,
+    }))
 
     const factsBlock = factsForPrompt.map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.evidence ? `, evidence: ${f.evidence}` : ''})`).join('\n')
 
@@ -1231,6 +1263,49 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         .single()
       if (quoteErr || !quoteRow) { await fail('Could not create quote record'); return }
       quoteId = quoteRow.id
+    }
+
+    // ── Document contribution report (migration 039) ──────────────────────
+    // The durable answer to "did WorkA actually use my drawings?": for every
+    // source document, how many facts it contributed to the job and how many
+    // made it into the prompt this estimate was generated from — plus
+    // anything excluded or failed outright. Written best-effort: the report
+    // failing must never fail the estimate it describes.
+    try {
+      const { data: docsForReport } = await supabase
+        .from('project_documents')
+        .select('id, file_id, drawing_title, document_type')
+        .eq('job_id', jobId)
+      const docRowsForReport = (docsForReport ?? []) as Array<{ id: string; file_id: string; drawing_title: string | null; document_type: string | null }>
+      const fileIds = docRowsForReport.map((d) => d.file_id).filter(Boolean)
+      const { data: fileNames } = fileIds.length > 0
+        ? await supabase.from('files').select('id, filename').in('id', fileIds)
+        : { data: [] }
+      const filenameByFileId = new Map(((fileNames ?? []) as Array<{ id: string; filename: string }>).map((f) => [f.id, f.filename]))
+      const summaryBySource = new Map(factSelectionSummary.map((s) => [s.source_document_id, s]))
+
+      const documentContribution = {
+        documents: docRowsForReport.map((d) => {
+          const s = summaryBySource.get(d.id)
+          return {
+            document_id: d.id,
+            name: filenameByFileId.get(d.file_id) ?? d.drawing_title ?? d.document_type ?? 'Document',
+            facts_extracted: s?.facts_extracted ?? 0,
+            facts_used: s?.facts_used ?? 0,
+          }
+        }),
+        // Builder answers from the clarify flow and any pre-schema facts —
+        // real influence with no source document to attribute it to.
+        other_sources: summaryBySource.get(null)
+          ? { facts_extracted: summaryBySource.get(null)!.facts_extracted, facts_used: summaryBySource.get(null)!.facts_used }
+          : null,
+        excluded: skippedSiblings,
+        failed: failedToLoadSiblings,
+        generated_at: new Date().toISOString(),
+      }
+      await supabase.from('quotes').update({ document_contribution: documentContribution }).eq('id', quoteId)
+    } catch (reportErr) {
+      console.log(JSON.stringify({ stage: 'building_quote', document_contribution_failed: reportErr instanceof Error ? reportErr.message : String(reportErr) }))
     }
 
     // Avoid re-inserting a line item that already exists on this quote for

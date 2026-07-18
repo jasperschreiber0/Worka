@@ -130,6 +130,18 @@ export interface FactMergeResult {
   supersededIds: string[]
   supersededKeys: string[]
   mergedFacts: FactRow[]
+  /**
+   * Indexes into newFacts of exact restatements — same category+key AND the
+   * same normalized value as an existing active fact. These are not
+   * conflicts (nothing to supersede: the values agree) but inserting them
+   * duplicates an established fact, and every duplicate burns a slot of the
+   * per-prompt fact budget that a real fact from another document should
+   * have had (the same document uploaded twice used to double its own
+   * weight this way). Callers should skip inserting these; mergedFacts
+   * still includes them unchanged for backward compatibility with callers
+   * that only consume supersededIds/Keys.
+   */
+  duplicateNewFactIndexes: number[]
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
@@ -152,13 +164,22 @@ export function mergeFacts(
   const priorByKey = new Map(existingFacts.map((f) => [`${f.category}::${f.key}`, f]))
   const supersededIds = new Set<string>()
   const supersededKeys = new Set<string>()
+  const duplicateNewFactIndexes: number[] = []
 
-  for (const nf of newFacts) {
+  for (let nfIndex = 0; nfIndex < newFacts.length; nfIndex++) {
+    const nf = newFacts[nfIndex]
     const k = `${nf.category}::${nf.key}`
     const exactMatch = priorByKey.get(k)
     if (exactMatch && String(exactMatch.value).trim().toLowerCase() !== nf.value.trim().toLowerCase()) {
       if (exactMatch.id) supersededIds.add(exactMatch.id)
       supersededKeys.add(k)
+      continue
+    }
+    if (exactMatch) {
+      // Same key, same value — an exact restatement (e.g. the same document
+      // uploaded twice, or two documents agreeing verbatim). Nothing to
+      // supersede; flag it so the caller can skip the redundant insert.
+      duplicateNewFactIndexes.push(nfIndex)
       continue
     }
 
@@ -185,6 +206,7 @@ export function mergeFacts(
     supersededIds: Array.from(supersededIds),
     supersededKeys: Array.from(supersededKeys),
     mergedFacts,
+    duplicateNewFactIndexes,
   }
 }
 
@@ -219,6 +241,105 @@ function idTiebreak(a: FactRow, b: FactRow): number {
   if (a.id === undefined) return 1
   if (b.id === undefined) return -1
   return a.id < b.id ? -1 : 1
+}
+
+// ─── Document-balanced fact selection (Stage 3/6) ──────────────────────────
+//
+// selectFactsForPrompt's global confidence ordering has a failure mode that
+// contradicts the product promise outright: when a job's active facts exceed
+// the budget, the facts evicted first are the lowest-confidence ones — and
+// confidence correlates with document READABILITY, not importance. A scanned
+// structural engineering set reads at confidence 40-65; a crisp fixtures
+// schedule at 85-95. Past the cap, the global sort deletes the engineering
+// document's entire contribution while the builder is told every document
+// was processed (verified: 0% survival for a 30-fact scanned document in a
+// 300-fact base). Uploading more documents could silently remove earlier
+// documents' influence on the estimate.
+//
+// This selector restores the property the promise depends on — EVERY source
+// document is guaranteed representation:
+//   1. Group facts by source_document_id (facts with no source — builder
+//      answers from the clarify flow — form their own group; they are
+//      direct human statements and must never be evicted by volume).
+//   2. Reserve floor = max(1, budget / groupCount) slots per group, filled
+//      by that group's own highest-confidence facts.
+//   3. Spend whatever budget remains on the globally highest-confidence
+//      unselected facts — high-value facts still rank higher, exactly as
+//      before, just after every document has its guaranteed voice.
+// Deterministic throughout (confidence desc, then ascending id — same
+// tiebreak contract as selectFactsForPrompt).
+//
+// Chat's project-memory context deliberately still uses selectFactsForPrompt
+// with relevance hints — a single question benefits from relevance ranking;
+// a full-project takeoff benefits from full-project representation.
+
+export function selectFactsBalancedBySource(
+  facts: FactRow[],
+  maxFacts: number = MAX_FACTS_IN_PROMPT,
+): FactRow[] {
+  if (facts.length <= maxFacts) return facts
+
+  const groups = new Map<string, FactRow[]>()
+  for (const f of facts) {
+    const key = f.source_document_id ?? '__no_source__'
+    const g = groups.get(key)
+    if (g) g.push(f)
+    else groups.set(key, [f])
+  }
+  for (const g of Array.from(groups.values())) {
+    g.sort((a, b) => b.confidence - a.confidence || idTiebreak(a, b))
+  }
+
+  const selected = new Set<FactRow>()
+
+  // Deterministic group order (each group's best fact decides; id breaks
+  // ties) — matters only in the degenerate case where there are more source
+  // documents than budget slots and even a floor of 1 can't cover them all.
+  const orderedGroups = Array.from(groups.values()).sort(
+    (a, b) => b[0].confidence - a[0].confidence || idTiebreak(a[0], b[0])
+  )
+
+  const floor = Math.max(1, Math.floor(maxFacts / orderedGroups.length))
+  for (const g of orderedGroups) {
+    if (selected.size >= maxFacts) break
+    for (const f of g.slice(0, Math.min(floor, maxFacts - selected.size))) {
+      selected.add(f)
+    }
+  }
+
+  if (selected.size < maxFacts) {
+    const remainder = facts
+      .filter((f) => !selected.has(f))
+      .sort((a, b) => b.confidence - a.confidence || idTiebreak(a, b))
+    for (const f of remainder) {
+      if (selected.size >= maxFacts) break
+      selected.add(f)
+    }
+  }
+
+  return Array.from(selected).sort((a, b) => b.confidence - a.confidence || idTiebreak(a, b))
+}
+
+/** Per-source accounting of a selection — extracted vs actually sent. */
+export interface SourceSelectionSummary {
+  source_document_id: string | null
+  facts_extracted: number
+  facts_used: number
+}
+
+export function summarizeFactSelection(allFacts: FactRow[], selectedFacts: FactRow[]): SourceSelectionSummary[] {
+  const selectedSet = new Set(selectedFacts)
+  const bySource = new Map<string | null, { extracted: number; used: number }>()
+  for (const f of allFacts) {
+    const key = f.source_document_id ?? null
+    const entry = bySource.get(key) ?? { extracted: 0, used: 0 }
+    entry.extracted++
+    if (selectedSet.has(f)) entry.used++
+    bySource.set(key, entry)
+  }
+  return Array.from(bySource.entries())
+    .map(([source_document_id, counts]) => ({ source_document_id, facts_extracted: counts.extracted, facts_used: counts.used }))
+    .sort((a, b) => (a.source_document_id ?? '').localeCompare(b.source_document_id ?? ''))
 }
 
 export function selectFactsForPrompt(

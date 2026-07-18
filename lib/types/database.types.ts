@@ -119,6 +119,17 @@ export interface Quote {
   /** Stage 6 QA pass output — see lib/estimating/qa.ts */
   qa_report: QAReport | null
   overall_confidence: number | null
+  /** Per-source-document facts_extracted/facts_used accounting for the engine
+   *  run that produced this quote — migration 039, written by smooth-responder. */
+  document_contribution: DocumentContributionReport | null
+}
+
+export interface DocumentContributionReport {
+  documents: Array<{ document_id: string; name: string; facts_extracted: number; facts_used: number }>
+  other_sources: { facts_extracted: number; facts_used: number } | null
+  excluded: string[]
+  failed: string[]
+  generated_at?: string
 }
 
 export interface QAReport {

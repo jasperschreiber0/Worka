@@ -34,12 +34,24 @@ interface QuoteSummary {
   can_send: boolean
 }
 
+/** Per-source-document accounting written by the estimating engine — see
+ *  migration 039 and quotes.document_contribution. */
+interface DocumentContribution {
+  documents: Array<{ document_id: string; name: string; facts_extracted: number; facts_used: number }>
+  other_sources: { facts_extracted: number; facts_used: number } | null
+  excluded: string[]
+  failed: string[]
+  generated_at?: string
+}
+
 interface QuoteResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
   /** Stage 8 QA output — "what should I check?" — now actually delivered. */
   qa_report: QAReport | null
+  /** "Did WorkA actually use my drawings?" — null for pre-039 quotes. */
+  document_contribution: DocumentContribution | null
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -139,6 +151,7 @@ export async function GET(
       line_items_by_category,
       summary,
       qa_report: null,
+      document_contribution: null,
     }
 
     return NextResponse.json(response)
@@ -167,6 +180,7 @@ export async function GET(
         created_at,
         qa_report,
         overall_confidence,
+        document_contribution,
         jobs (
           address
         )
@@ -344,6 +358,7 @@ export async function GET(
       line_items_by_category,
       summary,
       qa_report: qaReport,
+      document_contribution: ((quoteRow as { document_contribution?: DocumentContribution | null }).document_contribution) ?? null,
     }
 
     return NextResponse.json(response)

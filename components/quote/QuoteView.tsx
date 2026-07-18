@@ -49,11 +49,19 @@ interface QAReportPayload {
   recommended_actions: string[]
 }
 
+interface DocumentContributionPayload {
+  documents: Array<{ document_id: string; name: string; facts_extracted: number; facts_used: number }>
+  other_sources: { facts_extracted: number; facts_used: number } | null
+  excluded: string[]
+  failed: string[]
+}
+
 interface QuoteApiResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
   qa_report: QAReportPayload | null
+  document_contribution: DocumentContributionPayload | null
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -756,6 +764,75 @@ function SummaryCard({ summary }: SummaryCardProps) {
   )
 }
 
+// ─── "What WorkA read" — per-document contribution, on screen ────────────────
+// Answers the builder's real question — "I uploaded my plans. Did WorkA
+// actually use them?" — with the engine's own per-document accounting
+// (quotes.document_contribution, migration 039) instead of asking them to
+// trust a progress bar they watched an hour ago.
+
+function WhatWorkaRead({ contribution }: { contribution: DocumentContributionPayload }) {
+  const docs = contribution.documents ?? []
+  const notProcessed = [...(contribution.excluded ?? []), ...(contribution.failed ?? [])]
+  if (docs.length === 0 && notProcessed.length === 0) return null
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }}>
+      <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-tertiary)' }}>
+          What WorkA read
+        </h3>
+        <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
+          Every document, and how much of it shaped this estimate.
+        </p>
+      </div>
+      <div style={{ backgroundColor: 'var(--bg-surface)' }}>
+        {docs.map((d) => {
+          const unused = d.facts_used === 0
+          return (
+            <div key={d.document_id} className="flex items-center justify-between gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+              <div className="flex items-center gap-2 min-w-0">
+                {unused ? (
+                  <span className="flex-shrink-0 font-semibold" style={{ color: 'var(--status-red)' }} aria-hidden="true">✕</span>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
+                    <path d="M2 6l2.5 2.5L10 3" stroke="var(--status-green)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+                <span className="text-[13px] truncate" style={{ color: unused ? 'var(--status-red)' : 'var(--text-primary)' }}>{d.name}</span>
+              </div>
+              <span className="text-[11px] flex-shrink-0 tabular-nums" style={{ color: unused ? 'var(--status-red)' : 'var(--text-tertiary)' }}>
+                {unused ? 'nothing usable read' : `${d.facts_used} of ${d.facts_extracted} detail${d.facts_extracted !== 1 ? 's' : ''} used`}
+              </span>
+            </div>
+          )
+        })}
+        {contribution.other_sources && contribution.other_sources.facts_extracted > 0 && (
+          <div className="flex items-center justify-between gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+            <div className="flex items-center gap-2">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="flex-shrink-0">
+                <path d="M2 6l2.5 2.5L10 3" stroke="var(--status-green)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Your answers</span>
+            </div>
+            <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
+              {contribution.other_sources.facts_used} of {contribution.other_sources.facts_extracted} used
+            </span>
+          </div>
+        )}
+        {notProcessed.map((name, i) => (
+          <div key={`np-${i}`} className="flex items-center justify-between gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'rgba(244,67,54,0.06)' }}>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="flex-shrink-0 font-semibold" style={{ color: 'var(--status-red)' }} aria-hidden="true">✕</span>
+              <span className="text-[13px] truncate" style={{ color: 'var(--status-red)' }}>{name}</span>
+            </div>
+            <span className="text-[11px] flex-shrink-0" style={{ color: 'var(--status-red)' }}>not processed — scope missing</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── "Check before sending" — the QA report, finally on screen ───────────────
 
 function CheckBeforeSending({ report }: { report: QAReportPayload }) {
@@ -1210,6 +1287,9 @@ function QuoteViewInner({
 
               {/* What should I check? — QA output, shown before the numbers */}
               {data.qa_report && <CheckBeforeSending report={data.qa_report} />}
+
+              {/* Did WorkA actually use my documents? */}
+              {data.document_contribution && <WhatWorkaRead contribution={data.document_contribution} />}
 
               {/* PC/PS register */}
               {(() => {

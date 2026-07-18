@@ -23,6 +23,8 @@ import {
   withTimeoutAndRetry,
   documentPhaseProgress,
   documentDisplayState,
+  selectFactsBalancedBySource,
+  summarizeFactSelection,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -114,6 +116,22 @@ test('mergeFacts: identical category+key+value is not superseded (no-op restatem
   // restatements is a job for a caller that wants to skip the insert,
   // not for supersession (which only fires on a genuine value change).
   assert.equal(result.mergedFacts.length, 2)
+  // ...and the caller is now told exactly which incoming facts are those
+  // restatements, so the redundant insert can be skipped (a document
+  // uploaded twice must not double its own weight in the fact budget).
+  assert.deepEqual(result.duplicateNewFactIndexes, [0])
+})
+
+test('mergeFacts: a genuinely new fact is not flagged as a duplicate', () => {
+  const existing: FactRow[] = [{ id: 'e1', category: 'rooms', key: 'storeys', value: '2', evidence: null, confidence: 80 }]
+  const incoming: FactRow[] = [
+    { category: 'rooms', key: 'storeys', value: '2', evidence: null, confidence: 85 },        // restatement
+    { category: 'finishes', key: 'benchtop', value: 'stone 40mm', evidence: null, confidence: 90 }, // new
+    { category: 'rooms', key: 'storeys', value: '3', evidence: null, confidence: 88 },        // conflict
+  ]
+  const result = mergeFacts(existing, incoming, 0.93)
+  assert.deepEqual(result.duplicateNewFactIndexes, [0])
+  assert.deepEqual(result.supersededIds, ['e1'])
 })
 
 test('mergeFacts: semantic near-duplicate under a different key is superseded via embedding similarity', () => {
@@ -273,6 +291,101 @@ test('deriveParentBatchStatus: one failed document among otherwise-completed one
 
 test('deriveParentBatchStatus: every child failed is a genuine batch failure', () => {
   assert.equal(deriveParentBatchStatus(['failed', 'failed']), 'failed')
+})
+
+// ─── selectFactsBalancedBySource ────────────────────────────────────────────
+// Regression coverage for the multi-document trust failure: global
+// confidence-ordered truncation deleted a scanned engineering document's
+// ENTIRE contribution (0% survival) once the fact base crossed the cap,
+// because scan readability depressed its confidence scores. Every source
+// document must be guaranteed representation.
+
+function factsFrom(source: string | null, count: number, confidence: number): FactRow[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `${source ?? 'none'}-${String(i).padStart(3, '0')}`,
+    category: 'cat', key: `${source}-k${i}`, value: `v${i}`,
+    confidence, source_document_id: source,
+  }))
+}
+
+test('balanced: under the cap, every fact passes through untouched', () => {
+  const facts = [...factsFrom('doc-a', 10, 90), ...factsFrom('doc-b', 5, 40)]
+  assert.equal(selectFactsBalancedBySource(facts, 200).length, 15)
+})
+
+test('balanced: the scanned-engineering scenario — low-confidence document survives the cap', () => {
+  // 7 sources, 300 facts, engineering scanned at confidence 45 — the exact
+  // shape that produced 0% survival under global confidence ordering.
+  const facts = [
+    ...factsFrom('plans', 60, 85),
+    ...factsFrom('spec', 70, 80),
+    ...factsFrom('fixtures', 45, 90),
+    ...factsFrom('finishes', 40, 82),
+    ...factsFrom('electrical', 35, 78),
+    ...factsFrom('engineering', 30, 45), // scanned
+    ...factsFrom('plumbing', 20, 76),
+  ]
+  const kept = selectFactsBalancedBySource(facts, 200)
+  assert.equal(kept.length, 200)
+  const engineeringKept = kept.filter((f) => f.source_document_id === 'engineering').length
+  // floor = 200/7 = 28 — engineering is guaranteed its highest-confidence 28
+  assert.ok(engineeringKept >= 28, `engineering must keep at least its floor, got ${engineeringKept}`)
+  // and the old behavior is confirmed dead: it can no longer be zero
+  assert.ok(engineeringKept > 0)
+})
+
+test('balanced: remaining budget still goes to the highest-confidence facts', () => {
+  const facts = [...factsFrom('big', 150, 95), ...factsFrom('small', 10, 30)]
+  const kept = selectFactsBalancedBySource(facts, 100)
+  assert.equal(kept.length, 100)
+  const small = kept.filter((f) => f.source_document_id === 'small').length
+  // floor = 100/2 = 50, but small only has 10 — all 10 kept, the other 90
+  // slots go to big's higher-confidence facts, not wasted.
+  assert.equal(small, 10)
+  assert.equal(kept.filter((f) => f.source_document_id === 'big').length, 90)
+})
+
+test('balanced: builder answers (no source document) form their own protected group', () => {
+  const facts = [...factsFrom('doc-a', 250, 90), ...factsFrom(null, 5, 100)]
+  const kept = selectFactsBalancedBySource(facts, 200)
+  assert.equal(kept.filter((f) => f.source_document_id === null).length, 5)
+})
+
+test('balanced: 20-document upload — no source disappears', () => {
+  const facts: FactRow[] = []
+  for (let d = 0; d < 20; d++) {
+    facts.push(...factsFrom(`doc-${String(d).padStart(2, '0')}`, 20, 50 + d * 2))
+  }
+  const kept = selectFactsBalancedBySource(facts, 200)
+  assert.equal(kept.length, 200)
+  const sources = new Set(kept.map((f) => f.source_document_id))
+  assert.equal(sources.size, 20, 'every one of 20 documents must contribute')
+  // floor = 200/20 = 10 — each document keeps at least its floor
+  for (const s of Array.from(sources)) {
+    assert.ok(kept.filter((f) => f.source_document_id === s).length >= 10)
+  }
+})
+
+test('balanced: deterministic — same input always selects the same facts', () => {
+  const facts = [
+    ...factsFrom('a', 80, 70),
+    ...factsFrom('b', 80, 70),
+    ...factsFrom('c', 80, 70),
+  ]
+  const first = selectFactsBalancedBySource(facts, 100).map((f) => f.id)
+  const shuffled = [...facts].reverse()
+  const second = selectFactsBalancedBySource(shuffled, 100).map((f) => f.id)
+  assert.deepEqual(first, second)
+})
+
+test('summarizeFactSelection: per-source extracted vs used accounting', () => {
+  const a = factsFrom('doc-a', 3, 90)
+  const b = factsFrom('doc-b', 2, 40)
+  const summary = summarizeFactSelection([...a, ...b], [...a, b[0]])
+  assert.deepEqual(summary, [
+    { source_document_id: 'doc-a', facts_extracted: 3, facts_used: 3 },
+    { source_document_id: 'doc-b', facts_extracted: 2, facts_used: 1 },
+  ])
 })
 
 // ─── documentDisplayState ───────────────────────────────────────────────────
