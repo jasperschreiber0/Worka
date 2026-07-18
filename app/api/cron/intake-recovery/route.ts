@@ -79,7 +79,24 @@ function log(event: string, fields: Record<string, unknown> = {}) {
   console.log(JSON.stringify({ event, ts: new Date().toISOString(), ...fields }))
 }
 
+// ── EMERGENCY KILL SWITCH ────────────────────────────────────────────────
+// This route was found repeatedly re-triggering smooth-responder against a
+// batch that deterministically times out on every attempt (the 16 Alfred
+// St Woonona job — a 6-document batch including Kitchen Elevation.pdf),
+// burning real Anthropic spend on every cycle. Hard-disabled here as an
+// immediate, deploy-time stop independent of the pg_cron unschedule
+// (migration 041) and the GitHub Actions workflow, since this route is the
+// one thing every trigger path (pg_cron, GitHub Actions, manual curl) has
+// in common. Remove this block only after the underlying stuck batch/file
+// has been identified and resolved, and MAX_RECOVERY_ATTEMPTS has been
+// verified to actually stop a repeat.
+const RECOVERY_DISABLED = true
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  if (RECOVERY_DISABLED) {
+    return NextResponse.json({ ran: false, skipped: 'recovery temporarily disabled — see RECOVERY_DISABLED in route.ts' })
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
