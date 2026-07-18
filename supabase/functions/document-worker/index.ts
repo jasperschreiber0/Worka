@@ -237,11 +237,28 @@ async function triggerNext(edgeFnUrl: string, anonKey: string, parentJobId: stri
     await new Promise((resolve) => setTimeout(resolve, delayMs))
   }
   try {
-    await fetch(`${edgeFnUrl}/document-worker`, {
+    const res = await fetch(`${edgeFnUrl}/document-worker`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
       body: JSON.stringify({ parent_job_id: parentJobId, builder_id: builderId }),
     })
+    // fetch() does NOT throw on a non-2xx response (a 401/403/500 resolves
+    // normally) — previously only a network-level failure (thrown before
+    // ever getting a response) was ever logged, so a REJECTED self-chain
+    // call (e.g. an auth mismatch on this function's own SUPABASE_ANON_KEY
+    // secret vs. whatever key the ORIGINAL upload-triggered invocation
+    // used) failed completely silently: no error anywhere, the chain just
+    // stopped, indistinguishable in the logs from "batch genuinely done."
+    // This is exactly the shape of a real incident — always precisely the
+    // first WORKER_CONCURRENCY documents succeed and nothing beyond them
+    // ever does.
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => '')
+      console.error(JSON.stringify({
+        event: 'trigger_next_rejected', parent_job_id: parentJobId,
+        status: res.status, body: bodyText.slice(0, 500),
+      }))
+    }
   } catch (err) {
     console.error('document-worker: failed to trigger next job', err)
   }
@@ -249,11 +266,20 @@ async function triggerNext(edgeFnUrl: string, anonKey: string, parentJobId: stri
 
 async function triggerClassification(edgeFnUrl: string, anonKey: string, parentJobId: string): Promise<void> {
   try {
-    await fetch(`${edgeFnUrl}/smooth-responder`, {
+    const res = await fetch(`${edgeFnUrl}/smooth-responder`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
       body: JSON.stringify({ parent_job_id: parentJobId }),
     })
+    // See triggerNext's comment above — fetch() doesn't throw on a
+    // rejected response, so this was previously silent too.
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => '')
+      console.error(JSON.stringify({
+        event: 'trigger_classification_rejected', parent_job_id: parentJobId,
+        status: res.status, body: bodyText.slice(0, 500),
+      }))
+    }
   } catch (err) {
     console.error('document-worker: failed to trigger classification', err)
   }
