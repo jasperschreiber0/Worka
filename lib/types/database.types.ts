@@ -300,6 +300,7 @@ export interface File {
   failed_sibling_filenames: string[] | null
   intake_batch_index: number | null
   intake_batch_count: number | null
+  intake_recovery_attempts: number
   created_at: string
 }
 

@@ -558,6 +558,21 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 QuoteView's "What WorkA read" panel and read by lib/estimating/qa.ts
                                 to flag zero-contribution documents. See "Document-balanced fact
                                 selection" below.
+040_intake_recovery_attempt_cap.sql — files.intake_recovery_attempts (default 0) +
+                                intake_recovery_runs.files_permanently_failed. Closes an
+                                unbounded-retry gap in GET /api/cron/intake-recovery: stale-lock
+                                reclaim and stuck-classification retry (migration 037) had no
+                                per-file ceiling, so a file whose Stage 1/2 AI call fails every
+                                time (e.g. an Anthropic outage) got re-triggered forever —
+                                every ~6 minutes as its job_intake_lock kept going stale — which
+                                caused a real uncontrolled overnight Anthropic spend. The cron now
+                                increments intake_recovery_attempts on every reclaim/retry and,
+                                once it hits MAX_RECOVERY_ATTEMPTS (3, matching
+                                document_processing_jobs' own cap), marks the file
+                                intake_status='failed' with a `failure_reason` explaining the cap
+                                was hit, deletes the lock, and stops — no further automatic
+                                retries; the builder must re-upload. See "Independent Intake
+                                Recovery Service" below.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -799,6 +814,18 @@ not just whatever's left of the function's own log retention.
 in the route): deliberate backpressure so a systemic outage (e.g. Anthropic down, every batch
 stalling) can't turn one cron run into an unbounded re-trigger storm — a capped run still makes
 visible, logged progress, and the next scheduled run picks up the rest.
+
+**Bounded per file, across runs** (`MAX_RECOVERY_ATTEMPTS = 3`, migration 040,
+`files.intake_recovery_attempts`): the per-run caps above bound one cron execution, but don't stop
+the *same* file from being reclaimed/retried again on the *next* run, forever, if its Stage 1/2 AI
+call fails deterministically every time (e.g. an Anthropic credit outage) — that gap caused a real
+uncontrolled overnight Anthropic spend, since a failing run never releases its lock cleanly, the
+lock goes stale (~6 min), and the cron reclaims and re-fires the same expensive processing again
+immediately. Step 4 (stale-lock reclaim) and step 5 (stuck-classification retry) both increment
+`intake_recovery_attempts` before triggering and check it first: once a file hits the cap, the cron
+marks it `intake_status='failed'` with a `failure_reason` explaining the cap was hit, deletes the
+lock, and stops retrying it — the builder must re-upload. `intake_recovery_runs.files_permanently_failed`
+tracks how many files each run gave up on.
 
 **AI call timeouts, the other half of "no request can hang indefinitely."** Before this work, no
 Claude call anywhere in the codebase had an explicit timeout — a hung upstream connection blocks on

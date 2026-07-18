@@ -55,12 +55,23 @@ const MAX_BATCHES_PER_RUN = 20
 const MAX_LOCKS_PER_RUN = 10
 const MAX_STUCK_FILES_PER_RUN = 10
 
+// Hard ceiling on how many times this cron will reclaim a stale
+// job_intake_lock or retry classification for the SAME file. Without this,
+// a file whose processing fails deterministically every time (e.g. an
+// Anthropic credit outage) never releases its lock cleanly, the lock goes
+// stale, this cron reclaims it, the same expensive Stage 1/2 AI call fires
+// again, fails again, and repeats forever — an uncontrolled spend loop, not
+// a recovery mechanism. Matches document_processing_jobs' own retry cap
+// (retry_or_fail_document_job, migration 034).
+const MAX_RECOVERY_ATTEMPTS = 3
+
 interface RunSummary {
   document_jobs_reclaimed: number
   stalled_batches_recomputed: number
   batches_resumed: number
   job_locks_reclaimed: number
   stuck_files_retried: number
+  files_permanently_failed: number
   errors: Array<{ stage: string; message: string }>
 }
 
@@ -95,6 +106,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     batches_resumed: 0,
     job_locks_reclaimed: 0,
     stuck_files_retried: 0,
+    files_permanently_failed: 0,
     errors: [],
   }
 
@@ -207,7 +219,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         // try/finally, but a stuck lock alone is harmless to release).
         const { data: fileRow } = await supabase
           .from('files')
-          .select('id, intake_status, builder_id, processing_batch_id')
+          .select('id, intake_status, builder_id, processing_batch_id, intake_recovery_attempts')
           .eq('id', candidate.file_id)
           .single()
         if (!fileRow || ['extracted', 'failed', 'needs_info'].includes(fileRow.intake_status)) {
@@ -215,8 +227,34 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           continue
         }
 
+        // Retry cap: a lock that keeps going stale means the pipeline run
+        // it's protecting keeps dying (or failing) every single time — most
+        // often a transient outage (e.g. Anthropic credits) that recovery
+        // cannot fix by re-running the same expensive AI call again. Stop
+        // after MAX_RECOVERY_ATTEMPTS rather than retrying forever.
+        if (fileRow.intake_recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
+          await supabase
+            .from('files')
+            .update({
+              intake_status: 'failed',
+              failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while reclaiming a stale processing lock — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
+            })
+            .eq('id', candidate.file_id)
+          await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
+          summary.files_permanently_failed++
+          log('recovery_retry_cap_reached', {
+            stage: 'stale_lock_reclaim', job_id: candidate.job_id, file_id: candidate.file_id,
+            attempts: fileRow.intake_recovery_attempts,
+          })
+          continue
+        }
+        await supabase
+          .from('files')
+          .update({ intake_recovery_attempts: fileRow.intake_recovery_attempts + 1 })
+          .eq('id', candidate.file_id)
+
         summary.job_locks_reclaimed++
-        log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id })
+        log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id, recovery_attempts: fileRow.intake_recovery_attempts + 1 })
 
         // Prefer the queue-model resume path (re-reads each document's
         // already-persisted extraction result — no re-download/re-parse of
@@ -266,8 +304,38 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       })
       if (lockErr || !lockData?.[0]?.acquired) continue
 
+      const { data: stuckFileRow } = await supabase
+        .from('files')
+        .select('intake_recovery_attempts')
+        .eq('id', f.file_id)
+        .single()
+      const attempts = stuckFileRow?.intake_recovery_attempts ?? 0
+
+      // Same retry cap as step 4 — a file that keeps needing a
+      // classification retry is failing every time it's re-triggered, not
+      // recovering from a one-off lost network call.
+      if (attempts >= MAX_RECOVERY_ATTEMPTS) {
+        await supabase
+          .from('files')
+          .update({
+            intake_status: 'failed',
+            failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
+          })
+          .eq('id', f.file_id)
+        await supabase.from('job_intake_locks').delete().eq('job_id', f.job_id)
+        summary.files_permanently_failed++
+        log('recovery_retry_cap_reached', {
+          stage: 'stuck_classification_retry', job_id: f.job_id, file_id: f.file_id, attempts,
+        })
+        continue
+      }
+      await supabase
+        .from('files')
+        .update({ intake_recovery_attempts: attempts + 1 })
+        .eq('id', f.file_id)
+
       summary.stuck_files_retried++
-      log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id })
+      log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id, recovery_attempts: attempts + 1 })
       await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
@@ -296,6 +364,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     batches_resumed: summary.batches_resumed,
     job_locks_reclaimed: summary.job_locks_reclaimed,
     stuck_files_retried: summary.stuck_files_retried,
+    files_permanently_failed: summary.files_permanently_failed,
     errors: summary.errors,
   }).then(({ error }) => {
     if (error) log('recovery_audit_log_write_failed', { error: error.message })
