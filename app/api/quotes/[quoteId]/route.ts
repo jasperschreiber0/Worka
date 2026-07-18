@@ -3,6 +3,8 @@ import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { applyMargin, ensureQuotePriced } from '@/lib/pricing'
+import { deriveQuoteReadiness, isSilentlyUnpriced, type QuoteReadiness } from '@/lib/estimating/readiness'
+import type { QAReport } from '@/lib/types/database.types'
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -23,6 +25,12 @@ interface QuoteSummary {
   confidence_score: number
   unresolved_count: number
   assumption_count: number
+  /** Included items with no total that nothing else surfaces — each adds $0. */
+  unpriced_count: number
+  /** The one builder-facing trust state — see lib/estimating/readiness.ts. */
+  readiness: QuoteReadiness
+  blocked_reasons: string[]
+  review_reasons: string[]
   can_send: boolean
 }
 
@@ -30,6 +38,8 @@ interface QuoteResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
+  /** Stage 8 QA output — "what should I check?" — now actually delivered. */
+  qa_report: QAReport | null
 }
 
 // ─── Helper: group line items by trade category ───────────────────────────────
@@ -72,12 +82,21 @@ function groupByCategory(items: DemoQuoteLineItem[]): LineItemsByCategory[] {
 
 // ─── Helper: compute summary ──────────────────────────────────────────────────
 
-function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[]): QuoteSummary {
+function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[], qaReport: QAReport | null): QuoteSummary {
   const unresolved_count = items.filter(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
   ).length
 
   const assumption_count = items.filter((i) => i.is_assumption).length
+  const unpriced_count = items.filter((i) => isSilentlyUnpriced(i)).length
+
+  const { readiness, blockedReasons, reviewReasons } = deriveQuoteReadiness({
+    unresolvedAssumptions: unresolved_count,
+    unpricedItems: unpriced_count,
+    topRiskCount: qaReport?.top_risks?.length ?? 0,
+    reviewItemCount: qaReport?.review_items?.length ?? 0,
+    confidenceScore: quote.confidence_score,
+  })
 
   return {
     total_cost: quote.total_cost,
@@ -86,7 +105,14 @@ function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[]): QuoteSumm
     confidence_score: quote.confidence_score,
     unresolved_count,
     assumption_count,
-    can_send: unresolved_count === 0,
+    unpriced_count,
+    readiness,
+    blocked_reasons: blockedReasons,
+    review_reasons: reviewReasons,
+    // A blocked quote must never present as sendable — the send routes
+    // enforce the same rule server-side, so this is display truth, not the
+    // only line of defense.
+    can_send: readiness !== 'blocked',
   }
 }
 
@@ -106,12 +132,13 @@ export async function GET(
   // ── Demo mode ──────────────────────────────────────────────────────────────
   if (isDemoMode()) {
     const line_items_by_category = groupByCategory(DEMO_LINE_ITEMS)
-    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS)
+    const summary = computeSummary(DEMO_QUOTE, DEMO_LINE_ITEMS, null)
 
     const response: QuoteResponse = {
       quote: DEMO_QUOTE,
       line_items_by_category,
       summary,
+      qa_report: null,
     }
 
     return NextResponse.json(response)
@@ -138,6 +165,8 @@ export async function GET(
         confidence_score,
         version,
         created_at,
+        qa_report,
+        overall_confidence,
         jobs (
           address
         )
@@ -292,13 +321,29 @@ export async function GET(
       }
     })
 
+    // Stage 8 QA normally runs from the intake poller right after pricing —
+    // but a quote viewed before that ran (or where it failed) would otherwise
+    // show no "what to check" list at all. Lazy-run it here exactly once so
+    // qa_report is never structurally absent from the review screen. Cheap
+    // (a few scoped queries, no AI call) and idempotent.
+    let qaReport = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
+    if (!qaReport) {
+      try {
+        const { runQualityAssurance } = await import('@/lib/estimating/qa')
+        qaReport = await runQualityAssurance(supabase, quoteId, quoteRow.job_id)
+      } catch (qaErr) {
+        console.error('[quotes:get] lazy QA run failed:', qaErr)
+      }
+    }
+
     const line_items_by_category = groupByCategory(items)
-    const summary = computeSummary(quote, items)
+    const summary = computeSummary(quote, items, qaReport)
 
     const response: QuoteResponse = {
       quote,
       line_items_by_category,
       summary,
+      qa_report: qaReport,
     }
 
     return NextResponse.json(response)

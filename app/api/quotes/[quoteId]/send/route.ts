@@ -3,6 +3,7 @@ import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { applyMargin } from '@/lib/pricing'
+import { isSilentlyUnpriced } from '@/lib/estimating/readiness'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -141,6 +142,23 @@ export async function POST(
       return NextResponse.json(
         {
           error: `Quote cannot be sent — current status is '${(quoteRow as { status: string }).status}'. Only quotes in 'pending_review' can be sent.`,
+        },
+        { status: 422 }
+      )
+    }
+
+    // Pricing safety: an included line item with no total contributes $0 to
+    // the quoted price while still describing real scope. That quote is
+    // understated, not complete — refuse to even build the send draft.
+    // (Same isSilentlyUnpriced definition the quote GET's blocked state and
+    // confirm-send's final guard use, so all three can never disagree.)
+    const unpricedForDraft = ((lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>)
+      .filter((li) => isSilentlyUnpriced(li))
+    if (unpricedForDraft.length > 0) {
+      const names = unpricedForDraft.slice(0, 3).map((li) => `"${li.description}"`).join(', ')
+      return NextResponse.json(
+        {
+          error: `${unpricedForDraft.length} item${unpricedForDraft.length !== 1 ? 's' : ''} (${names}${unpricedForDraft.length > 3 ? ', …' : ''}) have no price and currently add $0 to this quote. Set a rate or exclude them before sending.`,
         },
         { status: 422 }
       )

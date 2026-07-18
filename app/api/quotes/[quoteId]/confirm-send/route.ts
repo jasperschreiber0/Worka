@@ -135,24 +135,37 @@ export async function POST(
     )
   }
 
-  // 3. Send via Resend
-  if (resendApiKey) {
-    try {
-      const { Resend } = await import('resend')
-      const resend = new Resend(resendApiKey)
-      await resend.emails.send({
-        from: 'quotes@getworka.com',
-        to: body.to,
-        subject: body.subject,
-        text: body.body,
-      })
-    } catch (err) {
-      console.error('[confirm-send] Resend error:', err)
-      return NextResponse.json({ error: 'Failed to send email' }, { status: 502 })
+  // 3. Pricing safety — the last server-side line of defense before a real
+  // email reaches a real client. An included line item with no total is
+  // silently contributing $0; the quoted price is understated and must not
+  // go out. (Same shared isSilentlyUnpriced rule the quote GET and the
+  // draft route apply — this re-checks against the DB at send time in case
+  // anything changed since the draft was built.)
+  {
+    const { data: lineItems } = await supabase
+      .from('quote_line_items')
+      .select('description, total, is_assumption, assumption_status')
+      .eq('quote_id', quoteId)
+    const { isSilentlyUnpriced } = await import('@/lib/estimating/readiness')
+    const unpriced = ((lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>)
+      .filter((li) => isSilentlyUnpriced(li))
+    if (unpriced.length > 0) {
+      const names = unpriced.slice(0, 3).map((li) => `"${li.description}"`).join(', ')
+      return NextResponse.json(
+        {
+          error: `Cannot send: ${unpriced.length} item${unpriced.length !== 1 ? 's' : ''} (${names}${unpriced.length > 3 ? ', …' : ''}) have no price and add $0 to the total. Set a rate or exclude them first.`,
+        },
+        { status: 422 }
+      )
     }
   }
 
-  // 4. Atomic status update — eq('status', 'pending_review') prevents double-sends
+  // 4. Atomic claim FIRST, then email. Previously the Resend call ran before
+  // the eq('status','pending_review') guard, so two near-simultaneous
+  // requests (double-click, client retry) could both dispatch a real email
+  // to the client before one of them lost the status race — the client got
+  // two identical quotes and WorkA Proof recorded one send. Claiming the
+  // status transition first means the loser of the race never emails at all.
   const { data: updated } = await supabase
     .from('quotes')
     .update({ status: 'sent', sent_at: sentAt })
@@ -168,7 +181,38 @@ export async function POST(
     )
   }
 
-  // 5. Log to communication_history
+  // 5. Send via Resend — with the claim held. If delivery fails, roll the
+  // claim back (a compensating rollback of our own claim, not a user-facing
+  // backwards transition: guarded on this request's own sent_at so it can
+  // never revert someone else's later legitimate send) so the builder can
+  // fix the problem and try again instead of the quote being marked sent
+  // with no email ever delivered.
+  if (resendApiKey) {
+    try {
+      const { Resend } = await import('resend')
+      const resend = new Resend(resendApiKey)
+      await resend.emails.send({
+        from: 'quotes@getworka.com',
+        to: body.to,
+        subject: body.subject,
+        text: body.body,
+      })
+    } catch (err) {
+      console.error('[confirm-send] Resend error:', err)
+      const { error: rollbackErr } = await supabase
+        .from('quotes')
+        .update({ status: 'pending_review', sent_at: null })
+        .eq('id', quoteId)
+        .eq('status', 'sent')
+        .eq('sent_at', sentAt)
+      if (rollbackErr) {
+        console.error('[confirm-send] rollback after email failure ALSO failed — quote is marked sent without a delivered email:', rollbackErr.message, { quoteId })
+      }
+      return NextResponse.json({ error: 'The email failed to send — nothing was delivered to the client. Please try again.' }, { status: 502 })
+    }
+  }
+
+  // 6. Log to communication_history
   const { data: commRow } = await supabase
     .from('communication_history')
     .insert({

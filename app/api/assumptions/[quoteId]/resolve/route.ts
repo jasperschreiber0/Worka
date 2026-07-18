@@ -115,7 +115,7 @@ export async function POST(
     // The quote must belong to the authenticated builder
     const { data: ownedQuote } = await supabase
       .from('quotes')
-      .select('id')
+      .select('id, job_id')
       .eq('id', quoteId)
       .eq('builder_id', builder_id)
       .single()
@@ -216,6 +216,13 @@ export async function POST(
       // line item — so totals only counted assumption items.)
       const { recomputeQuoteTotals } = await import('@/lib/pricing')
       await recomputeQuoteTotals(supabase, quoteId)
+
+      // Refresh the QA report so the review screen's "what to check" list
+      // reflects this resolution immediately (e.g. a Gate-1 item that just
+      // got a unit and a rate should drop out of the unpriced top-risk).
+      // Best-effort — runQualityAssurance never throws.
+      const { runQualityAssurance } = await import('@/lib/estimating/qa')
+      await runQualityAssurance(supabase, quoteId, ownedQuote.job_id)
     }
 
     // 3. Check if all assumptions for this quote are resolved

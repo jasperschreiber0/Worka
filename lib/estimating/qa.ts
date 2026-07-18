@@ -6,6 +6,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
 import type { QAReport } from '@/lib/types/database.types'
+import { pairSupersededFacts, type FactRow } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { isSilentlyUnpriced } from '@/lib/estimating/readiness'
 
 const UNIT_SANITY_MAX: Record<string, number> = {
   m2: 2000,
@@ -23,7 +25,9 @@ interface QALineItem {
   quantity: number | null
   unit: string | null
   rate: number | null
+  total: number | null
   confidence: number | null
+  is_assumption: boolean | null
   assumption_status: string | null
 }
 
@@ -35,7 +39,7 @@ export async function runQualityAssurance(
   try {
     const { data: items } = await supabase
       .from('quote_line_items')
-      .select('id, trade_category_id, description, quantity, unit, rate, confidence, assumption_status')
+      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, is_assumption, assumption_status')
       .eq('quote_id', quoteId)
 
     const lineItems = (items ?? []) as QALineItem[]
@@ -91,10 +95,19 @@ export async function runQualityAssurance(
       reviewItems.push(`${unrealisticCount} line item${unrealisticCount !== 1 ? 's have' : ' has'} an unusually large quantity for its unit — worth a sanity check.`)
     }
 
-    // ── Unpriced / low-confidence items ──
-    const unpriced = included.filter((i) => i.rate === null)
+    // ── Unpriced items — a TOP risk, not a footnote ──
+    // A line that failed every pricing tier has total = null and contributes
+    // $0 to the quote while still describing real scope. This is the single
+    // most direct way WorkA could cost a builder money, so it's named per
+    // item (not just counted) and lands in top_risks. The quote GET derives
+    // its blocked state from the same isSilentlyUnpriced definition, so this
+    // warning and the send gate can never disagree.
+    const unpriced = included.filter((i) => isSilentlyUnpriced(i))
     if (unpriced.length > 0) {
-      reviewItems.push(`${unpriced.length} line item${unpriced.length !== 1 ? 's' : ''} could not be priced from any rate tier.`)
+      const names = unpriced.slice(0, 5).map((i) => `"${i.description}"`).join(', ')
+      const more = unpriced.length > 5 ? ` and ${unpriced.length - 5} more` : ''
+      topRisks.push(`${unpriced.length} item${unpriced.length !== 1 ? 's have' : ' has'} no price and currently add${unpriced.length === 1 ? 's' : ''} $0 to this quote: ${names}${more}.`)
+      recommendedActions.push('Set a rate for the unpriced items (or exclude them) — the total is understated until you do.')
     }
     const lowConfidence = included.filter((i) => (i.confidence ?? 100) < 50)
     if (lowConfidence.length > 0) {
@@ -109,6 +122,50 @@ export async function runQualityAssurance(
       .eq('job_id', jobId)
     if (!docCount || docCount === 0) {
       reviewItems.push('No source documents on record for this estimate — quantities came from a plain-English description.')
+    }
+
+    // ── Document conflicts — surfaced, never silently merged ──
+    // When two documents state different values for the same fact (plan says
+    // kitchen island 2400mm, spec says 3000mm), the engine already supersedes
+    // the older fact deterministically at write time (mergeFacts) — but until
+    // now that resolution was invisible: the builder never learned a conflict
+    // existed, let alone which value won. pairSupersededFacts (the same
+    // shared pairing chat's project memory uses — exact category+key match
+    // plus the same semantic-similarity check mergeFacts applied at write
+    // time) reconstructs old-value → current-value pairs so the builder can
+    // confirm the value WorkA chose. created_at DESC on the superseded query
+    // is a hard precondition of that function, not a preference.
+    try {
+      const [{ data: activeFacts }, { data: supersededFacts }] = await Promise.all([
+        supabase
+          .from('project_facts')
+          .select('category, key, value, embedding')
+          .eq('job_id', jobId)
+          .eq('superseded', false)
+          .order('confidence', { ascending: false })
+          .limit(200),
+        supabase
+          .from('project_facts')
+          .select('category, key, value, embedding')
+          .eq('job_id', jobId)
+          .eq('superseded', true)
+          .order('created_at', { ascending: false })
+          .limit(50),
+      ])
+      if (activeFacts && supersededFacts && supersededFacts.length > 0) {
+        const conflicts = pairSupersededFacts(activeFacts as FactRow[], supersededFacts as FactRow[], undefined, 5)
+        for (const c of conflicts) {
+          reviewItems.push(
+            `Your documents disagreed on ${c.key.replace(/_/g, ' ')}: one said "${c.oldValue}", another said "${c.newValue}". WorkA is using "${c.newValue}" — confirm that's the right one.`
+          )
+        }
+        if (conflicts.length > 0) {
+          recommendedActions.push('Check the document disagreements listed — WorkA kept the most recent value, but only you know which document is current.')
+        }
+      }
+    } catch (conflictErr) {
+      // Conflict surfacing is additive — its failure must never take down QA.
+      console.error('runQualityAssurance: conflict pairing failed', conflictErr)
     }
 
     const { data: quote } = await supabase

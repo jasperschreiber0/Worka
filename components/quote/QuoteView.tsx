@@ -36,13 +36,24 @@ interface QuoteSummary {
   confidence_score: number
   unresolved_count: number
   assumption_count: number
+  unpriced_count: number
+  readiness: 'ready' | 'review_required' | 'blocked'
+  blocked_reasons: string[]
+  review_reasons: string[]
   can_send: boolean
+}
+
+interface QAReportPayload {
+  top_risks: string[]
+  review_items: string[]
+  recommended_actions: string[]
 }
 
 interface QuoteApiResponse {
   quote: DemoQuote
   line_items_by_category: LineItemsByCategory[]
   summary: QuoteSummary
+  qa_report: QAReportPayload | null
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -218,12 +229,41 @@ function PricingTypeTag({ type }: { type: DemoQuoteLineItem['pricing_type'] }) {
 interface LineItemRowProps {
   key?: string | number
   item: DemoQuoteLineItem
+  /** True when the quote is still editable (draft / pending_review). */
+  canEdit?: boolean
+  /** Set the builder's own price for an unpriced line. Resolves true on success. */
+  onSetRate?: (itemId: string, rate: number) => Promise<boolean>
+  /** Exclude an unpriced line from the quote. Resolves true on success. */
+  onExclude?: (itemId: string) => Promise<boolean>
 }
 
-function LineItemRow({ item }: LineItemRowProps) {
+function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) {
   const isExcluded = item.assumption_status === 'excluded'
   const isUnresolved = item.is_assumption && item.assumption_status === 'unresolved'
   const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
+  // Silently unpriced: included, contributes $0, and not already surfaced by
+  // the assumption flow — mirrors isSilentlyUnpriced server-side.
+  const isUnpriced = !isExcluded && !isUnresolved && item.total === null
+
+  const [editing, setEditing] = useState(false)
+  const [rateInput, setRateInput] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const submitRate = async () => {
+    const rate = Number(rateInput)
+    if (!onSetRate || !Number.isFinite(rate) || rate <= 0 || saving) return
+    setSaving(true)
+    const ok = await onSetRate(item.id, rate)
+    setSaving(false)
+    if (ok) setEditing(false)
+  }
+
+  const submitExclude = async () => {
+    if (!onExclude || saving) return
+    setSaving(true)
+    await onExclude(item.id)
+    setSaving(false)
+  }
 
   // item.margin_pct is stored as a 0-1 fraction (migration 012); applyMargin
   // expects a 0-100 percent — convert rather than reimplementing the markup
@@ -235,7 +275,7 @@ function LineItemRow({ item }: LineItemRowProps) {
       className={['flex items-start gap-2 px-3 py-2.5 last:border-0', isExcluded ? 'opacity-60' : ''].filter(Boolean).join(' ')}
       style={{
         borderBottom: '1px solid var(--bg-border)',
-        backgroundColor: isUnresolved ? 'rgba(244,67,54,0.06)' : undefined,
+        backgroundColor: isUnresolved ? 'rgba(244,67,54,0.06)' : isUnpriced ? 'rgba(255,152,0,0.06)' : undefined,
       }}
       role="row"
     >
@@ -252,6 +292,14 @@ function LineItemRow({ item }: LineItemRowProps) {
             {item.description}
           </span>
           <PricingTypeTag type={item.pricing_type} />
+          {isUnpriced && (
+            <span
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold"
+              style={{ backgroundColor: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }}
+            >
+              No price — adds $0
+            </span>
+          )}
         </div>
         {item.dimensions_string && !isExcluded && (
           <span className="text-[11px] block truncate mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
@@ -262,6 +310,64 @@ function LineItemRow({ item }: LineItemRowProps) {
           <span className="text-[11px] block mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
             {item.source_ref}
           </span>
+        )}
+        {/* Unpriced fix actions — the builder's way through the send gate */}
+        {isUnpriced && canEdit && !editing && (
+          <div className="flex items-center gap-2 mt-1.5">
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="text-[11px] font-semibold px-2 py-1 rounded"
+              style={{ backgroundColor: 'rgba(255,152,0,0.1)', color: 'var(--status-amber)' }}
+            >
+              Add your price
+            </button>
+            <button
+              type="button"
+              onClick={submitExclude}
+              disabled={saving}
+              className="text-[11px] font-medium px-2 py-1 rounded disabled:opacity-40"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              Leave it out
+            </button>
+          </div>
+        )}
+        {isUnpriced && canEdit && editing && (
+          <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+            <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+              {item.quantity !== null && item.unit ? `$ per ${item.unit}` : '$ total for this item'}
+            </span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={rateInput}
+              onChange={(e) => setRateInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitRate() }}
+              className="w-24 px-2 py-1 rounded text-[12px] tabular-nums"
+              style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+              aria-label={`Price for ${item.description}`}
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={submitRate}
+              disabled={saving || !(Number(rateInput) > 0)}
+              className="btn-primary text-[11px] px-2.5 py-1 disabled:opacity-40"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              disabled={saving}
+              className="text-[11px] px-2 py-1"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              Cancel
+            </button>
+          </div>
         )}
       </div>
 
@@ -420,9 +526,12 @@ interface CategorySectionProps {
   group: LineItemsByCategory
   isExpanded: boolean
   onToggle: () => void
+  canEdit?: boolean
+  onSetRate?: (itemId: string, rate: number) => Promise<boolean>
+  onExclude?: (itemId: string) => Promise<boolean>
 }
 
-function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) {
+function CategorySection({ group, isExpanded, onToggle, canEdit, onSetRate, onExclude }: CategorySectionProps) {
   const hasUnresolved = group.items.some(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
   )
@@ -518,7 +627,7 @@ function CategorySection({ group, isExpanded, onToggle }: CategorySectionProps) 
             </div>
           </div>
           {group.items.map((item) => (
-            <LineItemRow key={item.id} item={item} />
+            <LineItemRow key={item.id} item={item} canEdit={canEdit} onSetRate={onSetRate} onExclude={onExclude} />
           ))}
         </div>
       </div>
@@ -572,11 +681,41 @@ function SummaryCard({ summary }: SummaryCardProps) {
             <span className="text-[11px] hidden sm:inline" style={{ color: 'var(--text-tertiary)' }}>{confidenceLabel}</span>
           </div>
         </div>
-        {summary.unresolved_count > 0 && (
-          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(244,67,54,0.08)' }}>
+        {/* Readiness banner — the one answer to "can I send this?" */}
+        {summary.readiness === 'blocked' && (
+          <div className="px-4 py-2.5" style={{ backgroundColor: 'rgba(244,67,54,0.08)' }}>
+            <div className="flex items-center gap-2">
+              <svg
+                className="w-4 h-4 flex-shrink-0"
+                style={{ color: 'var(--status-red)' }}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                />
+              </svg>
+              <span className="text-[13px] font-medium" style={{ color: 'var(--status-red)' }}>
+                These items require review before sending
+              </span>
+            </div>
+            <ul className="mt-1 ml-6 space-y-0.5">
+              {summary.blocked_reasons.map((reason, i) => (
+                <li key={i} className="text-[12px]" style={{ color: 'var(--status-red)' }}>{reason}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {summary.readiness === 'review_required' && (
+          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(255,152,0,0.1)' }}>
             <svg
               className="w-4 h-4 flex-shrink-0"
-              style={{ color: 'var(--status-red)' }}
+              style={{ color: 'var(--status-amber)' }}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -589,31 +728,12 @@ function SummaryCard({ summary }: SummaryCardProps) {
                 d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
               />
             </svg>
-            <span className="text-[13px] font-medium" style={{ color: 'var(--status-red)' }}>
-              {summary.unresolved_count} item{summary.unresolved_count !== 1 ? 's' : ''} need
-              {summary.unresolved_count === 1 ? 's' : ''} your input before sending
+            <span className="text-[13px] font-medium" style={{ color: 'var(--status-amber)' }}>
+              The numbers are complete — check the items below before sending
             </span>
           </div>
         )}
-        {summary.unresolved_count === 0 && summary.assumption_count > 0 && (
-          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
-            <svg
-              className="w-4 h-4 flex-shrink-0"
-              style={{ color: 'var(--status-green)' }}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-              aria-hidden="true"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-            <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
-              All assumptions resolved — quote is ready to send
-            </span>
-          </div>
-        )}
-        {summary.unresolved_count === 0 && summary.assumption_count === 0 && (
+        {summary.readiness === 'ready' && (
           <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(76,175,80,0.08)' }}>
             <svg
               className="w-4 h-4 flex-shrink-0"
@@ -631,6 +751,40 @@ function SummaryCard({ summary }: SummaryCardProps) {
             </span>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ─── "Check before sending" — the QA report, finally on screen ───────────────
+
+function CheckBeforeSending({ report }: { report: QAReportPayload }) {
+  const hasContent = report.top_risks.length > 0 || report.review_items.length > 0
+  if (!hasContent) return null
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
+      <div className="px-4 py-2" style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderBottom: '1px solid rgba(255,152,0,0.2)' }}>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>
+          Check before sending
+        </h3>
+        <p className="text-[11px] mt-0.5" style={{ color: 'var(--status-amber)' }}>
+          WorkA reviewed this estimate — these are the things only you can confirm.
+        </p>
+      </div>
+      <div style={{ backgroundColor: 'var(--bg-surface)' }}>
+        {report.top_risks.map((risk, i) => (
+          <div key={`risk-${i}`} className="flex items-start gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+            <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
+            <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{risk}</span>
+          </div>
+        ))}
+        {report.review_items.map((item, i) => (
+          <div key={`review-${i}`} className="flex items-start gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+            <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: 'var(--status-amber)' }} aria-hidden="true" />
+            <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{item}</span>
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -668,8 +822,7 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
               d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
             />
           </svg>
-          {summary.unresolved_count} item
-          {summary.unresolved_count !== 1 ? 's' : ''} need your input first
+          These items require review before sending
         </p>
       )}
       <div className="flex items-center gap-2">
@@ -679,8 +832,10 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
           disabled={!summary.can_send}
           title={
             summary.can_send
-              ? 'Send quote to client'
-              : `Resolve ${summary.unresolved_count} item${summary.unresolved_count !== 1 ? 's' : ''} first`
+              ? summary.readiness === 'review_required'
+                ? 'Check the flagged items, then send'
+                : 'Send quote to client'
+              : summary.blocked_reasons[0] ?? 'Fix the flagged items first'
           }
           className="btn-primary px-4 py-2 text-[13px] disabled:opacity-40 disabled:cursor-not-allowed flex-1 sm:flex-none"
         >
@@ -797,40 +952,64 @@ function QuoteViewInner({
     }
   }, [])
 
-  // Fetch quote data
-  useEffect(() => {
-    async function load() {
-      // Guard against empty quoteId (can happen if SSE pipeline didn't return one)
-      if (!quoteId || quoteId === 'demo-quote-id') {
-        // In demo mode or when no real quoteId, fall back to the demo endpoint
-        // which always returns 200 with placeholder data.
-      }
-      try {
-        const res = await fetch(`/api/quotes/${quoteId}`)
-        if (!res.ok) {
-          const status = res.status
-          if (status === 401) {
-            setError('Session expired — please refresh the page and try again.')
-          } else if (status === 404) {
-            setError('Quote not found — it may still be processing. Try again in a moment.')
-          } else {
-            setError('Failed to load quote. Please try again.')
-          }
-          return
+  // Fetch quote data. Extracted so the line-item fix actions can re-fetch
+  // after a successful PATCH — the server recomputes totals/QA/readiness,
+  // and the screen must show that truth rather than a local guess.
+  const firstLoadRef = useRef(true)
+  const loadQuote = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}`)
+      if (!res.ok) {
+        const status = res.status
+        if (status === 401) {
+          setError('Session expired — please refresh the page and try again.')
+        } else if (status === 404) {
+          setError('Quote not found — it may still be processing. Try again in a moment.')
+        } else {
+          setError('Failed to load quote. Please try again.')
         }
-        const json = await res.json() as QuoteApiResponse
-        setData(json)
-        // Expand all categories by default
+        return
+      }
+      const json = await res.json() as QuoteApiResponse
+      setData(json)
+      // Expand all categories by default — but only on first load, so a
+      // refetch after a fix doesn't blow away the builder's collapse state.
+      if (firstLoadRef.current) {
+        firstLoadRef.current = false
         const allIds = new Set(json.line_items_by_category.map((g) => g.category_id))
         setExpandedCategories(allIds)
-      } catch {
-        setError('Something went wrong loading the quote.')
-      } finally {
-        setIsLoading(false)
       }
+    } catch {
+      setError('Something went wrong loading the quote.')
+    } finally {
+      setIsLoading(false)
     }
-    load()
   }, [quoteId])
+
+  useEffect(() => {
+    loadQuote()
+  }, [loadQuote])
+
+  // Line-item fix actions — the builder's way through the unpriced gate.
+  const patchLineItem = useCallback(async (itemId: string, body: { rate?: number; excluded?: boolean }): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}/line-items/${itemId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) return false
+      await loadQuote()
+      return true
+    } catch {
+      return false
+    }
+  }, [quoteId, loadQuote])
+
+  const handleSetRate = useCallback((itemId: string, rate: number) => patchLineItem(itemId, { rate }), [patchLineItem])
+  const handleExclude = useCallback((itemId: string) => patchLineItem(itemId, { excluded: true }), [patchLineItem])
+
+  const canEditItems = !!data && !sentAt && ['draft', 'pending_review'].includes(data.quote.status)
 
   const handleClose = useCallback(() => {
     setSendModalOpen(false)
@@ -1029,6 +1208,9 @@ function QuoteViewInner({
               {/* Summary card */}
               <SummaryCard summary={data.summary} />
 
+              {/* What should I check? — QA output, shown before the numbers */}
+              {data.qa_report && <CheckBeforeSending report={data.qa_report} />}
+
               {/* PC/PS register */}
               {(() => {
                 const allItems = data.line_items_by_category.flatMap(g => g.items)
@@ -1042,6 +1224,9 @@ function QuoteViewInner({
                   group={group}
                   isExpanded={expandedCategories.has(group.category_id)}
                   onToggle={() => toggleCategory(group.category_id)}
+                  canEdit={canEditItems}
+                  onSetRate={handleSetRate}
+                  onExclude={handleExclude}
                 />
               ))}
 

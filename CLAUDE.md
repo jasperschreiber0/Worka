@@ -337,6 +337,7 @@ This table is now generated to match `app/api/**/route.ts` exactly — a prior v
 | `POST /api/quotes/[quoteId]/send` | Build the send draft (no mutation, no email sent yet) |
 | `POST /api/quotes/[quoteId]/confirm-send` | Builder-confirmed send — atomic `pending_review → sent` guard, Resend delivery, proof event |
 | `POST /api/quotes/[quoteId]/revise` | Copy the quote + all line items into a new draft version one number up |
+| `PATCH /api/quotes/[quoteId]/line-items/[itemId]` | Set a builder price for (or exclude) an unpriced line item — the unblock path for the unpriced-item send gate; draft/pending_review only, recomputes totals + QA |
 | `GET/POST /api/variations` | Variation list / create (builder-session scoped; never trusts a body-supplied `builder_id`) |
 | `GET /api/variations/[variationId]` | Single variation detail — builder session, or a valid `?t=` share token for the public approval page |
 | `PATCH /api/variations/[variationId]` | Client approves/rejects a variation — public, requires the `?t=`/body `t` share token, forward-only |

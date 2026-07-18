@@ -96,6 +96,9 @@ function renderCategorySection(group: CategoryGroup): string {
 // ─── Build the full HTML page ─────────────────────────────────────────────────
 
 function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
+  // Anything short of sent/approved is a working document, not a client
+  // quote — watermark it so an exported draft can't pass for the real thing.
+  const isDraft = quote.status !== 'sent' && quote.status !== 'approved'
   // This document is CLIENT-FACING: every amount is marked up by the
   // builder's margin. Raw cost rates never leave the builder's screen.
   const markedUpItems = items.map((item) => ({
@@ -359,7 +362,13 @@ function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
     <p>This page is optimised for printing. Use the button to save as PDF or print.</p>
     <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
   </div>
-
+${isDraft ? `
+  <!-- Draft watermark — a quote that hasn't passed review must never look
+       like a finished client document if this link is printed or forwarded -->
+  <div style="background:#b91c1c;color:#ffffff;text-align:center;font-weight:700;letter-spacing:0.12em;padding:8px 12px;font-size:14px;">
+    DRAFT — NOT FOR ISSUE. This estimate has not completed review.
+  </div>
+` : ''}
   <!-- Quote header -->
   <div class="quote-header">
     <div>
@@ -403,7 +412,7 @@ function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
   <!-- Footer -->
   <div class="footer">
     <div class="footer-note">
-      All amounts in AUD including GST unless stated. Quote prepared ${quoteDate}.
+      All amounts in AUD excluding GST unless stated. Quote prepared ${quoteDate}.
     </div>
     <div class="worka-badge">Quote prepared by WorkA</div>
   </div>

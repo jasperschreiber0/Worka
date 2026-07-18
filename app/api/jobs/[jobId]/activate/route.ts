@@ -10,6 +10,7 @@ import {
 } from '@/lib/activation-demo'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { applyMargin, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
 import { randomUUID } from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -180,9 +181,10 @@ async function handleDemoActivation(
     } satisfies ActivateResponse)
   }
 
-  // Generate activation data
+  // Generate activation data — invoice amounts from the client contract
+  // value (cost + margin), matching the real-mode path's margin rule.
   const milestones = generateMilestones(jobId, quote.total_cost)
-  const invoiceSchedule = generateInvoiceSchedule(jobId, quote.total_cost)
+  const invoiceSchedule = generateInvoiceSchedule(jobId, applyMargin(quote.total_cost, DEFAULT_MARGIN_PCT))
   const now = new Date().toISOString()
 
   const recorded = await recordProofEvent({
@@ -262,7 +264,7 @@ async function handleLiveActivation(
   // 1. Fetch and validate the quote
   const { data: quoteRow, error: quoteError } = await supabase
     .from('quotes')
-    .select('id, job_id, status, total_cost, version')
+    .select('id, job_id, status, total_cost, margin_pct, version')
     .eq('id', quoteId)
     .eq('builder_id', builderId)
     .single()
@@ -271,7 +273,7 @@ async function handleLiveActivation(
     return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
   }
 
-  const quote = quoteRow as { id: string; job_id: string; status: string; total_cost: number; version: number }
+  const quote = quoteRow as { id: string; job_id: string; status: string; total_cost: number; margin_pct: number | null; version: number }
 
   if (quote.status !== 'sent' && quote.status !== 'approved') {
     return NextResponse.json(
@@ -294,22 +296,50 @@ async function handleLiveActivation(
 
   const job = jobRow as { id: string; address: string; status: string }
 
-  // 3. Update job status to active
-  await supabase
+  // 3. Atomic forward-only activation claim. The .in('status', ...) filter is
+  // the guard: a job already active (double-click, client retry, a second
+  // sent quote for the same job) matches zero rows here, so the second call
+  // gets a clean 409 instead of re-inserting a full duplicate set of
+  // milestones/invoices and re-feeding rate learning (Safety Rule #3 —
+  // "write guards on every status-change function" — previously missing on
+  // exactly this transition).
+  const { data: claimedJob } = await supabase
     .from('jobs')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', jobId)
+    .in('status', ['quoting', 'quoted'])
+    .select('id')
+    .single()
 
-  // 4. Update quote status to approved
+  if (!claimedJob) {
+    return NextResponse.json(
+      { error: `Job is already ${job.status === 'active' ? 'active' : job.status} — activation can only run once` },
+      { status: 409 }
+    )
+  }
+
+  // 4. Update quote status to approved (guarded the same way — never
+  // re-approves or reverses a terminal quote)
   await supabase
     .from('quotes')
     .update({ status: 'approved', approved_at: new Date().toISOString() })
     .eq('id', quoteId)
+    .in('status', ['sent', 'approved'])
 
   // 4b. Tier 1 rate learning — fold this accepted quote's rates into
-  // builder_learned_rates (best-effort, never blocks activation)
+  // builder_learned_rates (best-effort, never blocks activation). Runs after
+  // the atomic claim above, so a duplicate activation attempt can never
+  // double-count the same quote's rates into the running averages.
   const { captureLearnedRates } = await import('@/lib/pricing')
   await captureLearnedRates(supabase, quoteId)
+
+  // The client pays cost + margin. quotes.total_cost is the builder's
+  // internal cost basis (see CLAUDE.md's Margin rule) — every client-facing
+  // figure must be marked up, and invoice-schedule amounts are exactly that:
+  // the progress claims the client will be billed. Generating them from raw
+  // total_cost (as this used to) meant every activated job invoiced the
+  // client at cost, silently forfeiting the builder's entire margin.
+  const clientContractValue = applyMargin(quote.total_cost, quote.margin_pct ?? DEFAULT_MARGIN_PCT)
 
   // 5. Generate and insert milestones
   const milestones = generateMilestones(jobId, quote.total_cost)
@@ -326,8 +356,9 @@ async function handleLiveActivation(
     }))
   )
 
-  // 6. Generate and insert invoice schedule
-  const invoiceSchedule = generateInvoiceSchedule(jobId, quote.total_cost)
+  // 6. Generate and insert invoice schedule — from the CLIENT contract value
+  // (cost + margin), never raw cost. See the margin note above step 5.
+  const invoiceSchedule = generateInvoiceSchedule(jobId, clientContractValue)
   await supabase.from('invoice_schedule').insert(
     invoiceSchedule.map((item) => ({
       id: item.id,

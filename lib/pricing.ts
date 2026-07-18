@@ -147,10 +147,22 @@ function matchLineItemKey(
 
 // ─── Rate resolution (5-tier hierarchy) ───────────────────────────────────────
 
+// A learned rate needs at least this many contributing quotes before Tier 1
+// trusts it over the platform default. With no threshold, the very first
+// activation set the learned rate outright (upsert_learned_rate seeds the
+// running average from sample 1) and immediately outranked every other tier —
+// one rushed job, favor price, or fat-fingered rate permanently became that
+// builder's authoritative price with nothing to dilute it. Below the
+// threshold the sample is still captured (the average keeps building); it
+// just doesn't OVERRIDE anything until a second independent quote agrees
+// it's real.
+export const MIN_LEARNED_RATE_SAMPLES = 2
+
 interface RateRow {
   line_item_key: string
   rate: number
   unit: string
+  sample_count?: number | null
 }
 
 interface StateRateRow extends RateRow {
@@ -181,7 +193,7 @@ async function loadRateContext(
   const stateFilter = builderState ? `state.is.null,state.eq.${builderState}` : 'state.is.null'
 
   const [learnedRes, prefRes, supplierRes, platformRes, networkRes] = await Promise.all([
-    supabase.from('builder_learned_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
+    supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count').eq('builder_id', builderId),
     supabase.from('builder_rate_preferences').select('line_item_key, rate, unit').eq('builder_id', builderId),
     supabase.from('builder_supplier_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
     supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state').or(stateFilter),
@@ -220,8 +232,12 @@ function resolveRateForKey(
   const unitMatches = (rateUnit: string) =>
     !itemUnit || normalizeUnit(rateUnit) === itemUnit
 
-  // Tier 1: learned
-  const learned = ctx.learned.find((r) => r.line_item_key === key && unitMatches(r.unit))
+  // Tier 1: learned — only once enough independent quotes agree (see
+  // MIN_LEARNED_RATE_SAMPLES). A single-sample "learned" rate falls through
+  // to the tiers below instead of overriding them.
+  const learned = ctx.learned.find(
+    (r) => r.line_item_key === key && unitMatches(r.unit) && (r.sample_count ?? 1) >= MIN_LEARNED_RATE_SAMPLES
+  )
   if (learned) return { rate: learned.rate, unit: learned.unit, source: 'learned', line_item_key: key }
 
   // Tier 2: preference
@@ -459,7 +475,7 @@ export async function captureLearnedRates(
 
     const { data: items } = await supabase
       .from('quote_line_items')
-      .select('trade_category_id, description, unit, rate, assumption_status')
+      .select('trade_category_id, description, unit, rate, assumption_status, pricing_type')
       .eq('quote_id', quoteId)
     if (!items) return
 
@@ -484,6 +500,12 @@ export async function captureLearnedRates(
     await Promise.all(
       items.map(async (item) => {
         if (item.rate === null || item.assumption_status === 'excluded') return
+        // PC allowances and provisional sums are placeholders by definition —
+        // a nominal PS figure entered to unblock a quote is not a market
+        // rate, and folding it into the learned average would poison Tier 1
+        // pricing for every future quote. Only measured lines teach.
+        const pricingType = (item as { pricing_type?: string | null }).pricing_type
+        if (pricingType && pricingType !== 'measured') return
         const key = matchLineItemKey({ ...item, quantity: null }, catalogue)
         if (!key || !item.unit) return
 
