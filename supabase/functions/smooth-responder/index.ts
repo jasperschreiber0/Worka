@@ -37,8 +37,9 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 import {
   splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
-  withTimeoutAndRetry,
-  type BatchableFile, type FactRow,
+  withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, shouldStopRetrying, nextFailureHistory,
+  splitBatchForRetry,
+  type BatchableFile, type FactRow, type AnthropicFailureClassification,
 } from './pipeline-logic.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
@@ -570,6 +571,7 @@ async function callTool(
         console.log(JSON.stringify({
           event: 'claude_call_attempt_failed', tool: tool.name, attempt: info.attempt,
           duration_ms: info.durationMs, retryable: info.retryable,
+          classification: info.classification,
           anthropic_status: err?.status ?? null,
           anthropic_error_body: err?.error ?? null,
           error: info.error instanceof Error ? info.error.message : String(info.error),
@@ -702,6 +704,60 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     }
   }
 
+  // ── Billing-halt: stop calling Anthropic for the REST of this run ───────
+  // credit_exhausted / authentication_failed mean the account itself cannot
+  // proceed — every subsequent call in this run (next batch, Stage 3, Stage
+  // 6) would fail identically, so continuing to make them was the second
+  // half of the incident this was built to close (the first 400
+  // credit-balance error was logged, but the pipeline kept spending on
+  // batch 2, Stage 3, Stage 6 regardless). Callers MUST `return` immediately
+  // after calling this — it does not throw, so the caller controls the
+  // unwind. Remaining unprocessed documents/stages are left exactly as they
+  // are (still 'pending' at the document-worker layer) rather than marked
+  // failed — this is a temporary account-level condition, not a verdict on
+  // those documents, so they should resume normally once billing is fixed
+  // rather than requiring a full re-upload.
+  const haltForBilling = async (classification: AnthropicFailureClassification, reason: string) => {
+    console.log(JSON.stringify({ event: 'ai_billing_halt', classification, reason, file_id: fileId, job_id: jobId }))
+    await fail(
+      `AI processing stopped: ${classification === 'credit_exhausted' ? 'Anthropic account credit balance is too low' : 'Anthropic API authentication failed'} — ${reason}`.slice(0, 500)
+    )
+  }
+
+  // ── Per-file AI failure history (files.ai_failure_classification / .ai_failure_count, migration 042) ──
+  // Persists across invocations so a LATER run (a resume, a fresh upload
+  // trigger, a recovery reclaim) doesn't blindly repeat a call that has
+  // already proven deterministic for this exact file — the root cause of
+  // "the same document batch is later processed again by recovery" in the
+  // incident this closes. shouldStopRetrying's "twice with the same
+  // classification" rule is what actually marks the file permanently
+  // failed; a single non-retryable failure (e.g. one context_window_exceeded)
+  // is also stopped immediately (isRetryableClassification is false for it),
+  // matching document_processing_jobs' own posture of never retrying a
+  // deterministic failure just to collect more data points.
+  const recordAiFailure = async (rawFileId: string, classification: AnthropicFailureClassification, reason: string) => {
+    const fid = rawFileId.split('#')[0] // strip pdf-chunk.ts's `${realId}#pStart-End` suffix — one files row per real file
+    const { data: row } = await supabase
+      .from('files')
+      .select('ai_failure_classification, ai_failure_count')
+      .eq('id', fid)
+      .single()
+    const priorClassification = (row?.ai_failure_classification as AnthropicFailureClassification | null) ?? null
+    const priorCount = row?.ai_failure_count ?? 0
+    const stop = shouldStopRetrying(priorClassification, priorCount, classification)
+    const next = nextFailureHistory({ classification: priorClassification, count: priorCount }, classification)
+    const update: Record<string, unknown> = { ai_failure_classification: next.classification, ai_failure_count: next.count }
+    if (stop) {
+      update.intake_status = 'failed'
+      update.failure_stage = 'AI_REASONING_FAILED'
+      update.failure_reason =
+        `Automatic AI processing stopped after ${next.count === 1 ? 'a non-retryable' : `${next.count} repeated`} ${classification} failure${next.count === 1 ? '' : 's'} — ${reason}. Manual intervention required (re-upload after resolving the underlying issue).`.slice(0, 500)
+    }
+    await supabase.from('files').update(update).eq('id', fid)
+    console.log(JSON.stringify({ event: 'ai_failure_recorded', file_id: fid, classification, consecutive_count: next.count, stopped: stop }))
+    return stop
+  }
+
   const startedAt = Date.now()
 
   try {
@@ -818,6 +874,42 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         allLoaded = [primary, ...loadedSiblings]
       }
 
+      // ── Exclude files that have already proven deterministically unprocessable ──
+      // ai_failure_count >= 2 means the same AI-call failure classification
+      // has already been recorded twice for this exact file (see
+      // recordAiFailure/shouldStopRetrying above) — by the time that
+      // happened, recordAiFailure already marked it intake_status='failed',
+      // so it should never have been picked up as pending work again. This
+      // is a defensive second check for a same-run re-read (both paths
+      // above load documents by id, not by intake_status), and it's what
+      // actually breaks the "same document batch is later processed again
+      // by recovery" loop for a resumed/re-triggered run that includes this
+      // file as a sibling rather than as the primary trigger.
+      let priorFailureCounts = new Map<string, { classification: AnthropicFailureClassification | null; count: number }>()
+      if (allLoaded.length > 0) {
+        const { data: historyRows } = await supabase
+          .from('files')
+          .select('id, ai_failure_classification, ai_failure_count')
+          .in('id', Array.from(new Set(allLoaded.map((f) => f.fileId.split('#')[0]))))
+        priorFailureCounts = new Map(
+          (historyRows ?? []).map((r: Record<string, unknown>) => [
+            r.id as string,
+            { classification: (r.ai_failure_classification as AnthropicFailureClassification | null) ?? null, count: (r.ai_failure_count as number) ?? 0 },
+          ])
+        )
+        const stillEligible: LoadedFile[] = []
+        for (const f of allLoaded) {
+          const history = priorFailureCounts.get(f.fileId.split('#')[0])
+          if (history && history.count >= 2) {
+            failedToLoadSiblings.push(f.filename)
+            console.log(JSON.stringify({ document: f.filename, status: 'skipped_exhausted_retries', prior_classification: history.classification, prior_count: history.count }))
+          } else {
+            stillEligible.push(f)
+          }
+        }
+        allLoaded = stillEligible
+      }
+
       // ── Batch instead of a single hard cutoff ────────────────────────────
       // Previously: one 20MB pass/fail per run, largest-first, anything that
       // didn't fit was dropped with no way to retry short of a fresh manual
@@ -879,7 +971,31 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         filename: f.filename,
         approxBytes: JSON.stringify(f.block).length,
       }))
-      const { batches: fileBatches, excluded } = splitIntoBatches(batchInput, MAX_BYTES_PER_BATCH, MAX_BATCHES)
+
+      // ── Never resend an identical request that already timed out ────────
+      // A file with exactly one prior AI failure (ai_failure_count === 1 —
+      // two would already have been excluded above) is pulled out of the
+      // normal bin-packer and forced into its own solo batch: whatever
+      // grouping it was bundled with last time is guaranteed not to recur,
+      // since a solo request is strictly smaller than any multi-file
+      // grouping the packer could have produced. This is what "split the
+      // batch, never resend the identical oversized request" means across
+      // invocations — a live in-run recursive split isn't needed because
+      // the persisted per-file history already tells the NEXT invocation to
+      // start smaller. If a solo file still fails, ai_failure_count reaches
+      // 2 and recordAiFailure permanently excludes it — no third attempt.
+      const forcedSoloInput = batchInput.filter((f) => (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) >= 1)
+      const freshInput = batchInput.filter((f) => (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) < 1)
+      const soloTaken = forcedSoloInput.slice(0, MAX_BATCHES)
+      const soloOverflow = forcedSoloInput.slice(MAX_BATCHES)
+      const soloBatches: BatchableFile[][] = soloTaken.map((f) => [f])
+      const remainingBatchBudget = Math.max(0, MAX_BATCHES - soloBatches.length)
+      const { batches: freshBatches, excluded: freshExcluded } = splitIntoBatches(freshInput, MAX_BYTES_PER_BATCH, remainingBatchBudget)
+      const fileBatches = [...soloBatches, ...freshBatches]
+      const excluded = [
+        ...soloOverflow.map((f) => ({ fileId: f.fileId, filename: f.filename, reason: 'previously timed out — retrying alone once batch capacity allows' })),
+        ...freshExcluded,
+      ]
       for (const ex of excluded) skippedSiblings.push(ex.filename)
 
       // Persist what's included/excluded as soon as it's decided — not just
@@ -963,16 +1079,35 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // successful batches. This is a genuinely catchable, in-band
           // failure (unlike the CPU-governor kill this pipeline separately
           // guards against above, which no catch block can intercept) — so
-          // it should cost this batch's files, not the whole run. The
-          // batch's files are recorded as failed and surfaced to the
-          // builder exactly like a failed-to-load sibling; remaining
-          // batches still get a chance to run.
+          // it should cost this batch's files, not the whole run, EXCEPT
+          // for a billing-halt classification (credit_exhausted /
+          // authentication_failed): every remaining call in this run would
+          // fail identically, so continuing to the next batch/stage would
+          // just keep spending on calls guaranteed to fail — that's the
+          // second half of the incident this closes (see haltForBilling).
+          const classification = (err as { classification?: AnthropicFailureClassification })?.classification
+            ?? classifyAnthropicError(err)
+          const errMessage = err instanceof Error ? err.message : String(err)
           console.log(JSON.stringify({
             batch: batchIdx + 1, totalBatches: fileBatches.length,
             documents: batchFiles.map((f) => f.filename), status: 'failed',
             durationMs: Date.now() - batchStartedAt,
-            error: err instanceof Error ? err.message : String(err),
+            classification, error: errMessage,
           }))
+
+          if (isBillingHaltClassification(classification)) {
+            await haltForBilling(classification, errMessage)
+            return
+          }
+
+          // Persist this failure against every file in the batch — this is
+          // what lets a LATER invocation retry this exact grouping smaller
+          // (forced solo batching above) instead of resending it whole, and
+          // what stops it for good after a second identical failure
+          // (shouldStopRetrying, inside recordAiFailure).
+          for (const f of batchFiles) {
+            await recordAiFailure(f.fileId, classification, errMessage)
+          }
           failedToLoadSiblings.push(...batchFiles.map((f) => f.filename))
           continue
         }
@@ -1156,8 +1291,14 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // two stages' proven 16000 rather than guessing at yet another cap.
       scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000)
     } catch (err) {
-      console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, error: err instanceof Error ? err.message : String(err) }))
-      await fail(`Scope reasoning call failed: ${err instanceof Error ? err.message : String(err)}`)
+      const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
+      const errMessage = err instanceof Error ? err.message : String(err)
+      console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, classification, error: errMessage }))
+      if (isBillingHaltClassification(classification)) {
+        await haltForBilling(classification, errMessage)
+        return
+      }
+      await fail(`Scope reasoning call failed: ${errMessage}`)
       return
     }
     if (!scopeResult) { await fail('No structured response from scope reasoning stage'); return }
@@ -1237,8 +1378,14 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     try {
       estimateResult = await callTool(anthropic, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
     } catch (err) {
-      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, error: err instanceof Error ? err.message : String(err) }))
-      await fail(`Estimate generation call failed: ${err instanceof Error ? err.message : String(err)}`)
+      const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
+      const errMessage = err instanceof Error ? err.message : String(err)
+      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, classification, error: errMessage }))
+      if (isBillingHaltClassification(classification)) {
+        await haltForBilling(classification, errMessage)
+        return
+      }
+      await fail(`Estimate generation call failed: ${errMessage}`)
       return
     }
     if (!estimateResult || !estimateResult.line_items || estimateResult.line_items.length === 0) {

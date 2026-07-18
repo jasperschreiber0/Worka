@@ -168,6 +168,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     intake_batch_index: null,
     intake_batch_count: null,
     intake_recovery_attempts: 0,
+    ai_failure_classification: null,
+    ai_failure_count: 0,
     created_at: new Date().toISOString(),
   }
 

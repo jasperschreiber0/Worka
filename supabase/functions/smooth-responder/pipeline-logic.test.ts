@@ -25,6 +25,12 @@ import {
   documentDisplayState,
   selectFactsBalancedBySource,
   summarizeFactSelection,
+  classifyAnthropicError,
+  isRetryableClassification,
+  isBillingHaltClassification,
+  shouldStopRetrying,
+  nextFailureHistory,
+  splitBatchForRetry,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -579,12 +585,138 @@ test('pairSupersededFacts: chain collapsing is order-dependent on its documented
   assert.equal(changes[0].oldValue, '120', 'with the precondition violated, the function reports v1 as if it were the most recent predecessor')
 })
 
+// ─── classifyAnthropicError ─────────────────────────────────────────────────
+//
+// Evidence-driven: production logs showed the identical 6-document batch
+// aborting at ~150000ms twice in a row (a retried application_timeout can
+// never succeed on an unmodified payload) and a `400 Your credit balance is
+// too low` not halting the run. These tests pin down the exact
+// classification each of those (and every other documented category) maps
+// to, and that only the three genuinely transient ones are retryable.
+
+test('classifyAnthropicError: an abort at ~timeoutMs is application_timeout, not retryable', () => {
+  const err = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+  assert.equal(classifyAnthropicError(err, 150002, 150_000), 'application_timeout')
+  assert.equal(isRetryableClassification(classifyAnthropicError(err, 150002, 150_000)), false)
+})
+
+test('classifyAnthropicError: an abort well under timeoutMs is client_timeout, not retryable', () => {
+  const err = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+  assert.equal(classifyAnthropicError(err, 500, 150_000), 'client_timeout')
+  assert.equal(isRetryableClassification('client_timeout'), false)
+})
+
+test('classifyAnthropicError: an abort with no elapsed/timeout supplied falls back to client_timeout', () => {
+  const err = Object.assign(new Error('aborted'), { name: 'AbortError' })
+  assert.equal(classifyAnthropicError(err), 'client_timeout')
+})
+
+test('classifyAnthropicError: 429 is rate_limited (retryable)', () => {
+  assert.equal(classifyAnthropicError({ status: 429 }), 'rate_limited')
+  assert.equal(isRetryableClassification('rate_limited'), true)
+})
+
+test('classifyAnthropicError: 529 overloaded_error and other 5xx are overloaded (retryable)', () => {
+  assert.equal(classifyAnthropicError({ status: 529, error: { type: 'overloaded_error' } }), 'overloaded')
+  assert.equal(classifyAnthropicError({ status: 500 }), 'overloaded')
+  assert.equal(isRetryableClassification('overloaded'), true)
+})
+
+test('classifyAnthropicError: a raw fetch failure with no status is network_interruption (retryable)', () => {
+  const err = Object.assign(new Error('fetch failed'), { name: 'TypeError' })
+  assert.equal(classifyAnthropicError(err), 'network_interruption')
+  assert.equal(isRetryableClassification('network_interruption'), true)
+})
+
+test('classifyAnthropicError: 401/403 is authentication_failed — billing-halt, never retryable', () => {
+  assert.equal(classifyAnthropicError({ status: 401 }), 'authentication_failed')
+  assert.equal(classifyAnthropicError({ status: 403 }), 'authentication_failed')
+  assert.equal(isRetryableClassification('authentication_failed'), false)
+  assert.equal(isBillingHaltClassification('authentication_failed'), true)
+})
+
+test('classifyAnthropicError: a 400 credit-balance message is credit_exhausted — billing-halt, never retryable', () => {
+  const err = { status: 400, message: 'Your credit balance is too low to access the Anthropic API' }
+  assert.equal(classifyAnthropicError(err), 'credit_exhausted')
+  assert.equal(isRetryableClassification('credit_exhausted'), false)
+  assert.equal(isBillingHaltClassification('credit_exhausted'), true)
+})
+
+test('classifyAnthropicError: a 400 context-length message is context_window_exceeded, not retryable', () => {
+  const err = { status: 400, message: 'prompt is too long: 250000 tokens > 200000 maximum context length' }
+  assert.equal(classifyAnthropicError(err), 'context_window_exceeded')
+  assert.equal(isRetryableClassification('context_window_exceeded'), false)
+  assert.equal(isBillingHaltClassification('context_window_exceeded'), false)
+})
+
+test('classifyAnthropicError: a plain 400 is invalid_request, not retryable', () => {
+  assert.equal(classifyAnthropicError({ status: 400, message: 'missing required field' }), 'invalid_request')
+  assert.equal(isRetryableClassification('invalid_request'), false)
+})
+
+test('classifyAnthropicError: 422 / validation_error is validation_error, not retryable', () => {
+  assert.equal(classifyAnthropicError({ status: 422 }), 'validation_error')
+  assert.equal(classifyAnthropicError({ error: { type: 'validation_error' } }), 'validation_error')
+  assert.equal(isRetryableClassification('validation_error'), false)
+})
+
+test('classifyAnthropicError: an unrecognised error is unknown, not retryable by default', () => {
+  assert.equal(classifyAnthropicError(new Error('boom')), 'unknown')
+  assert.equal(classifyAnthropicError(null), 'unknown')
+  assert.equal(isRetryableClassification('unknown'), false)
+})
+
+// ─── shouldStopRetrying / nextFailureHistory ────────────────────────────────
+
+test('shouldStopRetrying: a non-retryable classification stops on the very first occurrence', () => {
+  assert.equal(shouldStopRetrying(null, 0, 'credit_exhausted'), true)
+  assert.equal(shouldStopRetrying(null, 0, 'invalid_request'), true)
+  assert.equal(shouldStopRetrying(null, 0, 'context_window_exceeded'), true)
+})
+
+test('shouldStopRetrying: a retryable classification is allowed once, but not a second identical time', () => {
+  assert.equal(shouldStopRetrying(null, 0, 'overloaded'), false, 'first occurrence — worth trying')
+  assert.equal(shouldStopRetrying('overloaded', 1, 'overloaded'), false, 'second occurrence — still under the 2-strike threshold')
+  assert.equal(shouldStopRetrying('overloaded', 2, 'overloaded'), true, 'third identical occurrence — stop')
+})
+
+test('shouldStopRetrying: a DIFFERENT classification than last time is not penalised by the prior streak', () => {
+  assert.equal(shouldStopRetrying('overloaded', 2, 'rate_limited'), false)
+})
+
+test('nextFailureHistory: repeating the same classification increments the streak', () => {
+  assert.deepEqual(nextFailureHistory({ classification: 'overloaded', count: 1 }, 'overloaded'), { classification: 'overloaded', count: 2 })
+})
+
+test('nextFailureHistory: a different classification resets the streak to 1', () => {
+  assert.deepEqual(nextFailureHistory({ classification: 'overloaded', count: 2 }, 'rate_limited'), { classification: 'rate_limited', count: 1 })
+})
+
+test('nextFailureHistory: no prior history starts the streak at 1', () => {
+  assert.deepEqual(nextFailureHistory({ classification: null, count: 0 }, 'application_timeout'), { classification: 'application_timeout', count: 1 })
+})
+
+// ─── splitBatchForRetry ──────────────────────────────────────────────────────
+
+test('splitBatchForRetry: halves a multi-file batch', () => {
+  assert.deepEqual(splitBatchForRetry([1, 2, 3, 4]), [[1, 2], [3, 4]])
+  assert.deepEqual(splitBatchForRetry([1, 2, 3]), [[1, 2], [3]])
+})
+
+test('splitBatchForRetry: a single-file batch cannot be split further', () => {
+  assert.equal(splitBatchForRetry([1]), null)
+  assert.equal(splitBatchForRetry([]), null)
+})
+
 // ─── isRetryableApiError / withTimeoutAndRetry ─────────────────────────────
 
-test('isRetryableApiError: abort (timeout), 429, and 5xx are retryable', () => {
+test('isRetryableApiError: an application timeout is no longer retryable — the exact bug this redesign fixes', () => {
   const abortErr = new Error('The operation was aborted')
   abortErr.name = 'AbortError'
-  assert.equal(isRetryableApiError(abortErr), true)
+  assert.equal(isRetryableApiError(abortErr), false, 'without elapsed/timeoutMs this classifies as client_timeout, itself also non-retryable')
+})
+
+test('isRetryableApiError: 429 and 5xx are retryable', () => {
   assert.equal(isRetryableApiError({ status: 429 }), true)
   assert.equal(isRetryableApiError({ status: 500 }), true)
   assert.equal(isRetryableApiError({ status: 529 }), true, '529 overloaded_error is >= 500')
@@ -632,16 +764,43 @@ test('withTimeoutAndRetry: a non-retryable error throws immediately without retr
   assert.equal(calls, 1)
 })
 
-test('withTimeoutAndRetry: exhausting all retries rethrows the last error', async () => {
+test('withTimeoutAndRetry: exhausting all retries rethrows the last error, with its classification attached', async () => {
   let calls = 0
   await assert.rejects(
     withTimeoutAndRetry(async () => { calls++; throw { status: 503 } }, { maxRetries: 2 }),
     (err: unknown) => {
-      assert.deepEqual(err, { status: 503 })
+      assert.equal((err as { status?: number }).status, 503)
+      assert.equal((err as { classification?: string }).classification, 'overloaded')
       return true
     },
   )
   assert.equal(calls, 3) // initial attempt + 2 retries
+})
+
+test('withTimeoutAndRetry: a repeated application_timeout is NOT retried — the exact production bug this fixes', async () => {
+  // Both attempts would abort at ~timeoutMs given an unmodified payload —
+  // this asserts the call is made exactly once, not twice, unlike the
+  // pre-fix behaviour that burned two full 150s timeouts on an identical
+  // oversized batch.
+  let calls = 0
+  const failures: Array<{ classification: string; retryable: boolean }> = []
+  await assert.rejects(
+    withTimeoutAndRetry(
+      (signal) => new Promise((_resolve, reject) => {
+        calls++
+        signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+      }),
+      {
+        timeoutMs: 10,
+        maxRetries: 2,
+        onAttemptFailed: (info) => failures.push({ classification: info.classification, retryable: info.retryable }),
+      },
+    ),
+  )
+  assert.equal(calls, 1, 'an application_timeout must not trigger a second identical call')
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].classification, 'application_timeout')
+  assert.equal(failures[0].retryable, false)
 })
 
 // ─── documentPhaseProgress ─────────────────────────────────────────────────

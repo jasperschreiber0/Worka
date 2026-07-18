@@ -691,6 +691,188 @@ export function nextRetryState(currentAttempts: number, maxAttempts: number = MA
   return { status: 'pending', attempts, delayMs: RETRY_DELAYS_MS[attempts] ?? RETRY_DELAYS_MS[2] }
 }
 
+// ─── Anthropic failure classification ──────────────────────────────────────
+//
+// Root-cause fix for a production incident: the previous retry logic
+// treated every abort (including OUR OWN 150s timeout firing) as
+// automatically retryable. Evidence from production logs showed the actual
+// failure mode this caused: a 6-document batch's Claude call aborted at
+// ~150000ms, was immediately retried with the IDENTICAL payload, and the
+// retry aborted at ~150000ms again — because a batch that genuinely needs
+// more than 150s of reasoning needs it every time it's sent unchanged, so
+// "retry the same request" was guaranteed to burn a second full-price call
+// for zero chance of success. Separately, when Anthropic returned
+// `400 Your credit balance is too low`, the pipeline logged it but kept
+// making MORE calls (next batch, next stage) instead of recognising it as a
+// signal to stop spending immediately — and because nothing distinguished
+// "this exact failure has already happened before" from "first time seeing
+// this," any later re-trigger (a resumed run, a recovery-cron reclaim, a
+// manual re-upload) reproduced the identical doomed call again, unbounded.
+//
+// This section replaces "retry anything that looks transient" with an
+// explicit classification of every failure into one of a fixed set of
+// categories, each with an explicit, documented retry decision — see
+// isRetryableClassification and isBillingHaltClassification below. Nothing
+// here guesses; every category maps to a concrete signal (HTTP status,
+// Anthropic's own `error.type`, or message content Anthropic's docs specify
+// for that condition).
+
+export type AnthropicFailureClassification =
+  | 'client_timeout'           // abort fired well before our own deadline — a client/transport-level timeout, not ours
+  | 'application_timeout'      // OUR AbortController fired at (or within ~2s of) the configured timeoutMs — see withTimeoutAndRetry
+  | 'network_interruption'     // no HTTP response at all (DNS, connection reset, TLS failure) — genuinely transient
+  | 'rate_limited'             // 429 / rate_limit_error
+  | 'overloaded'               // 5xx / overloaded_error / api_error — Anthropic's own infrastructure, transient
+  | 'invalid_request'          // 400 / invalid_request_error, not otherwise classified below
+  | 'authentication_failed'    // 401/403 / authentication_error / permission_error — a billing/config problem, not a content problem
+  | 'credit_exhausted'         // 400 whose message identifies an insufficient-credit-balance condition
+  | 'context_window_exceeded'  // 400 whose message identifies the request as too large for the model's context window
+  | 'validation_error'         // 422 / validation_error — Anthropic accepted the request but rejected the tool/schema shape
+  | 'unknown'                  // anything not matched above — deliberately NOT auto-retried; see isRetryableClassification
+
+interface AnthropicLikeError {
+  name?: string
+  message?: string
+  status?: number
+  error?: { type?: string; message?: string; error?: { type?: string; message?: string } }
+}
+
+/**
+ * Classifies any error thrown by an Anthropic SDK call (or the
+ * AbortController wrapping it) into exactly one AnthropicFailureClassification.
+ * `elapsedMs`/`timeoutMs`, when supplied, distinguish OUR deliberate timeout
+ * (application_timeout — the abort landed at the deadline we configured)
+ * from an abort that fired for some other reason well before that deadline
+ * (client_timeout) — both are non-retryable (see isRetryableClassification),
+ * but the distinction matters for diagnosing which one actually happened.
+ */
+export function classifyAnthropicError(
+  err: unknown,
+  elapsedMs?: number,
+  timeoutMs?: number,
+): AnthropicFailureClassification {
+  const e = (err ?? {}) as AnthropicLikeError
+  const message = (e.message ?? (err == null ? '' : String(err))).toLowerCase()
+  const isAbort = e.name === 'AbortError' || /\baborted\b/i.test(message)
+
+  if (isAbort) {
+    if (typeof elapsedMs === 'number' && typeof timeoutMs === 'number' && elapsedMs >= timeoutMs - 2000) {
+      return 'application_timeout'
+    }
+    return 'client_timeout'
+  }
+
+  const status = e.status
+  const anthropicErrorType = e.error?.error?.type ?? e.error?.type
+
+  // No HTTP status at all is the shape a raw fetch failure takes (DNS
+  // failure, connection reset, TLS handshake failure) — the SDK never got a
+  // response to classify by status code.
+  if (typeof status !== 'number' && (e.name === 'TypeError' || /network|fetch failed|econnreset|enotfound|eai_again/i.test(message))) {
+    return 'network_interruption'
+  }
+
+  if (status === 429 || anthropicErrorType === 'rate_limit_error') return 'rate_limited'
+  if (anthropicErrorType === 'overloaded_error' || (typeof status === 'number' && status >= 500)) return 'overloaded'
+  if (status === 401 || status === 403 || anthropicErrorType === 'authentication_error' || anthropicErrorType === 'permission_error') {
+    return 'authentication_failed'
+  }
+  if (anthropicErrorType === 'validation_error' || status === 422) return 'validation_error'
+
+  if (status === 400 || anthropicErrorType === 'invalid_request_error') {
+    if (/credit balance|insufficient.{0,20}credit|billing/i.test(message)) return 'credit_exhausted'
+    if (/context length|too many tokens|maximum context|prompt is too long|exceeds the (?:maximum|model's maximum)/i.test(message)) {
+      return 'context_window_exceeded'
+    }
+    return 'invalid_request'
+  }
+
+  return 'unknown'
+}
+
+// Only these three classifications have a realistic chance of succeeding on
+// an unmodified retry — each is either Anthropic explicitly asking the
+// caller to back off (rate_limited), Anthropic's own infrastructure having a
+// transient problem (overloaded), or the request never reaching Anthropic at
+// all (network_interruption). Every other classification is either a
+// deterministic property of the request itself (it will fail identically
+// every time until the request changes) or a billing/auth problem no retry
+// can fix — see isBillingHaltClassification.
+const RETRYABLE_CLASSIFICATIONS = new Set<AnthropicFailureClassification>([
+  'network_interruption', 'rate_limited', 'overloaded',
+])
+
+export function isRetryableClassification(classification: AnthropicFailureClassification): boolean {
+  return RETRYABLE_CLASSIFICATIONS.has(classification)
+}
+
+/** True for errors worth retrying — thin wrapper over classifyAnthropicError, kept for callers with no elapsed/timeout to report. */
+export function isRetryableApiError(err: unknown): boolean {
+  return isRetryableClassification(classifyAnthropicError(err))
+}
+
+// These two classifications mean the ANTHROPIC ACCOUNT, not this one
+// request, cannot proceed — every other in-flight or subsequent call in the
+// same processing run will fail identically until a human fixes billing/
+// auth. Callers MUST treat this as "stop calling Anthropic for the rest of
+// this run" (see haltForBilling in index.ts), not just "this call failed."
+const BILLING_HALT_CLASSIFICATIONS = new Set<AnthropicFailureClassification>([
+  'credit_exhausted', 'authentication_failed',
+])
+
+export function isBillingHaltClassification(classification: AnthropicFailureClassification): boolean {
+  return BILLING_HALT_CLASSIFICATIONS.has(classification)
+}
+
+/**
+ * Cross-attempt guard: even a classification that's individually retryable
+ * (or individually worth one more attempt at a smaller size — see
+ * splitBatchForRetry) must stop once the SAME classification has already
+ * been observed for this file/batch. Two identical failures in a row is
+ * treated as proof the failure is deterministic for this input, not bad
+ * luck — matches document_processing_jobs' own "give up after repeated
+ * identical failure" posture (migration 034), applied here to the
+ * AI-call axis rather than the extraction axis.
+ */
+export function shouldStopRetrying(
+  priorClassification: AnthropicFailureClassification | null,
+  priorConsecutiveFailures: number,
+  currentClassification: AnthropicFailureClassification,
+): boolean {
+  if (!isRetryableClassification(currentClassification)) return true
+  return priorClassification === currentClassification && priorConsecutiveFailures >= 2
+}
+
+/**
+ * Pure state transition for the persisted per-file failure history
+ * (files.ai_failure_classification / files.ai_failure_count — migration
+ * 042): a repeat of the same classification increments the streak, any
+ * other classification resets it to a fresh streak of 1. Kept as a pure
+ * function so the "twice with the same classification" rule in
+ * shouldStopRetrying is testable without a live database.
+ */
+export function nextFailureHistory(
+  prior: { classification: AnthropicFailureClassification | null; count: number },
+  current: AnthropicFailureClassification,
+): { classification: AnthropicFailureClassification; count: number } {
+  return prior.classification === current
+    ? { classification: current, count: prior.count + 1 }
+    : { classification: current, count: 1 }
+}
+
+/**
+ * Splits a batch of files in half for a smaller retry, rather than resending
+ * the identical oversized request that just timed out / exceeded the
+ * context window. Returns null once the batch is already down to one file —
+ * there's nothing left to split, so the caller must give up on that file
+ * (recording the failure via nextFailureHistory) instead of looping.
+ */
+export function splitBatchForRetry<T>(batch: T[]): [T[], T[]] | null {
+  if (batch.length <= 1) return null
+  const mid = Math.ceil(batch.length / 2)
+  return [batch.slice(0, mid), batch.slice(mid)]
+}
+
 // ─── AI call timeout + retry ────────────────────────────────────────────────
 //
 // No Claude (or any provider) call anywhere in this codebase had an explicit
@@ -699,47 +881,45 @@ export function nextRetryState(currentAttempts: number, maxAttempts: number = MA
 // interrupts, and Vercel's function timeout is the only backstop on the
 // Next.js side (300s, far too coarse to recover gracefully or retry). This
 // wraps any such call with an AbortController-backed timeout and a bounded,
-// backed-off retry for genuinely transient failures (429/5xx/timeout) —
-// dependency-free (only the AbortController/setTimeout globals both Deno and
-// Node provide) so it's the one implementation shared by smooth-responder's
-// callTool and every Next.js route that calls the Anthropic SDK, rather than
-// N slightly-different copies.
+// backed-off retry for genuinely transient failures — dependency-free (only
+// the AbortController/setTimeout globals both Deno and Node provide) so
+// it's the one implementation shared by smooth-responder's callTool and
+// every Next.js route that calls the Anthropic SDK, rather than N
+// slightly-different copies.
 //
-// Deliberately NOT retried: anything that isn't one of the specific
-// transient signals below (e.g. a 400 invalid-request, a 401 bad key) —
-// retrying those wastes the timeout budget on a call that will never
-// succeed and delays the caller's own failure handling for no benefit.
+// Deliberately NOT retried here: our own timeout firing (application_timeout
+// / client_timeout — see classifyAnthropicError above and the incident this
+// fixes), and anything else that isn't one of the three transient
+// classifications (rate_limited/overloaded/network_interruption). Retrying
+// a deterministic failure only burns a second full-price call that will
+// fail identically and delays the caller's own failure handling for no
+// benefit.
 
 export interface TimedRetryOptions {
   timeoutMs?: number
   maxRetries?: number
   label?: string
-  onAttemptFailed?: (info: { attempt: number; durationMs: number; retryable: boolean; error: unknown }) => void
-}
-
-/**
- * True for errors worth retrying: an abort (our own timeout firing), a rate
- * limit, or a 5xx from the provider. Everything else (bad request, auth,
- * content policy) fails immediately — retrying a deterministic failure only
- * burns the caller's own timeout/latency budget.
- */
-export function isRetryableApiError(err: unknown): boolean {
-  if (err instanceof Error && (err.name === 'AbortError' || /aborted/i.test(err.message))) return true
-  const status = (err as { status?: number } | null | undefined)?.status
-  if (typeof status === 'number' && (status === 429 || status >= 500)) return true
-  return false
+  onAttemptFailed?: (info: {
+    attempt: number
+    durationMs: number
+    retryable: boolean
+    classification: AnthropicFailureClassification
+    error: unknown
+  }) => void
 }
 
 /**
  * Runs `call` with a hard timeout (aborted via the AbortSignal it's handed —
  * callers MUST pass this signal into the underlying SDK call for the abort
  * to actually cut the in-flight request, not just abandon it locally while
- * it keeps running server-side) and retries transient failures with
- * exponential backoff (1s, 2s, 4s, ...) up to maxRetries times. Always
- * rethrows the last error once retries are exhausted — callers are
- * responsible for their own graceful-failure/DB-update handling on that
- * rethrow, exactly as they already handle any other exception from the
- * call they're wrapping.
+ * it keeps running server-side) and retries only failures classified as
+ * transient (see isRetryableClassification) with exponential backoff (1s,
+ * 2s, 4s, ...) up to maxRetries times. Always rethrows the last error once
+ * retries are exhausted, with `.classification` attached (see
+ * `withClassification` below) so callers can make a further-retry/halt/
+ * split decision without reclassifying — callers are responsible for their
+ * own graceful-failure/DB-update handling on that rethrow, exactly as they
+ * already handle any other exception from the call they're wrapping.
  */
 export async function withTimeoutAndRetry<T>(
   call: (signal: AbortSignal) => Promise<T>,
@@ -747,6 +927,7 @@ export async function withTimeoutAndRetry<T>(
 ): Promise<T> {
   const { timeoutMs = 60_000, maxRetries = 1, label = 'api_call', onAttemptFailed } = options
   let lastErr: unknown
+  let lastClassification: AnthropicFailureClassification = 'unknown'
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -758,16 +939,29 @@ export async function withTimeoutAndRetry<T>(
     } catch (err) {
       clearTimeout(timer)
       lastErr = err
-      const canRetry = attempt <= maxRetries && isRetryableApiError(err)
-      onAttemptFailed?.({ attempt, durationMs: Date.now() - startedAt, retryable: canRetry, error: err })
-      if (!canRetry) throw err
+      const durationMs = Date.now() - startedAt
+      const classification = classifyAnthropicError(err, durationMs, timeoutMs)
+      lastClassification = classification
+      const canRetry = attempt <= maxRetries && isRetryableClassification(classification)
+      onAttemptFailed?.({ attempt, durationMs, retryable: canRetry, classification, error: err })
+      if (!canRetry) throw withClassification(err, classification)
       await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** (attempt - 1)))
     }
   }
   // Unreachable — the loop above always either returns or throws — but kept
   // so this compiles under both stripped-TS runtimes without a non-null
   // assertion.
-  throw lastErr
+  throw withClassification(lastErr, lastClassification)
+}
+
+/** Attaches `.classification` to a thrown error so a catch site doesn't need to re-run classifyAnthropicError (and lose the elapsed/timeoutMs it used). */
+function withClassification(err: unknown, classification: AnthropicFailureClassification): unknown {
+  if (err && typeof err === 'object') {
+    try {
+      Object.assign(err as object, { classification })
+    } catch { /* frozen/non-extensible error object — fall through, caller can still reclassify */ }
+  }
+  return err
 }
 
 export type ChildJobStatus = 'pending' | 'running' | 'completed' | 'failed'

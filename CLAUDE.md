@@ -573,6 +573,32 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 was hit, deletes the lock, and stops — no further automatic
                                 retries; the builder must re-upload. See "Independent Intake
                                 Recovery Service" below.
+041_pause_intake_recovery_cron.sql — EMERGENCY, temporary: unschedules the pg_cron job from
+                                migration 038 (`worka-intake-recovery`). Added when production logs
+                                showed the loop below actually happening — the recovery cron
+                                reclaiming a lock and re-triggering smooth-responder against a batch
+                                that timed out deterministically on every attempt, burning real
+                                Anthropic spend each cycle. Paired with a `RECOVERY_DISABLED = true`
+                                kill switch at the top of `GET /api/cron/intake-recovery`
+                                (app/api/cron/intake-recovery/route.ts) so every trigger path
+                                (pg_cron, the GitHub Actions workflow, a manual curl) is covered by
+                                one flag, not just the database schedule. Both are intentionally
+                                still in place as of migration 042 below — re-enable only after
+                                verifying the classification/retry-cap redesign in migration 042
+                                actually stops the failure mode that caused this, not just on faith.
+042_ai_failure_classification.sql — files.ai_failure_classification (text) / ai_failure_count
+                                (integer, default 0). Root-cause fix for the incident migration 041
+                                emergency-stopped: the previous retry logic treated an aborted call
+                                as automatically retryable, including OUR OWN 150s timeout firing —
+                                so a 6-document batch that genuinely needed >150s reasoning timed out
+                                on attempt 1, was retried with the IDENTICAL payload, and timed out
+                                on attempt 2 identically (confirmed in production logs: both attempts
+                                aborted within 1-2ms of the 150000ms deadline). Separately, a
+                                `400 Your credit balance is too low` was logged but didn't stop the
+                                pipeline from making MORE Anthropic calls in the same run. See
+                                "Anthropic failure classification and retry redesign" below for the
+                                full fix — these two columns are the cross-invocation half of it (the
+                                per-call half lives entirely in pipeline-logic.ts, no schema needed).
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -699,6 +725,130 @@ Quality Assurance → Render Estimate
 - Gate 3: quantity ≤ 0 → assumption (excluded).
 
 See `lib/estimating/gates.ts` for the canonical spec.
+
+---
+
+## Anthropic failure classification and retry redesign
+
+Root-cause redesign after a production incident: automatic retry/recovery logic converted a
+transient Anthropic problem (a slow batch, then an exhausted credit balance) into unbounded,
+repeated paid API calls. This is not a bigger retry limit — it's a replacement of "retry anything
+that looks transient" with an explicit classification of every failure, where only three of eleven
+categories are ever auto-retried and two specific categories immediately stop all further spending
+for the run.
+
+**Where the 150-second abort actually comes from (traced, not guessed).** It is **our own
+application-level timeout**, not the Anthropic SDK's default, not Railway, not a network stack
+default. The exact chain: `supabase/functions/smooth-responder/index.ts`'s `callTool` passes
+`timeoutMs: 150_000` into `withTimeoutAndRetry` (`supabase/functions/smooth-responder/pipeline-logic.ts`),
+which does `const timer = setTimeout(() => controller.abort(), timeoutMs)` and hands
+`controller.signal` into `anthropic.messages.create(..., { signal })`. Production logs confirmed
+this exactly: two consecutive attempts each aborted within 1-2ms of 150000ms — a batch that
+genuinely needs more than 150s of reasoning needs it every time it's sent unchanged, so retrying the
+identical payload was guaranteed to reproduce the identical timeout at full price.
+
+**Every Anthropic call site in the codebase** (all go through `withTimeoutAndRetry`, so the fix
+below applies to every one without per-site changes): `supabase/functions/smooth-responder/index.ts`
+(`callTool`, called from Stage 1/2's per-batch loop, Stage 3 Scope Reasoning, Stage 6 Estimate
+Generation), and ten Next.js routes — `app/api/chat/route.ts` (three call sites:
+`extractActions`/`chat_extract_actions`, `handleProjectQuestion`/`chat_project_question`,
+`routeDemoMessage`'s fallback/`chat_fallback_intent`), `app/api/email-draft/route.ts`,
+`app/api/email-sync/parse/route.ts`, `app/api/email-sync/simulate/route.ts`,
+`app/api/classify-document/route.ts`, `app/api/rates/extract-pdf/route.ts`,
+`app/api/estimation/scope-hints/route.ts`, `app/api/estimation/history/route.ts`.
+`supabase/functions/document-worker` never calls Anthropic at all (it only does PDF text
+extraction) — untouched by any of this.
+
+**Every retry path**, before and after: (1) `withTimeoutAndRetry` itself — one bounded, in-call
+retry, now classification-gated instead of abort/429/5xx-gated. (2) The Stage 1/2 batch loop in
+`smooth-responder` — used to unconditionally `continue` to the next batch on any failure, including
+a billing-halt classification; now halts the whole run immediately on one. (3)
+`GET /api/cron/intake-recovery`'s stale-lock reclaim and stuck-classification retry (migration 037)
+— already capped per-run (`MAX_BATCHES_PER_RUN`/`MAX_LOCKS_PER_RUN`/`MAX_STUCK_FILES_PER_RUN`) and,
+since the incident this followed, per-file across runs (`files.intake_recovery_attempts`, migration
+040) — see "Independent Intake Recovery Service" above; currently disabled entirely
+(`RECOVERY_DISABLED`, migration 041) pending verification of this redesign. (4)
+`document-worker`'s `retry_or_fail_document_job` (migration 034) — unaffected; that axis is PDF
+extraction retries, not Anthropic calls, and was never implicated in this incident.
+
+**1. Classification** (`classifyAnthropicError`, `pipeline-logic.ts`) — every failure maps to
+exactly one of:
+
+| Classification | Signal | Retryable (single call) | Billing-halt (stop the whole run) |
+|---|---|---|---|
+| `client_timeout` | abort fires well before our configured `timeoutMs` | No | No |
+| `application_timeout` | abort fires at (within ~2s of) our configured `timeoutMs` — OUR deadline | No | No |
+| `network_interruption` | no HTTP response at all (DNS/connection reset/TLS failure) | **Yes** | No |
+| `rate_limited` | 429 / `rate_limit_error` | **Yes** | No |
+| `overloaded` | any 5xx / `overloaded_error` / generic `api_error` | **Yes** | No |
+| `invalid_request` | 400 / `invalid_request_error`, not otherwise classified below | No | No |
+| `authentication_failed` | 401/403 / `authentication_error` / `permission_error` | No | **Yes** |
+| `credit_exhausted` | 400 whose message identifies an insufficient-credit-balance condition | No | **Yes** |
+| `context_window_exceeded` | 400 whose message identifies the request as too large for the model | No | No |
+| `validation_error` | 422 / `validation_error` — Anthropic accepted the request, rejected the tool/schema shape | No | No |
+| `unknown` | anything not matched above | No (deliberately — never assume an unrecognised failure is safe to retry) | No |
+
+**2. Retry only transient failures.** `isRetryableClassification` is exactly the three-row "Yes"
+set above. `withTimeoutAndRetry` (shared by every call site listed) now decides retry by
+classification, not by "was it an abort/429/5xx" — the fix that directly closes the double-150s-
+timeout bug: `application_timeout` is not in the retryable set, so a call that hits our own timeout
+fails after exactly one attempt instead of two.
+
+**3. Repeated identical failures stop, don't retry a third time.** `shouldStopRetrying(prior, current)`
+— a non-retryable classification stops on its very first occurrence (nothing to learn from a second
+identical attempt at, say, an exhausted credit balance); a retryable classification is allowed to
+recur once more but stops once the SAME classification has been seen twice in a row.
+`nextFailureHistory` is the paired pure state transition (same classification → increment the
+streak; a different one → reset to 1), persisted per-file on `files.ai_failure_classification` /
+`files.ai_failure_count` (migration 042) via `recordAiFailure` in `smooth-responder/index.ts`. Once
+the streak reaches 2, the file is marked `intake_status='failed'` with a `failure_reason` explaining
+the retry cap was hit — permanent, no third attempt, from any future invocation (a resume, a fresh
+upload, a recovery reclaim all read this history before doing any work).
+
+**4. The 150-second abort's exact origin** — see the traced chain above; this is application code
+(`withTimeoutAndRetry`), not the SDK, Railway, or a fetch default.
+
+**5. Never resend an identical oversized request.** Rather than a live in-run recursive split
+(rejected as unnecessarily invasive to the existing per-batch persistence logic — see
+`splitBatchForRetry` in `pipeline-logic.ts`, which exists as a pure, unit-tested primitive for a
+future in-run split but isn't wired into the live loop), the actual fix uses the persisted per-file
+history: a file with exactly one prior AI failure (`ai_failure_count === 1`) is pulled out of
+`splitIntoBatches`' normal bin-packer and forced into its own solo batch on the NEXT invocation — a
+solo request is strictly smaller than any multi-file grouping the packer could have produced, so the
+retry is guaranteed not to be the identical request that timed out. If the solo attempt also fails,
+the streak reaches 2 and #3 above permanently excludes it — no third attempt at any size.
+
+**6. Fail fast on billing errors.** `haltForBilling` (`smooth-responder/index.ts`) is called from
+every catch site — the Stage 1/2 batch loop, Stage 3, Stage 6 — the instant a `credit_exhausted` or
+`authentication_failed` classification is seen: it logs `ai_billing_halt`, marks the file
+`intake_status='failed'` with a clear reason, and the caller `return`s immediately, which (via
+`runPipeline`'s existing `try/finally`) releases `job_intake_locks` right away. No further Anthropic
+call is made for the rest of that run — this is what actually stops "batch 2 fails identically,
+Stage 3 fails identically, Stage 6 fails identically" from happening after the FIRST credit-balance
+error, which is what production logs showed happening before this fix. Remaining unprocessed
+documents are left exactly as they are (not marked failed) — a billing problem is a temporary
+account-level condition, not a verdict on those documents, so they resume normally once billing is
+fixed rather than requiring a full re-upload.
+
+**7. Pre-request guards.** Before Stage 1/2 builds its batch plan: (a) any file with
+`ai_failure_count >= 2` is excluded entirely (#3); (b) any file with `ai_failure_count === 1` is
+forced solo (#5); (c) `job_intake_locks` already prevents a duplicate in-flight run for the same job
+(migration 030, unrelated to this incident); (d) `MAX_BATCHES` (3) bounds total per-invocation
+Anthropic calls regardless. Deliberately not added: a numeric "project retry budget" beyond what
+`MAX_BATCHES` + the per-file history above already provide — the failure modes this incident
+actually exhibited (identical-payload timeout retry, un-halted billing failure) are both closed by
+#2/#3/#5/#6 without one.
+
+**8. Why each retry is/isn't safe, in one line each:** `network_interruption`/`rate_limited`/
+`overloaded` — the request never reached Anthropic, or Anthropic explicitly asked for backoff, or
+Anthropic's own infrastructure had a transient problem; none of these say anything about the request
+itself, so an unmodified retry has a real chance. Every other classification is either a
+deterministic property of the request (`application_timeout`/`client_timeout`/
+`context_window_exceeded`/`invalid_request`/`validation_error` will fail identically until the
+request changes) or an account-level condition no retry can fix (`credit_exhausted`/
+`authentication_failed`) — retrying any of these only spends money to reproduce a foregone
+conclusion. `unknown` is conservatively non-retryable: assuming safety for an unrecognised failure
+shape is exactly the assumption that caused this incident.
 
 ---
 

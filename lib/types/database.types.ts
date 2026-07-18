@@ -301,6 +301,8 @@ export interface File {
   intake_batch_index: number | null
   intake_batch_count: number | null
   intake_recovery_attempts: number
+  ai_failure_classification: string | null
+  ai_failure_count: number
   created_at: string
 }
 
