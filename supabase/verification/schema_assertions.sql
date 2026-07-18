@@ -218,6 +218,10 @@ DO $$ BEGIN
     (SELECT count(*) FROM pg_proc WHERE proname = 'find_stuck_files_needing_classification_retry') = 1,
     'find_stuck_files_needing_classification_retry function is missing (migration 037)'
   );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'record_ai_failure' AND pg_get_function_arguments(oid) = 'p_file_id uuid, p_classification text, p_reason text, p_max_occurrences integer') = 1,
+    'record_ai_failure(uuid, text, text, integer) function is missing or its signature changed (migration 043)'
+  );
 END $$;
 
 -- ─── Functions are actually callable (not just present) ────────────────────
@@ -242,6 +246,10 @@ BEGIN
   PERFORM * FROM recompute_stalled_batches();
   PERFORM * FROM find_stale_job_intake_locks();
   PERFORM * FROM find_stuck_files_needing_classification_retry();
+  -- record_ai_failure's SELECT...FOR UPDATE matches zero rows for a bogus
+  -- file_id, hits its own NOT FOUND branch, and returns without mutating —
+  -- same safe-to-run-in-production shape as retry_or_fail_document_job above.
+  PERFORM * FROM record_ai_failure(v_bogus_uuid, 'unknown', 'schema_assertions.sql callability probe', 0);
 EXCEPTION WHEN OTHERS THEN
   RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: one or more document-processing/recovery functions are not callable: %', SQLERRM;
 END $$;

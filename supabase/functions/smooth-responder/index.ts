@@ -37,8 +37,8 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 import {
   splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
-  withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, shouldStopRetrying, nextFailureHistory,
-  splitBatchForRetry,
+  withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
+  dedupeRealFileIds, splitBatchForRetry,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
 } from './pipeline-logic.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -729,33 +729,45 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   // trigger, a recovery reclaim) doesn't blindly repeat a call that has
   // already proven deterministic for this exact file — the root cause of
   // "the same document batch is later processed again by recovery" in the
-  // incident this closes. shouldStopRetrying's "twice with the same
-  // classification" rule is what actually marks the file permanently
-  // failed; a single non-retryable failure (e.g. one context_window_exceeded)
-  // is also stopped immediately (isRetryableClassification is false for it),
-  // matching document_processing_jobs' own posture of never retrying a
-  // deterministic failure just to collect more data points.
+  // incident this closes. maxConsecutiveOccurrences (pipeline-logic.ts)
+  // decides how many identical occurrences are tolerated per
+  // classification before the file is marked permanently failed — 0 for a
+  // deterministic-content failure (never worth even one retry), 1 for a
+  // deterministic-SIZE failure (one more attempt at a genuinely smaller
+  // request is worth it — see forcedSoloInput below), 2 for a classification
+  // that's already survived one in-call retry and failed identically again.
+  //
+  // Delegates the actual read-modify-write to record_ai_failure (migration
+  // 043) rather than doing it here in JS: production readiness review
+  // finding (blocking issue 3) — a JS-side SELECT-then-UPDATE is not atomic
+  // across two overlapping invocations of this same job (reclaiming a
+  // stale job_intake_lock does not kill the physical old invocation still
+  // running server-side — see acquire_or_reclaim_job_intake_lock's own
+  // comment), which could lose an increment and undermine the exact
+  // safety cap this exists to provide. The SQL function holds a row lock
+  // (SELECT ... FOR UPDATE) for its whole transaction, so concurrent
+  // callers are strictly serialized instead of racing.
   const recordAiFailure = async (rawFileId: string, classification: AnthropicFailureClassification, reason: string) => {
     const fid = rawFileId.split('#')[0] // strip pdf-chunk.ts's `${realId}#pStart-End` suffix — one files row per real file
-    const { data: row } = await supabase
-      .from('files')
-      .select('ai_failure_classification, ai_failure_count')
-      .eq('id', fid)
-      .single()
-    const priorClassification = (row?.ai_failure_classification as AnthropicFailureClassification | null) ?? null
-    const priorCount = row?.ai_failure_count ?? 0
-    const stop = shouldStopRetrying(priorClassification, priorCount, classification)
-    const next = nextFailureHistory({ classification: priorClassification, count: priorCount }, classification)
-    const update: Record<string, unknown> = { ai_failure_classification: next.classification, ai_failure_count: next.count }
-    if (stop) {
-      update.intake_status = 'failed'
-      update.failure_stage = 'AI_REASONING_FAILED'
-      update.failure_reason =
-        `Automatic AI processing stopped after ${next.count === 1 ? 'a non-retryable' : `${next.count} repeated`} ${classification} failure${next.count === 1 ? '' : 's'} — ${reason}. Manual intervention required (re-upload after resolving the underlying issue).`.slice(0, 500)
+    const { data, error } = await supabase.rpc('record_ai_failure', {
+      p_file_id: fid,
+      p_classification: classification,
+      p_reason: reason,
+      p_max_occurrences: maxConsecutiveOccurrences(classification),
+    })
+    if (error) {
+      // Best-effort, matching every other observability write in this
+      // pipeline: a failure to RECORD a failure must never itself throw
+      // and mask the original error the caller is already handling.
+      console.error('record_ai_failure RPC failed:', error)
+      return false
     }
-    await supabase.from('files').update(update).eq('id', fid)
-    console.log(JSON.stringify({ event: 'ai_failure_recorded', file_id: fid, classification, consecutive_count: next.count, stopped: stop }))
-    return stop
+    const result = (data as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
+    console.log(JSON.stringify({
+      event: 'ai_failure_recorded', file_id: fid, classification,
+      consecutive_count: result?.occurrence_count ?? null, stopped: result?.stopped ?? false,
+    }))
+    return result?.stopped ?? false
   }
 
   const startedAt = Date.now()
@@ -875,21 +887,27 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       }
 
       // ── Exclude files that have already proven deterministically unprocessable ──
-      // ai_failure_count >= 2 means the same AI-call failure classification
-      // has already been recorded twice for this exact file (see
-      // recordAiFailure/shouldStopRetrying above) — by the time that
-      // happened, recordAiFailure already marked it intake_status='failed',
-      // so it should never have been picked up as pending work again. This
-      // is a defensive second check for a same-run re-read (both paths
-      // above load documents by id, not by intake_status), and it's what
-      // actually breaks the "same document batch is later processed again
-      // by recovery" loop for a resumed/re-triggered run that includes this
-      // file as a sibling rather than as the primary trigger.
+      // How many identical failures are tolerated before a file is
+      // permanently excluded now varies by classification — 0 for a
+      // deterministic-content failure, 1 for a deterministic-size failure
+      // (one more attempt at a smaller size is worth it), 2 for a
+      // classification that already survived one in-call retry (see
+      // maxConsecutiveOccurrences, pipeline-logic.ts). So the authoritative
+      // signal for "already exhausted" is intake_status='failed' itself —
+      // record_ai_failure (migration 043) sets that atomically the moment
+      // the threshold for THIS file's classification is reached, whatever
+      // that threshold is — rather than re-deriving a fixed count cutoff
+      // here that would be wrong for at least two of the three tiers. This
+      // is a defensive second check for a same-run re-read (both load
+      // paths above load documents by id, not by intake_status), and it's
+      // what actually breaks the "same document batch is later processed
+      // again by recovery" loop for a resumed/re-triggered run that
+      // includes this file as a sibling rather than as the primary trigger.
       let priorFailureCounts = new Map<string, { classification: AnthropicFailureClassification | null; count: number }>()
       if (allLoaded.length > 0) {
         const { data: historyRows } = await supabase
           .from('files')
-          .select('id, ai_failure_classification, ai_failure_count')
+          .select('id, ai_failure_classification, ai_failure_count, intake_status')
           .in('id', Array.from(new Set(allLoaded.map((f) => f.fileId.split('#')[0]))))
         priorFailureCounts = new Map(
           (historyRows ?? []).map((r: Record<string, unknown>) => [
@@ -897,12 +915,13 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             { classification: (r.ai_failure_classification as AnthropicFailureClassification | null) ?? null, count: (r.ai_failure_count as number) ?? 0 },
           ])
         )
+        const alreadyFailed = new Set((historyRows ?? []).filter((r: Record<string, unknown>) => r.intake_status === 'failed').map((r: Record<string, unknown>) => r.id as string))
         const stillEligible: LoadedFile[] = []
         for (const f of allLoaded) {
           const history = priorFailureCounts.get(f.fileId.split('#')[0])
-          if (history && history.count >= 2) {
+          if (alreadyFailed.has(f.fileId.split('#')[0])) {
             failedToLoadSiblings.push(f.filename)
-            console.log(JSON.stringify({ document: f.filename, status: 'skipped_exhausted_retries', prior_classification: history.classification, prior_count: history.count }))
+            console.log(JSON.stringify({ document: f.filename, status: 'skipped_exhausted_retries', prior_classification: history?.classification ?? null, prior_count: history?.count ?? 0 }))
           } else {
             stillEligible.push(f)
           }
@@ -1100,13 +1119,20 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             return
           }
 
-          // Persist this failure against every file in the batch — this is
-          // what lets a LATER invocation retry this exact grouping smaller
-          // (forced solo batching above) instead of resending it whole, and
-          // what stops it for good after a second identical failure
-          // (shouldStopRetrying, inside recordAiFailure).
-          for (const f of batchFiles) {
-            await recordAiFailure(f.fileId, classification, errMessage)
+          // Persist this failure against every REAL file in the batch — this
+          // is what lets a LATER invocation retry this exact grouping
+          // smaller (forced solo batching above) instead of resending it
+          // whole, and what stops it for good after too many identical
+          // failures (maxConsecutiveOccurrences, inside recordAiFailure).
+          // Deduplicated by real file id (dedupeRealFileIds): a page-
+          // chunked PDF contributes multiple batchFiles entries
+          // (`${realId}#pStart-End`) for ONE real file — recording this ONE
+          // Claude-call failure once per chunk would inflate one real
+          // failure into several counted occurrences (production readiness
+          // review, blocking issue 2), so this call is one per underlying
+          // file, not one per batch entry.
+          for (const rfid of dedupeRealFileIds(batchFiles.map((f) => f.fileId))) {
+            await recordAiFailure(rfid, classification, errMessage)
           }
           failedToLoadSiblings.push(...batchFiles.map((f) => f.filename))
           continue

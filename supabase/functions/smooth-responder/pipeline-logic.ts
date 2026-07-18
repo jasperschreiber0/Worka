@@ -824,23 +824,80 @@ export function isBillingHaltClassification(classification: AnthropicFailureClas
   return BILLING_HALT_CLASSIFICATIONS.has(classification)
 }
 
+// Classifications where the failure is deterministic for the REQUEST'S
+// SIZE, not the request's content — a genuinely smaller retry (a solo
+// batch instead of a group — see forcedSoloInput in index.ts) has a real
+// chance of succeeding, unlike resending the identical payload. Distinct
+// from RETRYABLE_CLASSIFICATIONS (the single in-call retry decision in
+// withTimeoutAndRetry): an application_timeout must NOT be retried a
+// second time with the SAME payload inside one call (that's the double-
+// 150s-timeout production bug this whole redesign fixes — see
+// withTimeoutAndRetry's own comment), but IS worth exactly one attempt
+// with a genuinely smaller payload on a LATER invocation. Production
+// readiness review finding: the original version of shouldStopRetrying
+// conflated these two questions — by testing `!isRetryableClassification`
+// alone, it stopped an application_timeout/context_window_exceeded file
+// on its very FIRST occurrence, making the solo-retry path
+// (splitBatchForRetry / forcedSoloInput) unreachable for exactly the
+// classification the original incident exhibited. This set exists so that
+// question is answered independently of the single-call retry question.
+const ONE_MORE_ATTEMPT_CLASSIFICATIONS = new Set<AnthropicFailureClassification>([
+  'application_timeout', 'context_window_exceeded',
+])
+
 /**
- * Cross-attempt guard: even a classification that's individually retryable
- * (or individually worth one more attempt at a smaller size — see
- * splitBatchForRetry) must stop once the SAME classification has already
- * been observed for this file/batch. Two identical failures in a row is
- * treated as proof the failure is deterministic for this input, not bad
- * luck — matches document_processing_jobs' own "give up after repeated
- * identical failure" posture (migration 034), applied here to the
- * AI-call axis rather than the extraction axis.
+ * How many consecutive occurrences of this classification are tolerated
+ * before shouldStopRetrying gives up, mirrored exactly by the atomic SQL
+ * function record_ai_failure (migration 043) — keep both in sync if either
+ * changes.
+ *
+ * - 0 (credit_exhausted, authentication_failed, invalid_request,
+ *   validation_error, unknown, client_timeout): never worth even one
+ *   cross-invocation retry — either it's a billing/auth problem no retry
+ *   fixes (and never reaches this function in practice — see
+ *   isBillingHaltClassification/haltForBilling, which halts the run
+ *   before recordAiFailure is ever called for these two), or it's a
+ *   deterministic property of the request's CONTENT that a resend
+ *   (identical or solo) can't change.
+ * - 1 (application_timeout, context_window_exceeded): the request's SIZE
+ *   is implicated, not its content — worth exactly one more attempt at a
+ *   genuinely smaller size. Each occurrence here already represents
+ *   exactly one real Claude call (these are excluded from
+ *   RETRYABLE_CLASSIFICATIONS, so withTimeoutAndRetry never retries them
+ *   in-call) — so "1" means "stop after the SECOND identical occurrence",
+ *   matching the incident's own evidence (batch fails once, solo retry
+ *   fails identically a second time, THEN give up).
+ * - 2 (network_interruption, rate_limited, overloaded): each occurrence
+ *   here already represents TWO real Claude calls (the initial attempt
+ *   plus withTimeoutAndRetry's one in-call retry, since these ARE in
+ *   RETRYABLE_CLASSIFICATIONS) — kept at 2 to preserve the existing,
+ *   already-correct tolerance for genuinely transient infrastructure
+ *   blips, unrelated to either blocking issue this constant was
+ *   introduced to fix.
+ */
+export function maxConsecutiveOccurrences(classification: AnthropicFailureClassification): number {
+  if (ONE_MORE_ATTEMPT_CLASSIFICATIONS.has(classification)) return 1
+  if (isRetryableClassification(classification)) return 2
+  return 0
+}
+
+/**
+ * Cross-attempt guard: even a classification worth retrying at all must
+ * stop once it's recurred past its maxConsecutiveOccurrences allowance —
+ * a repeat of the identical classification is treated as proof the
+ * failure is deterministic for this input, not bad luck, matches
+ * document_processing_jobs' own "give up after repeated identical
+ * failure" posture (migration 034), applied here to the AI-call axis
+ * rather than the extraction axis.
  */
 export function shouldStopRetrying(
   priorClassification: AnthropicFailureClassification | null,
   priorConsecutiveFailures: number,
   currentClassification: AnthropicFailureClassification,
 ): boolean {
-  if (!isRetryableClassification(currentClassification)) return true
-  return priorClassification === currentClassification && priorConsecutiveFailures >= 2
+  const max = maxConsecutiveOccurrences(currentClassification)
+  if (max <= 0) return true
+  return priorClassification === currentClassification && priorConsecutiveFailures >= max
 }
 
 /**
@@ -871,6 +928,20 @@ export function splitBatchForRetry<T>(batch: T[]): [T[], T[]] | null {
   if (batch.length <= 1) return null
   const mid = Math.ceil(batch.length / 2)
   return [batch.slice(0, mid), batch.slice(mid)]
+}
+
+// A page-chunked PDF (pdf-chunk.ts) produces several batch entries sharing
+// one real `files` row, each id suffixed `${realId}#pStart-End`. Production
+// readiness review finding: recording a failure once per CHUNK for a batch
+// that failed as a single Claude call inflated a single real failure into
+// 2+ counted occurrences — a large chunked document could exhaust
+// maxConsecutiveOccurrences after only ONE actual failed attempt, exactly
+// the document profile (large multi-page PDFs) the solo-retry path exists
+// to protect. Strips the chunk suffix and de-duplicates so one Claude-call
+// failure is recorded as exactly one occurrence per real underlying file,
+// regardless of how many chunks of it were bundled into the failed batch.
+export function dedupeRealFileIds(fileIds: string[]): string[] {
+  return Array.from(new Set(fileIds.map((id) => id.split('#')[0])))
 }
 
 // ─── AI call timeout + retry ────────────────────────────────────────────────

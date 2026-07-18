@@ -28,9 +28,11 @@ import {
   classifyAnthropicError,
   isRetryableClassification,
   isBillingHaltClassification,
+  maxConsecutiveOccurrences,
   shouldStopRetrying,
   nextFailureHistory,
   splitBatchForRetry,
+  dedupeRealFileIds,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -666,15 +668,150 @@ test('classifyAnthropicError: an unrecognised error is unknown, not retryable by
   assert.equal(isRetryableClassification('unknown'), false)
 })
 
-// ─── shouldStopRetrying / nextFailureHistory ────────────────────────────────
+// ─── maxConsecutiveOccurrences / shouldStopRetrying / nextFailureHistory ───
+//
+// Production readiness review finding (blocking issue 1): the original
+// shouldStopRetrying tested `!isRetryableClassification(current)` alone,
+// which stopped application_timeout/context_window_exceeded on their VERY
+// FIRST occurrence — making the solo-batch-retry path in index.ts
+// (forcedSoloInput) unreachable for exactly the classification the
+// production incident exhibited. maxConsecutiveOccurrences fixes this by
+// giving those two classifications their own tier (one more attempt,
+// distinct from both "never retry" and "tolerate like a transient
+// failure") — these tests pin down the exact intended flow:
+//   first timeout -> record failure (not yet stopped) -> retry solo ->
+//   second identical timeout -> permanently fail.
 
-test('shouldStopRetrying: a non-retryable classification stops on the very first occurrence', () => {
-  assert.equal(shouldStopRetrying(null, 0, 'credit_exhausted'), true)
-  assert.equal(shouldStopRetrying(null, 0, 'invalid_request'), true)
-  assert.equal(shouldStopRetrying(null, 0, 'context_window_exceeded'), true)
+test('maxConsecutiveOccurrences: billing-halt and genuinely-hopeless classifications get zero tolerance', () => {
+  assert.equal(maxConsecutiveOccurrences('credit_exhausted'), 0)
+  assert.equal(maxConsecutiveOccurrences('authentication_failed'), 0)
+  assert.equal(maxConsecutiveOccurrences('invalid_request'), 0)
+  assert.equal(maxConsecutiveOccurrences('validation_error'), 0)
+  assert.equal(maxConsecutiveOccurrences('unknown'), 0)
+  assert.equal(maxConsecutiveOccurrences('client_timeout'), 0)
 })
 
-test('shouldStopRetrying: a retryable classification is allowed once, but not a second identical time', () => {
+test('maxConsecutiveOccurrences: application_timeout / context_window_exceeded get exactly one more attempt', () => {
+  assert.equal(maxConsecutiveOccurrences('application_timeout'), 1)
+  assert.equal(maxConsecutiveOccurrences('context_window_exceeded'), 1)
+})
+
+test('maxConsecutiveOccurrences: classifications that already survive one in-call retry keep their existing 2-strike tolerance', () => {
+  assert.equal(maxConsecutiveOccurrences('network_interruption'), 2)
+  assert.equal(maxConsecutiveOccurrences('rate_limited'), 2)
+  assert.equal(maxConsecutiveOccurrences('overloaded'), 2)
+})
+
+test('shouldStopRetrying: billing-halt classifications still stop on the very first occurrence (unchanged) — regression check for existing billing-halt behaviour', () => {
+  // credit_exhausted/authentication_failed never actually reach
+  // shouldStopRetrying in production (haltForBilling intercepts them in
+  // index.ts before recordAiFailure is ever called), but the function's
+  // own contract must still treat them as zero-tolerance in case that ever
+  // changes — this pins that down independently of index.ts's halt logic.
+  assert.equal(maxConsecutiveOccurrences('credit_exhausted'), 0)
+  assert.equal(maxConsecutiveOccurrences('authentication_failed'), 0)
+  assert.equal(shouldStopRetrying(null, 0, 'credit_exhausted'), true)
+  assert.equal(shouldStopRetrying(null, 0, 'authentication_failed'), true)
+})
+
+test('shouldStopRetrying: an immediately-hopeless classification stops on the very first occurrence', () => {
+  assert.equal(shouldStopRetrying(null, 0, 'credit_exhausted'), true)
+  assert.equal(shouldStopRetrying(null, 0, 'invalid_request'), true)
+  assert.equal(shouldStopRetrying(null, 0, 'validation_error'), true)
+  assert.equal(shouldStopRetrying(null, 0, 'unknown'), true)
+})
+
+test('shouldStopRetrying / integration: first application_timeout is recorded but does NOT stop — solo retry is reachable', () => {
+  // Step 1: the file has never failed before.
+  const first = shouldStopRetrying(null, 0, 'application_timeout')
+  assert.equal(first, false, 'a first timeout must not immediately permanently fail the file — blocking issue 1')
+  const afterFirst = nextFailureHistory({ classification: null, count: 0 }, 'application_timeout')
+  assert.deepEqual(afterFirst, { classification: 'application_timeout', count: 1 })
+
+  // Step 2 (in index.ts): a file at ai_failure_count === 1 is forced into
+  // its own solo batch on the next invocation (forcedSoloInput) — modelled
+  // here as simply calling shouldStopRetrying again with the persisted
+  // state from step 1.
+  const second = shouldStopRetrying(afterFirst.classification, afterFirst.count, 'application_timeout')
+  assert.equal(second, true, 'a second IDENTICAL timeout (the solo retry failing the same way) must permanently fail the file')
+  const afterSecond = nextFailureHistory(afterFirst, 'application_timeout')
+  assert.deepEqual(afterSecond, { classification: 'application_timeout', count: 2 })
+})
+
+test('shouldStopRetrying / integration: same two-attempt flow for context_window_exceeded', () => {
+  const first = shouldStopRetrying(null, 0, 'context_window_exceeded')
+  assert.equal(first, false)
+  const afterFirst = nextFailureHistory({ classification: null, count: 0 }, 'context_window_exceeded')
+  const second = shouldStopRetrying(afterFirst.classification, afterFirst.count, 'context_window_exceeded')
+  assert.equal(second, true)
+})
+
+// ─── Concurrency: no lost updates when the counter is serialized ──────────
+//
+// Blocking issue 3: the old recordAiFailure did a JS-side SELECT-then-
+// UPDATE, which is NOT atomic across two overlapping smooth-responder
+// invocations for the same job (a real possibility — reclaiming a stale
+// job_intake_lock does not kill the physical old invocation still running
+// server-side). The fix moves the read-compute-write into a single SQL
+// function (record_ai_failure, migration 043) that holds a row lock
+// (SELECT ... FOR UPDATE) for its whole transaction, so concurrent callers
+// are serialized by Postgres itself rather than racing in application code.
+//
+// This test suite has no live Postgres instance to exercise that lock
+// directly, so what's verified here is the arithmetic layer instead: fed a
+// series of "concurrent" calls IN THE SERIALIZED ORDER Postgres's row lock
+// guarantees (each call sees the immediately-prior call's committed
+// result, never a stale read), the counter must advance by exactly one per
+// call — no call's contribution is skipped or double-counted. This is
+// exactly the guarantee FOR UPDATE provides mechanically; what it cannot
+// prove from a pure-function test is that Postgres actually blocks a
+// second transaction until the first commits — that part is architectural
+// (verified by reading record_ai_failure's SQL, not testable without a
+// live database).
+test('concurrency: N serialized failures of the same classification produce exactly N in the counter, none lost', () => {
+  let state: { classification: 'overloaded' | null; count: number } = { classification: null, count: 0 }
+  const N = 5
+  for (let i = 0; i < N; i++) {
+    // Every "call" reads the state left by the previous one, exactly what
+    // a row lock guarantees — no two calls ever read the same prior state.
+    state = nextFailureHistory(state, 'overloaded')
+  }
+  assert.equal(state.count, N, 'every serialized call must contribute exactly one increment — a race would show as count < N')
+})
+
+test('concurrency: a stop decision made mid-sequence is consistent with the state at that exact point, not a stale read', () => {
+  // Simulates two "concurrent" callers for an application_timeout file
+  // (max tolerance 1): if the SQL row lock is doing its job, the SECOND
+  // caller to actually commit always sees the FIRST caller's result, so
+  // the stop decision is made against fresh state, not a stale snapshot
+  // both callers happened to read simultaneously (the exact failure mode
+  // a non-atomic SELECT-then-UPDATE was exposed to).
+  let state: { classification: 'application_timeout' | null; count: number } = { classification: null, count: 0 }
+
+  const call1Stop = shouldStopRetrying(state.classification, state.count, 'application_timeout')
+  state = nextFailureHistory(state, 'application_timeout')
+  assert.equal(call1Stop, false)
+  assert.equal(state.count, 1)
+
+  // A second "concurrent" caller that raced call1 but — per FOR UPDATE —
+  // is forced to serialize AFTER it, sees count=1, not the stale count=0
+  // a lost-update race would have produced.
+  const call2Stop = shouldStopRetrying(state.classification, state.count, 'application_timeout')
+  state = nextFailureHistory(state, 'application_timeout')
+  assert.equal(call2Stop, true, 'the second serialized call must see the first call already recorded and stop — a race would incorrectly allow a 3rd attempt')
+  assert.equal(state.count, 2)
+})
+
+test('shouldStopRetrying: a DIFFERENT classification on the second attempt resets the streak, not penalised by the prior one', () => {
+  // A timeout followed by, say, a rate limit is not "the same deterministic
+  // failure twice" — the streak must reset rather than compound across
+  // unrelated classifications.
+  const afterFirst = nextFailureHistory({ classification: null, count: 0 }, 'application_timeout')
+  const second = shouldStopRetrying(afterFirst.classification, afterFirst.count, 'overloaded')
+  assert.equal(second, false)
+})
+
+test('shouldStopRetrying: a retryable classification keeps its existing 2-strike tolerance (unchanged by this fix)', () => {
   assert.equal(shouldStopRetrying(null, 0, 'overloaded'), false, 'first occurrence — worth trying')
   assert.equal(shouldStopRetrying('overloaded', 1, 'overloaded'), false, 'second occurrence — still under the 2-strike threshold')
   assert.equal(shouldStopRetrying('overloaded', 2, 'overloaded'), true, 'third identical occurrence — stop')
@@ -694,6 +831,41 @@ test('nextFailureHistory: a different classification resets the streak to 1', ()
 
 test('nextFailureHistory: no prior history starts the streak at 1', () => {
   assert.deepEqual(nextFailureHistory({ classification: null, count: 0 }, 'application_timeout'), { classification: 'application_timeout', count: 1 })
+})
+
+// ─── dedupeRealFileIds ───────────────────────────────────────────────────────
+//
+// Blocking issue 2: a page-chunked PDF contributes several batch entries
+// sharing one real files.id (`${realId}#pStart-End`) — recording a failure
+// once per chunk inflated one real Claude-call failure into several
+// counted occurrences, exhausting maxConsecutiveOccurrences after a single
+// genuine failure for exactly the large-document profile the solo-retry
+// path exists to protect.
+
+test('dedupeRealFileIds: multiple chunks of the same file collapse to one real id', () => {
+  const ids = ['file-a#p1-5', 'file-a#p6-10', 'file-a#p11-15']
+  assert.deepEqual(dedupeRealFileIds(ids), ['file-a'])
+})
+
+test('dedupeRealFileIds: a mix of chunked and unchunked files dedupes only the chunked ones', () => {
+  const ids = ['file-a#p1-5', 'file-a#p6-10', 'file-b', 'file-c#p1-2']
+  assert.deepEqual(dedupeRealFileIds(ids), ['file-a', 'file-b', 'file-c'])
+})
+
+test('dedupeRealFileIds: a chunked-batch failure now records exactly one occurrence, not one per chunk', () => {
+  // Simulates the exact scenario from the incident: one failed Claude call
+  // for a batch containing 3 chunks of the same oversized document.
+  const chunkIdsInFailedBatch = ['big-plan#p1-10', 'big-plan#p11-20', 'big-plan#p21-30']
+  const realFileIds = dedupeRealFileIds(chunkIdsInFailedBatch)
+  assert.equal(realFileIds.length, 1, 'one real document must produce exactly one recordAiFailure call, regardless of chunk count')
+
+  // Threading that single occurrence through the same state machine used
+  // above confirms it takes TWO real failed attempts (not one) to
+  // permanently fail the document — the chunking bug used to reach that
+  // point after a single failed batch call.
+  const afterFirstFailedBatch = nextFailureHistory({ classification: null, count: 0 }, 'application_timeout')
+  assert.equal(afterFirstFailedBatch.count, 1, 'one failed batch call must record exactly one occurrence')
+  assert.equal(shouldStopRetrying(null, 0, 'application_timeout'), false)
 })
 
 // ─── splitBatchForRetry ──────────────────────────────────────────────────────
