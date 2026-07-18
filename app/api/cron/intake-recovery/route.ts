@@ -70,6 +70,7 @@ interface RunSummary {
   stalled_batches_recomputed: number
   batches_resumed: number
   stale_locks_released: number
+  abandoned_files_marked_failed: number
   job_locks_reclaimed: number
   stuck_files_retried: number
   files_permanently_failed: number
@@ -143,6 +144,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     stalled_batches_recomputed: 0,
     batches_resumed: 0,
     stale_locks_released: 0,
+    abandoned_files_marked_failed: 0,
     job_locks_reclaimed: 0,
     stuck_files_retried: 0,
     files_permanently_failed: 0,
@@ -298,6 +300,40 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const message = err instanceof Error ? err.message : String(err)
       summary.errors.push({ stage: 'find_stale_job_intake_locks_safe', message })
       log('recovery_stage_failed', { stage: 'find_stale_job_intake_locks_safe', error: message })
+    }
+
+    // ── 3c. Mark genuinely abandoned files failed (SAFE — files bookkeeping
+    //      only, never calls Anthropic or triggers any worker) ─────────────
+    // Migration 045 (just above) stops a stuck lock from blocking the JOB
+    // forever, but does nothing for the FILE's own intake_status — a file
+    // left at 'uploaded'/'queued'/'processing' with its lock now cleared
+    // (or one that never had a lock at all, e.g. the SSE trigger was never
+    // opened) just sits there indefinitely with no visible failure. Across
+    // repeated retries on the same job this accumulates silently — the
+    // direct cause of a job showing "173 plans uploaded but not yet
+    // processed" for what was really 7 documents retried many times over
+    // one day. find_and_fail_abandoned_files (migration 046) only touches
+    // files whose job currently holds NO job_intake_locks row at all (an
+    // active or even a still-stale-but-not-yet-reclaimed run is left
+    // strictly alone) and that have been non-terminal for well over any
+    // legitimate run's own timeout (2h, vs. the SSE poller's 15min
+    // OVERALL_TIMEOUT_MS) — see the migration's own comment for why this
+    // can never touch a run a connected client would still consider live.
+    try {
+      const { data, error } = await supabase.rpc('find_and_fail_abandoned_files')
+      if (error) throw error
+      const abandoned = (data ?? []) as Array<{ file_id: string; job_id: string; filename: string; previous_status: string; age: string }>
+      summary.abandoned_files_marked_failed = abandoned.length
+      for (const f of abandoned) {
+        log('abandoned_file_marked_failed', {
+          job_id: f.job_id, file_id: f.file_id, filename: f.filename,
+          previous_status: f.previous_status, age: f.age, reason: 'abandoned_file_marked_failed',
+        })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      summary.errors.push({ stage: 'find_and_fail_abandoned_files', message })
+      log('recovery_stage_failed', { stage: 'find_and_fail_abandoned_files', error: message })
     }
   }
 
@@ -486,6 +522,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     stalled_batches_recomputed: summary.stalled_batches_recomputed,
     batches_resumed: summary.batches_resumed,
     stale_locks_released: summary.stale_locks_released,
+    abandoned_files_marked_failed: summary.abandoned_files_marked_failed,
     job_locks_reclaimed: summary.job_locks_reclaimed,
     stuck_files_retried: summary.stuck_files_retried,
     files_permanently_failed: summary.files_permanently_failed,

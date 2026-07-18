@@ -226,6 +226,10 @@ DO $$ BEGIN
     (SELECT count(*) FROM pg_proc WHERE proname = 'release_stale_job_intake_lock' AND pg_get_function_arguments(oid) LIKE 'p_job_id uuid%') = 1,
     'release_stale_job_intake_lock(uuid, ...) function is missing or its signature changed (migration 045)'
   );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'find_and_fail_abandoned_files') = 1,
+    'find_and_fail_abandoned_files function is missing (migration 046)'
+  );
 END $$;
 
 -- ─── Functions are actually callable (not just present) ────────────────────
@@ -257,6 +261,11 @@ BEGIN
   -- release_stale_job_intake_lock's SELECT...FOR UPDATE also matches zero
   -- rows for a bogus job_id, hits NOT FOUND, and returns without mutating.
   PERFORM * FROM release_stale_job_intake_lock(v_bogus_uuid);
+  -- find_and_fail_abandoned_files' default threshold (2h) would match real
+  -- rows in production — probe with an absurdly large interval instead
+  -- (same trick as reclaim_stale_document_jobs(interval '100 years', ...)
+  -- above), so `created_at < now() - 100 years` matches nothing real.
+  PERFORM * FROM find_and_fail_abandoned_files(interval '100 years');
 EXCEPTION WHEN OTHERS THEN
   RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: one or more document-processing/recovery functions are not callable: %', SQLERRM;
 END $$;

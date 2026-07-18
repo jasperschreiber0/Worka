@@ -642,6 +642,19 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 SELECT...FOR UPDATE re-check (not a plain DELETE off an earlier
                                 read, which would race a genuinely new acquire in the gap), never
                                 re-acquires the lock, never calls smooth-responder or Anthropic.
+046_abandoned_file_recovery.sql — find_and_fail_abandoned_files(interval) RPC +
+                                intake_recovery_runs.abandoned_files_marked_failed. Companion to
+                                migration 045: clearing the job-level lock doesn't touch the FILE's
+                                own intake_status, so a file left at 'uploaded'/'queued'/'processing'
+                                just sits there forever with no visible failure — across repeated
+                                retries on one job this silently accumulates (the direct cause of a
+                                job showing "173 plans uploaded but not yet processed" for what was
+                                really 7 documents retried many times in one day). Added as step 3c
+                                in the DOCUMENT_RECOVERY path — marks a file intake_status='failed'
+                                only once it's been non-terminal for 2+ hours (well past the SSE
+                                poller's own 15-minute OVERALL_TIMEOUT_MS) AND its job currently
+                                holds no job_intake_locks row at all. Files-table bookkeeping only;
+                                never calls Anthropic, never triggers any worker.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
