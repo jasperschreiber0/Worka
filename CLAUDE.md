@@ -655,6 +655,18 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 poller's own 15-minute OVERALL_TIMEOUT_MS) AND its job currently
                                 holds no job_intake_locks row at all. Files-table bookkeeping only;
                                 never calls Anthropic, never triggers any worker.
+047_atomic_job_ref_generation.sql — fixes a pre-existing race condition in generate_job_ref()
+                                (migration 006), unrelated to the intake-pipeline work above but
+                                found while testing it: creating a job intermittently failed with
+                                `duplicate key value violates unique constraint "jobs_job_ref_key"`.
+                                The trigger computed the next JOB-YYYY-NNN number via a plain
+                                `SELECT COUNT(*) + 1`, with no locking — two near-simultaneous
+                                inserts for the same builder (e.g. retrying a failed "new job" chat
+                                message) could both read the same count before either committed,
+                                both compute the identical ref, and collide. Fixed with
+                                pg_advisory_xact_lock keyed on builder_id+year, serializing
+                                concurrent inserts for the same builder without affecting the ref
+                                format or creating cross-builder contention.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
