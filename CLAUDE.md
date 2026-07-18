@@ -667,6 +667,15 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 pg_advisory_xact_lock keyed on builder_id+year, serializing
                                 concurrent inserts for the same builder without affecting the ref
                                 format or creating cross-builder contention.
+048_job_ref_unique_per_builder.sql — the actual root cause 047's lock didn't resolve: job_ref's
+                                UNIQUE constraint was GLOBAL across every builder, while
+                                generate_job_ref() computes the sequence number scoped to one
+                                builder — any two different builders' first job of a calendar year
+                                both correctly compute 'JOB-2026-001', and the global constraint
+                                rejected the second one deterministically, every time, regardless of
+                                locking. Relaxed to UNIQUE(builder_id, job_ref) — two builders can
+                                each have their own "JOB-2026-001", exactly like two companies each
+                                having their own "Invoice #1". No change to the ref format.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
