@@ -209,6 +209,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const supabase = createClient(supabaseUrl, supabaseKey)
 
+  // Phase 1, increment 1 (migration 056): estimate_runs is a derived
+  // projection reconciled from the same tables/RPCs this route already
+  // reads and writes — collected here purely so every batch this run
+  // TOUCHED gets its projection refreshed at the end, alongside (never
+  // instead of) the real recovery work above. See reconcile_estimate_run's
+  // own comment: read-only against everything but estimate_runs, so this
+  // can never affect what recovery actually does, only how quickly the
+  // projection catches up to it.
+  const touchedBatchIds = new Set<string>()
+
   if (DOCUMENT_RECOVERY_DISABLED) {
     log('recovery_document_steps_skipped', { reason: 'DOCUMENT_RECOVERY_DISABLED' })
   } else {
@@ -271,6 +281,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         )
       )
       summary.batches_resumed = results.filter((r) => r.status === 'fulfilled' && (r.value as Response).ok).length
+      toResume.forEach((b) => touchedBatchIds.add(b.parent_job_id))
       if (toResume.length > 0) {
         log('recovery_batches_resumed', {
           attempted: toResume.length, succeeded: summary.batches_resumed,
@@ -483,6 +494,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             }
 
             summary.job_locks_reclaimed++
+            if (fileRow.processing_batch_id) touchedBatchIds.add(fileRow.processing_batch_id)
             log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
 
             // Prefer the queue-model resume path (re-reads each document's
@@ -570,6 +582,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           }
 
           summary.stuck_files_retried++
+          touchedBatchIds.add(b.batch_id)
           log('recovery_classification_retriggered', { job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
           await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
             method: 'POST',
@@ -584,6 +597,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         summary.errors.push({ stage: 'find_stuck_batches_needing_classification_retry', message })
         log('recovery_stage_failed', { stage: 'find_stuck_batches_needing_classification_retry', error: message })
       }
+  }
+
+  // Refresh the estimate_runs projection for every batch this run actually
+  // touched. Best-effort and parallel — a failure here never affects
+  // recovery's own outcome (already committed above) or this run's audit
+  // row below, only how current the projection is for that batch.
+  if (touchedBatchIds.size > 0) {
+    const reconcileResults = await Promise.allSettled(
+      Array.from(touchedBatchIds).map((batchId) =>
+        supabase.rpc('reconcile_estimate_run', { p_batch_id: batchId })
+      )
+    )
+    const reconcileFailures = reconcileResults.filter((r) => r.status === 'rejected').length
+    if (reconcileFailures > 0) {
+      log('recovery_estimate_run_reconcile_failed', { count: reconcileFailures, of: touchedBatchIds.size })
+    }
   }
 
   const durationMs = Date.now() - runStartedAt

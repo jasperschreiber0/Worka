@@ -271,7 +271,28 @@ async function createDocumentProcessingBatch(
     body: JSON.stringify({ p_batch_id: batchId }),
   }).catch(() => { /* best-effort */ })
 
+  await reconcileEstimateRun(supabaseUrl!, supabaseKey!, batchId)
+
   return batchId
+}
+
+// Phase 1, increment 1 (migration 056): estimate_runs is a derived
+// projection, reconciled from the same real tables this route already
+// reads/writes — never itself authoritative for anything yet. Called as a
+// pure side effect, fire-and-forget from the pipeline's perspective: a
+// failure here can never affect the actual document/estimate pipeline,
+// only delay when the estimate_runs projection catches up to reality.
+async function reconcileEstimateRun(supabaseUrl: string, supabaseKey: string, batchId: string): Promise<void> {
+  await fetch(`${supabaseUrl}/rest/v1/rpc/reconcile_estimate_run`, {
+    method: 'POST',
+    headers: {
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ p_batch_id: batchId }),
+  }).catch(() => { /* best-effort — see comment above */ })
 }
 
 interface DocumentProcessingJobRow {
@@ -736,6 +757,7 @@ export async function GET(
           // (completed/failed) and simply stop changing, so this becomes a
           // no-op for the rest of the run.
           if (row.processing_batch_id) {
+            await reconcileEstimateRun(supabaseUrl!, supabaseKey!, row.processing_batch_id)
             const jobRows = await fetchBatchJobStatuses(supabaseUrl!, supabaseKey!, anonKey, row.processing_batch_id)
             if (jobRows.length > 0) {
               const snapshot = JSON.stringify(jobRows)

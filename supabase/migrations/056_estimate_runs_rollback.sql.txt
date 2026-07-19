@@ -1,0 +1,22 @@
+-- ROLLBACK for 056_estimate_runs.sql — NOT auto-applied, kept as a .txt so
+-- it's never picked up by the migration runner. Run manually if this
+-- increment needs to be undone.
+--
+-- Safe by construction: estimate_runs/estimate_run_events are a pure,
+-- additive projection that nothing else reads from yet (see migration
+-- 056's header comment) — dropping them and the reconciliation function
+-- cannot affect the live intake/estimate pipeline, only stop the
+-- projection from being computed. The two application call sites
+-- (app/api/intake/[fileId]/route.ts, app/api/cron/intake-recovery/route.ts)
+-- call reconcile_estimate_run via a plain fetch/rpc wrapped in .catch()/
+-- Promise.allSettled — a missing function after this rollback just makes
+-- those best-effort calls fail silently and log a count, exactly like any
+-- other transient RPC failure they already tolerate. No code changes are
+-- required in the application to roll back safely; removing the two call
+-- sites afterward is optional cleanup, not a requirement for safety.
+
+DROP FUNCTION IF EXISTS reconcile_estimate_run(uuid);
+DROP TABLE IF EXISTS estimate_run_events;
+DROP TABLE IF EXISTS estimate_runs;
+
+NOTIFY pgrst, 'reload schema';
