@@ -112,6 +112,18 @@ export default function IntakeProgress({
   const [clarification, setClarification] = useState<ClarificationState | null>(null)
   const [clarifySubmitting, setClarifySubmitting] = useState(false)
   const [clarifyError, setClarifyError] = useState<string | null>(null)
+  // Distinct from clarifyError: a 409 here means another upload for the
+  // SAME job currently holds job_intake_locks (at most one smooth-responder
+  // run per job) — not a failure, a normal, temporary condition that
+  // resolves itself once that sibling upload's own Stage 1/2 call
+  // finishes. The server (acquireLockOrWait, app/api/intake/[fileId]/
+  // clarify/route.ts) already retries internally for 20s before giving up,
+  // but a real multi-document Stage 1/2 call can easily run longer than
+  // that — previously a single client-side attempt just surfaced the
+  // server's eventual 409 as a dead-end red error with no auto-recovery,
+  // leaving the builder stuck on this screen with no idea it was
+  // transient. This retries automatically and shows why, instead.
+  const [clarifyRetryStatus, setClarifyRetryStatus] = useState<string | null>(null)
   const [resumeKey, setResumeKey] = useState(0)
   const [reconnectKey, setReconnectKey] = useState(0)
 
@@ -131,26 +143,59 @@ export default function IntakeProgress({
   const lastProgressAtRef = useRef<number>(Date.now())
   const lastProgressPctRef = useRef<number>(5)
 
+  // Auto-retry cadence for the "another upload still holds this job's lock"
+  // condition (HTTP 409 specifically — see clarifyRetryStatus above). Fixed
+  // interval, not exponential backoff: this isn't a rate-limit/overload
+  // situation where backing off matters, it's "wait for a specific other
+  // operation to finish," so a steady, predictable retry is clearer to a
+  // builder watching the status line than a growing delay would be.
+  const CLARIFY_RETRY_INTERVAL_MS = 5_000
+  const CLARIFY_MAX_RETRY_ATTEMPTS = 24 // ~2 minutes of client-side retrying
+
   const handleAnswerSubmit = async (answers: Array<{ question_id: string; answer: string }>) => {
     setClarifySubmitting(true)
     setClarifyError(null)
-    try {
-      const res = await fetch(`/api/intake/${encodeURIComponent(fileId)}/clarify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId, answers }),
-      })
-      if (!res.ok) {
+    setClarifyRetryStatus(null)
+
+    for (let attempt = 1; attempt <= CLARIFY_MAX_RETRY_ATTEMPTS; attempt++) {
+      try {
+        const res = await fetch(`/api/intake/${encodeURIComponent(fileId)}/clarify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId, answers }),
+        })
+        if (res.ok) {
+          setClarifyRetryStatus(null)
+          setClarification(null)
+          setResumeKey((k) => k + 1)
+          setClarifySubmitting(false)
+          return
+        }
+        if (res.status === 409 && attempt < CLARIFY_MAX_RETRY_ATTEMPTS) {
+          // Another upload for this job is still finishing — not a
+          // failure. Keep the panel in its submitting state (button stays
+          // disabled, showing "Continuing...") and surface why, instead of
+          // dead-ending on a red error the builder has to notice and
+          // manually retry.
+          setClarifyRetryStatus(`Finishing another upload for this job — retrying automatically… (attempt ${attempt} of ${CLARIFY_MAX_RETRY_ATTEMPTS})`)
+          await new Promise((resolve) => setTimeout(resolve, CLARIFY_RETRY_INTERVAL_MS))
+          continue
+        }
         const body = await res.json().catch(() => ({ error: 'Could not continue' }))
         throw new Error((body as { error?: string }).error ?? 'Could not continue')
+      } catch (err) {
+        setClarifyRetryStatus(null)
+        setClarifyError(err instanceof Error ? err.message : 'Could not continue — please try again.')
+        setClarifySubmitting(false)
+        return
       }
-      setClarification(null)
-      setResumeKey((k) => k + 1)
-    } catch (err) {
-      setClarifyError(err instanceof Error ? err.message : 'Could not continue — please try again.')
-    } finally {
-      setClarifySubmitting(false)
     }
+
+    // Exhausted every retry — this is now worth surfacing as a real,
+    // actionable error rather than retrying forever.
+    setClarifyRetryStatus(null)
+    setClarifyError('Still waiting on another upload for this job to finish. Please try again in a minute.')
+    setClarifySubmitting(false)
   }
 
   useEffect(() => {
@@ -337,6 +382,7 @@ export default function IntakeProgress({
         questions={clarification.questions}
         submitting={clarifySubmitting}
         error={clarifyError}
+        retryStatus={clarifyRetryStatus}
         onSubmit={handleAnswerSubmit}
       />
     )

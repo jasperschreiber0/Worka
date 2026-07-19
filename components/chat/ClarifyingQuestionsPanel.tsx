@@ -15,6 +15,12 @@ export interface ClarifyingQuestionsPanelProps {
   questions: ClarifyingQuestion[]
   submitting: boolean
   error: string | null
+  // A transient, expected condition (another upload for this job still
+  // finishing) being retried automatically — distinct from `error`, which
+  // is a terminal failure the builder needs to act on. Rendered as an
+  // informative, non-alarming status line rather than a red error, so the
+  // builder understands the system is actively working, not stuck.
+  retryStatus?: string | null
   onSubmit: (answers: Array<{ question_id: string; answer: string }>) => void
 }
 
@@ -29,6 +35,7 @@ export default function ClarifyingQuestionsPanel({
   questions,
   submitting,
   error,
+  retryStatus,
   onSubmit,
 }: ClarifyingQuestionsPanelProps) {
   const [answers, setAnswers] = useState<Record<string, string>>({})
@@ -81,6 +88,15 @@ export default function ClarifyingQuestionsPanel({
         ))}
       </div>
 
+      {retryStatus && (
+        <div className="flex items-center gap-2 text-xs text-[#ff9800]">
+          <svg className="animate-spin flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.25" />
+            <path d="M22 12a10 10 0 00-10-10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+          </svg>
+          <span>{retryStatus}</span>
+        </div>
+      )}
       {error && <p className="text-xs text-[#f44336]">{error}</p>}
 
       <button
