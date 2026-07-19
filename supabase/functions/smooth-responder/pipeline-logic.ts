@@ -1021,6 +1021,67 @@ export function splitTradeCategoriesIntoChunks<T>(items: T[], chunkCount: number
   return chunks
 }
 
+// Proven-safe ceiling for one Stage 3 call, unchanged from the original
+// 150s->220s widening (see index.ts's own comment on that call site).
+// Never inflated beyond this even when budget is tight -- the whole point
+// of chunking is bounding a single call's size, so a request that grows
+// because budget was short would reintroduce the exact timeout risk
+// chunking exists to remove.
+export const STAGE3_PER_CALL_TIMEOUT_MS = 220_000
+
+export interface Stage3ChunkPlan<T> {
+  // Chunks safe to actually attempt in THIS invocation, sized at the
+  // proven-safe STAGE3_DEFAULT_CHUNK_COUNT split (or fewer chunks if the
+  // remaining trade list is small) -- never inflated to fit more trades
+  // into one call just because budget allowed it.
+  chunksToRunNow: T[][]
+  // True when the full trade list needed more chunks than fit in the
+  // available budget -- some trades are deliberately left for a LATER
+  // invocation (a fresh wall-clock window) rather than crammed into an
+  // oversized call now.
+  hasMoreAfterThisInvocation: boolean
+}
+
+// Budget-aware Stage 3 chunk planning: decides how many of the (already
+// right-sized) chunks can actually be attempted THIS invocation without
+// starting a call that cannot finish inside the remaining wall-clock
+// window. This is the core of the redesign that replaces the old
+// "hasWallClockBudget(220_000 * fixedChunkCount) or bail entirely" check
+// (which either ran the full fixed plan or made zero progress) with
+// "run as many right-sized chunks as genuinely fit, persist that
+// progress, and leave the rest for the next invocation."
+//
+// remainingTrades should already exclude any trade whose scope reasoning
+// was durably completed in a PRIOR invocation of this same batch (see
+// document_processing_batches.stage3_completed_trade_ids, migration 060)
+// -- this function only decides how much of what's LEFT fits now.
+export function planStage3Chunks<T>(
+  remainingTrades: T[],
+  remainingBudgetMs: number,
+  factsInPromptCount: number,
+  chunkThreshold: number = STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
+  desiredChunkCount: number = STAGE3_DEFAULT_CHUNK_COUNT,
+): Stage3ChunkPlan<T> {
+  if (remainingTrades.length === 0) {
+    return { chunksToRunNow: [], hasMoreAfterThisInvocation: false }
+  }
+
+  const maxAffordableCalls = Math.floor(remainingBudgetMs / STAGE3_PER_CALL_TIMEOUT_MS)
+  if (maxAffordableCalls < 1) {
+    // Cannot safely start even one call this invocation -- never attempt
+    // a call that can't finish inside the remaining window. All of
+    // remainingTrades is deferred, untouched, to the next invocation.
+    return { chunksToRunNow: [], hasMoreAfterThisInvocation: true }
+  }
+
+  const desiredGroups = shouldChunkTradeReasoning(factsInPromptCount, chunkThreshold) ? desiredChunkCount : 1
+  const fullPlan = splitTradeCategoriesIntoChunks(remainingTrades, desiredGroups)
+  const chunksToRunNow = fullPlan.slice(0, maxAffordableCalls)
+  const hasMoreAfterThisInvocation = fullPlan.length > chunksToRunNow.length
+
+  return { chunksToRunNow, hasMoreAfterThisInvocation }
+}
+
 export interface ScopeReasoningResult {
   scope: Array<Record<string, unknown>>
   clarifying_questions: Array<Record<string, unknown>>

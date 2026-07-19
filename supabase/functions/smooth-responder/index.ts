@@ -39,8 +39,8 @@ import {
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
   dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
-  formatFactForScopePrompt, shouldChunkTradeReasoning, splitTradeCategoriesIntoChunks, mergeScopeReasoningResults,
-  shouldSkipStage3Call, STAGE3_DEFAULT_CHUNK_COUNT,
+  formatFactForScopePrompt, mergeScopeReasoningResults,
+  shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
 } from './pipeline-logic.ts'
@@ -1583,68 +1583,162 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         return
       }
 
-      // ── Trade chunking above a complexity threshold ──────────────────────
-      // Every chunk sees the FULL evidence-capped fact block (cross-trade
-      // context — e.g. a slab note affecting both Site Works and Framing —
-      // is preserved in every call); only the set of trades a given call is
-      // asked to reason about shrinks, bounding output generation per call.
-      // Below the threshold this is a single chunk containing all 13
-      // trades — byte-for-byte the same request shape as before chunking
-      // existed, so already-successful projects are unaffected.
-      const tradeChunks = shouldChunkTradeReasoning(factsForPrompt.length)
-        ? splitTradeCategoriesIntoChunks(TRADE_CATEGORIES, STAGE3_DEFAULT_CHUNK_COUNT)
-        : [TRADE_CATEGORIES]
-
-      if (!hasWallClockBudget(220_000 * tradeChunks.length)) {
-        await bailForWallClockBudget('reasoning_scope', 220_000 * tradeChunks.length)
-        return
+      // ── Budget-aware trade chunking (replaces the old fixed-2-chunk-or-bail
+      // design) ──────────────────────────────────────────────────────────
+      // Root cause closed here: WALL_CLOCK_SAFETY_MS (340s) is LESS than
+      // 2 x STAGE3_PER_CALL_TIMEOUT_MS (440s), so a chunked project can
+      // never fit both desired chunks in one invocation no matter how
+      // little time Stage 1/2 used — the old design either ran the full
+      // plan (risking exactly the wall-clock overrun this exists to
+      // prevent) or bailed with zero progress. planStage3Chunks computes
+      // how many right-sized chunks actually fit THIS invocation's
+      // remaining budget; document_processing_batches.stage3_completed_
+      // trade_ids (migration 060) persists which trades are durably done
+      // so a later invocation (a fresh wall-clock window) resumes with
+      // only the remaining trades — never repeating finished work, never
+      // starting a call that can't finish.
+      let completedTradeIds: number[] = []
+      if (parentJobId) {
+        const { data: progressRow } = await supabase
+          .from('document_processing_batches')
+          .select('stage3_completed_trade_ids')
+          .eq('id', parentJobId)
+          .single()
+        completedTradeIds = (progressRow?.stage3_completed_trade_ids as number[] | null) ?? []
       }
+      const remainingTrades = TRADE_CATEGORIES.filter((t) => !completedTradeIds.includes(t.id))
 
-      // No chunk-level checkpoint is persisted here, deliberately (in-memory
-      // only, per the reliability investigation's scope) — but a retry that
-      // re-enters this loop still doesn't re-spend on a chunk that already
-      // succeeded: guardedClaudeCall's own idempotent reuse (scope_key +
-      // per-call input hash, ai-gateway.ts) replays that exact chunk's
-      // stored result at zero additional cost, since its request content is
-      // byte-identical on an unchanged fact base. Only a chunk that hasn't
-      // yet succeeded actually reaches Anthropic again.
-      const scopeStartedAt = Date.now()
-      const chunkResults: ScopeReasoningResult[] = []
-      let scopeResult: MergedScopeReasoningResult | null = null
-      try {
-        for (const [chunkIndex, tradeChunk] of tradeChunks.entries()) {
-          const scopeUserContent = [{
-            type: 'text' as const,
-            text: tradeChunks.length > 1
-              ? `PROJECT FACTS:\n${factsBlock}\n\nTrade categories to reason about in THIS call (only return entries for these — the remaining trades are covered by a separate call, do not include them here):\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`
-              : `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`,
-          }]
+      if (remainingTrades.length === 0) {
+        // Defensive only — scopeAlreadyComplete above should already have
+        // caught the "every trade done" case. Nothing left to reason
+        // about; fall through to Stage 6 with what's already persisted.
+        console.log(JSON.stringify({
+          stage: 'reasoning_scope', status: 'all_trades_already_complete', job_id: jobId, batch_id: parentJobId,
+        }))
+      } else {
+        const remainingBudgetMs = WALL_CLOCK_SAFETY_MS - (Date.now() - startedAt)
+        const plan = planStage3Chunks(remainingTrades, remainingBudgetMs, factsForPrompt.length)
 
-          // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
-          // on a real 75-fact project reasoning across 13 trades. Match the other
-          // two stages' proven 16000 rather than guessing at yet another cap.
-          //
-          // timeoutMs widened from the 150s default to 220s: confirmed in
-          // production on a 108-fact, 4-document project — the call was cleanly
-          // aborted by OUR OWN AbortController at exactly 150002ms
-          // (classification: application_timeout), then retried on the next
-          // invocation with the byte-for-byte identical fact block and failed
-          // identically. Trade chunking (above) now gives large-fact-base
-          // projects a genuine "smaller request" lever on top of this — 220s
-          // stays well inside Supabase's real 400s isolate wall-clock ceiling
-          // even when this stage runs after Stage 1/2 in the same invocation.
-          const chunkResult = await callTool(
-            anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning' },
-            scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000
-          ) as ScopeReasoningResult
-          chunkResults.push(chunkResult)
-          console.log(JSON.stringify({
-            stage: 'reasoning_scope', status: 'chunk_processed', job_id: jobId,
-            chunk: chunkIndex + 1, chunk_count: tradeChunks.length,
-            tradesInChunk: tradeChunk.length, tradesReasoned: (chunkResult.scope ?? []).length,
-          }))
+        if (plan.chunksToRunNow.length === 0) {
+          // No room for even one call this invocation — never start a call
+          // that cannot finish. Zero spend, everything deferred to a later
+          // invocation with a fresh budget.
+          await bailForWallClockBudget('reasoning_scope', STAGE3_PER_CALL_TIMEOUT_MS)
+          return
         }
-        scopeResult = mergeScopeReasoningResults(chunkResults)
+
+        const scopeStartedAt = Date.now()
+        const chunkResults: ScopeReasoningResult[] = []
+        let raisedBlocking = false
+        try {
+          for (const [chunkIndex, tradeChunk] of plan.chunksToRunNow.entries()) {
+            const scopeUserContent = [{
+              type: 'text' as const,
+              text: plan.chunksToRunNow.length > 1 || completedTradeIds.length > 0
+                ? `PROJECT FACTS:\n${factsBlock}\n\nTrade categories to reason about in THIS call (only return entries for these — the remaining trades are covered by a separate call, do not include them here):\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`
+                : `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`,
+            }]
+
+            // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
+            // on a real 75-fact project reasoning across 13 trades. Match the other
+            // two stages' proven 16000 rather than guessing at yet another cap.
+            //
+            // STAGE3_PER_CALL_TIMEOUT_MS (220s) widened from the 150s default:
+            // confirmed in production on a 108-fact, 4-document project — the
+            // call was cleanly aborted by OUR OWN AbortController at exactly
+            // 150002ms (classification: application_timeout). Budget-aware
+            // chunking (above) now gives large-fact-base projects a genuine
+            // "smaller request, persisted across invocations" lever on top of
+            // this — 220s per call stays well inside Supabase's real 400s
+            // isolate wall-clock ceiling even when this stage runs after
+            // Stage 1/2 in the same invocation.
+            const chunkResult = await callTool(
+              anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning' },
+              scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, STAGE3_PER_CALL_TIMEOUT_MS
+            ) as ScopeReasoningResult
+            chunkResults.push(chunkResult)
+
+            // Persist THIS chunk's scope + progress immediately — durability
+            // across a crash, not just across a clean bail. A retry that
+            // re-enters this loop after a crash mid-way still doesn't
+            // re-spend on a chunk that already succeeded: this write lands
+            // before the loop ever reaches Anthropic again for these trades.
+            const chunkScopeRows = (chunkResult.scope ?? []) as Array<Record<string, unknown>>
+            if (chunkScopeRows.length > 0) {
+              const chunkScopeInserts = chunkScopeRows
+                .filter((s) => typeof s.trade_category_id === 'number')
+                .map((s) => ({
+                  job_id: jobId,
+                  trade_category_id: s.trade_category_id,
+                  included_scope: s.included_scope ?? [],
+                  excluded_scope: s.excluded_scope ?? [],
+                  dependencies: s.dependencies ?? [],
+                  assumptions: s.assumptions ?? [],
+                  uncertainty_notes: s.uncertainty_notes ?? null,
+                  confidence: s.confidence ?? null,
+                }))
+              if (chunkScopeInserts.length > 0) {
+                await supabase.from('scope_items').upsert(chunkScopeInserts, { onConflict: 'job_id,trade_category_id' })
+              }
+            }
+            if (parentJobId) {
+              completedTradeIds = Array.from(new Set([...completedTradeIds, ...tradeChunk.map((t) => t.id)]))
+              await supabase.from('document_processing_batches').update({
+                stage3_completed_trade_ids: completedTradeIds,
+                updated_at: new Date().toISOString(),
+              }).eq('id', parentJobId)
+            }
+
+            console.log(JSON.stringify({
+              stage: 'reasoning_scope', status: 'chunk_processed', job_id: jobId, batch_id: parentJobId,
+              chunk: chunkIndex + 1, chunk_count: plan.chunksToRunNow.length,
+              tradesInChunk: tradeChunk.length, tradesReasoned: (chunkResult.scope ?? []).length,
+              trades_completed_total: completedTradeIds.length, trades_remaining: TRADE_CATEGORIES.length - completedTradeIds.length,
+            }))
+
+            // A blocking question stops further chunks this invocation —
+            // no point spending on more trades once the run needs the
+            // builder's input regardless.
+            if (((chunkResult.clarifying_questions ?? []) as Array<Record<string, unknown>>).some((q) => q.blocking === true)) {
+              raisedBlocking = true
+              break
+            }
+          }
+        } catch (err) {
+          const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
+          const errMessage = err instanceof Error ? err.message : String(err)
+          console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, chunkCount: plan.chunksToRunNow.length, classification, error: errMessage }))
+          if (isBillingHaltClassification(classification)) {
+            await haltForBilling(classification, errMessage)
+            return
+          }
+          // Race-safe, atomic — mirrors record_ai_failure (migration 043),
+          // keyed by batch + input hash (migration 059) instead of files.id,
+          // since Stage 3 has no per-file correspondence. Best-effort: a
+          // failure to RECORD the failure must never mask the original error.
+          if (parentJobId) {
+            try {
+              const { data: recordData, error: recordErr } = await supabase.rpc('record_stage3_failure', {
+                p_batch_id: parentJobId,
+                p_input_hash: stage3InputHash,
+                p_classification: classification,
+                p_max_occurrences: maxConsecutiveOccurrences(classification),
+              })
+              if (recordErr) throw recordErr
+              const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
+              console.log(JSON.stringify({
+                event: 'stage3_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
+                consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
+              }))
+            } catch (recordErr) {
+              console.error('record_stage3_failure RPC failed:', recordErr)
+            }
+          }
+          await fail(`Scope reasoning call failed: ${errMessage}`)
+          return
+        }
+
+        const scopeResult: MergedScopeReasoningResult = mergeScopeReasoningResults(chunkResults)
         if (scopeResult.tradeCollisions.length > 0) {
           // Should be rare — chunks are given disjoint trade subsets — but
           // if a chunk didn't fully respect its assigned trades, both
@@ -1657,116 +1751,85 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             batch_id: parentJobId, trade_category_ids: scopeResult.tradeCollisions,
           }))
         }
-      } catch (err) {
-        const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
-        const errMessage = err instanceof Error ? err.message : String(err)
-        console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, chunkCount: tradeChunks.length, classification, error: errMessage }))
-        if (isBillingHaltClassification(classification)) {
-          await haltForBilling(classification, errMessage)
+        console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'processed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, tradesReasoned: (scopeResult.scope ?? []).length, questionsRaised: (scopeResult.clarifying_questions ?? []).length }))
+
+        await setStage('detecting_gaps')
+
+        const questions = ((scopeResult.clarifying_questions ?? []) as Array<Record<string, unknown>>)
+        const blockingQuestions = questions.filter((q) => q.blocking === true)
+        const nonBlocking = questions.filter((q) => q.blocking !== true)
+        if (nonBlocking.length > 0) {
+          await supabase.from('clarifying_questions').insert(
+            nonBlocking.map((q) => ({
+              job_id: jobId, question: q.question, reason: q.reason,
+              trade_category_id: q.trade_category_id ?? null, blocking: false, status: 'open' as const,
+            }))
+          )
+        }
+
+        if (!raisedBlocking && plan.hasMoreAfterThisInvocation) {
+          // Genuine forward progress this invocation (chunksToRunNow > 0,
+          // all persisted above), but the remaining trades didn't fit —
+          // defer them, cleanly, to a later invocation with a fresh
+          // wall-clock window. Distinct log/stall reason from a zero-
+          // progress bail, so an operator reading document_processing_
+          // batches can immediately tell "this is converging" from "this
+          // made no progress at all."
+          console.log(JSON.stringify({
+            stage: 'reasoning_scope', status: 'partial_progress_deferred', job_id: jobId, batch_id: parentJobId,
+            trades_completed_total: completedTradeIds.length, trades_remaining: TRADE_CATEGORIES.length - completedTradeIds.length,
+          }))
+          if (parentJobId) {
+            await supabase.from('document_processing_batches').update({
+              stall_stage: 'reasoning_scope',
+              stall_reason: `Stage 3 partially complete (${completedTradeIds.length}/${TRADE_CATEGORIES.length} trades reasoned) — remaining trades deferred to a future invocation with a fresh wall-clock budget.`,
+              stalled_at: new Date().toISOString(),
+            }).eq('id', parentJobId)
+          }
           return
         }
-        // Race-safe, atomic — mirrors record_ai_failure (migration 043),
-        // keyed by batch + input hash (migration 059) instead of files.id,
-        // since Stage 3 has no per-file correspondence. Best-effort: a
-        // failure to RECORD the failure must never mask the original error.
-        if (parentJobId) {
-          try {
-            const { data: recordData, error: recordErr } = await supabase.rpc('record_stage3_failure', {
-              p_batch_id: parentJobId,
-              p_input_hash: stage3InputHash,
-              p_classification: classification,
-              p_max_occurrences: maxConsecutiveOccurrences(classification),
-            })
-            if (recordErr) throw recordErr
-            const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
-            console.log(JSON.stringify({
-              event: 'stage3_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
-              consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
-            }))
-          } catch (recordErr) {
-            console.error('record_stage3_failure RPC failed:', recordErr)
-          }
-        }
-        await fail(`Scope reasoning call failed: ${errMessage}`)
-        return
-      }
-      if (!scopeResult) { await fail('No structured response from scope reasoning stage'); return }
-      console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'processed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, tradesReasoned: (scopeResult.scope ?? []).length, questionsRaised: (scopeResult.clarifying_questions ?? []).length }))
 
-      await setStage('detecting_gaps')
-
-      const scopeRows = (scopeResult.scope ?? []) as Array<Record<string, unknown>>
-      if (scopeRows.length > 0) {
-        const scopeInserts = scopeRows
-          .filter((s) => typeof s.trade_category_id === 'number')
-          .map((s) => ({
+        if (blockingQuestions.length > 0) {
+          const questionInserts = blockingQuestions.map((q) => ({
             job_id: jobId,
-            trade_category_id: s.trade_category_id,
-            included_scope: s.included_scope ?? [],
-            excluded_scope: s.excluded_scope ?? [],
-            dependencies: s.dependencies ?? [],
-            assumptions: s.assumptions ?? [],
-            uncertainty_notes: s.uncertainty_notes ?? null,
-            confidence: s.confidence ?? null,
+            question: q.question,
+            reason: q.reason,
+            trade_category_id: q.trade_category_id ?? null,
+            blocking: true,
+            status: 'open' as const,
           }))
-        if (scopeInserts.length > 0) {
-          await supabase.from('scope_items').upsert(scopeInserts, { onConflict: 'job_id,trade_category_id' })
+          await supabase.from('clarifying_questions').insert(questionInserts)
+
+          await supabase
+            .from('files')
+            .update({ intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
+            .eq('id', fileId)
+          if (parentJobId) {
+            // Every file in the batch, not just fileId (the primary/anchor) —
+            // recompute_file_intake_status resolves this to 'needs_info' for
+            // each since classification_triggered is already true by this
+            // point in a queue-model run (migration 052).
+            await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+          } else {
+            await supabase.from('files').update({ intake_status: 'needs_info' }).eq('id', fileId)
+          }
+          // Deliberately NOT marking scope_reasoning_completed_at here — a run
+          // that raised a blocking question genuinely needs Stage 3 to run
+          // again once the builder answers (the merged fact base changes),
+          // not to be skipped on the resumed run.
+          return
         }
-      }
 
-      const questions = ((scopeResult.clarifying_questions ?? []) as Array<Record<string, unknown>>)
-      const blockingQuestions = questions.filter((q) => q.blocking === true)
-
-      if (blockingQuestions.length > 0) {
-        const questionInserts = blockingQuestions.map((q) => ({
-          job_id: jobId,
-          question: q.question,
-          reason: q.reason,
-          trade_category_id: q.trade_category_id ?? null,
-          blocking: true,
-          status: 'open' as const,
-        }))
-        await supabase.from('clarifying_questions').insert(questionInserts)
-
-        await supabase
-          .from('files')
-          .update({ intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
-          .eq('id', fileId)
+        // Reaching here means every remaining trade was reasoned about this
+        // invocation (plan.hasMoreAfterThisInvocation was false) and no
+        // chunk raised a blocking question — genuinely done. Durable Stage 3
+        // checkpoint: a subsequent retry against this same batch will read
+        // this and skip straight to Stage 6.
         if (parentJobId) {
-          // Every file in the batch, not just fileId (the primary/anchor) —
-          // recompute_file_intake_status resolves this to 'needs_info' for
-          // each since classification_triggered is already true by this
-          // point in a queue-model run (migration 052).
-          await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
-        } else {
-          await supabase.from('files').update({ intake_status: 'needs_info' }).eq('id', fileId)
+          await supabase.from('document_processing_batches')
+            .update({ scope_reasoning_completed_at: new Date().toISOString() })
+            .eq('id', parentJobId)
         }
-        // Deliberately NOT marking scope_reasoning_completed_at here — a run
-        // that raised a blocking question genuinely needs Stage 3 to run
-        // again once the builder answers (the merged fact base changes),
-        // not to be skipped on the resumed run.
-        return
-      }
-
-      // Non-blocking questions are logged for visibility but never stop the pipeline.
-      const nonBlocking = questions.filter((q) => q.blocking !== true)
-      if (nonBlocking.length > 0) {
-        await supabase.from('clarifying_questions').insert(
-          nonBlocking.map((q) => ({
-            job_id: jobId, question: q.question, reason: q.reason,
-            trade_category_id: q.trade_category_id ?? null, blocking: false, status: 'open' as const,
-          }))
-        )
-      }
-
-      // Durable Stage 3 checkpoint — only reached once Gap Detection has
-      // finished without a blocking question stopping the run above. A
-      // subsequent retry against this same batch (parent_job_id) will read
-      // this and skip straight to Stage 6.
-      if (parentJobId) {
-        await supabase.from('document_processing_batches')
-          .update({ scope_reasoning_completed_at: new Date().toISOString() })
-          .eq('id', parentJobId)
       }
     }
 

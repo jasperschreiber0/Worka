@@ -157,6 +157,19 @@ export async function GET(
     .eq('status', 'open')
     .order('created_at', { ascending: true })
 
+  // Non-blocking open questions were previously never surfaced anywhere in
+  // the builder UI — the only path that read them was chat's project_
+  // question AI context (lib/project-context.ts), reachable only if a
+  // builder happened to ask. These don't block estimating, so they're kept
+  // separate from pending_clarifying_questions above rather than merged in.
+  const { data: openNonBlockingQuestions } = await sb
+    .from('clarifying_questions')
+    .select('id, question, reason')
+    .eq('job_id', jobId)
+    .eq('blocking', false)
+    .eq('status', 'open')
+    .order('created_at', { ascending: true })
+
   const { data: pausedFile } = await sb
     .from('files')
     .select('id')
@@ -302,6 +315,12 @@ export async function GET(
     milestones_count: milestonesCount ?? 0,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pending_clarifying_questions: (openQuestions ?? []).map((q: any) => ({
+      id: q.id,
+      question: q.question,
+      reason: q.reason,
+    })),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    pending_non_blocking_questions: (openNonBlockingQuestions ?? []).map((q: any) => ({
       id: q.id,
       question: q.question,
       reason: q.reason,

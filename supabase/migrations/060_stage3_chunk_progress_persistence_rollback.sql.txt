@@ -1,0 +1,19 @@
+-- ROLLBACK for 060_stage3_chunk_progress_persistence.sql — NOT
+-- auto-applied, kept as a .txt so it's never picked up by the migration
+-- runner.
+--
+-- Safe by construction: this column is additive and only read/written by
+-- the Stage 3 chunk-progress code paired with it. Rolling back the app
+-- code first (reverting to the fixed-2-chunk-or-bail behavior) means
+-- nothing reads/writes this column anymore, then this migration can drop
+-- it safely. Rolling back the DB first is also safe: a SELECT of a
+-- dropped column errors, and app code deployed after this rollback would
+-- need to be reverted too -- but a batch mid-way through partial Stage 3
+-- progress at the moment of rollback loses that progress marker and would
+-- restart Stage 3 from scratch on its next attempt (safe, just not free —
+-- no different from the pre-060 behavior every batch already had).
+
+ALTER TABLE document_processing_batches
+  DROP COLUMN IF EXISTS stage3_completed_trade_ids;
+
+NOTIFY pgrst, 'reload schema';

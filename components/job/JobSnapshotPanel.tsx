@@ -156,6 +156,13 @@ export default function JobSnapshotPanel({
   const [answeringQuestions, setAnsweringQuestions] = useState(false)
   const [clarifySubmitting, setClarifySubmitting] = useState(false)
   const [clarifyError, setClarifyError] = useState<string | null>(null)
+  // See IntakeProgress.tsx's identical fix for why this exists: a 409 from
+  // /clarify means another upload for this job still holds job_intake_locks
+  // (normal, temporary — resolves on its own), not a real failure. This
+  // component previously had its own, unfixed one-shot submit with no
+  // retry, so a builder answering from the Job Snapshot Panel (rather than
+  // the live upload SSE session) hit the exact same dead-end error.
+  const [clarifyRetryStatus, setClarifyRetryStatus] = useState<string | null>(null)
   const [archiving, setArchiving] = useState(false)
 
   // Fetch aggregate pulse once for the no-job empty state
@@ -204,30 +211,52 @@ export default function JobSnapshotPanel({
     setActivatedJobStatus(null)
     setAnsweringQuestions(false)
     setClarifyError(null)
+    setClarifyRetryStatus(null)
   }, [job?.id])
+
+  // Same fixed cadence as IntakeProgress.tsx's handleAnswerSubmit.
+  const CLARIFY_RETRY_INTERVAL_MS = 5_000
+  const CLARIFY_MAX_RETRY_ATTEMPTS = 24 // ~2 minutes of client-side retrying
 
   const handleClarifyAnswers = useCallback(
     async (answers: Array<{ question_id: string; answer: string }>) => {
       if (!job || !snapshot?.clarify_file_id) return
       setClarifySubmitting(true)
       setClarifyError(null)
-      try {
-        const res = await fetch(`/api/intake/${encodeURIComponent(snapshot.clarify_file_id)}/clarify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ job_id: job.id, answers }),
-        })
-        if (!res.ok) {
+      setClarifyRetryStatus(null)
+
+      for (let attempt = 1; attempt <= CLARIFY_MAX_RETRY_ATTEMPTS; attempt++) {
+        try {
+          const res = await fetch(`/api/intake/${encodeURIComponent(snapshot.clarify_file_id)}/clarify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ job_id: job.id, answers }),
+          })
+          if (res.ok) {
+            setClarifyRetryStatus(null)
+            setAnsweringQuestions(false)
+            await fetchSnapshot(job.id)
+            setClarifySubmitting(false)
+            return
+          }
+          if (res.status === 409 && attempt < CLARIFY_MAX_RETRY_ATTEMPTS) {
+            setClarifyRetryStatus(`Finishing another upload for this job — retrying automatically… (attempt ${attempt} of ${CLARIFY_MAX_RETRY_ATTEMPTS})`)
+            await new Promise((resolve) => setTimeout(resolve, CLARIFY_RETRY_INTERVAL_MS))
+            continue
+          }
           const body = await res.json().catch(() => ({ error: 'Could not continue' }))
           throw new Error((body as { error?: string }).error ?? 'Could not continue')
+        } catch (err) {
+          setClarifyRetryStatus(null)
+          setClarifyError(err instanceof Error ? err.message : 'Could not continue — please try again.')
+          setClarifySubmitting(false)
+          return
         }
-        setAnsweringQuestions(false)
-        await fetchSnapshot(job.id)
-      } catch (err) {
-        setClarifyError(err instanceof Error ? err.message : 'Could not continue — please try again.')
-      } finally {
-        setClarifySubmitting(false)
       }
+
+      setClarifyRetryStatus(null)
+      setClarifyError('Still waiting on another upload for this job to finish. Please try again in a minute.')
+      setClarifySubmitting(false)
     },
     [job, snapshot?.clarify_file_id, fetchSnapshot],
   )
@@ -294,6 +323,7 @@ export default function JobSnapshotPanel({
   const pendingVariations = snapshot?.variations.filter((v) => v.status === 'pending') ?? []
   const overdueInvoices = snapshot?.invoices.filter((i) => i.status === 'overdue') ?? []
   const pendingQuestions = snapshot?.pending_clarifying_questions ?? []
+  const nonBlockingQuestions = snapshot?.pending_non_blocking_questions ?? []
   const hasPending = pendingVariations.length > 0 || overdueInvoices.length > 0
 
   const paidSentInvoiceTotal = (snapshot?.invoices ?? [])
@@ -765,6 +795,7 @@ export default function JobSnapshotPanel({
                     questions={pendingQuestions}
                     submitting={clarifySubmitting}
                     error={clarifyError}
+                    retryStatus={clarifyRetryStatus}
                     onSubmit={handleClarifyAnswers}
                   />
                 ) : (
@@ -787,6 +818,33 @@ export default function JobSnapshotPanel({
                     </p>
                   </button>
                 )}
+              </SectionGroup>
+            )}
+
+            {/* ── 3.6. NON-BLOCKING OPEN QUESTIONS — Stage 4/5 raised these but
+                 they never pause estimating; a quote can already exist. Previously
+                 invisible anywhere in the builder UI (the estimating engine's own
+                 clarifying_questions table always had them, but no route ever
+                 surfaced non-blocking ones — see GET /api/jobs/[jobId]/snapshot's
+                 pending_non_blocking_questions). Deliberately informational only,
+                 no answer form: answering these doesn't change pipeline behavior
+                 today, so a form implying otherwise would be misleading. ── */}
+            {nonBlockingQuestions.length > 0 && (
+              <SectionGroup label="Worth knowing">
+                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
+                  {nonBlockingQuestions.map((q, idx) => (
+                    <div
+                      key={q.id}
+                      style={{
+                        padding: '10px 14px',
+                        borderTop: idx > 0 ? '1px solid var(--bg-border)' : 'none',
+                      }}
+                    >
+                      <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{q.question}</p>
+                      <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{q.reason}</p>
+                    </div>
+                  ))}
+                </div>
               </SectionGroup>
             )}
 

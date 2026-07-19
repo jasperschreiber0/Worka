@@ -143,47 +143,62 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 //     project_documents.extraction_status (migration 050) means a
 //     cron-triggered retry can't re-spend on work already durably done
 //
-// EMERGENCY RE-DISABLE (2026-07-19, second incident same day): with
-// AI_RECOVERY_DISABLED=true (below) already stopping Anthropic calls,
-// production logs still showed find_and_fail_abandoned_files (step 3c,
-// migration 046) re-marking the SAME two files 'failed' on every single
-// cron tick (once a minute), each time reporting previous_status:
-// 'processing' — meaning something is resetting files.intake_status back to
-// a non-terminal value between ticks, which this function's own candidate
-// query (`intake_status IN ('uploaded','queued','processing')`) then matches
-// again. Root cause not yet isolated (no production DB access from the
-// session that found this) — plausibly an interaction with migration 052's
-// derived-intake_status recompute path re-deriving 'processing' for these
-// specific files independent of this function's direct write. No Anthropic
-// calls are involved (confirmed via ai_recovery_enabled: false in the same
-// logs), but it is still real, non-converging load run every minute
-// indefinitely, so the whole cron is stopped here rather than partially.
-// Do not re-enable until the revert mechanism is found and fixed — the
-// count of consecutive `abandoned_file_marked_failed` events for the same
-// file_id across intake_recovery_runs is the fastest way to confirm it's
-// actually stopped recurring before flipping this back.
+// STILL DISABLED (2026-07-19) — deliberately NOT re-enabled in the same
+// pass that re-enabled AI_RECOVERY_DISABLED below. Root cause now traced
+// (previously "not yet isolated"), but not fixed, and this is a genuinely
+// separate bug from the wall-clock issue AI_RECOVERY_DISABLED covered:
+//
+//   find_and_fail_abandoned_files (migration 046) does a direct
+//   `UPDATE files SET intake_status = 'failed'`. But migration 052
+//   redefined files.intake_status as a DERIVED, recomputed-and-overwritten
+//   projection — document-worker's own recompute_file_intake_status call
+//   (index.ts:403, fired after step 1/3's reclaim-and-retrigger) re-derives
+//   'processing' from the file's document_processing_jobs row whenever that
+//   row is still non-terminal. For a file whose worker keeps dying before
+//   completing (the exact profile find_and_fail_abandoned_files exists to
+//   catch), steps 1+3 (reclaim, then re-trigger a fresh document-worker
+//   invocation) and step 3c (mark it failed if stale) race every single
+//   cron tick: 3c marks it 'failed', the freshly-retriggered worker
+//   eventually calls recompute_file_intake_status and flips it back to
+//   'processing' (since the underlying job row never reaches a terminal
+//   state), and the next tick's 3c sees 'processing' again — a genuine,
+//   non-converging oscillation, not a one-off.
+//
+// This is now a plausible, code-traced hypothesis, not a proven root cause
+// — confirming it needs live document_processing_jobs.attempts/status
+// history for the two specific affected files, which no session so far has
+// had DB access to pull. A real fix (e.g. reclaim_stale_document_jobs
+// respecting an already-'failed' files.intake_status as terminal and
+// excluding it from re-claiming, or find_batches_with_claimable_work
+// excluding a batch with any abandoned-and-failed file) is a distinct,
+// scoped piece of work — out of scope for the Stage 3 estimate-generation
+// fixes this pass was about. Re-enabling this blind risks reproducing the
+// exact "real, non-converging load run every minute indefinitely"
+// incident that caused the disable. Do not flip this to false until the
+// hypothesis above is confirmed against live data and a fix for it is
+// implemented and tested.
 const DOCUMENT_RECOVERY_DISABLED = true
-// EMERGENCY RE-DISABLE (2026-07-19): a live retrigger storm was observed —
-// recovery_classification_retriggered firing every ~60s for the same 3
-// files (recovery_attempts climbing 1,1,2), each retrigger re-running the
-// full Stage 3 (Scope Reasoning) Claude call. Root cause: Stage 3's 220s
-// budget + Stage 6's 150s budget together exceed smooth-responder's own
-// WALL_CLOCK_SAFETY_MS (340s) — see supabase/functions/smooth-responder/
-// index.ts's hasWallClockBudget/bailForWallClockBudget. bailForWallClockBudget
-// only logs and never calls fail(), so the run exits cleanly via the
-// try/finally, deleting job_intake_locks — which makes
-// find_stuck_batches_needing_classification_retry (migration 052) treat it
-// as "classification never reached smooth-responder" and retrigger it,
-// every cron tick, forever (bounded only by the 3-attempt recovery cap per
-// file, which was itself burning 3 real Stage 3 calls per affected project
-// before failing). This is a structural deadlock, not a transient outage —
-// re-enabling this flag will immediately reproduce the loop for any job
-// whose Stage 3 call takes >190s. Do not re-enable until either (a) the
-// wall-clock budget arithmetic is fixed so Stage 3 + Stage 6 fit inside
-// WALL_CLOCK_SAFETY_MS, or (b) Stage 3 gets a completion checkpoint
-// (mirroring project_documents.extraction_status) so a retry can skip
-// straight to Stage 6 instead of re-running Stage 3.
-const AI_RECOVERY_DISABLED = true
+// RE-ENABLED (2026-07-19, wall-clock redesign): was emergency-disabled
+// after a live retrigger storm — recovery_classification_retriggered
+// firing every ~60s for the same files, each retrigger re-running the
+// FULL Stage 3 call from scratch, because WALL_CLOCK_SAFETY_MS (340s) is
+// structurally less than the room a chunked Stage 3 attempt could need
+// (2 x STAGE3_PER_CALL_TIMEOUT_MS = 440s) — a chunked project could never
+// complete Stage 3 in one invocation, and every retry repeated both
+// chunks. Root cause closed by document_processing_batches.stage3_
+// completed_trade_ids (migration 060) + planStage3Chunks (pipeline-
+// logic.ts): a retrigger now resumes with only the REMAINING trades (a
+// genuinely smaller request, per-chunk scope_items already durably
+// written), converging toward completion instead of repeating finished
+// work — a chunked project needs at most ~2 real retries to finish,
+// comfortably inside MAX_RECOVERY_ATTEMPTS (3) below. The
+// recovery_classification_retriggered log now reports stage3_trades_
+// already_completed / resume_kind so a converging resume is visibly
+// distinguishable from a genuinely stuck one. Re-disable immediately
+// (set back to true) if retrigger-storm behavior is observed again —
+// intake_recovery_runs / recovery_classification_retriggered logs are
+// the fastest way to confirm convergence before trusting this long-term.
+const AI_RECOVERY_DISABLED = false
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -599,7 +614,26 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
           summary.stuck_files_retried++
           touchedBatchIds.add(b.batch_id)
-          log('recovery_classification_retriggered', { job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
+          // Clear audit distinction (2026-07-19 wall-clock redesign): a
+          // retrigger of a batch with real Stage 3 progress already
+          // persisted (stage3_completed_trade_ids non-empty, migration 060)
+          // is a CONVERGING resume, not a repeat of a doomed identical call
+          // — surfaced explicitly here so an operator reading logs doesn't
+          // have to guess whether a given retrigger is making progress or
+          // looping. The retry cap above still applies identically either
+          // way; this is observability only, not a second enforcement path.
+          const { data: progressRow } = await supabase
+            .from('document_processing_batches')
+            .select('stage3_completed_trade_ids')
+            .eq('id', b.batch_id)
+            .single()
+          const tradesAlreadyDone = (progressRow?.stage3_completed_trade_ids as number[] | null)?.length ?? 0
+          log('recovery_classification_retriggered', {
+            job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id,
+            recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1,
+            stage3_trades_already_completed: tradesAlreadyDone,
+            resume_kind: tradesAlreadyDone > 0 ? 'converging_partial_progress' : 'fresh_or_unstarted',
+          })
           await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },

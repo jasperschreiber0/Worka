@@ -40,6 +40,9 @@ import {
   shouldChunkTradeReasoning,
   STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
   splitTradeCategoriesIntoChunks,
+  planStage3Chunks,
+  STAGE3_PER_CALL_TIMEOUT_MS,
+  STAGE3_DEFAULT_CHUNK_COUNT,
   mergeScopeReasoningResults,
   shouldSkipStage3Call,
   nextStage3FailureHistory,
@@ -1134,6 +1137,86 @@ test('splitTradeCategoriesIntoChunks: deterministic — same input always produc
   const a = splitTradeCategoriesIntoChunks(trades, 2)
   const b = splitTradeCategoriesIntoChunks(trades, 2)
   assert.deepEqual(a, b)
+})
+
+// ─── planStage3Chunks: budget-aware chunk planning ─────────────────────────
+
+const TRADES_13 = Array.from({ length: 13 }, (_, i) => ({ id: i + 1 }))
+
+test('planStage3Chunks: no remaining trades -> nothing to do, no more after', () => {
+  const plan = planStage3Chunks([], 340_000, 150)
+  assert.deepEqual(plan, { chunksToRunNow: [], hasMoreAfterThisInvocation: false })
+})
+
+test('planStage3Chunks: plenty of budget, below chunk threshold -> single chunk with all trades, no deferral', () => {
+  const plan = planStage3Chunks(TRADES_13, 340_000, 50) // 50 facts, under STAGE3_TRADE_CHUNK_FACT_THRESHOLD
+  assert.equal(plan.chunksToRunNow.length, 1)
+  assert.equal(plan.chunksToRunNow[0].length, 13)
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage3Chunks: plenty of budget, above chunk threshold -> the full desired chunk plan runs now', () => {
+  // NOTE: 1,000,000ms here is deliberately larger than this codebase's real
+  // WALL_CLOCK_SAFETY_MS (340,000ms) -- this is a pure-function unit test of
+  // chunk-count logic in isolation, not a claim that 340,000ms is "plenty."
+  // In fact 340,000 < 2 x STAGE3_PER_CALL_TIMEOUT_MS (440,000), a genuine
+  // structural finding: even a hypothetical zero-elapsed invocation cannot
+  // fit 2 full desired chunks inside the real ceiling -- see the two tests
+  // below, which use the REAL constants and correctly expect deferral.
+  const plan = planStage3Chunks(TRADES_13, 1_000_000, 150) // over threshold
+  assert.equal(plan.chunksToRunNow.length, STAGE3_DEFAULT_CHUNK_COUNT)
+  assert.equal(plan.chunksToRunNow.flat().length, 13)
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage3Chunks: REAL WALL_CLOCK_SAFETY_MS (340s) cannot fit 2 full 220s chunks -> always defers on a chunked project, by design', () => {
+  // This is the structural fact the production incident traced back to:
+  // 340,000 < 2 x 220,000. A chunked project (>100 facts) can NEVER
+  // complete Stage 3 in a single invocation no matter how little of the
+  // budget Stage 1/2 consumed -- persistence across invocations (this
+  // migration) is not an optimization here, it's the only way a large
+  // project can ever finish at all.
+  const plan = planStage3Chunks(TRADES_13, 340_000, 150)
+  assert.equal(plan.chunksToRunNow.length, 1, 'only one of the two desired chunks fits even in the full real budget')
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage3Chunks: budget fits only ONE of the two desired chunks -> runs one now, defers the rest, never inflates the chunk', () => {
+  // Only room for exactly 1 call (just over STAGE3_PER_CALL_TIMEOUT_MS,
+  // under 2x it) -- must NOT cram all 13 trades into that one call.
+  const plan = planStage3Chunks(TRADES_13, STAGE3_PER_CALL_TIMEOUT_MS + 5_000, 150)
+  assert.equal(plan.chunksToRunNow.length, 1)
+  assert.ok(plan.chunksToRunNow[0].length < 13, 'the one chunk that runs must still be the right-sized half, not all 13 trades')
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage3Chunks: zero room for even one call -> nothing attempted, everything deferred, no wasted spend', () => {
+  const plan = planStage3Chunks(TRADES_13, STAGE3_PER_CALL_TIMEOUT_MS - 1, 150)
+  assert.deepEqual(plan.chunksToRunNow, [])
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage3Chunks: resuming with only some trades remaining (prior invocation already completed the rest) — below chunk threshold, fits in one call', () => {
+  const remaining = TRADES_13.slice(7) // trades 8-13, as if 1-7 already completed and persisted
+  const plan = planStage3Chunks(remaining, 340_000, 50) // under STAGE3_TRADE_CHUNK_FACT_THRESHOLD -> desiredGroups=1
+  assert.equal(plan.chunksToRunNow.flat().length, 6)
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage3Chunks: resuming with only 6 of 13 trades remaining, still above chunk threshold -> still splits into the desired 2 groups of the REMAINING trades only', () => {
+  const remaining = TRADES_13.slice(7) // trades 8-13
+  const plan = planStage3Chunks(remaining, 1_000_000, 150) // over threshold, ample budget
+  assert.equal(plan.chunksToRunNow.length, STAGE3_DEFAULT_CHUNK_COUNT)
+  assert.equal(plan.chunksToRunNow.flat().length, 6, 'only the 6 remaining trades are planned -- never the original 13')
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage3Chunks: never plans a call needing more than STAGE3_PER_CALL_TIMEOUT_MS regardless of how much budget is available', () => {
+  // Even with a huge budget, chunk SIZE is governed by the desired chunk
+  // count (complexity-based), not by how much room happens to exist --
+  // more budget must never cause fewer, bigger chunks.
+  const plan = planStage3Chunks(TRADES_13, 10_000_000, 150)
+  assert.equal(plan.chunksToRunNow.length, STAGE3_DEFAULT_CHUNK_COUNT)
 })
 
 test('mergeScopeReasoningResults: concatenates disjoint per-trade scope from each chunk', () => {

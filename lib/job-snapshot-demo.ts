@@ -128,6 +128,10 @@ export interface JobSnapshot {
   // URL — it re-derives the real paused file itself, so any file belonging
   // to the job works.
   pending_clarifying_questions: Array<{ id: string; question: string; reason: string }>
+  // Non-blocking open questions — informational, never pause estimating.
+  // Previously never surfaced in any builder UI; see JobSnapshotPanel's
+  // "Worth knowing" section.
+  pending_non_blocking_questions: Array<{ id: string; question: string; reason: string }>
   clarify_file_id: string | null
 }
 
@@ -301,6 +305,7 @@ const JOB_1_FITZROY: Omit<JobSnapshot, 'job_health'> = {
   },
   milestones_count: 8,
   pending_clarifying_questions: [],
+  pending_non_blocking_questions: [],
   clarify_file_id: null,
   risks: [
     { level: 'high', message: '2 variations pending approval.' },
@@ -397,6 +402,7 @@ const JOB_2_TOORAK: Omit<JobSnapshot, 'job_health'> = {
   },
   milestones_count: 0,
   pending_clarifying_questions: [],
+  pending_non_blocking_questions: [],
   clarify_file_id: null,
   risks: [
     { level: 'medium', message: 'Quote sent 5 days ago with no response from Tom Caruso.' },
@@ -452,6 +458,7 @@ const JOB_3_BRUNSWICK: Omit<JobSnapshot, 'job_health'> = {
   },
   milestones_count: 0,
   pending_clarifying_questions: [],
+  pending_non_blocking_questions: [],
   clarify_file_id: null,
   risks: [
     { level: 'medium', message: 'Budget noted ($380,000) but no plans uploaded yet.' },
