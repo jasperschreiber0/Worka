@@ -36,12 +36,16 @@ export async function getSessionUser(): Promise<SessionUser> {
 
   try {
     const supabase = createServerComponentClient<Database>({ cookies })
-    const { data: { session } } = await supabase.auth.getSession()
+    // getUser() re-verifies against the Supabase Auth server rather than
+    // trusting the cookie-derived session as-is — matters here because
+    // user.id below is used as the primary key for a service-role DB
+    // upsert. See https://supabase.com/docs/guides/auth/server-side/nextjs
+    const { data: { user } } = await supabase.auth.getUser()
 
-    if (!session?.user) return DEMO_USER
+    if (!user) return DEMO_USER
 
-    const meta = session.user.user_metadata as { full_name?: string; company_name?: string }
-    const fullName = meta.full_name ?? session.user.email?.split('@')[0] ?? 'Builder'
+    const meta = user.user_metadata as { full_name?: string; company_name?: string }
+    const fullName = meta.full_name ?? user.email?.split('@')[0] ?? 'Builder'
 
     // Ensure builders row exists — migration 008 trigger only fires for new signups,
     // so backfill silently for any user who signed up before 008 was applied.
@@ -51,14 +55,14 @@ export async function getSessionUser(): Promise<SessionUser> {
         auth: { autoRefreshToken: false, persistSession: false },
       })
       await admin.from('builders').upsert(
-        { id: session.user.id, email: session.user.email ?? '', name: fullName, business_name: meta.company_name ?? null },
+        { id: user.id, email: user.email ?? '', name: fullName, business_name: meta.company_name ?? null },
         { onConflict: 'id', ignoreDuplicates: true }
       )
     }
 
     return {
-      id: session.user.id,
-      email: session.user.email ?? '',
+      id: user.id,
+      email: user.email ?? '',
       full_name: fullName,
       initials: toInitials(fullName),
       is_demo: false,

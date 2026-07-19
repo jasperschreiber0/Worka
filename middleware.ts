@@ -21,9 +21,12 @@ export async function middleware(req: NextRequest) {
   if (!isProtected) return res
 
   const supabase = createMiddlewareClient<Database>({ req, res })
-  const { data: { session } } = await supabase.auth.getSession()
+  // getUser() re-verifies the session against the Supabase Auth server
+  // instead of trusting the cookie payload as-is (getSession() does not
+  // authenticate it) — see https://supabase.com/docs/guides/auth/server-side/nextjs
+  const { data: { user } } = await supabase.auth.getUser()
 
-  if (!session) {
+  if (!user) {
     const loginUrl = req.nextUrl.clone()
     loginUrl.pathname = '/login'
     loginUrl.searchParams.set('next', path)

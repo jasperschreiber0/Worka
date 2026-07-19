@@ -177,8 +177,10 @@ export default function RatesPage() {
   useEffect(() => {
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return
     import('@supabase/auth-helpers-nextjs').then(({ createClientComponentClient }) => {
-      createClientComponentClient().auth.getSession().then(({ data }) => {
-        if (data.session?.user.id) setBuilderId(data.session.user.id)
+      // getUser() re-verifies with the Supabase Auth server rather than
+      // trusting the cookie-derived session as-is.
+      createClientComponentClient().auth.getUser().then(({ data }) => {
+        if (data.user?.id) setBuilderId(data.user.id)
       })
     })
   }, [])

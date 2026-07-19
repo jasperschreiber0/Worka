@@ -20,8 +20,10 @@ function EmailSettingsContent() {
   useEffect(() => {
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return
     const supabase = createClientComponentClient()
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session?.user.id) setBuilderId(data.session.user.id)
+    // getUser() re-verifies with the Supabase Auth server rather than
+    // trusting the cookie-derived session as-is.
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user?.id) setBuilderId(data.user.id)
     })
   }, [])
 
