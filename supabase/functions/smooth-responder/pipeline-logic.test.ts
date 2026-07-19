@@ -33,6 +33,7 @@ import {
   nextFailureHistory,
   splitBatchForRetry,
   dedupeRealFileIds,
+  formatWallClockStallReason,
   type BatchableFile,
   type FactRow,
 } from './pipeline-logic.ts'
@@ -1007,4 +1008,15 @@ test('withTimeoutAndRetry: aborts the call via the signal once timeoutMs elapses
     { timeoutMs: 10, maxRetries: 0 },
   ).catch((e) => e)
   assert.equal((result as Error).name, 'AbortError')
+})
+
+// ─── formatWallClockStallReason ─────────────────────────────────────────────
+
+test('formatWallClockStallReason: includes stage name and every millisecond figure', () => {
+  const reason = formatWallClockStallReason('generating_estimate', 150_000, 200_000, 340_000)
+  assert.match(reason, /generating_estimate/)
+  assert.match(reason, /150000ms/)
+  assert.match(reason, /200000ms/)
+  assert.match(reason, /340000ms/)
+  assert.match(reason, /not a content or model failure/)
 })

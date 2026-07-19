@@ -38,7 +38,7 @@ import {
   splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
-  dedupeRealFileIds, splitBatchForRetry,
+  dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
 } from './pipeline-logic.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -816,11 +816,54 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   // and the slower staleness-based recovery path.
   const WALL_CLOCK_SAFETY_MS = 340_000 // 60s margin under the real ~400s ceiling
   const hasWallClockBudget = (neededMs: number) => (Date.now() - startedAt) + neededMs <= WALL_CLOCK_SAFETY_MS
-  const bailForWallClockBudget = (stage: string, neededMs: number) => {
+  // Was: log-only, silent `return` — no terminal state, no persisted reason.
+  // That made a wall-clock exit indistinguishable from a healthy in-progress
+  // run to everything downstream (the SSE poller, the recovery cron, a human
+  // looking at the files/document_processing_batches rows), and gave the
+  // recovery cron nothing to check before blindly re-running Stage 3 on
+  // every retrigger (see the Stage 3 checkpoint below for the other half of
+  // this fix). Now persists stage/reason/timestamp/attempt-count to
+  // document_processing_batches (migration 053) — deliberately NOT routed
+  // through files.ai_failure_classification/ai_failure_count (migration
+  // 042): this is a scheduling condition (ran out of safe room to attempt a
+  // call), not a content or model failure, and must not consume the
+  // Anthropic-failure retry budget that exists for actually-bad documents.
+  const bailForWallClockBudget = async (stage: string, neededMs: number) => {
+    const elapsedMs = Date.now() - startedAt
+    const reason = formatWallClockStallReason(stage, neededMs, elapsedMs, WALL_CLOCK_SAFETY_MS)
     console.log(JSON.stringify({
       event: 'wall_clock_budget_exhausted', stage, needed_ms: neededMs,
-      elapsed_ms: Date.now() - startedAt, job_id: jobId, file_id: fileId,
+      elapsed_ms: elapsedMs, job_id: jobId, file_id: fileId, parent_job_id: parentJobId ?? null,
     }))
+    if (parentJobId) {
+      try {
+        const { data: current } = await supabase
+          .from('document_processing_batches')
+          .select('stall_count')
+          .eq('id', parentJobId)
+          .single()
+        await supabase.from('document_processing_batches').update({
+          stall_stage: stage,
+          stall_reason: reason,
+          stalled_at: new Date().toISOString(),
+          stall_count: (current?.stall_count ?? 0) + 1,
+          updated_at: new Date().toISOString(),
+        }).eq('id', parentJobId)
+      } catch (err) {
+        console.error('Failed to persist wall-clock stall state to document_processing_batches:', err)
+      }
+    }
+    // Also surfaced on the files row directly (both the parentJobId and
+    // legacy no-batch paths) — best-effort, non-terminal (intake_status is
+    // deliberately left as-is, still recoverable/retryable, not 'failed').
+    try {
+      await supabase.from('files').update({
+        failure_stage: `WALL_CLOCK_STALLED:${stage}`,
+        failure_reason: reason.slice(0, 500),
+      }).eq('id', fileId)
+    } catch (err) {
+      console.error('Failed to persist wall-clock stall state to files:', err)
+    }
   }
 
   try {
@@ -1127,7 +1170,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // wall-clock exhaustion this budget guard exists to prevent.
         const batchTimeoutMs = batchFiles.length === 1 ? 220_000 : 150_000
         if (!hasWallClockBudget(batchTimeoutMs)) {
-          bailForWallClockBudget('classifying_documents', batchTimeoutMs)
+          await bailForWallClockBudget('classifying_documents', batchTimeoutMs)
           break
         }
 
@@ -1391,6 +1434,19 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       return
     }
 
+    {
+      const { count: documentsCount } = await supabase
+        .from('project_documents')
+        .select('*', { count: 'exact', head: true })
+        .eq('job_id', jobId)
+      console.log(JSON.stringify({
+        event: 'stage_checkpoint', job_id: jobId, batch_id: parentJobId ?? null,
+        stage: 'document_intelligence', completed_at: new Date().toISOString(),
+        documents_count: documentsCount ?? null, facts_count: facts.length,
+        scope_items_count: null, quote_created: false,
+      }))
+    }
+
     // ── Stage 3 + 4: Scope Reasoning + Gap Detection ───────────────────────
     await setStage('reasoning_scope')
 
@@ -1418,110 +1474,154 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     const factsBlock = factsForPrompt.map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.evidence ? `, evidence: ${f.evidence}` : ''})`).join('\n')
 
-    const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all).${memoryContext}`
-
-    const scopeUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${TRADE_CATEGORIES.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.` }]
-
-    if (!hasWallClockBudget(220_000)) {
-      bailForWallClockBudget('reasoning_scope', 220_000)
-      return
+    // ── Stage 3 checkpoint (migration 053) ──────────────────────────────────
+    // A retry against the SAME batch (parent_job_id unchanged — this is how
+    // the recovery cron's find_stuck_batches_needing_classification_retry
+    // re-triggers a wall-clock-stalled run, see bailForWallClockBudget above)
+    // that already completed Stage 3 + Gap Detection without a blocking
+    // question skips straight to Stage 6, reusing the persisted scope_items
+    // instead of re-running the whole reasoning call. This is what makes a
+    // retry strictly cheaper rather than repeating the exact call that ran
+    // out of wall-clock room last time. A genuinely NEW upload for this job
+    // gets its own fresh document_processing_batches row
+    // (scope_reasoning_completed_at null by default), so incremental uploads
+    // still correctly re-run Stage 3 over the newly-merged fact base — this
+    // is per-batch, not per-job.
+    let scopeAlreadyComplete = false
+    if (parentJobId) {
+      const { data: batchRow } = await supabase
+        .from('document_processing_batches')
+        .select('scope_reasoning_completed_at')
+        .eq('id', parentJobId)
+        .single()
+      scopeAlreadyComplete = Boolean(batchRow?.scope_reasoning_completed_at)
     }
 
-    const scopeStartedAt = Date.now()
-    let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
-    try {
-      // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
-      // on a real 75-fact project reasoning across 13 trades. Match the other
-      // two stages' proven 16000 rather than guessing at yet another cap.
-      //
-      // timeoutMs widened from the 150s default to 220s: confirmed in
-      // production on a 108-fact, 4-document project — the call was cleanly
-      // aborted by OUR OWN AbortController at exactly 150002ms
-      // (classification: application_timeout), then retried on the next
-      // invocation with the byte-for-byte identical fact block and failed
-      // identically, because unlike Stage 1/2 there is no per-file "make the
-      // next attempt smaller" lever here — this stage reasons over the whole
-      // accumulated fact base in a single call, so retrying can only help if
-      // it's given more room, not a smaller payload. 220s stays well inside
-      // Supabase's real 400s isolate wall-clock ceiling even when this stage
-      // runs after Stage 1/2 in the same invocation (a fresh, non-resumed
-      // upload) — see callTool's own comment for why this is safe to widen
-      // per-stage rather than globally.
-      scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000)
-    } catch (err) {
-      const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
-      const errMessage = err instanceof Error ? err.message : String(err)
-      console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, classification, error: errMessage }))
-      if (isBillingHaltClassification(classification)) {
-        await haltForBilling(classification, errMessage)
+    if (scopeAlreadyComplete) {
+      console.log(JSON.stringify({
+        stage: 'reasoning_scope', status: 'skipped_checkpoint', job_id: jobId, batch_id: parentJobId,
+        reason: 'scope_reasoning_completed_at already set for this batch — reusing persisted scope_items instead of re-running Stage 3',
+      }))
+    } else {
+      const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all).${memoryContext}`
+
+      const scopeUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${TRADE_CATEGORIES.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.` }]
+
+      if (!hasWallClockBudget(220_000)) {
+        await bailForWallClockBudget('reasoning_scope', 220_000)
         return
       }
-      await fail(`Scope reasoning call failed: ${errMessage}`)
-      return
-    }
-    if (!scopeResult) { await fail('No structured response from scope reasoning stage'); return }
-    console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'processed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, tradesReasoned: (scopeResult.scope ?? []).length, questionsRaised: (scopeResult.clarifying_questions ?? []).length }))
 
-    await setStage('detecting_gaps')
+      const scopeStartedAt = Date.now()
+      let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
+      try {
+        // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
+        // on a real 75-fact project reasoning across 13 trades. Match the other
+        // two stages' proven 16000 rather than guessing at yet another cap.
+        //
+        // timeoutMs widened from the 150s default to 220s: confirmed in
+        // production on a 108-fact, 4-document project — the call was cleanly
+        // aborted by OUR OWN AbortController at exactly 150002ms
+        // (classification: application_timeout), then retried on the next
+        // invocation with the byte-for-byte identical fact block and failed
+        // identically, because unlike Stage 1/2 there is no per-file "make the
+        // next attempt smaller" lever here — this stage reasons over the whole
+        // accumulated fact base in a single call, so retrying can only help if
+        // it's given more room, not a smaller payload. 220s stays well inside
+        // Supabase's real 400s isolate wall-clock ceiling even when this stage
+        // runs after Stage 1/2 in the same invocation (a fresh, non-resumed
+        // upload) — see callTool's own comment for why this is safe to widen
+        // per-stage rather than globally.
+        scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000)
+      } catch (err) {
+        const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
+        const errMessage = err instanceof Error ? err.message : String(err)
+        console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, classification, error: errMessage }))
+        if (isBillingHaltClassification(classification)) {
+          await haltForBilling(classification, errMessage)
+          return
+        }
+        await fail(`Scope reasoning call failed: ${errMessage}`)
+        return
+      }
+      if (!scopeResult) { await fail('No structured response from scope reasoning stage'); return }
+      console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'processed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, tradesReasoned: (scopeResult.scope ?? []).length, questionsRaised: (scopeResult.clarifying_questions ?? []).length }))
 
-    const scopeRows = (scopeResult.scope ?? []) as Array<Record<string, unknown>>
-    if (scopeRows.length > 0) {
-      const scopeInserts = scopeRows
-        .filter((s) => typeof s.trade_category_id === 'number')
-        .map((s) => ({
+      await setStage('detecting_gaps')
+
+      const scopeRows = (scopeResult.scope ?? []) as Array<Record<string, unknown>>
+      if (scopeRows.length > 0) {
+        const scopeInserts = scopeRows
+          .filter((s) => typeof s.trade_category_id === 'number')
+          .map((s) => ({
+            job_id: jobId,
+            trade_category_id: s.trade_category_id,
+            included_scope: s.included_scope ?? [],
+            excluded_scope: s.excluded_scope ?? [],
+            dependencies: s.dependencies ?? [],
+            assumptions: s.assumptions ?? [],
+            uncertainty_notes: s.uncertainty_notes ?? null,
+            confidence: s.confidence ?? null,
+          }))
+        if (scopeInserts.length > 0) {
+          await supabase.from('scope_items').upsert(scopeInserts, { onConflict: 'job_id,trade_category_id' })
+        }
+      }
+
+      const questions = ((scopeResult.clarifying_questions ?? []) as Array<Record<string, unknown>>)
+      const blockingQuestions = questions.filter((q) => q.blocking === true)
+
+      if (blockingQuestions.length > 0) {
+        const questionInserts = blockingQuestions.map((q) => ({
           job_id: jobId,
-          trade_category_id: s.trade_category_id,
-          included_scope: s.included_scope ?? [],
-          excluded_scope: s.excluded_scope ?? [],
-          dependencies: s.dependencies ?? [],
-          assumptions: s.assumptions ?? [],
-          uncertainty_notes: s.uncertainty_notes ?? null,
-          confidence: s.confidence ?? null,
+          question: q.question,
+          reason: q.reason,
+          trade_category_id: q.trade_category_id ?? null,
+          blocking: true,
+          status: 'open' as const,
         }))
-      if (scopeInserts.length > 0) {
-        await supabase.from('scope_items').upsert(scopeInserts, { onConflict: 'job_id,trade_category_id' })
+        await supabase.from('clarifying_questions').insert(questionInserts)
+
+        await supabase
+          .from('files')
+          .update({ intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
+          .eq('id', fileId)
+        if (parentJobId) {
+          // Every file in the batch, not just fileId (the primary/anchor) —
+          // recompute_file_intake_status resolves this to 'needs_info' for
+          // each since classification_triggered is already true by this
+          // point in a queue-model run (migration 052).
+          await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+        } else {
+          await supabase.from('files').update({ intake_status: 'needs_info' }).eq('id', fileId)
+        }
+        // Deliberately NOT marking scope_reasoning_completed_at here — a run
+        // that raised a blocking question genuinely needs Stage 3 to run
+        // again once the builder answers (the merged fact base changes),
+        // not to be skipped on the resumed run.
+        return
       }
-    }
 
-    const questions = ((scopeResult.clarifying_questions ?? []) as Array<Record<string, unknown>>)
-    const blockingQuestions = questions.filter((q) => q.blocking === true)
+      // Non-blocking questions are logged for visibility but never stop the pipeline.
+      const nonBlocking = questions.filter((q) => q.blocking !== true)
+      if (nonBlocking.length > 0) {
+        await supabase.from('clarifying_questions').insert(
+          nonBlocking.map((q) => ({
+            job_id: jobId, question: q.question, reason: q.reason,
+            trade_category_id: q.trade_category_id ?? null, blocking: false, status: 'open' as const,
+          }))
+        )
+      }
 
-    if (blockingQuestions.length > 0) {
-      const questionInserts = blockingQuestions.map((q) => ({
-        job_id: jobId,
-        question: q.question,
-        reason: q.reason,
-        trade_category_id: q.trade_category_id ?? null,
-        blocking: true,
-        status: 'open' as const,
-      }))
-      await supabase.from('clarifying_questions').insert(questionInserts)
-
-      await supabase
-        .from('files')
-        .update({ intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
-        .eq('id', fileId)
+      // Durable Stage 3 checkpoint — only reached once Gap Detection has
+      // finished without a blocking question stopping the run above. A
+      // subsequent retry against this same batch (parent_job_id) will read
+      // this and skip straight to Stage 6.
       if (parentJobId) {
-        // Every file in the batch, not just fileId (the primary/anchor) —
-        // recompute_file_intake_status resolves this to 'needs_info' for
-        // each since classification_triggered is already true by this
-        // point in a queue-model run (migration 052).
-        await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
-      } else {
-        await supabase.from('files').update({ intake_status: 'needs_info' }).eq('id', fileId)
+        await supabase.from('document_processing_batches')
+          .update({ scope_reasoning_completed_at: new Date().toISOString() })
+          .eq('id', parentJobId)
       }
-      return
-    }
-
-    // Non-blocking questions are logged for visibility but never stop the pipeline.
-    const nonBlocking = questions.filter((q) => q.blocking !== true)
-    if (nonBlocking.length > 0) {
-      await supabase.from('clarifying_questions').insert(
-        nonBlocking.map((q) => ({
-          job_id: jobId, question: q.question, reason: q.reason,
-          trade_category_id: q.trade_category_id ?? null, blocking: false, status: 'open' as const,
-        }))
-      )
     }
 
     // ── Stage 6: Estimate Generation (spec Stage 5) ────────────────────────
@@ -1532,6 +1632,13 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .select('trade_category_id, included_scope, excluded_scope, assumptions, uncertainty_notes')
       .eq('job_id', jobId)
 
+    console.log(JSON.stringify({
+      event: 'stage_checkpoint', job_id: jobId, batch_id: parentJobId ?? null,
+      stage: 'reasoning_scope', completed_at: new Date().toISOString(),
+      documents_count: null, facts_count: facts.length,
+      scope_items_count: (scopeForEstimate ?? []).length, quote_created: false,
+    }))
+
     const scopeBlock = (scopeForEstimate ?? [])
       .map((s: Record<string, unknown>) => `Trade ${s.trade_category_id} (${TRADE_CATEGORIES.find((t) => t.id === s.trade_category_id)?.name}): included = ${(s.included_scope as string[]).join('; ')}. excluded = ${(s.excluded_scope as string[]).join('; ')}.`)
       .join('\n')
@@ -1541,7 +1648,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     const estimateUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
 
     if (!hasWallClockBudget(150_000)) {
-      bailForWallClockBudget('generating_estimate', 150_000)
+      await bailForWallClockBudget('generating_estimate', 150_000)
       return
     }
 
@@ -1775,6 +1882,14 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // Legacy direct-invocation path — no batch to derive from.
       await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
     }
+
+    console.log(JSON.stringify({
+      event: 'stage_checkpoint', job_id: jobId, batch_id: parentJobId ?? null,
+      stage: 'building_quote', completed_at: new Date().toISOString(),
+      documents_count: null, facts_count: facts.length,
+      scope_items_count: (scopeForEstimate ?? []).length,
+      quote_created: true, quote_id: quoteId, line_items_count: lineItemInserts.length,
+    }))
   } catch (err) {
     console.error('estimating-engine error:', err)
     await fail(err instanceof Error ? err.message : String(err))

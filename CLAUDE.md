@@ -789,6 +789,36 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 document-worker}/index.ts are all updated to call the new functions
                                 at their existing transition points rather than writing
                                 files.intake_status inline.
+053_stage3_checkpoint_and_wallclock_observability.sql — closes the structural deadlock traced
+                                live in production on 2026-07-19: smooth-responder's wall-clock
+                                safety budgets for Stage 3 (220s) and Stage 6 (150s) sum to MORE
+                                than WALL_CLOCK_SAFETY_MS (340s) itself, so a project whose Stage 3
+                                call genuinely takes ~190s+ can never fit both stages in one
+                                invocation — confirmed by a live retrigger loop
+                                (recovery_classification_retriggered firing every ~60s for the same
+                                batch, recovery_attempts climbing) where Stage 3 kept re-running and
+                                Stage 6 was never reached. bailForWallClockBudget (index.ts)
+                                previously only logged and returned with no terminal state, which is
+                                what let find_stuck_batches_needing_classification_retry (migration
+                                052) treat the batch as "classification never reached
+                                smooth-responder" and retrigger it every cron tick, unconditionally
+                                re-running Stage 3 each time (no durable "Stage 3 already completed"
+                                signal existed, unlike project_documents.extraction_status for Stage
+                                1/2). Adds document_processing_batches.scope_reasoning_completed_at
+                                — set once Stage 3 + Gap Detection finish without a blocking
+                                clarifying question, checked before Stage 3 runs again so a retry
+                                against the SAME batch (parent_job_id unchanged) skips straight to
+                                Stage 6 and reuses the persisted scope_items, making a retry
+                                strictly cheaper instead of repeating the exact call that ran out of
+                                wall-clock room — and stall_stage / stall_reason / stalled_at /
+                                stall_count, written by bailForWallClockBudget on every wall-clock
+                                exit (deliberately NOT routed through
+                                files.ai_failure_classification/ai_failure_count, migration 042 —
+                                this is a scheduling condition, not a content or model failure).
+                                Both are scoped to document_processing_batches (per-upload-attempt),
+                                not per-job, so a genuinely NEW upload to the same job still gets a
+                                fresh row and a fresh, un-skipped Stage 3 run over the merged fact
+                                base. See "Stage 3 resumability and wall-clock observability" below.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -922,6 +952,95 @@ Quality Assurance → Render Estimate
 - Gate 3: quantity ≤ 0 → assumption (excluded).
 
 See `lib/estimating/gates.ts` for the canonical spec.
+
+---
+
+## Stage 3 resumability and wall-clock observability
+
+Fixes a structural deadlock distinct from the timeout/retry incidents below: `WALL_CLOCK_SAFETY_MS`
+(340s, `smooth-responder/index.ts`) is checked before Stage 3 (needs 220s) and again before Stage 6
+(needs 150s) — but `220_000 + 150_000 = 370_000 > 340_000`, so a project whose Stage 3 call
+genuinely takes ~190s+ can never fit both stages in one invocation, no matter how many times it's
+retried. Confirmed live in production on 2026-07-19: `recovery_classification_retriggered` firing
+every ~60s for the same batch/job, `recovery_attempts` climbing, each retrigger re-running the full
+Stage 3 (Scope Reasoning) call and never reaching Stage 6.
+
+**Two failures compounded this into an unbounded loop, not just a missed deadline:**
+
+1. `bailForWallClockBudget` used to only `console.log` and `return` — no terminal DB state, no
+   persisted reason. The run exits "cleanly" through the existing `try/finally`, which deletes
+   `job_intake_locks`. That absence is exactly what
+   `find_stuck_batches_needing_classification_retry` (migration 052) reads as "classification
+   finished but never actually reached smooth-responder" — so it retriggers the batch on every cron
+   tick.
+2. Stage 3 had no completion checkpoint, unlike Stage 1/2's `project_documents.extraction_status`
+   (migration 050). Every retrigger unconditionally re-ran the full Stage 3 Claude call — real
+   spend, every ~60s, indefinitely — before hitting the identical Stage 6 wall-clock check and
+   bailing again.
+
+**The fix (migration 053), deliberately minimal — no prompt/model/timeout changes:**
+
+- `bailForWallClockBudget` is now `async` and persists `stall_stage` / `stall_reason` / `stalled_at`
+  / `stall_count` to `document_processing_batches` (and `failure_stage`/`failure_reason` to `files`
+  as a fallback for the legacy no-batch path) before returning — a stalled batch is now
+  distinguishable from a healthy in-progress one by anyone looking at the row, not just log
+  archaeology. Deliberately **not** routed through `files.ai_failure_classification`/
+  `ai_failure_count` (migration 042) — a wall-clock exit is a scheduling condition (ran out of safe
+  room to *attempt* a call), not a content or model failure, and must not consume the
+  Anthropic-failure retry budget that exists for actually-bad documents.
+- `document_processing_batches.scope_reasoning_completed_at` is set once, immediately after Stage 3
+  + Gap Detection finish without a blocking clarifying question stopping the run. Before calling
+  Stage 3, `runPipeline` checks this column (only when `parentJobId` is set — the path the recovery
+  cron's retriggers always use, reusing the *same* batch row); if set, Stage 3 is skipped entirely
+  and the run reuses the already-persisted `scope_items`, going straight to Stage 6. This is what
+  makes a retry strictly *cheaper* instead of repeating the exact call that just ran out of
+  wall-clock room — on the next attempt, Stage 1/2 is already skipped (via `extraction_status`) and
+  now Stage 3 is too, so only Stage 6's 150s budget needs to fit, which it comfortably does.
+  Deliberately **per-batch, not per-job**: a genuinely new upload to the same job gets a fresh
+  `document_processing_batches` row (`scope_reasoning_completed_at` null by default), so incremental
+  uploads still correctly re-run Stage 3 over the newly-merged fact base — this is not a per-job
+  cache that could go stale.
+- A run that raises a *blocking* clarifying question deliberately does **not** set the checkpoint —
+  that run genuinely needs Stage 3 to re-run once the builder answers, since the merged fact base
+  changes.
+- Uniform `stage_checkpoint` structured logs (`job_id`, `batch_id`, `stage`, `completed_at`,
+  `documents_count`, `facts_count`, `scope_items_count`, `quote_created`) are now emitted at the
+  three real stage boundaries (Stage 1/2 → Stage 3, Stage 3 → Stage 6, Stage 6 → quote built) — the
+  question "exactly where did this run stop?" is answerable from logs alone, without needing a live
+  DB session mid-incident.
+
+**Not done here, on purpose:** no schema change to make document-worker or the extraction queue
+resumable (migrations 034/036/050 already give that stage a real checkpoint); no change to Stage 3
+or Stage 6's own `timeoutMs`/token budgets; no new SQL RPC for the `stall_count` increment (a plain
+read-then-write, guarded in practice by `job_intake_locks`/`acquire_or_reclaim_job_intake_lock`
+already preventing two concurrent runs against the same job — a residual, accepted race narrower
+than what it replaces, not eliminated); no hard cap on `stall_count` itself (the recovery cron's own
+`MAX_RECOVERY_ATTEMPTS` already bounds retries against the same batch — `stall_count` is
+observability, not a second enforcement mechanism, at least until production data shows retries
+still aren't converging after this fix).
+
+**Verification status:** implemented and unit-tested (`formatWallClockStallReason`,
+`pipeline-logic.test.ts`) against the live log pattern described above, but not yet confirmed
+end-to-end against a real multi-document upload in production/staging — the session that built this
+fix had no live Supabase/Anthropic credentials to run one. Before trusting this in production: (1)
+confirm the migration applied and the PostgREST schema cache picked it up (see the schema-cache
+note below), (2) re-enable `AI_RECOVERY_DISABLED`/`DOCUMENT_RECOVERY_DISABLED` in
+`app/api/cron/intake-recovery/route.ts` only after a real upload is watched end-to-end, (3) confirm
+via `intake_recovery_runs`/`document_processing_batches.stall_count` that retries actually stop
+recurring, not just that they're now visible.
+
+**Known open issue, found live, not yet root-caused:** independent of the wall-clock deadlock above,
+production logs on the same day showed `find_and_fail_abandoned_files` (migration 046, step 3c)
+re-marking the same two files `intake_status='failed'` on every single cron tick, each time
+reporting `previous_status: 'processing'` — meaning something resets `files.intake_status` back to
+a non-terminal value between ticks, which the function's own candidate query then matches again.
+Not an Anthropic-spend issue (confirmed via `ai_recovery_enabled: false` in the same logs — the
+AI-calling half of the cron was already off), but real, non-converging load running every minute.
+Root cause not isolated — the session that found this had no live DB access to watch
+`files.intake_status` change between ticks. `DOCUMENT_RECOVERY_DISABLED` was set `true` as an
+emergency stop; do not re-enable until this is diagnosed (plausibly an interaction with migration
+052's derived-`intake_status` recompute path re-deriving `'processing'` for these specific files
+independent of this function's direct write — unconfirmed).
 
 ---
 

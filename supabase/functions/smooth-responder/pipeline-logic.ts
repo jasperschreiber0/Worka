@@ -1035,6 +1035,27 @@ function withClassification(err: unknown, classification: AnthropicFailureClassi
   return err
 }
 
+/**
+ * Human-readable reason persisted to document_processing_batches.stall_reason
+ * when bailForWallClockBudget (index.ts) exits before a stage can safely
+ * start. Pure/testable so the exact wording (and the arithmetic it reports)
+ * doesn't drift between what's logged and what's persisted — this and the
+ * structured `wall_clock_budget_exhausted` log line are the only two places
+ * a wall-clock stall is ever described, and they must describe the same
+ * event identically.
+ */
+export function formatWallClockStallReason(
+  stage: string,
+  neededMs: number,
+  elapsedMs: number,
+  safetyMs: number,
+): string {
+  return `Wall-clock safety budget exhausted before stage "${stage}" could start ` +
+    `(needed ${neededMs}ms, ${elapsedMs}ms already elapsed this invocation, safety ceiling ${safetyMs}ms) — ` +
+    `a scheduling condition, not a content or model failure. The batch will be retried by the recovery ` +
+    `cron; a completed Stage 3 checkpoint (if reached) means the retry skips straight to Stage 6.`
+}
+
 export type ChildJobStatus = 'pending' | 'running' | 'completed' | 'failed'
 export type ParentBatchStatus = 'pending' | 'running' | 'completed' | 'completed_with_failures' | 'failed'
 
