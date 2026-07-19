@@ -3,6 +3,8 @@ import type { ScopeHint, ProjectMetadata } from '@/lib/types/estimation.types'
 import { SCOPE_HINTS_BY_TYPE, DEMO_SCOPE_HINTS } from '@/lib/estimation-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
+import { gatewaySupabase } from '@/lib/ai-gateway-client'
 
 interface ScopePatternRow {
   renovation_type: string | null
@@ -123,7 +125,9 @@ Return ONLY valid JSON:
 
 Maximum 5 items. Only include items with confidence ≥ 65. Order by confidence descending.`
 
-    const response = await withTimeoutAndRetry(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { response } = await guardedClaudeCall<any>(
+      { supabase: gatewaySupabase(), builderId, callSite: 'scope_hints', model: 'claude-sonnet-4-6' },
       (signal) => client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { tradeCategoryName } from '@/lib/trade-taxonomy'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
+import { gatewaySupabase } from '@/lib/ai-gateway-client'
 
 interface ExtractedRate {
   trade_category_id: number
@@ -97,7 +99,8 @@ Use the extract_rates tool to return your results.`
 
     // Tool use forces Claude to return schema-validated JSON — no parsing needed.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response: any = await withTimeoutAndRetry(
+    const { response } = await guardedClaudeCall<any>(
+      { supabase: gatewaySupabase(), builderId, callSite: 'rates_extract_pdf', model: 'claude-sonnet-4-6' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (signal) => (client.messages.create as any)({
       model: 'claude-sonnet-4-6',

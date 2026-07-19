@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode as isDemo } from '@/lib/auth/api-auth'
 import { DEMO_PROJECT_MEMORY } from '@/lib/estimation-demo'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
+import { gatewaySupabase } from '@/lib/ai-gateway-client'
 
 // ─── Estimation history — the corpus behind the parametric estimator ──────────
 //
@@ -141,7 +143,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const systemPrompt = `You are cataloguing a completed Australian residential building job from its priced quote / trade breakdown, to store as a historical reference. Extract the project's high-level characteristics and its delivered contract price. The contract price EXCLUDES GST (use the subtotal + margin figure, not the GST-inclusive grand total). Floor area is the built/renovated area in m². If the document is not a priced residential building job, still return your best assessment.`
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response: any = await withTimeoutAndRetry(
+    const { response } = await guardedClaudeCall<any>(
+      { supabase: gatewaySupabase(), builderId, callSite: 'estimation_history_catalogue', model: 'claude-sonnet-4-6' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (signal) => (client.messages.create as any)({
         model: 'claude-sonnet-4-6',

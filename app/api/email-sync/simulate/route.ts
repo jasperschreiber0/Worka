@@ -11,6 +11,8 @@ import {
 import Anthropic from '@anthropic-ai/sdk'
 import type { EmailIntent } from '../parse/route'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
+import { gatewaySupabase } from '@/lib/ai-gateway-client'
 
 // ─── Demo email scenarios ─────────────────────────────────────────────────────
 
@@ -91,7 +93,9 @@ Respond ONLY with valid JSON:
   "confidence": <number 0-100>
 }`
 
-  const response = await withTimeoutAndRetry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { response } = await guardedClaudeCall<any>(
+    { supabase: gatewaySupabase(), builderId: null, callSite: 'email_sync_simulate_classify', model: 'claude-sonnet-4-6' },
     (signal) => anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 128,

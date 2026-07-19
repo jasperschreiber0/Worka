@@ -41,6 +41,7 @@ import {
   dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
 } from './pipeline-logic.ts'
+import { guardedClaudeCall } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
@@ -506,9 +507,23 @@ const ESTIMATE_GENERATION_TOOL = {
 // existing try/catch, which already marks the file failed and releases
 // the job lock — this wrapper only prevents "stuck," it doesn't change
 // what a genuine failure does downstream.
+// Gateway context threaded from runPipeline into every stage's Claude call —
+// carries what the shared AI gateway (ai-gateway.ts) needs for spend limits,
+// the usage ledger, and idempotent reuse. stage doubles as both the ledger's
+// call_site label and (with jobId) the idempotency scope, so a retry of the
+// same stage with a byte-identical prompt reuses the stored result instead of
+// paying for the call again — the Phase 0 duplicate-work protection.
+interface StageGatewayCtx {
+  supabase: SupabaseClient
+  builderId: string
+  jobId: string
+  stage: string
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function callTool(
   anthropic: Anthropic,
+  gw: StageGatewayCtx,
   system: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   content: any[],
@@ -551,7 +566,22 @@ async function callTool(
     tool_schema: tool.input_schema,
   }))
 
-  const response = await withTimeoutAndRetry(
+  // Routed through the shared AI gateway (ai-gateway.ts): budget/breaker
+  // check before the call (fails closed — an over-limit run stops with a
+  // clear reason and zero spend), idempotent reuse of a prior identical
+  // stage call (scope_key = job:stage + prompt hash), and the ai_operations/
+  // ai_spend_daily usage ledger. Retry/timeout semantics are unchanged —
+  // the gateway wraps the exact same withTimeoutAndRetry this call used
+  // directly before.
+  const { response, reusedFromOperation } = await guardedClaudeCall(
+    {
+      supabase: gw.supabase,
+      builderId: gw.builderId,
+      callSite: gw.stage,
+      model: 'claude-sonnet-4-6',
+      scopeKey: `${gw.jobId}:${gw.stage}`,
+      inputParts: [system, content, tool.name, maxTokens],
+    },
     (signal) => anthropic.messages.create(
       {
         model: 'claude-sonnet-4-6',
@@ -591,6 +621,7 @@ async function callTool(
   console.log(JSON.stringify({
     event: 'claude_call_complete', tool: tool.name, stop_reason: response.stop_reason,
     usage: response.usage, duration_ms: Date.now() - startedAt,
+    reused_from_operation: reusedFromOperation,
   }))
   if (response.stop_reason === 'max_tokens') {
     // A truncated tool call means partial/malformed input (e.g. an empty
@@ -1217,7 +1248,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // plus supporting documents (confirmed via the stop_reason=max_tokens
           // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
           // 16000 for this same model/API rather than guessing at another cap.
-          docResult = await callTool(anthropic, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
+          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence' }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
         } catch (err) {
           // A single batch's Claude call failing (a transient API error, a
           // truncated/malformed response) used to abort the ENTIRE run via
@@ -1532,7 +1563,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // runs after Stage 1/2 in the same invocation (a fresh, non-resumed
         // upload) — see callTool's own comment for why this is safe to widen
         // per-stage rather than globally.
-        scopeResult = await callTool(anthropic, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000)
+        scopeResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning' }, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000)
       } catch (err) {
         const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
         const errMessage = err instanceof Error ? err.message : String(err)
@@ -1655,7 +1686,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     const estimateStartedAt = Date.now()
     let estimateResult: { line_items?: unknown[] } | null = null
     try {
-      estimateResult = await callTool(anthropic, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
+      estimateResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation' }, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
     } catch (err) {
       const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
       const errMessage = err instanceof Error ? err.message : String(err)

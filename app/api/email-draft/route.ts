@@ -5,6 +5,8 @@ import { checkRateLimit } from '@/lib/rate-limit'
 import Anthropic from '@anthropic-ai/sdk'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
+import { gatewaySupabase } from '@/lib/ai-gateway-client'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -313,7 +315,12 @@ Respond with ONLY valid JSON in this exact format:
   "body": "the full email body text"
 }`
 
-  const response = await withTimeoutAndRetry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { response } = await guardedClaudeCall<any>(
+    // builderId is not threaded into this helper yet — global daily limits
+    // and the circuit breaker still fully apply; only per-builder
+    // attribution is absent for this call site.
+    { supabase: gatewaySupabase(), builderId: null, callSite: 'email_draft', model: 'claude-sonnet-4-6' },
     (signal) => anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 512,

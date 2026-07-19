@@ -819,6 +819,28 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 not per-job, so a genuinely NEW upload to the same job still gets a
                                 fresh row and a fresh, un-skipped Stage 3 run over the merged fact
                                 base. See "Stage 3 resumability and wall-clock observability" below.
+054_ai_gateway_spend_protection.sql — Phase 0 of the production-safety plan (see
+                                WORKA_IMPLEMENTATION_READINESS.md): ai_operations (per-call usage
+                                ledger + opt-in idempotency store — a pipeline stage retried with a
+                                byte-identical prompt reuses the stored result instead of paying for
+                                the call again), ai_spend_daily (atomic per-builder + global daily
+                                spend counters), system_status (ai_circuit_breaker global kill
+                                switch + ai_limits tunable ceilings, both operator-editable via SQL
+                                without a deploy), and record_ai_spend() (atomic post-call
+                                accounting that auto-trips the breaker in the same transaction the
+                                global daily limit is crossed in). Backs the shared AI gateway
+                                (supabase/functions/smooth-responder/ai-gateway.ts) that EVERY
+                                Anthropic call in the codebase now routes through — smooth-responder's
+                                three stage calls (with idempotent reuse scoped to job+stage) and all
+                                ten Next.js call sites (chat ×3, email-draft, email-sync
+                                parse/simulate, classify-document, scope-hints, estimation/history,
+                                rates/extract-pdf; no idempotency for these — a repeated chat message
+                                is a legitimate new request). The gateway fails CLOSED: breaker
+                                tripped, either daily limit reached, or breaker state unreadable ⇒
+                                AiBudgetError before any call is made, zero spend — bounding the
+                                worst-case damage of ANY retry-loop bug to the configured daily
+                                ceiling regardless of the bug's mechanism. Additive only; rollback
+                                is DROP TABLE/FUNCTION plus per-call-site revert.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**

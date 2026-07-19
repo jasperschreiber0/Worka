@@ -17,6 +17,8 @@ import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { buildProjectContext, persistContext } from '@/lib/project-context'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
+import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
+import { gatewaySupabase } from '@/lib/ai-gateway-client'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -392,7 +394,8 @@ Keep values as short strings.
 
 async function extractActions(
   message: string,
-  anthropic: Anthropic
+  anthropic: Anthropic,
+  builderId: string | null
 ): Promise<ExtractedAction[]> {
   const todayIso = new Date().toISOString().split('T')[0]
   const systemPrompt = EXTRACT_ACTIONS_PROMPT.replace(/REPLACE_TODAY/g, todayIso)
@@ -404,7 +407,9 @@ async function extractActions(
   // transient failure; the caller (extractActions' own caller, below)
   // already falls back to keyword routing on any thrown error, so this
   // wrapper only changes HOW FAST that fallback kicks in, not what it does.
-  const response = await withTimeoutAndRetry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { response } = await guardedClaudeCall<any>(
+    { supabase: gatewaySupabase(), builderId, callSite: 'chat_extract_actions', model: 'claude-sonnet-4-6' },
     (signal) => anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 512,
@@ -1295,7 +1300,9 @@ async function handleProjectQuestion(
   const startedAt = Date.now()
   let answer: string
   try {
-    const response = await withTimeoutAndRetry(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { response } = await guardedClaudeCall<any>(
+      { supabase: gatewaySupabase(), builderId, callSite: 'chat_project_question', model: 'claude-sonnet-4-6' },
       (signal) => anthropic.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 400,
@@ -2622,7 +2629,9 @@ Rules:
 
   const fallbackMsg = 'I\'m not sure what you mean. Try typing "whats on today" to see your morning brief, or ask me about a job.'
   try {
-    const resp = await withTimeoutAndRetry(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { response: resp } = await guardedClaudeCall<any>(
+      { supabase: gatewaySupabase(), builderId, callSite: 'chat_fallback_intent', model: 'claude-sonnet-4-6' },
       (signal) => anthropic.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 500,
@@ -3364,7 +3373,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     // 500ing — a provider outage must not take the whole chat down.
     let actions: ExtractedAction[]
     try {
-      actions = await extractActions(message, anthropic)
+      actions = await extractActions(message, anthropic, builderId)
     } catch (err) {
       console.error(
         '[/api/chat] Action extraction failed — falling back to keyword routing:',
