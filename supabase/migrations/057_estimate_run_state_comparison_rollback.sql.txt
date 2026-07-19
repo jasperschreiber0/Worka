@@ -1,0 +1,130 @@
+-- ROLLBACK for 057_estimate_run_state_comparison.sql — NOT auto-applied,
+-- kept as a .txt so it's never picked up by the migration runner.
+--
+-- Safe by construction: everything here is read-only tooling nothing in
+-- the application calls yet. Rolling back restores reconcile_estimate_run
+-- to the migration-056 inline version (functionally identical — this
+-- rollback re-creates it rather than leaving it pointing at a dropped
+-- derive_estimate_run_projection, since CREATE OR REPLACE FUNCTION doesn't
+-- support "restore previous definition" natively).
+
+DROP FUNCTION IF EXISTS estimate_run_projection_health();
+DROP FUNCTION IF EXISTS find_estimate_run_mismatches();
+
+-- Restore reconcile_estimate_run to its migration-056 inline form (not
+-- calling derive_estimate_run_projection, since that function is dropped
+-- below).
+CREATE OR REPLACE FUNCTION reconcile_estimate_run(p_batch_id uuid)
+RETURNS uuid AS $$
+DECLARE
+  v_batch          document_processing_batches%ROWTYPE;
+  v_docs_total     integer;
+  v_docs_processed integer;
+  v_docs_failed    integer;
+  v_blocking_open  integer;
+  v_lock_held      boolean;
+  v_status         text;
+  v_stall_reason   text;
+  v_failure_reason text;
+  v_run_id         uuid;
+  v_prev_status    text;
+  v_last_progress  timestamptz;
+BEGIN
+  SELECT status INTO v_prev_status FROM estimate_runs WHERE batch_id = p_batch_id;
+
+  SELECT * INTO v_batch FROM document_processing_batches WHERE id = p_batch_id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT count(*) FILTER (WHERE true),
+         count(*) FILTER (WHERE status = 'completed'),
+         count(*) FILTER (WHERE status = 'failed')
+    INTO v_docs_total, v_docs_processed, v_docs_failed
+    FROM document_processing_jobs
+    WHERE parent_job_id = p_batch_id;
+
+  SELECT count(*) INTO v_blocking_open
+    FROM clarifying_questions
+    WHERE job_id = v_batch.job_id AND blocking = true AND status = 'open';
+
+  SELECT EXISTS(SELECT 1 FROM job_intake_locks WHERE job_id = v_batch.job_id)
+    INTO v_lock_held;
+
+  v_stall_reason := v_batch.stall_reason;
+  v_failure_reason := NULL;
+
+  IF v_batch.quote_id IS NOT NULL AND EXISTS (
+       SELECT 1 FROM quotes WHERE id = v_batch.quote_id AND status <> 'draft'
+     ) THEN
+    v_status := 'complete';
+  ELSIF v_batch.status = 'failed' AND v_docs_processed = 0 THEN
+    v_status := 'failed';
+    v_failure_reason := 'all documents in this batch failed extraction';
+  ELSIF v_blocking_open > 0 THEN
+    v_status := 'awaiting_clarification';
+  ELSIF v_batch.quote_id IS NOT NULL THEN
+    v_status := 'generating_estimate';
+  ELSIF v_batch.scope_reasoning_completed_at IS NOT NULL THEN
+    v_status := 'generating_estimate';
+  ELSIF v_batch.classification_triggered THEN
+    v_status := 'reasoning';
+  ELSIF v_batch.status IN ('completed', 'completed_with_failures') THEN
+    v_status := 'classifying';
+  ELSE
+    v_status := 'extracting';
+  END IF;
+
+  IF v_status NOT IN ('complete', 'failed') AND v_stall_reason IS NOT NULL THEN
+    v_status := 'stalled';
+  END IF;
+
+  v_last_progress := GREATEST(
+    v_batch.updated_at,
+    COALESCE((SELECT max(updated_at) FROM document_processing_jobs WHERE parent_job_id = p_batch_id), v_batch.updated_at)
+  );
+
+  INSERT INTO estimate_runs AS er (
+    job_id, builder_id, batch_id, status, quote_id,
+    documents_total, documents_processed, documents_failed,
+    blocking_questions_open, lock_held, stall_reason, failure_reason,
+    last_progress_at, completed_at, reconciled_at
+  ) VALUES (
+    v_batch.job_id, v_batch.builder_id, p_batch_id, v_status, v_batch.quote_id,
+    COALESCE(v_docs_total, 0), COALESCE(v_docs_processed, 0), COALESCE(v_docs_failed, 0),
+    v_blocking_open, v_lock_held, v_stall_reason, v_failure_reason,
+    v_last_progress,
+    CASE WHEN v_status IN ('complete', 'failed') THEN now() ELSE NULL END,
+    now()
+  )
+  ON CONFLICT (batch_id) DO UPDATE SET
+    status = EXCLUDED.status,
+    quote_id = EXCLUDED.quote_id,
+    documents_total = EXCLUDED.documents_total,
+    documents_processed = EXCLUDED.documents_processed,
+    documents_failed = EXCLUDED.documents_failed,
+    blocking_questions_open = EXCLUDED.blocking_questions_open,
+    lock_held = EXCLUDED.lock_held,
+    stall_reason = EXCLUDED.stall_reason,
+    failure_reason = EXCLUDED.failure_reason,
+    last_progress_at = EXCLUDED.last_progress_at,
+    completed_at = COALESCE(er.completed_at, EXCLUDED.completed_at),
+    reconciled_at = now()
+  RETURNING er.id INTO v_run_id;
+
+  IF v_prev_status IS DISTINCT FROM v_status THEN
+    INSERT INTO estimate_run_events (estimate_run_id, from_status, to_status, detail)
+    VALUES (v_run_id, v_prev_status, v_status, jsonb_build_object(
+      'documents_total', v_docs_total, 'documents_processed', v_docs_processed,
+      'documents_failed', v_docs_failed, 'blocking_questions_open', v_blocking_open
+    ));
+  END IF;
+
+  RETURN v_run_id;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP FUNCTION IF EXISTS derive_estimate_run_projection(uuid);
+DROP TYPE IF EXISTS estimate_run_projection;
+
+NOTIFY pgrst, 'reload schema';
