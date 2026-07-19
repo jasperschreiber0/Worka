@@ -1026,22 +1026,81 @@ export interface ScopeReasoningResult {
   clarifying_questions: Array<Record<string, unknown>>
 }
 
+export interface MergedScopeReasoningResult extends ScopeReasoningResult {
+  // trade_category_ids where more than one chunk returned an entry — should
+  // be empty in the normal case (chunks are given disjoint trade subsets),
+  // present only if a chunk didn't fully respect its assigned trades. The
+  // caller logs this for observability; it is never itself an error.
+  tradeCollisions: unknown[]
+}
+
+const MERGE_CONFLICT_NOTE_PREFIX =
+  '[merge conflict: multiple chunked Stage 3 calls returned different scope for this trade — both preserved below, review recommended]'
+
+function unionStrings(a: unknown, b: unknown): string[] {
+  const arrA = Array.isArray(a) ? (a as string[]) : []
+  const arrB = Array.isArray(b) ? (b as string[]) : []
+  return Array.from(new Set([...arrA, ...arrB]))
+}
+
+// Combines two scope entries for the SAME trade_category_id into one,
+// preserving both sides rather than picking a winner — audit finding: a
+// prior version silently discarded whichever chunk's entry arrived first
+// (last-writer-wins), which could drop a genuine disagreement (e.g. "timber
+// frame" vs "steel portal frame" for the same trade) with zero trace. Every
+// array field is unioned (deduplicated, so an identical item both chunks
+// agree on isn't doubled); uncertainty_notes is prefixed with an explicit
+// conflict marker and both original notes appended, so the disagreement
+// itself is visible rather than silently resolved one way; confidence
+// takes the more conservative (lower) of the two, since a collision is
+// itself evidence the answer is less certain than either chunk alone
+// reported.
+export function mergeConflictingScopeEntries(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  const existingNotes = typeof existing.uncertainty_notes === 'string' ? existing.uncertainty_notes : null
+  const incomingNotes = typeof incoming.uncertainty_notes === 'string' ? incoming.uncertainty_notes : null
+  const combinedNotes = [existingNotes, incomingNotes].filter((n): n is string => Boolean(n)).join(' | ')
+  const existingConfidence = typeof existing.confidence === 'number' ? existing.confidence : 100
+  const incomingConfidence = typeof incoming.confidence === 'number' ? incoming.confidence : 100
+
+  return {
+    trade_category_id: existing.trade_category_id,
+    included_scope: unionStrings(existing.included_scope, incoming.included_scope),
+    excluded_scope: unionStrings(existing.excluded_scope, incoming.excluded_scope),
+    dependencies: unionStrings(existing.dependencies, incoming.dependencies),
+    assumptions: unionStrings(existing.assumptions, incoming.assumptions),
+    uncertainty_notes: combinedNotes ? `${MERGE_CONFLICT_NOTE_PREFIX} ${combinedNotes}` : MERGE_CONFLICT_NOTE_PREFIX,
+    confidence: Math.min(existingConfidence, incomingConfidence),
+  }
+}
+
 // Deterministic merge of one or more chunked Stage 3 results back into the
 // single shape the rest of the pipeline (scope_items upsert, clarifying_
 // questions insert, Stage 6) already expects — no downstream code needs to
-// know chunking happened. scope rows are deduplicated by trade_category_id
-// (last-writer-wins is a defensive backstop only — chunks are given
-// disjoint trade subsets, so a real collision should never occur; if it
-// somehow did, silently dropping a duplicate is safer than upserting the
-// same trade twice with different content in an undefined order).
-// clarifying_questions are deduplicated by exact (question, trade_category_id)
-// text match, since a general, non-trade-specific gap (trade_category_id
-// null) could plausibly be raised independently by more than one chunk.
-export function mergeScopeReasoningResults(chunks: ScopeReasoningResult[]): ScopeReasoningResult {
+// know chunking happened. scope rows are keyed by trade_category_id;
+// chunks are given disjoint trade subsets so a collision should be rare,
+// but when one occurs the two entries are merged (mergeConflictingScopeEntries)
+// rather than one silently overwriting the other. clarifying_questions are
+// deduplicated by exact (question, trade_category_id) text match, since a
+// general, non-trade-specific gap (trade_category_id null) could plausibly
+// be raised independently by more than one chunk with identical wording —
+// a different wording of the same real gap is NOT deduplicated (deliberately:
+// fuzzy text matching risks discarding a genuinely distinct concern, worse
+// than an occasional duplicate reaching the builder).
+export function mergeScopeReasoningResults(chunks: ScopeReasoningResult[]): MergedScopeReasoningResult {
   const scopeByTrade = new Map<unknown, Record<string, unknown>>()
+  const tradeCollisions: unknown[] = []
   for (const chunk of chunks) {
     for (const row of chunk.scope ?? []) {
-      scopeByTrade.set(row.trade_category_id, row)
+      const existing = scopeByTrade.get(row.trade_category_id)
+      if (existing) {
+        tradeCollisions.push(row.trade_category_id)
+        scopeByTrade.set(row.trade_category_id, mergeConflictingScopeEntries(existing, row))
+      } else {
+        scopeByTrade.set(row.trade_category_id, row)
+      }
     }
   }
 
@@ -1056,7 +1115,7 @@ export function mergeScopeReasoningResults(chunks: ScopeReasoningResult[]): Scop
     }
   }
 
-  return { scope: Array.from(scopeByTrade.values()), clarifying_questions: questions }
+  return { scope: Array.from(scopeByTrade.values()), clarifying_questions: questions, tradeCollisions }
 }
 
 // ── Failure-escalation identity, keyed on Stage 3's real input ─────────

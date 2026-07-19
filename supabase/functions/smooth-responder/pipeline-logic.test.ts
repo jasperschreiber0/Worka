@@ -1144,12 +1144,20 @@ test('mergeScopeReasoningResults: concatenates disjoint per-trade scope from eac
   assert.deepEqual(new Set(merged.scope.map((s) => s.trade_category_id)), new Set([1, 12]))
 })
 
-test('mergeScopeReasoningResults: a defensive trade_category_id collision keeps only the last occurrence, never duplicates', () => {
-  const chunkA = { scope: [{ trade_category_id: 1, included_scope: ['stale'] }], clarifying_questions: [] }
-  const chunkB = { scope: [{ trade_category_id: 1, included_scope: ['fresh'] }], clarifying_questions: [] }
+test('mergeScopeReasoningResults: a defensive trade_category_id collision merges both sides (never a silent overwrite) and is reported in tradeCollisions', () => {
+  const chunkA = { scope: [{ trade_category_id: 1, included_scope: ['siteworks item A'] }], clarifying_questions: [] }
+  const chunkB = { scope: [{ trade_category_id: 1, included_scope: ['siteworks item B'] }], clarifying_questions: [] }
   const merged = mergeScopeReasoningResults([chunkA, chunkB])
-  assert.equal(merged.scope.length, 1)
-  assert.deepEqual(merged.scope[0].included_scope, ['fresh'])
+  assert.equal(merged.scope.length, 1, 'still exactly one entry per trade — merged, not duplicated')
+  assert.deepEqual(merged.scope[0].included_scope, ['siteworks item A', 'siteworks item B'], 'both sides survive, deduplicated union')
+  assert.deepEqual(merged.tradeCollisions, [1])
+})
+
+test('mergeScopeReasoningResults: no collision -> tradeCollisions is empty', () => {
+  const chunkA = { scope: [{ trade_category_id: 1, included_scope: ['a'] }], clarifying_questions: [] }
+  const chunkB = { scope: [{ trade_category_id: 2, included_scope: ['b'] }], clarifying_questions: [] }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  assert.deepEqual(merged.tradeCollisions, [])
 })
 
 test('mergeScopeReasoningResults: preserves clarifying_questions, deduplicating exact (question, trade) repeats across chunks', () => {
@@ -1319,7 +1327,7 @@ test('AUDIT scenario 1b: near-duplicate questions (different wording, same real 
 // its assigned trade subset (each chunk is instructed to reason only about
 // its own trades), but nothing in mergeScopeReasoningResults enforces that
 // boundary, so it's worth proving what happens if it does.
-test('AUDIT scenario 2: conflicting assumptions for the SAME trade across two chunks — current behaviour silently drops one side', () => {
+test('AUDIT scenario 2 (FIXED): conflicting assumptions for the SAME trade across two chunks are both preserved, flagged, and lower confidence', () => {
   const chunkA: ScopeReasoningResult = {
     scope: [{
       trade_category_id: 2, included_scope: ['timber frame construction'], excluded_scope: [],
@@ -1337,22 +1345,20 @@ test('AUDIT scenario 2: conflicting assumptions for the SAME trade across two ch
     clarifying_questions: [],
   }
   const merged = mergeScopeReasoningResults([chunkA, chunkB])
-  // FINDING: this is a real gap. Two genuinely conflicting views of the
-  // same trade (timber vs steel framing — a materially different, expensive
-  // distinction) collapse to exactly one entry (last-writer-wins), with:
-  //   - no log/flag that a collision happened at all
-  //   - chunk A's entire assumption ("standard timber, no engineering
-  //     required") discarded with no trace
-  //   - no uncertainty_notes or clarifying_question generated to surface
-  //     the disagreement to the builder or a reviewer
-  // This violates "preserves conflicts" and "does not silently drop
-  // uncertainty" IF this scenario occurs in production. It's structurally
-  // rare (chunks are given disjoint trade subsets), but "rare and silent"
-  // is exactly the failure mode worth catching before it's needed live.
-  assert.equal(merged.scope.length, 1, 'only one entry survives per trade_category_id — the conflict itself is invisible')
-  assert.equal(merged.scope[0].included_scope, chunkB.scope[0].included_scope, 'chunk A (timber) is completely discarded, not merged or flagged')
+  // Fixed behaviour: both sides survive (union, not overwrite), the
+  // collision is reported in tradeCollisions for the caller to log, and an
+  // explicit uncertainty_notes marker flags the disagreement instead of
+  // resolving it silently one way.
+  assert.equal(merged.scope.length, 1, 'still one entry per trade — merged, not duplicated')
+  assert.deepEqual(merged.tradeCollisions, [2])
+  const survivingIncluded = merged.scope[0].included_scope as string[]
+  assert.ok(survivingIncluded.includes('timber frame construction'), 'chunk A is preserved')
+  assert.ok(survivingIncluded.includes('steel portal frame construction'), 'chunk B is preserved')
   const survivingAssumptions = merged.scope[0].assumptions as string[]
-  assert.ok(!survivingAssumptions.some((a) => a.includes('timber')), 'chunk A assumption text is gone with no trace')
+  assert.ok(survivingAssumptions.some((a) => a.includes('timber')), 'chunk A assumption text survives')
+  assert.ok(survivingAssumptions.some((a) => a.includes('steel')), 'chunk B assumption text survives')
+  assert.match(merged.scope[0].uncertainty_notes as string, /merge conflict/i)
+  assert.equal(merged.scope[0].confidence, 60, 'confidence takes the more conservative (lower) of the two')
 })
 
 // Scenario 3: a dependency discovered while reasoning about one trade that

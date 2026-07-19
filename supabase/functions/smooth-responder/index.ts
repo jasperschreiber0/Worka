@@ -42,7 +42,7 @@ import {
   formatFactForScopePrompt, shouldChunkTradeReasoning, splitTradeCategoriesIntoChunks, mergeScopeReasoningResults,
   shouldSkipStage3Call, STAGE3_DEFAULT_CHUNK_COUNT,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
-  type ScopeReasoningResult, type Stage3FailureHistory,
+  type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
 } from './pipeline-logic.ts'
 import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -1610,7 +1610,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // yet succeeded actually reaches Anthropic again.
       const scopeStartedAt = Date.now()
       const chunkResults: ScopeReasoningResult[] = []
-      let scopeResult: ScopeReasoningResult | null = null
+      let scopeResult: MergedScopeReasoningResult | null = null
       try {
         for (const [chunkIndex, tradeChunk] of tradeChunks.entries()) {
           const scopeUserContent = [{
@@ -1645,6 +1645,18 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           }))
         }
         scopeResult = mergeScopeReasoningResults(chunkResults)
+        if (scopeResult.tradeCollisions.length > 0) {
+          // Should be rare — chunks are given disjoint trade subsets — but
+          // if a chunk didn't fully respect its assigned trades, both
+          // sides are merged (not silently dropped, see
+          // mergeConflictingScopeEntries) and that merge is logged here so
+          // it's visible rather than only discoverable by reading
+          // uncertainty_notes after the fact.
+          console.log(JSON.stringify({
+            stage: 'reasoning_scope', status: 'trade_collision_merged', job_id: jobId,
+            batch_id: parentJobId, trade_category_ids: scopeResult.tradeCollisions,
+          }))
+        }
       } catch (err) {
         const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
         const errMessage = err instanceof Error ? err.message : String(err)
