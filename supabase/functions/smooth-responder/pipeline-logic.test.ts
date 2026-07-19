@@ -34,8 +34,18 @@ import {
   splitBatchForRetry,
   dedupeRealFileIds,
   formatWallClockStallReason,
+  truncateEvidence,
+  formatFactForScopePrompt,
+  STAGE3_MAX_EVIDENCE_CHARS,
+  shouldChunkTradeReasoning,
+  STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
+  splitTradeCategoriesIntoChunks,
+  mergeScopeReasoningResults,
+  shouldSkipStage3Call,
+  nextStage3FailureHistory,
   type BatchableFile,
   type FactRow,
+  type Stage3FailureHistory,
 } from './pipeline-logic.ts'
 
 // ─── splitIntoBatches ───────────────────────────────────────────────────────
@@ -1019,4 +1029,230 @@ test('formatWallClockStallReason: includes stage name and every millisecond figu
   assert.match(reason, /200000ms/)
   assert.match(reason, /340000ms/)
   assert.match(reason, /not a content or model failure/)
+})
+
+// ─── Stage 3: evidence truncation ───────────────────────────────────────────
+
+test('truncateEvidence: leaves short evidence untouched', () => {
+  assert.equal(truncateEvidence('a short note', 240), 'a short note')
+})
+
+test('truncateEvidence: null evidence stays null', () => {
+  assert.equal(truncateEvidence(null, 240), null)
+})
+
+test('truncateEvidence: caps at exactly maxChars plus an ellipsis marker', () => {
+  const long = 'x'.repeat(1000)
+  const result = truncateEvidence(long, 240)
+  assert.equal(result!.length, 241) // 240 chars + the ellipsis character
+  assert.ok(result!.endsWith('…'))
+  assert.equal(result!.slice(0, 240), 'x'.repeat(240))
+})
+
+test('truncateEvidence: an evidence string of ARBITRARY length is bounded to a fixed cap', () => {
+  for (const len of [241, 5_000, 50_000, 1_000_000]) {
+    const evidence = 'y'.repeat(len)
+    const result = truncateEvidence(evidence, STAGE3_MAX_EVIDENCE_CHARS)
+    assert.ok(result!.length <= STAGE3_MAX_EVIDENCE_CHARS + 1, `length ${len} produced an unbounded result`)
+  }
+})
+
+function makeFact(overrides: Partial<FactRow> = {}): FactRow {
+  return {
+    category: 'structural', key: 'slab_type', value: 'waffle pod',
+    evidence: 'per drawing S1.01 note 4', confidence: 80,
+    ...overrides,
+  }
+}
+
+test('formatFactForScopePrompt: preserves category/key/value/confidence exactly', () => {
+  const line = formatFactForScopePrompt(makeFact(), 240)
+  assert.match(line, /^- \[structural\] slab_type: waffle pod \(confidence 80%/)
+})
+
+test('formatFactForScopePrompt: caps only the evidence portion of the line', () => {
+  const line = formatFactForScopePrompt(makeFact({ evidence: 'z'.repeat(10_000) }), 240)
+  // category/key/value/confidence prefix is short and untouched regardless
+  // of evidence length — only the evidence segment grows unbounded input
+  assert.ok(line.length < 10_000, 'the whole line must not scale with evidence length')
+  assert.match(line, /^- \[structural\] slab_type: waffle pod \(confidence 80%, evidence: z+…\)$/)
+})
+
+test('formatFactForScopePrompt: a fact with no evidence omits the evidence segment entirely', () => {
+  const line = formatFactForScopePrompt(makeFact({ evidence: null }), 240)
+  assert.equal(line, '- [structural] slab_type: waffle pod (confidence 80%)')
+})
+
+test('formatFactForScopePrompt: total prompt size for N facts with unbounded evidence stays bounded by N * cap, not by the raw evidence size', () => {
+  const facts: FactRow[] = Array.from({ length: MAX_FACTS_IN_PROMPT }, (_, i) =>
+    makeFact({ key: `fact_${i}`, evidence: 'w'.repeat(20_000) }) // 20,000 chars of evidence each
+  )
+  const block = facts.map((f) => formatFactForScopePrompt(f)).join('\n')
+  // Without capping this would be ~200 * 20,000 = 4,000,000 chars. With
+  // capping it must stay in the low tens of thousands regardless.
+  assert.ok(block.length < MAX_FACTS_IN_PROMPT * (STAGE3_MAX_EVIDENCE_CHARS + 120),
+    `prompt block was ${block.length} chars — evidence truncation did not bound it`)
+})
+
+// ─── Stage 3: trade chunking ─────────────────────────────────────────────────
+
+test('shouldChunkTradeReasoning: false at or under the threshold', () => {
+  assert.equal(shouldChunkTradeReasoning(STAGE3_TRADE_CHUNK_FACT_THRESHOLD), false)
+  assert.equal(shouldChunkTradeReasoning(10), false)
+})
+
+test('shouldChunkTradeReasoning: true once strictly over the threshold', () => {
+  assert.equal(shouldChunkTradeReasoning(STAGE3_TRADE_CHUNK_FACT_THRESHOLD + 1), true)
+  assert.equal(shouldChunkTradeReasoning(200), true)
+})
+
+test('splitTradeCategoriesIntoChunks: splits 13 trades into 2 near-equal, contiguous, order-preserving groups', () => {
+  const trades = Array.from({ length: 13 }, (_, i) => ({ id: i + 1 }))
+  const chunks = splitTradeCategoriesIntoChunks(trades, 2)
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0].length + chunks[1].length, 13)
+  // every trade appears exactly once, across both chunks combined
+  const allIds = chunks.flat().map((t) => t.id)
+  assert.deepEqual(allIds, trades.map((t) => t.id))
+  assert.equal(new Set(allIds).size, 13)
+})
+
+test('splitTradeCategoriesIntoChunks: chunkCount of 1 is the identity split', () => {
+  const trades = [{ id: 1 }, { id: 2 }, { id: 3 }]
+  assert.deepEqual(splitTradeCategoriesIntoChunks(trades, 1), [trades])
+})
+
+test('splitTradeCategoriesIntoChunks: chunkCount larger than the list never produces an empty group', () => {
+  const trades = [{ id: 1 }, { id: 2 }]
+  const chunks = splitTradeCategoriesIntoChunks(trades, 5)
+  assert.ok(chunks.every((c) => c.length > 0))
+  assert.equal(chunks.flat().length, 2)
+})
+
+test('splitTradeCategoriesIntoChunks: deterministic — same input always produces the same split', () => {
+  const trades = Array.from({ length: 13 }, (_, i) => ({ id: i + 1 }))
+  const a = splitTradeCategoriesIntoChunks(trades, 2)
+  const b = splitTradeCategoriesIntoChunks(trades, 2)
+  assert.deepEqual(a, b)
+})
+
+test('mergeScopeReasoningResults: concatenates disjoint per-trade scope from each chunk', () => {
+  const chunkA = { scope: [{ trade_category_id: 1, included_scope: ['footings'] }], clarifying_questions: [] }
+  const chunkB = { scope: [{ trade_category_id: 12, included_scope: ['power points'] }], clarifying_questions: [] }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  assert.equal(merged.scope.length, 2)
+  assert.deepEqual(new Set(merged.scope.map((s) => s.trade_category_id)), new Set([1, 12]))
+})
+
+test('mergeScopeReasoningResults: a defensive trade_category_id collision keeps only the last occurrence, never duplicates', () => {
+  const chunkA = { scope: [{ trade_category_id: 1, included_scope: ['stale'] }], clarifying_questions: [] }
+  const chunkB = { scope: [{ trade_category_id: 1, included_scope: ['fresh'] }], clarifying_questions: [] }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  assert.equal(merged.scope.length, 1)
+  assert.deepEqual(merged.scope[0].included_scope, ['fresh'])
+})
+
+test('mergeScopeReasoningResults: preserves clarifying_questions, deduplicating exact (question, trade) repeats across chunks', () => {
+  const chunkA = {
+    scope: [], clarifying_questions: [
+      { question: 'Any structural drawings?', reason: 'needed for framing', trade_category_id: 2, blocking: true },
+    ],
+  }
+  const chunkB = {
+    scope: [], clarifying_questions: [
+      { question: 'Any structural drawings?', reason: 'needed for framing', trade_category_id: 2, blocking: true },
+      { question: 'What tapware finish?', reason: 'affects cost', trade_category_id: 11, blocking: false },
+    ],
+  }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  assert.equal(merged.clarifying_questions.length, 2)
+  assert.ok(merged.clarifying_questions.some((q) => q.question === 'Any structural drawings?'))
+  assert.ok(merged.clarifying_questions.some((q) => q.question === 'What tapware finish?'))
+})
+
+test('mergeScopeReasoningResults: preserves assumptions/dependencies/uncertainty_notes untouched per trade', () => {
+  const chunk = {
+    scope: [{
+      trade_category_id: 3, included_scope: ['roof sheeting'], excluded_scope: ['gutters'],
+      dependencies: ['framing complete'], assumptions: ['colorbond'], uncertainty_notes: 'pitch unclear', confidence: 70,
+    }],
+    clarifying_questions: [],
+  }
+  const merged = mergeScopeReasoningResults([chunk])
+  assert.deepEqual(merged.scope[0], chunk.scope[0])
+})
+
+test('mergeScopeReasoningResults: a single chunk (no chunking) round-trips unchanged — existing single-call behaviour preserved', () => {
+  const single = {
+    scope: [{ trade_category_id: 1, included_scope: ['a'] }, { trade_category_id: 2, included_scope: ['b'] }],
+    clarifying_questions: [{ question: 'q1', reason: 'r1', trade_category_id: null, blocking: false }],
+  }
+  const merged = mergeScopeReasoningResults([single])
+  assert.equal(merged.scope.length, 2)
+  assert.equal(merged.clarifying_questions.length, 1)
+})
+
+// ─── Stage 3: failure-escalation identity (batch + input hash, not files.id) ─
+
+const HASH_A = 'aaaa1111'
+const HASH_B = 'bbbb2222'
+const NO_HISTORY: Stage3FailureHistory = { inputHash: null, classification: null, count: 0 }
+
+test('shouldSkipStage3Call: never skips when there is no prior history', () => {
+  assert.equal(shouldSkipStage3Call(NO_HISTORY, HASH_A), false)
+})
+
+test('shouldSkipStage3Call: never skips a genuinely different input, regardless of prior count', () => {
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 5 }
+  assert.equal(shouldSkipStage3Call(prior, HASH_B), false)
+})
+
+test('shouldSkipStage3Call: does NOT skip after exactly one recorded failure — "one more attempt" must still fire', () => {
+  // application_timeout tolerates exactly 1 occurrence before stopping —
+  // after the FIRST failure is recorded (count=1), the retry it earns must
+  // still be allowed to run.
+  const max = maxConsecutiveOccurrences('application_timeout')
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: max }
+  assert.equal(shouldSkipStage3Call(prior, HASH_A), false)
+})
+
+test('shouldSkipStage3Call: skips once a SECOND identical failure has been recorded for the same input', () => {
+  const max = maxConsecutiveOccurrences('application_timeout')
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: max + 1 }
+  assert.equal(shouldSkipStage3Call(prior, HASH_A), true)
+})
+
+test('shouldSkipStage3Call: does NOT skip an identical input that has not yet exhausted its allowance', () => {
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 0 }
+  assert.equal(shouldSkipStage3Call(prior, HASH_A), false)
+})
+
+test('nextStage3FailureHistory: identical input + identical classification increments the streak', () => {
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 1 }
+  const next = nextStage3FailureHistory(prior, { inputHash: HASH_A, classification: 'application_timeout' })
+  assert.deepEqual(next, { inputHash: HASH_A, classification: 'application_timeout', count: 2 })
+})
+
+test('nextStage3FailureHistory: a genuinely different input resets the streak to 1, even with the same classification', () => {
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 3 }
+  const next = nextStage3FailureHistory(prior, { inputHash: HASH_B, classification: 'application_timeout' })
+  assert.deepEqual(next, { inputHash: HASH_B, classification: 'application_timeout', count: 1 })
+})
+
+test('nextStage3FailureHistory: identical input but a different classification resets the streak to 1', () => {
+  const prior: Stage3FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 2 }
+  const next = nextStage3FailureHistory(prior, { inputHash: HASH_A, classification: 'rate_limited' })
+  assert.deepEqual(next, { inputHash: HASH_A, classification: 'rate_limited', count: 1 })
+})
+
+test('nextStage3FailureHistory: end-to-end — identical input escalates to skip, changed input gets a fresh allowance', () => {
+  let history: Stage3FailureHistory = NO_HISTORY
+  // First failure on input A
+  history = nextStage3FailureHistory(history, { inputHash: HASH_A, classification: 'application_timeout' })
+  assert.equal(shouldSkipStage3Call(history, HASH_A), false, 'first failure alone must not skip the next attempt')
+  // Second identical failure on the SAME input — now exhausted
+  history = nextStage3FailureHistory(history, { inputHash: HASH_A, classification: 'application_timeout' })
+  assert.equal(shouldSkipStage3Call(history, HASH_A), true, 'a repeat of the identical input must now be skipped')
+  // A genuinely new upload changes the merged fact base -> different hash -> fresh allowance
+  assert.equal(shouldSkipStage3Call(history, HASH_B), false, 'a changed document set must not inherit the exhausted history')
 })

@@ -944,6 +944,185 @@ export function dedupeRealFileIds(fileIds: string[]): string[] {
   return Array.from(new Set(fileIds.map((id) => id.split('#')[0])))
 }
 
+// ─── Stage 3 (Scope Reasoning) reliability ─────────────────────────────────
+//
+// Root cause (production incident, see CLAUDE.md "Anthropic failure
+// classification" section and the follow-up investigation): Stage 3 reasons
+// over the WHOLE accumulated project_facts base in one call, with (a) each
+// fact's `evidence` string injected into the prompt completely unbounded,
+// and (b) all ≤13 trades reasoned about — and their full included_scope/
+// excluded_scope/dependencies/assumptions/uncertainty_notes generated — in a
+// single call. Both drive the call toward its wall-clock timeout as a
+// project's fact base grows, and unlike Stage 1/2 there was previously no
+// lever to make a retry's request genuinely smaller.
+
+// Cap on how many characters of a fact's evidence string are injected into
+// the Stage 3 prompt. Deliberately mid-range of the 200-300 char window: the
+// reasoning stage needs "what supports this quantity" context, not the full
+// extracted excerpt — the untruncated evidence remains intact in
+// project_facts (this only bounds what's copied INTO one prompt).
+export const STAGE3_MAX_EVIDENCE_CHARS = 240
+
+// Renders one project_facts row as a single Stage 3 prompt line, in the
+// exact format the prompt has always used, with evidence capped. Pure and
+// independently testable so "an arbitrarily long evidence string cannot
+// blow out the prompt" is provable without constructing a real Claude call.
+export function truncateEvidence(evidence: string | null, maxChars: number = STAGE3_MAX_EVIDENCE_CHARS): string | null {
+  if (evidence === null) return null
+  if (evidence.length <= maxChars) return evidence
+  return `${evidence.slice(0, maxChars)}…`
+}
+
+export function formatFactForScopePrompt(fact: FactRow, maxEvidenceChars: number = STAGE3_MAX_EVIDENCE_CHARS): string {
+  const evidence = truncateEvidence(fact.evidence, maxEvidenceChars)
+  return `- [${fact.category}] ${fact.key}: ${fact.value} (confidence ${fact.confidence}%${evidence ? `, evidence: ${evidence}` : ''})`
+}
+
+// ── Trade chunking ──────────────────────────────────────────────────────
+//
+// Above this many facts in the prompt, Stage 3 is split into multiple
+// smaller calls, each reasoning about only a subset of the 13 trade
+// categories — bounding output generation (the other confirmed cost driver
+// alongside prompt size) per call, without touching MAX_FACTS_IN_PROMPT or
+// requiring a second, filtered fact set per chunk (every chunk still sees
+// the full, evidence-capped fact block — cross-trade context, e.g. "the
+// slab note affects both Site Works and Framing," is preserved in every
+// call; only the set of trades a given call is asked to REASON ABOUT
+// shrinks). Deliberately a plain top-level threshold, not tied to any
+// specific project's failure history — this is a proactive complexity
+// signal, independent of whether this exact project has failed before.
+export const STAGE3_TRADE_CHUNK_FACT_THRESHOLD = 100
+
+// Default number of chunks once the threshold is exceeded — matches the
+// investigation's recommendation (split into two groups) rather than
+// scaling chunk count continuously with fact count, which would need real
+// production timing data to tune safely.
+export const STAGE3_DEFAULT_CHUNK_COUNT = 2
+
+export function shouldChunkTradeReasoning(
+  factsInPromptCount: number,
+  threshold: number = STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
+): boolean {
+  return factsInPromptCount > threshold
+}
+
+// Deterministic, order-preserving split into `chunkCount` contiguous,
+// near-equal-size groups. Pure and generic (not hardcoded to the 13 trade
+// categories) so it's testable against any list shape; the one real caller
+// passes TRADE_CATEGORIES. A chunkCount of 1 (or >= the list length)
+// degrades to the identity split, never an empty group swallowing a trade.
+export function splitTradeCategoriesIntoChunks<T>(items: T[], chunkCount: number): T[][] {
+  const count = Math.max(1, Math.min(chunkCount, items.length))
+  const chunkSize = Math.ceil(items.length / count)
+  const chunks: T[][] = []
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize))
+  }
+  return chunks
+}
+
+export interface ScopeReasoningResult {
+  scope: Array<Record<string, unknown>>
+  clarifying_questions: Array<Record<string, unknown>>
+}
+
+// Deterministic merge of one or more chunked Stage 3 results back into the
+// single shape the rest of the pipeline (scope_items upsert, clarifying_
+// questions insert, Stage 6) already expects — no downstream code needs to
+// know chunking happened. scope rows are deduplicated by trade_category_id
+// (last-writer-wins is a defensive backstop only — chunks are given
+// disjoint trade subsets, so a real collision should never occur; if it
+// somehow did, silently dropping a duplicate is safer than upserting the
+// same trade twice with different content in an undefined order).
+// clarifying_questions are deduplicated by exact (question, trade_category_id)
+// text match, since a general, non-trade-specific gap (trade_category_id
+// null) could plausibly be raised independently by more than one chunk.
+export function mergeScopeReasoningResults(chunks: ScopeReasoningResult[]): ScopeReasoningResult {
+  const scopeByTrade = new Map<unknown, Record<string, unknown>>()
+  for (const chunk of chunks) {
+    for (const row of chunk.scope ?? []) {
+      scopeByTrade.set(row.trade_category_id, row)
+    }
+  }
+
+  const seenQuestions = new Set<string>()
+  const questions: Array<Record<string, unknown>> = []
+  for (const chunk of chunks) {
+    for (const q of chunk.clarifying_questions ?? []) {
+      const key = `${q.question} ${q.trade_category_id ?? ''}`
+      if (seenQuestions.has(key)) continue
+      seenQuestions.add(key)
+      questions.push(q)
+    }
+  }
+
+  return { scope: Array.from(scopeByTrade.values()), clarifying_questions: questions }
+}
+
+// ── Failure-escalation identity, keyed on Stage 3's real input ─────────
+//
+// Stage 1/2's files.ai_failure_count (migration 042) is correctly scoped
+// per-file, because Stage 1/2 genuinely operates per-file/per-batch of
+// files. Stage 3 has no such correspondence — it reasons over the job's
+// whole MERGED fact base — so keying its own retry protection off
+// files.id is a category mismatch: a fresh re-upload of the exact same
+// problematic document mints a new files.id and silently resets the
+// counter to zero, letting the same doomed timeout cycle repeat forever
+// (the gap the investigation was asked to close). The correct identity is
+// the actual Stage 3 input: which document_processing_batches row, and a
+// content hash of the exact prompt sent (same hashing approach
+// ai-gateway.ts's hashAiInput already uses for idempotency, reused here
+// rather than reinvented, so a caller passes the same hash it already
+// computed to hashAiInput for the idempotent-reuse check into these
+// functions too).
+export interface Stage3FailureHistory {
+  inputHash: string | null
+  classification: AnthropicFailureClassification | null
+  count: number
+}
+
+// Pre-call guard: true when this exact input has already exhausted its
+// allowance (maxConsecutiveOccurrences) for the classification it
+// previously failed with — the caller should skip the Claude call entirely
+// rather than spend on a call whose outcome, for a byte-identical input, is
+// already known. A genuinely different input (different hash) is never
+// skipped, regardless of prior history, satisfying "a genuinely changed
+// document set gets a fresh attempt allowance."
+//
+// Boundary matches record_ai_failure's canonical semantics exactly
+// (migration 043's `v_stop := v_prior_count >= p_max_occurrences`, evaluated
+// against the count BEFORE the failure just recorded): the persisted
+// `count` here already includes that most recent failure, so the
+// equivalent post-hoc check is `count > max`, not `count >= max` — e.g. for
+// application_timeout (max=1), a single recorded failure (count=1) must
+// still allow one more attempt (1 > 1 is false); only a SECOND identical
+// failure (count=2) stops it (2 > 1 is true), matching "stop after the
+// second identical occurrence" documented on maxConsecutiveOccurrences.
+export function shouldSkipStage3Call(prior: Stage3FailureHistory, currentInputHash: string): boolean {
+  if (!prior.inputHash || !prior.classification) return false
+  if (prior.inputHash !== currentInputHash) return false
+  return prior.count > maxConsecutiveOccurrences(prior.classification)
+}
+
+// Pure state transition for the persisted history (document_processing_
+// batches.stage3_failure_input_hash / _classification / _count — see
+// migration 059). Mirrors nextFailureHistory's classification-streak logic,
+// but ALSO resets the streak whenever the input hash changes — even if the
+// classification happens to repeat coincidentally, a different input's
+// failure is not evidence the CURRENT input is deterministically doomed.
+export function nextStage3FailureHistory(
+  prior: Stage3FailureHistory,
+  current: { inputHash: string; classification: AnthropicFailureClassification },
+): Stage3FailureHistory {
+  const sameInputAndClassification =
+    prior.inputHash === current.inputHash && prior.classification === current.classification
+  return {
+    inputHash: current.inputHash,
+    classification: current.classification,
+    count: sameInputAndClassification ? prior.count + 1 : 1,
+  }
+}
+
 // ─── AI call timeout + retry ────────────────────────────────────────────────
 //
 // No Claude (or any provider) call anywhere in this codebase had an explicit

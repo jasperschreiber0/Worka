@@ -1,0 +1,21 @@
+-- ROLLBACK for 059_stage3_failure_escalation.sql — NOT auto-applied, kept
+-- as a .txt so it's never picked up by the migration runner.
+--
+-- Safe by construction: stage3_failure_* columns and record_stage3_failure
+-- are only read/written by the Stage 3 call site added alongside this
+-- migration. Rolling back the DB and rolling back the application code are
+-- independent and order-safe: if the app code is reverted first, these
+-- columns simply stop being read/written (harmless orphans) until this
+-- rollback runs; if this rollback runs first, the app's calls to
+-- record_stage3_failure will error, which its own try/catch already
+-- treats as best-effort (matching recordAiFailure's existing posture) --
+-- never blocks the actual Stage 3 call or its outcome.
+
+DROP FUNCTION IF EXISTS record_stage3_failure(uuid, text, text, int);
+
+ALTER TABLE document_processing_batches
+  DROP COLUMN IF EXISTS stage3_failure_input_hash,
+  DROP COLUMN IF EXISTS stage3_failure_classification,
+  DROP COLUMN IF EXISTS stage3_failure_count;
+
+NOTIFY pgrst, 'reload schema';

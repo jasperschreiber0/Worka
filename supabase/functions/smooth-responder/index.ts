@@ -39,9 +39,12 @@ import {
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
   dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
+  formatFactForScopePrompt, shouldChunkTradeReasoning, splitTradeCategoriesIntoChunks, mergeScopeReasoningResults,
+  shouldSkipStage3Call, STAGE3_DEFAULT_CHUNK_COUNT,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
+  type ScopeReasoningResult, type Stage3FailureHistory,
 } from './pipeline-logic.ts'
-import { guardedClaudeCall } from './ai-gateway.ts'
+import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
@@ -1503,7 +1506,12 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       per_source: factSelectionSummary,
     }))
 
-    const factsBlock = factsForPrompt.map((f) => `- [${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%${f.evidence ? `, evidence: ${f.evidence}` : ''})`).join('\n')
+    // Evidence capped per-fact (STAGE3_MAX_EVIDENCE_CHARS, pipeline-logic.ts)
+    // — category/key/value/confidence are never truncated, only the
+    // free-text evidence excerpt. project_facts.evidence itself is
+    // untouched; this only bounds what's copied into this one prompt. See
+    // the Stage 3 reliability investigation this closes.
+    const factsBlock = factsForPrompt.map((f) => formatFactForScopePrompt(f)).join('\n')
 
     // ── Stage 3 checkpoint (migration 053) ──────────────────────────────────
     // A retry against the SAME batch (parent_job_id unchanged — this is how
@@ -1536,41 +1544,136 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     } else {
       const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all).${memoryContext}`
 
-      const scopeUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${TRADE_CATEGORIES.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.` }]
+      // Stage 3 reliability: identity of THIS batch's Stage 3 input,
+      // independent of whether it ends up chunked into 1 or several calls
+      // below — the escalation history (migration 059) tracks "has this
+      // merged fact base + trade list already proven doomed," not any one
+      // call's exact request shape. Same hashing approach ai-gateway.ts's
+      // hashAiInput already uses for idempotency, reused rather than
+      // reinvented.
+      const stage3InputHash = await hashAiInput([factsBlock, TRADE_CATEGORIES, memoryContext])
 
-      if (!hasWallClockBudget(220_000)) {
-        await bailForWallClockBudget('reasoning_scope', 220_000)
+      // ── Pre-call skip: never resend an input already proven doomed ──────
+      // Read-only lookup (a plain SELECT, not FOR UPDATE — matches the
+      // scopeAlreadyComplete checkpoint read just above; only the WRITE
+      // after a failure needs the atomic RPC). Stage 1/2's files.ai_failure_
+      // count is a different, unrelated axis — untouched here.
+      let stage3History: Stage3FailureHistory = { inputHash: null, classification: null, count: 0 }
+      if (parentJobId) {
+        const { data: failureRow } = await supabase
+          .from('document_processing_batches')
+          .select('stage3_failure_input_hash, stage3_failure_classification, stage3_failure_count')
+          .eq('id', parentJobId)
+          .single()
+        if (failureRow) {
+          stage3History = {
+            inputHash: failureRow.stage3_failure_input_hash ?? null,
+            classification: (failureRow.stage3_failure_classification as AnthropicFailureClassification | null) ?? null,
+            count: failureRow.stage3_failure_count ?? 0,
+          }
+        }
+      }
+      if (shouldSkipStage3Call(stage3History, stage3InputHash)) {
+        console.log(JSON.stringify({
+          stage: 'reasoning_scope', status: 'skipped_exhausted_retries', job_id: jobId, batch_id: parentJobId,
+          prior_classification: stage3History.classification, prior_count: stage3History.count,
+          reason: 'identical Stage 3 input already failed the maximum tolerated number of times — not resending',
+        }))
+        await fail(`Scope reasoning previously failed repeatedly with an unchanged project fact base (${stage3History.classification}) — resolve the underlying issue or upload additional documents before retrying.`)
         return
       }
 
+      // ── Trade chunking above a complexity threshold ──────────────────────
+      // Every chunk sees the FULL evidence-capped fact block (cross-trade
+      // context — e.g. a slab note affecting both Site Works and Framing —
+      // is preserved in every call); only the set of trades a given call is
+      // asked to reason about shrinks, bounding output generation per call.
+      // Below the threshold this is a single chunk containing all 13
+      // trades — byte-for-byte the same request shape as before chunking
+      // existed, so already-successful projects are unaffected.
+      const tradeChunks = shouldChunkTradeReasoning(factsForPrompt.length)
+        ? splitTradeCategoriesIntoChunks(TRADE_CATEGORIES, STAGE3_DEFAULT_CHUNK_COUNT)
+        : [TRADE_CATEGORIES]
+
+      if (!hasWallClockBudget(220_000 * tradeChunks.length)) {
+        await bailForWallClockBudget('reasoning_scope', 220_000 * tradeChunks.length)
+        return
+      }
+
+      // No chunk-level checkpoint is persisted here, deliberately (in-memory
+      // only, per the reliability investigation's scope) — but a retry that
+      // re-enters this loop still doesn't re-spend on a chunk that already
+      // succeeded: guardedClaudeCall's own idempotent reuse (scope_key +
+      // per-call input hash, ai-gateway.ts) replays that exact chunk's
+      // stored result at zero additional cost, since its request content is
+      // byte-identical on an unchanged fact base. Only a chunk that hasn't
+      // yet succeeded actually reaches Anthropic again.
       const scopeStartedAt = Date.now()
-      let scopeResult: { scope?: unknown[]; clarifying_questions?: unknown[] } | null = null
+      const chunkResults: ScopeReasoningResult[] = []
+      let scopeResult: ScopeReasoningResult | null = null
       try {
-        // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
-        // on a real 75-fact project reasoning across 13 trades. Match the other
-        // two stages' proven 16000 rather than guessing at yet another cap.
-        //
-        // timeoutMs widened from the 150s default to 220s: confirmed in
-        // production on a 108-fact, 4-document project — the call was cleanly
-        // aborted by OUR OWN AbortController at exactly 150002ms
-        // (classification: application_timeout), then retried on the next
-        // invocation with the byte-for-byte identical fact block and failed
-        // identically, because unlike Stage 1/2 there is no per-file "make the
-        // next attempt smaller" lever here — this stage reasons over the whole
-        // accumulated fact base in a single call, so retrying can only help if
-        // it's given more room, not a smaller payload. 220s stays well inside
-        // Supabase's real 400s isolate wall-clock ceiling even when this stage
-        // runs after Stage 1/2 in the same invocation (a fresh, non-resumed
-        // upload) — see callTool's own comment for why this is safe to widen
-        // per-stage rather than globally.
-        scopeResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning' }, scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000)
+        for (const [chunkIndex, tradeChunk] of tradeChunks.entries()) {
+          const scopeUserContent = [{
+            type: 'text' as const,
+            text: tradeChunks.length > 1
+              ? `PROJECT FACTS:\n${factsBlock}\n\nTrade categories to reason about in THIS call (only return entries for these — the remaining trades are covered by a separate call, do not include them here):\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`
+              : `PROJECT FACTS:\n${factsBlock}\n\nTrade categories:\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`,
+          }]
+
+          // Was 4096, then 8192 -- both truncated (confirmed via stop_reason log)
+          // on a real 75-fact project reasoning across 13 trades. Match the other
+          // two stages' proven 16000 rather than guessing at yet another cap.
+          //
+          // timeoutMs widened from the 150s default to 220s: confirmed in
+          // production on a 108-fact, 4-document project — the call was cleanly
+          // aborted by OUR OWN AbortController at exactly 150002ms
+          // (classification: application_timeout), then retried on the next
+          // invocation with the byte-for-byte identical fact block and failed
+          // identically. Trade chunking (above) now gives large-fact-base
+          // projects a genuine "smaller request" lever on top of this — 220s
+          // stays well inside Supabase's real 400s isolate wall-clock ceiling
+          // even when this stage runs after Stage 1/2 in the same invocation.
+          const chunkResult = await callTool(
+            anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning' },
+            scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, 220_000
+          ) as ScopeReasoningResult
+          chunkResults.push(chunkResult)
+          console.log(JSON.stringify({
+            stage: 'reasoning_scope', status: 'chunk_processed', job_id: jobId,
+            chunk: chunkIndex + 1, chunk_count: tradeChunks.length,
+            tradesInChunk: tradeChunk.length, tradesReasoned: (chunkResult.scope ?? []).length,
+          }))
+        }
+        scopeResult = mergeScopeReasoningResults(chunkResults)
       } catch (err) {
         const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
         const errMessage = err instanceof Error ? err.message : String(err)
-        console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, classification, error: errMessage }))
+        console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, chunkCount: tradeChunks.length, classification, error: errMessage }))
         if (isBillingHaltClassification(classification)) {
           await haltForBilling(classification, errMessage)
           return
+        }
+        // Race-safe, atomic — mirrors record_ai_failure (migration 043),
+        // keyed by batch + input hash (migration 059) instead of files.id,
+        // since Stage 3 has no per-file correspondence. Best-effort: a
+        // failure to RECORD the failure must never mask the original error.
+        if (parentJobId) {
+          try {
+            const { data: recordData, error: recordErr } = await supabase.rpc('record_stage3_failure', {
+              p_batch_id: parentJobId,
+              p_input_hash: stage3InputHash,
+              p_classification: classification,
+              p_max_occurrences: maxConsecutiveOccurrences(classification),
+            })
+            if (recordErr) throw recordErr
+            const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
+            console.log(JSON.stringify({
+              event: 'stage3_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
+              consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
+            }))
+          } catch (recordErr) {
+            console.error('record_stage3_failure RPC failed:', recordErr)
+          }
         }
         await fail(`Scope reasoning call failed: ${errMessage}`)
         return
