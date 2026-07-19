@@ -100,7 +100,7 @@ Use the extract_rates tool to return your results.`
     // Tool use forces Claude to return schema-validated JSON — no parsing needed.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { response } = await guardedClaudeCall<any>(
-      { supabase: gatewaySupabase(), builderId, callSite: 'rates_extract_pdf', model: 'claude-sonnet-4-6' },
+      { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'rates_extract_pdf', model: 'claude-sonnet-4-6' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (signal) => (client.messages.create as any)({
       model: 'claude-sonnet-4-6',

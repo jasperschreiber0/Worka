@@ -144,7 +144,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { response } = await guardedClaudeCall<any>(
-      { supabase: gatewaySupabase(), builderId, callSite: 'estimation_history_catalogue', model: 'claude-sonnet-4-6' },
+      { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'estimation_history_catalogue', model: 'claude-sonnet-4-6' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (signal) => (client.messages.create as any)({
         model: 'claude-sonnet-4-6',

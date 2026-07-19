@@ -127,7 +127,7 @@ Maximum 5 items. Only include items with confidence ≥ 65. Order by confidence 
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { response } = await guardedClaudeCall<any>(
-      { supabase: gatewaySupabase(), builderId, callSite: 'scope_hints', model: 'claude-sonnet-4-6' },
+      { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'scope_hints', model: 'claude-sonnet-4-6' },
       (signal) => client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,

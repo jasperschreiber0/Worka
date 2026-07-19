@@ -576,7 +576,7 @@ async function callTool(
   const { response, reusedFromOperation } = await guardedClaudeCall(
     {
       supabase: gw.supabase,
-      builderId: gw.builderId,
+      attribution: { kind: 'builder', builderId: gw.builderId },
       callSite: gw.stage,
       model: 'claude-sonnet-4-6',
       scopeKey: `${gw.jobId}:${gw.stage}`,

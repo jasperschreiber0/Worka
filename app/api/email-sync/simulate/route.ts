@@ -66,7 +66,8 @@ const DEMO_EMAILS: Record<SimulateScenario, DemoEmailData> = {
 
 async function classifyIntentWithAI(
   email: DemoEmailData,
-  anthropic: Anthropic
+  anthropic: Anthropic,
+  builderId: string
 ): Promise<{ intent: EmailIntent; confidence: number }> {
   const prompt = `You are an email classifier for WorkA, an AI operations manager for Australian residential builders.
 
@@ -95,7 +96,7 @@ Respond ONLY with valid JSON:
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { response } = await guardedClaudeCall<any>(
-    { supabase: gatewaySupabase(), builderId: null, callSite: 'email_sync_simulate_classify', model: 'claude-sonnet-4-6' },
+    { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'email_sync_simulate_classify', model: 'claude-sonnet-4-6' },
     (signal) => anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 128,
@@ -159,7 +160,7 @@ export async function POST(
 
     if (apiKey) {
       const anthropic = new Anthropic({ apiKey })
-      classifyResult = await classifyIntentWithAI(email, anthropic)
+      classifyResult = await classifyIntentWithAI(email, anthropic, builder_id)
     } else {
       classifyResult = classifyIntentByKeywords(email)
     }

@@ -395,7 +395,7 @@ Keep values as short strings.
 async function extractActions(
   message: string,
   anthropic: Anthropic,
-  builderId: string | null
+  builderId: string
 ): Promise<ExtractedAction[]> {
   const todayIso = new Date().toISOString().split('T')[0]
   const systemPrompt = EXTRACT_ACTIONS_PROMPT.replace(/REPLACE_TODAY/g, todayIso)
@@ -409,7 +409,7 @@ async function extractActions(
   // wrapper only changes HOW FAST that fallback kicks in, not what it does.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { response } = await guardedClaudeCall<any>(
-    { supabase: gatewaySupabase(), builderId, callSite: 'chat_extract_actions', model: 'claude-sonnet-4-6' },
+    { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'chat_extract_actions', model: 'claude-sonnet-4-6' },
     (signal) => anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 512,
@@ -1302,7 +1302,7 @@ async function handleProjectQuestion(
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { response } = await guardedClaudeCall<any>(
-      { supabase: gatewaySupabase(), builderId, callSite: 'chat_project_question', model: 'claude-sonnet-4-6' },
+      { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'chat_project_question', model: 'claude-sonnet-4-6' },
       (signal) => anthropic.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 400,
@@ -2631,7 +2631,7 @@ Rules:
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { response: resp } = await guardedClaudeCall<any>(
-      { supabase: gatewaySupabase(), builderId, callSite: 'chat_fallback_intent', model: 'claude-sonnet-4-6' },
+      { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'chat_fallback_intent', model: 'claude-sonnet-4-6' },
       (signal) => anthropic.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 500,

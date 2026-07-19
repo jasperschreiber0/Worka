@@ -253,6 +253,7 @@ async function buildAIDraft(
   contextMessage: string | undefined,
   anthropic: Anthropic,
   builder: BuilderIdentity,
+  builderId: string,
 ): Promise<EmailDraft> {
   const clientName = ctx?.client_name ?? recipientName ?? 'the client'
   const jobAddress = ctx?.job_address ?? 'the project'
@@ -317,10 +318,7 @@ Respond with ONLY valid JSON in this exact format:
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { response } = await guardedClaudeCall<any>(
-    // builderId is not threaded into this helper yet — global daily limits
-    // and the circuit breaker still fully apply; only per-builder
-    // attribution is absent for this call site.
-    { supabase: gatewaySupabase(), builderId: null, callSite: 'email_draft', model: 'claude-sonnet-4-6' },
+    { supabase: gatewaySupabase(), attribution: { kind: 'builder', builderId }, callSite: 'email_draft', model: 'claude-sonnet-4-6' },
     (signal) => anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 512,
@@ -400,7 +398,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<EmailDraf
 
     if (apiKey) {
       const anthropic = new Anthropic({ apiKey })
-      draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic, builder)
+      draft = await buildAIDraft(jobCtx, intent_hint, recipient_name, context, anthropic, builder, builderId)
     } else {
       draft = buildFallbackDraft(jobCtx, intent_hint, recipient_name, builder)
     }

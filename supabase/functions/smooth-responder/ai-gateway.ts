@@ -110,6 +110,45 @@ export class AiBudgetError extends Error {
   }
 }
 
+// ─── Attribution — every call names who it is for, explicitly ────────────────
+// No silent nulls: a call is either attributed to a specific builder (the
+// normal case — per-builder daily limits apply on top of global ones) or
+// explicitly declared a system operation with a stated reason (crons,
+// maintenance — global limits only, identifiable in the ledger as such).
+// Anything else is a programming error and fails CLOSED before any call.
+
+export type AiAttribution =
+  | { kind: 'builder'; builderId: string }
+  | { kind: 'system'; reason: string }
+
+/** Thrown before any Anthropic call when attribution is missing/malformed —
+ * a code bug surfacing safely (no spend), never a silent unattributed call. */
+export class AiAttributionError extends Error {
+  readonly classification = 'attribution_invalid'
+  constructor(message: string) {
+    super(message)
+    this.name = 'AiAttributionError'
+  }
+}
+
+/** Pure, unit-tested. Returns the error message, or null when valid. */
+export function validateAttribution(a: AiAttribution | null | undefined): string | null {
+  if (!a || typeof a !== 'object') return 'AI call attribution is missing'
+  if (a.kind === 'builder') {
+    if (typeof a.builderId !== 'string' || a.builderId.trim() === '') {
+      return "builder-attributed AI call has no builderId — pass the authenticated builder's id, or declare the call { kind: 'system', reason }"
+    }
+    return null
+  }
+  if (a.kind === 'system') {
+    if (typeof a.reason !== 'string' || a.reason.trim() === '') {
+      return 'system-attributed AI call must state a reason'
+    }
+    return null
+  }
+  return `unknown AI attribution kind: ${String((a as { kind?: unknown }).kind)}`
+}
+
 // ─── Input hashing (Web Crypto — identical in Deno, Node 18+, edge) ──────────
 
 export async function hashAiInput(parts: unknown[]): Promise<string> {
@@ -143,8 +182,10 @@ interface SupabaseLike {
 export interface GuardedCallContext {
   /** Service-role client. null in demo mode → in-memory accounting. */
   supabase: SupabaseLike | null
-  /** For per-builder limits + attribution. null when genuinely unknown. */
-  builderId: string | null
+  /** Required, explicit: who this call is for. Builder-attributed calls get
+   * per-builder daily limits; system calls are globally limited and
+   * identifiable in the ledger. Invalid attribution fails closed. */
+  attribution: AiAttribution
   /** Stable label, e.g. 'stage_scope_reasoning', 'chat_extract_actions'. */
   callSite: string
   model: string
@@ -161,12 +202,17 @@ export interface GuardedCallResult<T> {
   reusedFromOperation: boolean
 }
 
+function attributedBuilderId(ctx: GuardedCallContext): string | null {
+  return ctx.attribution.kind === 'builder' ? ctx.attribution.builderId : null
+}
+
 async function readBudgetState(ctx: GuardedCallContext): Promise<BudgetState> {
+  const builderId = attributedBuilderId(ctx)
   if (!ctx.supabase) {
     // Demo mode: process-local counters, same default limits.
     return {
       breakerTripped: false, breakerReason: null, breakerKnown: true,
-      builderDayCents: memoryDaily.get(memoryKey(ctx.builderId)) ?? 0,
+      builderDayCents: memoryDaily.get(memoryKey(builderId)) ?? 0,
       globalDayCents: memoryDaily.get(memoryKey(null)) ?? 0,
       builderLimitCents: 1000, globalLimitCents: 2500,
     }
@@ -191,7 +237,7 @@ async function readBudgetState(ctx: GuardedCallContext): Promise<BudgetState> {
     let globalDay = 0
     for (const row of (spendRows ?? []) as Array<{ builder_id: string | null; cost_cents: number }>) {
       if (row.builder_id === null) globalDay = Number(row.cost_cents) || 0
-      else if (ctx.builderId && row.builder_id === ctx.builderId) builderDay = Number(row.cost_cents) || 0
+      else if (builderId && row.builder_id === builderId) builderDay = Number(row.cost_cents) || 0
     }
     return {
       breakerTripped: breaker.tripped === true,
@@ -199,7 +245,9 @@ async function readBudgetState(ctx: GuardedCallContext): Promise<BudgetState> {
       breakerKnown: true,
       builderDayCents: builderDay,
       globalDayCents: globalDay,
-      builderLimitCents: Number(limits?.builder_daily_cents) || 1000,
+      // System-attributed calls have no per-builder ceiling (there is no
+      // builder) — the global limit and breaker still fully apply.
+      builderLimitCents: builderId === null ? Number.POSITIVE_INFINITY : (Number(limits?.builder_daily_cents) || 1000),
       globalLimitCents: Number(limits?.global_daily_cents) || 2500,
     }
   } catch {
@@ -221,6 +269,16 @@ export async function guardedClaudeCall<T>(
   call: (signal: AbortSignal) => Promise<T>,
   options: TimedRetryOptions = {},
 ): Promise<GuardedCallResult<T>> {
+  // 0. Attribution gate — a malformed/missing attribution is a code bug and
+  // fails CLOSED here, before the idempotency lookup or any spend: better a
+  // loud, safe failure at the call site than a silently unattributed call.
+  const attributionProblem = validateAttribution(ctx.attribution)
+  if (attributionProblem) {
+    console.log(JSON.stringify({ event: 'ai_call_refused', call_site: ctx.callSite, reason: attributionProblem }))
+    throw new AiAttributionError(attributionProblem)
+  }
+  const builderId = attributedBuilderId(ctx)
+
   // 1. Budget gate — before anything else, including the idempotency lookup?
   // No: reuse first. Serving a stored result costs nothing, so it must work
   // even when the breaker is tripped — that's recovery without spend.
@@ -250,8 +308,8 @@ export async function guardedClaudeCall<T>(
   const decision = decideBudget(budget)
   if (!decision.allowed) {
     console.log(JSON.stringify({
-      event: 'ai_call_refused', call_site: ctx.callSite, builder_id: ctx.builderId,
-      reason: decision.reason,
+      event: 'ai_call_refused', call_site: ctx.callSite, builder_id: builderId,
+      attribution: ctx.attribution.kind, reason: decision.reason,
     }))
     throw new AiBudgetError(decision.reason ?? 'AI budget refused')
   }
@@ -261,7 +319,9 @@ export async function guardedClaudeCall<T>(
   if (ctx.supabase) {
     try {
       const { data } = await ctx.supabase.from('ai_operations').insert({
-        builder_id: ctx.builderId, call_site: ctx.callSite,
+        builder_id: builderId, call_site: ctx.callSite,
+        attribution: ctx.attribution.kind,
+        attribution_detail: ctx.attribution.kind === 'system' ? ctx.attribution.reason : null,
         scope_key: ctx.scopeKey ?? null, input_hash: inputHash,
         model: ctx.model, status: 'running',
       }).select('id').single()
@@ -284,7 +344,8 @@ export async function guardedClaudeCall<T>(
     const durationMs = Date.now() - startedAt
 
     console.log(JSON.stringify({
-      event: 'ai_call_complete', call_site: ctx.callSite, builder_id: ctx.builderId,
+      event: 'ai_call_complete', call_site: ctx.callSite, builder_id: builderId,
+      attribution: ctx.attribution.kind,
       model: ctx.model, input_tokens: inputTokens, output_tokens: outputTokens,
       cost_cents_estimate: costCents, duration_ms: durationMs,
     }))
@@ -304,13 +365,15 @@ export async function guardedClaudeCall<T>(
           }).eq('id', operationId)
         }
         await ctx.supabase.rpc('record_ai_spend', {
-          p_builder_id: ctx.builderId, p_cost_cents: costCents,
+          p_builder_id: builderId, p_cost_cents: costCents,
         })
       } catch (ledgerErr) {
         console.error('ai-gateway: ledger write failed (call succeeded, accounting incomplete):', ledgerErr)
       }
     } else {
-      memoryDaily.set(memoryKey(ctx.builderId), (memoryDaily.get(memoryKey(ctx.builderId)) ?? 0) + costCents)
+      if (builderId !== null) {
+        memoryDaily.set(memoryKey(builderId), (memoryDaily.get(memoryKey(builderId)) ?? 0) + costCents)
+      }
       memoryDaily.set(memoryKey(null), (memoryDaily.get(memoryKey(null)) ?? 0) + costCents)
     }
 
