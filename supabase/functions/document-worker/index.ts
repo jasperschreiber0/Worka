@@ -393,6 +393,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
         }
       }
 
+      // Derives THIS document's own files.intake_status from its own
+      // document_processing_jobs outcome (migration 052) — this is what
+      // makes each file's status accurate the moment its own extraction
+      // finishes, independent of every other file in the batch, rather
+      // than only the batch's primary/anchor file ever having a real
+      // status. Best-effort: intake_status is a derived cache column, a
+      // failure here never blocks the pipeline.
+      const { error: recomputeErr } = await supabase.rpc('recompute_file_intake_status', { p_file_id: job.document_id })
+      if (recomputeErr) {
+        console.error(JSON.stringify({ event: 'recompute_file_intake_status_failed', worker_id: workerId, document_id: job.document_id, error: recomputeErr.message }))
+      }
+
       // Immediately try to claim whatever else is ready now (covers sibling
       // documents in the same batch) — this is what turns a single claim
       // into a self-sustaining chain, each hop a fresh invocation/CPU budget.

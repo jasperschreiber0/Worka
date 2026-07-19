@@ -246,12 +246,30 @@ async function createDocumentProcessingBatch(
 
   // Anchors the batch to the primary file's row so a reconnecting SSE
   // client (which already re-fetches this row every poll) can recover
-  // which batch to poll without a new query-string parameter.
+  // which batch to poll without a new query-string parameter. Only the
+  // primary file needs processing_batch_id — it's purely an SSE-reconnect
+  // anchor, not a status source (see recompute_file_intake_status, which
+  // derives every file's status from document_processing_jobs directly,
+  // not from this column).
   await fetch(`${supabaseUrl}/rest/v1/files?id=eq.${encodeURIComponent(primaryFileId)}`, {
     method: 'PATCH',
     headers: { ...headers, Prefer: 'return=minimal' },
-    body: JSON.stringify({ processing_batch_id: batchId, intake_status: 'processing' }),
+    body: JSON.stringify({ processing_batch_id: batchId }),
   }).catch(() => { /* best-effort — the poller re-derives status from document_processing_jobs regardless */ })
+
+  // Sets intake_status='processing' for EVERY file in the batch (migration
+  // 052's recompute_batch_file_intake_statuses), not just the primary —
+  // this is what makes sibling files individually recoverable/reportable
+  // from the moment the batch exists, instead of staying frozen at
+  // 'uploaded' for the file's entire life (the bug this migration fixes).
+  // Best-effort: intake_status is a derived cache column, never
+  // authoritative — a failure here just delays when it catches up, it
+  // never blocks the actual pipeline.
+  await fetch(`${supabaseUrl}/rest/v1/rpc/recompute_batch_file_intake_statuses`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=minimal' },
+    body: JSON.stringify({ p_batch_id: batchId }),
+  }).catch(() => { /* best-effort */ })
 
   return batchId
 }

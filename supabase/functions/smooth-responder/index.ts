@@ -706,10 +706,22 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   const fail = async (reason: string) => {
     await supabase
       .from('files')
-      .update({ intake_status: 'failed', intake_stage: 'failed', intake_pct: 0, failure_stage: 'AI_REASONING_FAILED', failure_reason: reason.slice(0, 500) })
+      .update({ intake_stage: 'failed', intake_pct: 0, failure_stage: 'AI_REASONING_FAILED', failure_reason: reason.slice(0, 500) })
       .eq('id', fileId)
     if (parentJobId) {
       await supabase.from('document_processing_batches').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', parentJobId)
+      // Derives every file in the batch's intake_status from the batch
+      // outcome just written (migration 052) — not only fileId (the
+      // primary/anchor), so a sibling whose own extraction succeeded but
+      // whose run died later (e.g. a billing halt at Stage 3/6) also
+      // correctly ends up 'failed', instead of staying frozen at
+      // 'uploaded' forever.
+      await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+    } else {
+      // Legacy direct-invocation path (no queue model, no batch) — no
+      // derivation table to recompute from, so this file is the only one
+      // that needs (and can have) an explicit write.
+      await supabase.from('files').update({ intake_status: 'failed' }).eq('id', fileId)
     }
   }
 
@@ -1487,8 +1499,17 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
       await supabase
         .from('files')
-        .update({ intake_status: 'needs_info', intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
+        .update({ intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
         .eq('id', fileId)
+      if (parentJobId) {
+        // Every file in the batch, not just fileId (the primary/anchor) —
+        // recompute_file_intake_status resolves this to 'needs_info' for
+        // each since classification_triggered is already true by this
+        // point in a queue-model run (migration 052).
+        await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+      } else {
+        await supabase.from('files').update({ intake_status: 'needs_info' }).eq('id', fileId)
+      }
       return
     }
 
@@ -1714,10 +1735,19 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .eq('quote_id', quoteId)
       .is('resolution_type', null)
 
+    // intake_status is deliberately not written here — it's derived (see
+    // recompute_file_intake_status, migration 052) from
+    // document_processing_batches.quote_id, set just below, BEFORE the
+    // recompute runs, so the primary file included. The remaining fields
+    // here (quote_id, intake_assumption_count, line_item_count,
+    // skipped/failed_sibling_filenames, etc.) are genuinely primary-file-
+    // only reporting fields — the SSE poller only ever polls the primary
+    // file's row (app/api/intake/[fileId]/route.ts), so these stay scoped
+    // to fileId, unlike intake_status which every consumer expects to be
+    // accurate per-file.
     await supabase
       .from('files')
       .update({
-        intake_status: 'extracted',
         intake_stage: 'complete',
         intake_pct: 100,
         pipeline_stage: 'complete',
@@ -1737,6 +1767,13 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
     if (parentJobId) {
       await supabase.from('document_processing_batches').update({ quote_id: quoteId, updated_at: new Date().toISOString() }).eq('id', parentJobId)
+      // Every file in the batch, not just fileId (the primary/anchor) —
+      // recompute_file_intake_status resolves each to 'extracted' now that
+      // document_processing_batches.quote_id is set (migration 052).
+      await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+    } else {
+      // Legacy direct-invocation path — no batch to derive from.
+      await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
     }
   } catch (err) {
     console.error('estimating-engine error:', err)

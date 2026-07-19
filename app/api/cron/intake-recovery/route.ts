@@ -396,6 +396,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             // Already terminal? Nothing to resume — the lock was just leaked
             // past the pipeline's own release (shouldn't happen given its
             // try/finally, but a stuck lock alone is harmless to release).
+            // job_intake_locks.file_id is always the run's primary/anchor
+            // file (set by tryAcquireJobLock at upload time, or by step 5
+            // above using the batch's primary_file_id) — never a sibling —
+            // and the primary file's intake_status is still an explicit
+            // terminal write at the real end of the pipeline (fail()/
+            // needs_info/success in smooth-responder), just applied via the
+            // derived recompute path since migration 052 rather than a
+            // literal inline value. document_processing_batches.status is
+            // NOT a substitute here: it reflects only the extraction-queue
+            // portion (done well before Stage 3-6 concludes) and would
+            // read 'completed' for the entire, legitimate duration of a
+            // still-running smooth-responder invocation.
             const { data: fileRow, error: fileRowErr } = await supabase
               .from('files')
               .select('id, intake_status, builder_id, processing_batch_id')
@@ -467,69 +479,75 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
       // ── 5. Retry classification for batches that finished but never actually
       //      reached smooth-responder (triggerClassification's fetch was lost).
+      // Discovery is keyed on the batch itself (migration 052's
+      // find_stuck_batches_needing_classification_retry), not on any one
+      // file's files.intake_status/processing_batch_id — those were only
+      // ever populated for a batch's primary/anchor file, so the previous
+      // file-keyed version could structurally only ever surface a batch
+      // whose primary file itself was left stuck. document_processing_batches
+      // already carries everything this needs natively.
       try {
-        const { data, error } = await supabase.rpc('find_stuck_files_needing_classification_retry')
+        const { data, error } = await supabase.rpc('find_stuck_batches_needing_classification_retry')
         if (error) throw error
-        const stuckFiles = (data ?? []) as Array<{ file_id: string; job_id: string; builder_id: string; processing_batch_id: string }>
-        const toRetry = stuckFiles.slice(0, MAX_STUCK_FILES_PER_RUN)
-        if (stuckFiles.length > MAX_STUCK_FILES_PER_RUN) {
-          log('recovery_stuck_files_cap_hit', { candidates: stuckFiles.length, capped_to: MAX_STUCK_FILES_PER_RUN })
+        const stuckBatches = (data ?? []) as Array<{ batch_id: string; job_id: string; builder_id: string; primary_file_id: string }>
+        const toRetry = stuckBatches.slice(0, MAX_STUCK_FILES_PER_RUN)
+        if (stuckBatches.length > MAX_STUCK_FILES_PER_RUN) {
+          log('recovery_stuck_files_cap_hit', { candidates: stuckBatches.length, capped_to: MAX_STUCK_FILES_PER_RUN })
         }
 
-        for (const f of toRetry) {
+        for (const b of toRetry) {
           // acquire_or_reclaim_job_intake_lock also guards this path — if a
           // fresh upload or a step 4 reclaim just started a run for this same
           // job, this simply fails to acquire and is skipped, never double-fires.
+          // p_file_id is informational on job_intake_locks (job_id is the
+          // real key) — the batch's primary_file_id is as good an anchor as
+          // any, matching what the original upload session would have used.
           const { data: lockData, error: lockErr } = await supabase.rpc('acquire_or_reclaim_job_intake_lock', {
-            p_job_id: f.job_id,
-            p_file_id: f.file_id,
+            p_job_id: b.job_id,
+            p_file_id: b.primary_file_id,
           })
           if (lockErr || !lockData?.[0]?.acquired) continue
 
-          // Same retry cap as step 4, via the same atomic RPC (migration 051)
-          // — a file that keeps needing a classification retry is failing
-          // every time it's re-triggered, not recovering from a one-off lost
-          // network call. The previous JS-side SELECT-then-UPDATE here had
-          // its `error` unchecked on both calls, so any failure silently
-          // treated the file as attempt zero forever and silently dropped
-          // the write — this is the exact bug that let one file get
-          // reclaimed/retried every single cron run with recovery_attempts
-          // logged as 1 every time, never reaching the cap.
+          // Retry cap via the same atomic RPC as step 4 (migration 051) —
+          // a batch that keeps needing a classification retry is failing
+          // every time it's re-triggered, not recovering from a one-off
+          // lost network call. Keyed on the batch's primary_file_id, same
+          // as the lock above — one counter per batch/run, not per document.
           const { data: attemptData, error: attemptErr } = await supabase.rpc('record_intake_recovery_attempt', {
-            p_file_id: f.file_id,
+            p_file_id: b.primary_file_id,
             p_max_attempts: MAX_RECOVERY_ATTEMPTS,
             p_cap_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
           })
           if (attemptErr) {
             const message = attemptErr instanceof Error ? attemptErr.message : String(attemptErr)
-            summary.errors.push({ stage: `record_intake_recovery_attempt:${f.file_id}`, message })
-            log('recovery_stage_failed', { stage: 'record_intake_recovery_attempt', file_id: f.file_id, error: message })
+            summary.errors.push({ stage: `record_intake_recovery_attempt:${b.primary_file_id}`, message })
+            log('recovery_stage_failed', { stage: 'record_intake_recovery_attempt', file_id: b.primary_file_id, error: message })
             continue
           }
           const attemptResult = attemptData?.[0]
           if (attemptResult?.capped) {
-            await supabase.from('job_intake_locks').delete().eq('job_id', f.job_id)
+            await supabase.from('job_intake_locks').delete().eq('job_id', b.job_id)
             summary.files_permanently_failed++
             log('recovery_retry_cap_reached', {
-              stage: 'stuck_classification_retry', job_id: f.job_id, file_id: f.file_id, attempts: attemptResult.prior_attempts,
+              stage: 'stuck_classification_retry', job_id: b.job_id, file_id: b.primary_file_id, attempts: attemptResult.prior_attempts,
             })
             continue
           }
 
           summary.stuck_files_retried++
-          log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
+          log('recovery_classification_retriggered', { job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
           await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-            body: JSON.stringify({ parent_job_id: f.processing_batch_id }),
+            body: JSON.stringify({ parent_job_id: b.batch_id }),
           }).catch((fetchErr) => {
-            log('recovery_smooth_responder_trigger_failed', { job_id: f.job_id, error: String(fetchErr) })
+            log('recovery_smooth_responder_trigger_failed', { job_id: b.job_id, error: String(fetchErr) })
           })
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        summary.errors.push({ stage: 'find_stuck_files_needing_classification_retry', message })
-        log('recovery_stage_failed', { stage: 'find_stuck_files_needing_classification_retry', error: message })
+        summary.errors.push({ stage: 'find_stuck_batches_needing_classification_retry', message })
+        log('recovery_stage_failed', { stage: 'find_stuck_batches_needing_classification_retry', error: message })
       }
   }
 

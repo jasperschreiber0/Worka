@@ -215,8 +215,8 @@ DO $$ BEGIN
     'acquire_or_reclaim_job_intake_lock function is missing (migration 037)'
   );
   PERFORM pg_temp.assert(
-    (SELECT count(*) FROM pg_proc WHERE proname = 'find_stuck_files_needing_classification_retry') = 1,
-    'find_stuck_files_needing_classification_retry function is missing (migration 037)'
+    (SELECT count(*) FROM pg_proc WHERE proname = 'find_stuck_batches_needing_classification_retry') = 1,
+    'find_stuck_batches_needing_classification_retry function is missing (migration 052 — replaced find_stuck_files_needing_classification_retry from migration 037)'
   );
   PERFORM pg_temp.assert(
     (SELECT count(*) FROM pg_proc WHERE proname = 'record_ai_failure' AND pg_get_function_arguments(oid) = 'p_file_id uuid, p_classification text, p_reason text, p_max_occurrences integer') = 1,
@@ -233,6 +233,14 @@ DO $$ BEGIN
   PERFORM pg_temp.assert(
     (SELECT count(*) FROM pg_proc WHERE proname = 'record_intake_recovery_attempt' AND pg_get_function_arguments(oid) = 'p_file_id uuid, p_max_attempts integer, p_cap_reason text') = 1,
     'record_intake_recovery_attempt(uuid, integer, text) function is missing or its signature changed (migration 051)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'recompute_file_intake_status' AND pg_get_function_arguments(oid) = 'p_file_id uuid') = 1,
+    'recompute_file_intake_status(uuid) function is missing or its signature changed (migration 052)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'recompute_batch_file_intake_statuses' AND pg_get_function_arguments(oid) = 'p_batch_id uuid') = 1,
+    'recompute_batch_file_intake_statuses(uuid) function is missing or its signature changed (migration 052)'
   );
 END $$;
 
@@ -257,7 +265,11 @@ BEGIN
   PERFORM * FROM find_batches_with_claimable_work();
   PERFORM * FROM recompute_stalled_batches();
   PERFORM * FROM find_stale_job_intake_locks();
-  PERFORM * FROM find_stuck_files_needing_classification_retry();
+  PERFORM * FROM find_stuck_batches_needing_classification_retry();
+  -- Both matches zero rows for a bogus id and returns/writes nothing —
+  -- same safe-to-run-in-production shape as the other probes here.
+  PERFORM recompute_file_intake_status(v_bogus_uuid);
+  PERFORM recompute_batch_file_intake_statuses(v_bogus_uuid);
   -- record_ai_failure's SELECT...FOR UPDATE matches zero rows for a bogus
   -- file_id, hits its own NOT FOUND branch, and returns without mutating —
   -- same safe-to-run-in-production shape as retry_or_fail_document_job above.

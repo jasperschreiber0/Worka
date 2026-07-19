@@ -748,6 +748,47 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 across 8+ consecutive runs — the retry cap (MAX_RECOVERY_ATTEMPTS=3)
                                 was never actually enforced. The route's callers now check the RPC's
                                 `error` and throw/log rather than silently defaulting.
+052_derived_file_intake_status.sql — redesigns ownership of files.intake_status. It was never a
+                                real per-file state machine for sibling files in a multi-file
+                                upload: only the PRIMARY file (the one whose id the upload's SSE
+                                session used) was ever written to, at all four transition points
+                                (createDocumentProcessingBatch, smooth-responder's fail()/
+                                needs_info/success paths). Every sibling sat at 'uploaded' forever
+                                regardless of real outcome — this is what broke intake-recovery's
+                                stuck-classification discovery (filtered on files.intake_status,
+                                which only the primary could ever be) and produced permanently-
+                                stale "N plans uploaded but not yet processed" messaging in
+                                JobSnapshotPanel's risk list and chat's review_assumptions handler
+                                for every completed multi-file job. The real per-document truth
+                                already existed and was already correct — document_processing_jobs
+                                (extraction outcome, migration 034) and project_documents.
+                                extraction_status (classification outcome, migration 050) — so
+                                files.intake_status was a THIRD, ad hoc, primary-only truth source
+                                layered on top rather than a second one. Adds
+                                recompute_file_intake_status(uuid) and
+                                recompute_batch_file_intake_statuses(uuid): files.intake_status is
+                                now a pure, mechanically-recomputed PROJECTION derived from those
+                                two real tables (never written to directly again for queue-model
+                                files), following the same "cached view, never authoritative,
+                                recomputed and overwritten" pattern jobs.knowledge_confidence
+                                already uses (migration 035). A file's derived status is
+                                individually accurate even inside a mixed-outcome batch: one
+                                genuinely-unreadable sibling shows 'failed' while the other nine,
+                                whose content reached the quote, show 'extracted'. Also replaces
+                                find_stuck_files_needing_classification_retry (migration 037, now
+                                dropped) with find_stuck_batches_needing_classification_retry,
+                                keyed on document_processing_batches directly instead of joining
+                                through files.intake_status/processing_batch_id — both fields that
+                                were only ever populated for a batch's primary file, so the old
+                                discovery query could structurally never surface a stuck batch by
+                                any other file. Includes a one-time evidence-based backfill
+                                (recomputes every file that has ever gone through the queue model)
+                                so already-completed uploads are corrected immediately, not just
+                                future ones. app/api/cron/intake-recovery/route.ts, app/api/intake/
+                                [fileId]/route.ts, and supabase/functions/{smooth-responder,
+                                document-worker}/index.ts are all updated to call the new functions
+                                at their existing transition points rather than writing
+                                files.intake_status inline.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
