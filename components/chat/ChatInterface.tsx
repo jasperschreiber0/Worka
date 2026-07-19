@@ -1413,6 +1413,23 @@ export default function ChatInterface({
         </div>
 
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              setInput('new job at ')
+              inputRef.current?.focus()
+            }}
+            className="w-8 h-8 rounded-[6px] flex items-center justify-center flex-shrink-0 transition-colors"
+            style={{ color: 'var(--text-secondary)' }}
+            title="New job"
+            aria-label="New job"
+            onMouseOver={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-elevated)' }}
+            onMouseOut={(e) => { e.currentTarget.style.backgroundColor = 'transparent' }}
+          >
+            <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+          </button>
           <Link
             href="/estimate"
             className="w-8 h-8 rounded-[6px] flex items-center justify-center flex-shrink-0 transition-colors"

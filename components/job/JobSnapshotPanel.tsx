@@ -156,6 +156,7 @@ export default function JobSnapshotPanel({
   const [answeringQuestions, setAnsweringQuestions] = useState(false)
   const [clarifySubmitting, setClarifySubmitting] = useState(false)
   const [clarifyError, setClarifyError] = useState<string | null>(null)
+  const [archiving, setArchiving] = useState(false)
 
   // Fetch aggregate pulse once for the no-job empty state
   useEffect(() => {
@@ -230,6 +231,26 @@ export default function JobSnapshotPanel({
     },
     [job, snapshot?.clarify_file_id, fetchSnapshot],
   )
+
+  const handleArchive = useCallback(async () => {
+    if (!job) return
+    if (!window.confirm(`Archive "${job.address}"? It'll be hidden from your job list — nothing is deleted, and this can be undone directly in the database if needed.`)) {
+      return
+    }
+    setArchiving(true)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: 'Could not archive job' }))
+        throw new Error((body as { error?: string }).error ?? 'Could not archive job')
+      }
+      onClose()
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Could not archive job — please try again.')
+    } finally {
+      setArchiving(false)
+    }
+  }, [job, onClose])
 
   const handleActivated = useCallback(
     (result: ActivationResult) => {
@@ -386,6 +407,46 @@ export default function JobSnapshotPanel({
               )}
             </div>
           </div>
+          {/* Archive button — soft-deletes via jobs.status='archived' (see
+              /api/jobs/[jobId] DELETE), just hides the job from lists.
+              Nothing is destroyed: quotes, variations, and the WorkA Proof
+              trail are all untouched. */}
+          {job && (
+            <button
+              type="button"
+              onClick={handleArchive}
+              disabled={archiving}
+              aria-label="Archive job"
+              title="Archive job"
+              style={{
+                flexShrink: 0,
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                border: 'none',
+                background: 'transparent',
+                cursor: archiving ? 'default' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--text-tertiary)',
+                opacity: archiving ? 0.5 : 1,
+              }}
+              onMouseOver={(e) => {
+                if (archiving) return
+                e.currentTarget.style.color = 'var(--status-red)'
+                e.currentTarget.style.backgroundColor = 'rgba(244,67,54,0.1)'
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.color = 'var(--text-tertiary)'
+                e.currentTarget.style.backgroundColor = 'transparent'
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m3 0v13a1 1 0 01-1 1H7a1 1 0 01-1-1V6h12z" />
+              </svg>
+            </button>
+          )}
           {/* Close button */}
           <button
             type="button"
