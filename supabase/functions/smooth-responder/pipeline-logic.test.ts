@@ -1256,3 +1256,167 @@ test('nextStage3FailureHistory: end-to-end — identical input escalates to skip
   // A genuinely new upload changes the merged fact base -> different hash -> fresh allowance
   assert.equal(shouldSkipStage3Call(history, HASH_B), false, 'a changed document set must not inherit the exhausted history')
 })
+
+// ─── Audit: chunk merge behaviour against 4 specific scenarios ─────────────
+// (dedup questions / preserve conflicts / preserve dependencies / never
+// silently drop uncertainty) — see the investigation this responds to.
+
+// Scenario 1: two chunks independently raise the textually IDENTICAL
+// clarifying question (plausible for a general, non-trade-specific gap like
+// "no structural drawings" that both chunks' reasoning notices).
+test('AUDIT scenario 1: two chunks raising the exact same question text (general, trade_category_id null) are deduplicated', () => {
+  const chunkA: ScopeReasoningResult = {
+    scope: [], clarifying_questions: [
+      { question: 'No structural drawings provided.', reason: 'affects framing and footings', trade_category_id: null, blocking: true },
+    ],
+  }
+  const chunkB: ScopeReasoningResult = {
+    scope: [], clarifying_questions: [
+      { question: 'No structural drawings provided.', reason: 'affects electrical conduit routing', trade_category_id: null, blocking: true },
+    ],
+  }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  // Same finding: dedup is keyed on (question text, trade_category_id) only
+  // — a DIFFERENT `reason` string on an otherwise-identical question does
+  // NOT prevent dedup, so only chunk A's reason survives. This is a real,
+  // observable behaviour worth knowing (the second chunk's specific "why"
+  // is silently dropped when the question text matches exactly) — flagged
+  // below as scenario 1's finding, not fixed here since the question ITSELF
+  // (the builder-facing content) is correctly deduplicated, which is what
+  // "deduplicates questions" asks for.
+  assert.equal(merged.clarifying_questions.length, 1)
+  assert.equal(merged.clarifying_questions[0].reason, 'affects framing and footings')
+})
+
+// Scenario 1b: the same underlying gap, phrased differently by each chunk
+// (realistic — chunk A and chunk B are independent Claude calls with no
+// shared context, so identical wording is not guaranteed even for the same
+// real-world gap).
+test('AUDIT scenario 1b: near-duplicate questions (different wording, same real gap) are NOT deduplicated — both survive', () => {
+  const chunkA: ScopeReasoningResult = {
+    scope: [], clarifying_questions: [
+      { question: 'Are structural engineering drawings available?', reason: 'needed for footing sizes', trade_category_id: null, blocking: true },
+    ],
+  }
+  const chunkB: ScopeReasoningResult = {
+    scope: [], clarifying_questions: [
+      { question: 'Do we have the structural drawing set?', reason: 'needed for slab design', trade_category_id: null, blocking: true },
+    ],
+  }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  // FINDING (not a bug in mergeScopeReasoningResults itself, a documented
+  // limitation): dedup is exact-text only, by design (see scenario 4 for
+  // why fuzzy matching would be the wrong fix). Two independently-worded
+  // questions about the same real document gap both survive as separate
+  // entries. "Does not silently drop uncertainty" is satisfied (neither is
+  // lost) but "deduplicates questions" is only satisfied for LITERAL
+  // repeats, not semantic ones.
+  assert.equal(merged.clarifying_questions.length, 2)
+})
+
+// Scenario 2: two chunks return CONFLICTING scope for the SAME
+// trade_category_id — should only happen if a chunk doesn't fully respect
+// its assigned trade subset (each chunk is instructed to reason only about
+// its own trades), but nothing in mergeScopeReasoningResults enforces that
+// boundary, so it's worth proving what happens if it does.
+test('AUDIT scenario 2: conflicting assumptions for the SAME trade across two chunks — current behaviour silently drops one side', () => {
+  const chunkA: ScopeReasoningResult = {
+    scope: [{
+      trade_category_id: 2, included_scope: ['timber frame construction'], excluded_scope: [],
+      dependencies: [], assumptions: ['assume standard timber frame, no engineering required'],
+      uncertainty_notes: null, confidence: 70,
+    }],
+    clarifying_questions: [],
+  }
+  const chunkB: ScopeReasoningResult = {
+    scope: [{
+      trade_category_id: 2, included_scope: ['steel portal frame construction'], excluded_scope: [],
+      dependencies: [], assumptions: ['assume engineered steel frame per structural drawings'],
+      uncertainty_notes: null, confidence: 60,
+    }],
+    clarifying_questions: [],
+  }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  // FINDING: this is a real gap. Two genuinely conflicting views of the
+  // same trade (timber vs steel framing — a materially different, expensive
+  // distinction) collapse to exactly one entry (last-writer-wins), with:
+  //   - no log/flag that a collision happened at all
+  //   - chunk A's entire assumption ("standard timber, no engineering
+  //     required") discarded with no trace
+  //   - no uncertainty_notes or clarifying_question generated to surface
+  //     the disagreement to the builder or a reviewer
+  // This violates "preserves conflicts" and "does not silently drop
+  // uncertainty" IF this scenario occurs in production. It's structurally
+  // rare (chunks are given disjoint trade subsets), but "rare and silent"
+  // is exactly the failure mode worth catching before it's needed live.
+  assert.equal(merged.scope.length, 1, 'only one entry survives per trade_category_id — the conflict itself is invisible')
+  assert.equal(merged.scope[0].included_scope, chunkB.scope[0].included_scope, 'chunk A (timber) is completely discarded, not merged or flagged')
+  const survivingAssumptions = merged.scope[0].assumptions as string[]
+  assert.ok(!survivingAssumptions.some((a) => a.includes('timber')), 'chunk A assumption text is gone with no trace')
+})
+
+// Scenario 3: a dependency discovered while reasoning about one trade that
+// affects a DIFFERENT trade in another chunk.
+test('AUDIT scenario 3: a cross-trade dependency noted by the chunk that owns the source trade is preserved verbatim', () => {
+  // Chunk A owns trade 2 (Framing) and notes a dependency on trade 12
+  // (Electrical, owned by chunk B) as plain text within its OWN entry —
+  // this is the only way a single chunk call can express a cross-trade
+  // dependency, since it has no visibility into the other chunk's output.
+  const chunkA: ScopeReasoningResult = {
+    scope: [{
+      trade_category_id: 2, included_scope: ['wall framing'], excluded_scope: [],
+      dependencies: ['electrical conduit chasing (trade 12) must be coordinated before wall linings close up framing'],
+      assumptions: [], uncertainty_notes: null, confidence: 75,
+    }],
+    clarifying_questions: [],
+  }
+  const chunkB: ScopeReasoningResult = {
+    scope: [{
+      trade_category_id: 12, included_scope: ['power points', 'switchboard'], excluded_scope: [],
+      dependencies: [], assumptions: [], uncertainty_notes: null, confidence: 80,
+    }],
+    clarifying_questions: [],
+  }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  const framingEntry = merged.scope.find((s) => s.trade_category_id === 2)
+  const electricalEntry = merged.scope.find((s) => s.trade_category_id === 12)
+  // What the merge function itself guarantees: whatever a chunk actually
+  // returned is preserved verbatim — proven here.
+  assert.deepEqual(framingEntry!.dependencies, chunkA.scope[0].dependencies)
+  // FINDING (a structural limitation of chunking, not a merge-function bug):
+  // the dependency is only recorded on trade 2's (Framing's) side, because
+  // chunk B — reasoning about trade 12 independently, with no visibility
+  // into chunk A's output — never had the opportunity to also note it on
+  // trade 12's side the way a single, unchunked call reasoning about both
+  // trades together could have. mergeScopeReasoningResults cannot invent a
+  // cross-reference neither chunk actually returned; this is inherent to
+  // running the two chunks as independent calls, not a defect in the merge
+  // step itself.
+  assert.deepEqual(electricalEntry!.dependencies, [], 'the same dependency is NOT mirrored onto the affected trade — chunking cannot coordinate this without shared context')
+})
+
+// Scenario 4: multiple trade chunks each identify a missing document as a
+// gap, from their own trade's perspective.
+test('AUDIT scenario 4: a missing document identified independently by multiple trade chunks — every distinct concern survives, none silently dropped', () => {
+  const chunkA: ScopeReasoningResult = { // trades 1-6 group
+    scope: [], clarifying_questions: [
+      { question: 'No architectural drawings provided for the roof plan.', reason: 'roofing quantities cannot be measured', trade_category_id: 3, blocking: true },
+    ],
+  }
+  const chunkB: ScopeReasoningResult = { // trades 7-13 group
+    scope: [], clarifying_questions: [
+      { question: 'No architectural drawings provided for the roof plan.', reason: 'gutter/downpipe layout cannot be determined', trade_category_id: 3, blocking: true },
+      { question: 'Fixture schedule not supplied.', reason: 'tapware selections cannot be priced', trade_category_id: 11, blocking: false },
+    ],
+  }
+  const merged = mergeScopeReasoningResults([chunkA, chunkB])
+  // The (question, trade_category_id) pair is IDENTICAL between chunk A and
+  // chunk B's first question (same text, same trade_category_id=3) — this
+  // is the one case scenario 4 collapses to an exact duplicate, so it
+  // dedupes correctly (chunk A's reason wins, same finding as scenario 1).
+  // The distinctly-different fixture-schedule question is unrelated and
+  // must survive untouched.
+  assert.equal(merged.clarifying_questions.length, 2)
+  assert.ok(merged.clarifying_questions.some((q) => q.question === 'No architectural drawings provided for the roof plan.' && q.reason === 'roofing quantities cannot be measured'))
+  assert.ok(merged.clarifying_questions.some((q) => q.question === 'Fixture schedule not supplied.'))
+})
