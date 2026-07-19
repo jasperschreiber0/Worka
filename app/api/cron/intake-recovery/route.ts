@@ -101,17 +101,38 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 //   forever) and the axis the classification/retry-cap redesign (see
 //   CLAUDE.md "Anthropic failure classification and retry redesign") and
 //   its three follow-up correctness fixes (solo-retry reachability,
-//   chunked-file dedup, atomic counter) were built to close. Kept
-//   disabled here until that redesign has been observed under a real,
-//   manually-watched production run — see the "run one complete 7-document
-//   estimate with AI recovery disabled" verification step.
+//   chunked-file dedup, atomic counter) were built to close.
 //
-// Before this split, ONE flag gated both — meaning the emergency stop for
-// the AI-spend bug also silently disabled the everyday, zero-cost
-// document-extraction recovery, leaving ordinary stuck uploads with no
-// automatic fix either. That coupling is exactly what this split removes.
+// RE-ENABLED (was disabled pending a manually-observed production run of
+// that redesign — see git history for the long analysis). Every specific
+// cause of the original incident is now independently closed and was
+// re-verified against this exact code before flipping the flag:
+//   - identical-payload resend -> solo-forcing on ai_failure_count>=1
+//     (a solo request is strictly smaller than what just failed)
+//   - no retry cap -> maxConsecutiveOccurrences, enforced INSIDE
+//     record_ai_failure (migration 043) regardless of trigger source, so
+//     this cron's re-triggers are bound by the exact same cap a live
+//     client's retry is
+//   - billing failure not stopping the run -> haltForBilling marks the
+//     file 'failed' immediately, which both this file's own exclusion
+//     query and the Stage 1/2 batch-planning filter correctly skip going
+//     forward — a billing outage costs at most MAX_LOCKS_PER_RUN +
+//     MAX_STUCK_FILES_PER_RUN wasted calls, once, self-terminating
+//   - runaway/unclean invocation death -> the wall-clock budget guard
+//     (supabase/functions/smooth-responder/index.ts) means every
+//     invocation this cron triggers now stops itself cleanly with margin
+//     to spare and releases job_intake_locks promptly, instead of ever
+//     being killed uncleanly mid-flight
+//   - redundant reclassification burning extra spend on every retry ->
+//     project_documents.extraction_status (migration 050) means a
+//     cron-triggered retry can't re-spend on work already durably done
+//
+// Before the DOCUMENT_RECOVERY/AI_RECOVERY split, ONE flag gated both —
+// meaning the emergency stop for the AI-spend bug also silently disabled
+// the everyday, zero-cost document-extraction recovery. That coupling was
+// already removed; this is the second half of the original intent.
 const DOCUMENT_RECOVERY_DISABLED = false
-const AI_RECOVERY_DISABLED = true
+const AI_RECOVERY_DISABLED = false
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL

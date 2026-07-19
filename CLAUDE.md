@@ -904,9 +904,10 @@ a billing-halt classification; now halts the whole run immediately on one. (3)
 `GET /api/cron/intake-recovery`'s stale-lock reclaim and stuck-classification retry (migration 037)
 — already capped per-run (`MAX_BATCHES_PER_RUN`/`MAX_LOCKS_PER_RUN`/`MAX_STUCK_FILES_PER_RUN`) and,
 since the incident this followed, per-file across runs (`files.intake_recovery_attempts`, migration
-040) — see "Independent Intake Recovery Service" above; the AI-calling half of this (steps 4-5)
-remains disabled via `AI_RECOVERY_DISABLED` pending a manually-observed production run of this
-redesign (the document-recovery half, steps 1-3, was restored by migration 044 — see below). (4)
+040) — see "Independent Intake Recovery Service" above; the AI-calling half of this (steps 4-5) is
+now re-enabled via `AI_RECOVERY_DISABLED = false`, after an architecture review re-verified every
+specific cause of the original incident against the current code (see that section for the full
+list) — the document-recovery half, steps 1-3, was restored earlier by migration 044. (4)
 `document-worker`'s `retry_or_fail_document_job` (migration 034) — unaffected; that axis is PDF
 extraction retries, not Anthropic calls, and was never implicated in this incident.
 
@@ -1157,11 +1158,22 @@ both, so the emergency stop for the AI-spend incident also silently disabled the
 zero-cost document-extraction recovery — an ordinary stuck upload (a crashed extraction worker, or
 a lost `triggerNext`/`triggerClassification` fetch) had no automatic fix either while that flag was
 on. Current state: `DOCUMENT_RECOVERY_DISABLED = false` (restored by migration 044, safe — this
-half has never been implicated in any incident), `AI_RECOVERY_DISABLED = true` (stays off pending a
-manually-observed production run of the classification/retry-cap redesign — see "Anthropic failure
-classification and retry redesign" above). The pg_cron schedule firing does not by itself imply
-Anthropic calls can happen; `AI_RECOVERY_DISABLED` is checked inside the route regardless of how the
-route was invoked (pg_cron, GitHub Actions, or a manual curl).
+half has never been implicated in any incident), `AI_RECOVERY_DISABLED = false` (re-enabled after an
+architecture review re-verified every specific cause of the original incident is independently
+closed: solo-forcing on `ai_failure_count>=1` means a retry can never resend the identical payload
+that just timed out; `maxConsecutiveOccurrences` is enforced *inside* `record_ai_failure`, migration
+043, regardless of trigger source, so a cron-triggered retry is bound by the exact same cap a live
+client's retry is; `haltForBilling` marks a file `'failed'` immediately on a billing-classified
+error, which both this route's own queries and Stage 1/2's batch-planning filter skip on every
+future tick, bounding a billing outage to at most `MAX_LOCKS_PER_RUN + MAX_STUCK_FILES_PER_RUN`
+wasted calls, once, self-terminating; the wall-clock budget guard means an invocation this cron
+triggers now always stops itself cleanly and releases `job_intake_locks` promptly instead of ever
+dying uncleanly mid-flight; and `project_documents.extraction_status` — migration 050 — means a
+cron-triggered retry can't burn a Claude call re-classifying a document already durably done). The
+pg_cron schedule firing does not by itself imply Anthropic calls can happen; `AI_RECOVERY_DISABLED`
+is checked inside the route regardless of how the route was invoked (pg_cron, GitHub Actions, or a
+manual curl) — flipping it back to `true` remains the fastest kill switch if a new incident ever
+warrants one.
 
 **Operational considerations:**
 - **Actual trigger, live today**: `supabase/migrations/038_intake_recovery_pg_cron.sql` — `pg_cron`
