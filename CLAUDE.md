@@ -730,6 +730,24 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 exclusion filter also checks extraction_status='complete' as a
                                 defensive second layer, matching its existing intake_status='failed'
                                 check's own stated philosophy.
+051_atomic_intake_recovery_attempt_counter.sql — record_intake_recovery_attempt(uuid, integer,
+                                text) RPC, replacing a JS-side SELECT-then-UPDATE of
+                                files.intake_recovery_attempts in GET /api/cron/intake-recovery
+                                (both the stale-lock-reclaim and stuck-classification-retry paths)
+                                with one atomic function, following the same pattern as
+                                retry_or_fail_document_job (migration 034) and record_ai_failure
+                                (migration 043). Root cause found in production: neither the SELECT
+                                nor the UPDATE checked their `error` return, so any failure on
+                                either call (most likely a stale PostgREST schema cache not yet
+                                reflecting migration 040's column — the exact "not found in schema
+                                cache" failure mode covered above) silently treated the file as
+                                attempt zero and silently dropped the write. Confirmed against
+                                production logs: one file was reclaimed/retried on every single
+                                cron run (once a minute) with recovery_attempts logged as 1 every
+                                time, and intake_recovery_runs.files_permanently_failed stayed at 0
+                                across 8+ consecutive runs — the retry cap (MAX_RECOVERY_ATTEMPTS=3)
+                                was never actually enforced. The route's callers now check the RPC's
+                                `error` and throw/log rather than silently defaulting.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**

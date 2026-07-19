@@ -230,6 +230,10 @@ DO $$ BEGIN
     (SELECT count(*) FROM pg_proc WHERE proname = 'find_and_fail_abandoned_files') = 1,
     'find_and_fail_abandoned_files function is missing (migration 046)'
   );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'record_intake_recovery_attempt' AND pg_get_function_arguments(oid) = 'p_file_id uuid, p_max_attempts integer, p_cap_reason text') = 1,
+    'record_intake_recovery_attempt(uuid, integer, text) function is missing or its signature changed (migration 051)'
+  );
 END $$;
 
 -- ─── Functions are actually callable (not just present) ────────────────────
@@ -266,6 +270,10 @@ BEGIN
   -- (same trick as reclaim_stale_document_jobs(interval '100 years', ...)
   -- above), so `created_at < now() - 100 years` matches nothing real.
   PERFORM * FROM find_and_fail_abandoned_files(interval '100 years');
+  -- record_intake_recovery_attempt's SELECT...FOR UPDATE also matches zero
+  -- rows for a bogus file_id, hits NOT FOUND, and returns without mutating —
+  -- same safe-to-run-in-production shape as record_ai_failure above.
+  PERFORM * FROM record_intake_recovery_attempt(v_bogus_uuid, 3, 'schema_assertions.sql callability probe');
 EXCEPTION WHEN OTHERS THEN
   RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: one or more document-processing/recovery functions are not callable: %', SQLERRM;
 END $$;

@@ -396,11 +396,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             // Already terminal? Nothing to resume — the lock was just leaked
             // past the pipeline's own release (shouldn't happen given its
             // try/finally, but a stuck lock alone is harmless to release).
-            const { data: fileRow } = await supabase
+            const { data: fileRow, error: fileRowErr } = await supabase
               .from('files')
-              .select('id, intake_status, builder_id, processing_batch_id, intake_recovery_attempts')
+              .select('id, intake_status, builder_id, processing_batch_id')
               .eq('id', candidate.file_id)
               .single()
+            if (fileRowErr) throw fileRowErr
             if (!fileRow || ['extracted', 'failed', 'needs_info'].includes(fileRow.intake_status)) {
               await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
               continue
@@ -411,29 +412,31 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             // often a transient outage (e.g. Anthropic credits) that recovery
             // cannot fix by re-running the same expensive AI call again. Stop
             // after MAX_RECOVERY_ATTEMPTS rather than retrying forever.
-            if (fileRow.intake_recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
-              await supabase
-                .from('files')
-                .update({
-                  intake_status: 'failed',
-                  failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while reclaiming a stale processing lock — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
-                })
-                .eq('id', candidate.file_id)
+            // Atomic RPC (migration 051) — a plain JS-side SELECT-then-UPDATE
+            // here previously let a read/write failure (e.g. a stale
+            // PostgREST schema cache) silently default to "first attempt"
+            // forever, defeating this cap in production. Any RPC error is
+            // thrown, not swallowed, so it surfaces via this block's own
+            // catch instead of masquerading as attempt zero.
+            const { data: attemptData, error: attemptErr } = await supabase.rpc('record_intake_recovery_attempt', {
+              p_file_id: candidate.file_id,
+              p_max_attempts: MAX_RECOVERY_ATTEMPTS,
+              p_cap_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while reclaiming a stale processing lock — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
+            })
+            if (attemptErr) throw attemptErr
+            const attemptResult = attemptData?.[0]
+            if (attemptResult?.capped) {
               await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
               summary.files_permanently_failed++
               log('recovery_retry_cap_reached', {
                 stage: 'stale_lock_reclaim', job_id: candidate.job_id, file_id: candidate.file_id,
-                attempts: fileRow.intake_recovery_attempts,
+                attempts: attemptResult.prior_attempts,
               })
               continue
             }
-            await supabase
-              .from('files')
-              .update({ intake_recovery_attempts: fileRow.intake_recovery_attempts + 1 })
-              .eq('id', candidate.file_id)
 
             summary.job_locks_reclaimed++
-            log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id, recovery_attempts: fileRow.intake_recovery_attempts + 1 })
+            log('recovery_job_lock_reclaimed', { job_id: candidate.job_id, file_id: candidate.file_id, processing_batch_id: fileRow.processing_batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
 
             // Prefer the queue-model resume path (re-reads each document's
             // already-persisted extraction result — no re-download/re-parse of
@@ -483,38 +486,38 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           })
           if (lockErr || !lockData?.[0]?.acquired) continue
 
-          const { data: stuckFileRow } = await supabase
-            .from('files')
-            .select('intake_recovery_attempts')
-            .eq('id', f.file_id)
-            .single()
-          const attempts = stuckFileRow?.intake_recovery_attempts ?? 0
-
-          // Same retry cap as step 4 — a file that keeps needing a
-          // classification retry is failing every time it's re-triggered, not
-          // recovering from a one-off lost network call.
-          if (attempts >= MAX_RECOVERY_ATTEMPTS) {
-            await supabase
-              .from('files')
-              .update({
-                intake_status: 'failed',
-                failure_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
-              })
-              .eq('id', f.file_id)
+          // Same retry cap as step 4, via the same atomic RPC (migration 051)
+          // — a file that keeps needing a classification retry is failing
+          // every time it's re-triggered, not recovering from a one-off lost
+          // network call. The previous JS-side SELECT-then-UPDATE here had
+          // its `error` unchecked on both calls, so any failure silently
+          // treated the file as attempt zero forever and silently dropped
+          // the write — this is the exact bug that let one file get
+          // reclaimed/retried every single cron run with recovery_attempts
+          // logged as 1 every time, never reaching the cap.
+          const { data: attemptData, error: attemptErr } = await supabase.rpc('record_intake_recovery_attempt', {
+            p_file_id: f.file_id,
+            p_max_attempts: MAX_RECOVERY_ATTEMPTS,
+            p_cap_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
+          })
+          if (attemptErr) {
+            const message = attemptErr instanceof Error ? attemptErr.message : String(attemptErr)
+            summary.errors.push({ stage: `record_intake_recovery_attempt:${f.file_id}`, message })
+            log('recovery_stage_failed', { stage: 'record_intake_recovery_attempt', file_id: f.file_id, error: message })
+            continue
+          }
+          const attemptResult = attemptData?.[0]
+          if (attemptResult?.capped) {
             await supabase.from('job_intake_locks').delete().eq('job_id', f.job_id)
             summary.files_permanently_failed++
             log('recovery_retry_cap_reached', {
-              stage: 'stuck_classification_retry', job_id: f.job_id, file_id: f.file_id, attempts,
+              stage: 'stuck_classification_retry', job_id: f.job_id, file_id: f.file_id, attempts: attemptResult.prior_attempts,
             })
             continue
           }
-          await supabase
-            .from('files')
-            .update({ intake_recovery_attempts: attempts + 1 })
-            .eq('id', f.file_id)
 
           summary.stuck_files_retried++
-          log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id, recovery_attempts: attempts + 1 })
+          log('recovery_classification_retriggered', { job_id: f.job_id, file_id: f.file_id, processing_batch_id: f.processing_batch_id, recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1 })
           await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
