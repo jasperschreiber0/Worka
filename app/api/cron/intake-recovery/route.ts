@@ -132,18 +132,27 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 // the everyday, zero-cost document-extraction recovery. That coupling was
 // already removed; this is the second half of the original intent.
 const DOCUMENT_RECOVERY_DISABLED = false
-// Re-enabled: the actual root cause of the retrigger storm (19 candidates/
-// run, 10 retriggers/minute) was traced to the Anthropic account's credit
-// balance hitting zero (ai_billing_halt / credit_exhausted, confirmed
-// directly from production smooth-responder logs) — every AI call in the
-// pipeline was failing identically regardless of which batch or how many
-// times it was retried, not a pipeline defect. Balance has been topped up.
-// Files that hit credit_exhausted while it was empty were already marked
-// intake_status='failed' by haltForBilling and won't auto-resume — they
-// need a re-upload or an explicit retry. If jobs start cycling through the
-// same stuck-batch backlog again after this, re-disable and investigate
-// before assuming it's another billing outage.
-const AI_RECOVERY_DISABLED = false
+// EMERGENCY RE-DISABLE (2026-07-19): a live retrigger storm was observed —
+// recovery_classification_retriggered firing every ~60s for the same 3
+// files (recovery_attempts climbing 1,1,2), each retrigger re-running the
+// full Stage 3 (Scope Reasoning) Claude call. Root cause: Stage 3's 220s
+// budget + Stage 6's 150s budget together exceed smooth-responder's own
+// WALL_CLOCK_SAFETY_MS (340s) — see supabase/functions/smooth-responder/
+// index.ts's hasWallClockBudget/bailForWallClockBudget. bailForWallClockBudget
+// only logs and never calls fail(), so the run exits cleanly via the
+// try/finally, deleting job_intake_locks — which makes
+// find_stuck_batches_needing_classification_retry (migration 052) treat it
+// as "classification never reached smooth-responder" and retrigger it,
+// every cron tick, forever (bounded only by the 3-attempt recovery cap per
+// file, which was itself burning 3 real Stage 3 calls per affected project
+// before failing). This is a structural deadlock, not a transient outage —
+// re-enabling this flag will immediately reproduce the loop for any job
+// whose Stage 3 call takes >190s. Do not re-enable until either (a) the
+// wall-clock budget arithmetic is fixed so Stage 3 + Stage 6 fit inside
+// WALL_CLOCK_SAFETY_MS, or (b) Stage 3 gets a completion checkpoint
+// (mirroring project_documents.extraction_status) so a retry can skip
+// straight to Stage 6 instead of re-running Stage 3.
+const AI_RECOVERY_DISABLED = true
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
