@@ -127,11 +127,26 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 //     project_documents.extraction_status (migration 050) means a
 //     cron-triggered retry can't re-spend on work already durably done
 //
-// Before the DOCUMENT_RECOVERY/AI_RECOVERY split, ONE flag gated both —
-// meaning the emergency stop for the AI-spend bug also silently disabled
-// the everyday, zero-cost document-extraction recovery. That coupling was
-// already removed; this is the second half of the original intent.
-const DOCUMENT_RECOVERY_DISABLED = false
+// EMERGENCY RE-DISABLE (2026-07-19, second incident same day): with
+// AI_RECOVERY_DISABLED=true (below) already stopping Anthropic calls,
+// production logs still showed find_and_fail_abandoned_files (step 3c,
+// migration 046) re-marking the SAME two files 'failed' on every single
+// cron tick (once a minute), each time reporting previous_status:
+// 'processing' — meaning something is resetting files.intake_status back to
+// a non-terminal value between ticks, which this function's own candidate
+// query (`intake_status IN ('uploaded','queued','processing')`) then matches
+// again. Root cause not yet isolated (no production DB access from the
+// session that found this) — plausibly an interaction with migration 052's
+// derived-intake_status recompute path re-deriving 'processing' for these
+// specific files independent of this function's direct write. No Anthropic
+// calls are involved (confirmed via ai_recovery_enabled: false in the same
+// logs), but it is still real, non-converging load run every minute
+// indefinitely, so the whole cron is stopped here rather than partially.
+// Do not re-enable until the revert mechanism is found and fixed — the
+// count of consecutive `abandoned_file_marked_failed` events for the same
+// file_id across intake_recovery_runs is the fastest way to confirm it's
+// actually stopped recurring before flipping this back.
+const DOCUMENT_RECOVERY_DISABLED = true
 // EMERGENCY RE-DISABLE (2026-07-19): a live retrigger storm was observed —
 // recovery_classification_retriggered firing every ~60s for the same 3
 // files (recovery_attempts climbing 1,1,2), each retrigger re-running the
