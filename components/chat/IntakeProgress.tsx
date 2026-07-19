@@ -67,6 +67,24 @@ const STAGE_LABELS: Record<string, string> = {
   building_quote: 'Building draft quote',
 }
 
+// A rough, honestly-labelled range rather than a fake countdown — real
+// duration depends on document count, page count, and how much vision vs.
+// text-only extraction each one needs (see smooth-responder's
+// vision-selective processing), which this component has no way to know in
+// advance. Buckets are calibrated against observed production timings for
+// this pipeline: a single small document usually classifies in well under
+// a minute; a multi-document commercial-scale upload (drawings + schedules)
+// has taken multiple sequential Stage 1/2 batches plus Stage 3/6, often
+// 10+ minutes end to end, sometimes needing more than one attempt. Never
+// tightened further than this without real telemetry to back a narrower
+// range — see CLAUDE.md's "never invent a fact" principle, which applies
+// here just as much as to extracted quantities.
+function estimatedDurationLabel(totalFiles: number): string {
+  if (totalFiles <= 2) return 'Usually takes 1–3 minutes for a job this size.'
+  if (totalFiles <= 5) return 'Usually takes 3–8 minutes for a job this size.'
+  return 'Larger uploads like this can take 10–15 minutes, sometimes longer for complex drawings.'
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function IntakeProgress({
@@ -410,6 +428,12 @@ export default function IntakeProgress({
           )}
         </div>
       </div>
+
+      {!isDone && (
+        <p className="text-[11px] text-[#777777]">
+          {estimatedDurationLabel(1 + (additionalFileIds?.length ?? 0))} You can close this and keep working — it keeps running in the background.
+        </p>
+      )}
 
       {/* Per-document extraction checklist */}
       {documentProgress && documentProgress.length > 1 && (

@@ -334,11 +334,20 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
     [uploadedById]
   )
 
+  // Once anything is actually in flight — uploading, or the intake
+  // pipeline has started — a stray click outside the panel must not
+  // dismiss it. Processing keeps running server-side either way (it's
+  // driven by the SSE route + EdgeRuntime.waitUntil, not by this panel
+  // staying mounted), but a builder who accidentally closes it here has
+  // no way back to watch it: there's no persistent "still processing"
+  // indicator anywhere else in the UI yet. Requiring the explicit X
+  // button is a deliberate speed bump against exactly that accidental
+  // dismissal, not a restriction on closing outright.
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      if (e.target === e.currentTarget) onClose()
+      if (e.target === e.currentTarget && !uploading && !intakeStarted) onClose()
     },
-    [onClose]
+    [onClose, uploading, intakeStarted]
   )
 
   if (!mounted) return null
