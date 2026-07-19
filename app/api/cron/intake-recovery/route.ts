@@ -132,19 +132,18 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 // the everyday, zero-cost document-extraction recovery. That coupling was
 // already removed; this is the second half of the original intent.
 const DOCUMENT_RECOVERY_DISABLED = false
-// EMERGENCY, temporary: re-disabled after batch-keyed stuck-classification
-// discovery (migration 052's find_stuck_batches_needing_classification_retry)
-// surfaced a much larger backlog of stuck batches than the old primary-
-// file-only query ever could (19 candidates seen in one run, capped to 10
-// retriggers/minute) — each retrigger is a real Anthropic spend, and many
-// of these batches are dying from wall-clock budget exhaustion
-// (bailForWallClockBudget, supabase/functions/smooth-responder/index.ts),
-// which reproduces identically on every retry since nothing shrinks the
-// fact base between attempts. Re-enable only after that root cause has a
-// real fix (or the backlog has been manually triaged) — flipping this back
-// to false blindly would reproduce the exact spend incident migration 041
-// was originally written to stop.
-const AI_RECOVERY_DISABLED = true
+// Re-enabled: the actual root cause of the retrigger storm (19 candidates/
+// run, 10 retriggers/minute) was traced to the Anthropic account's credit
+// balance hitting zero (ai_billing_halt / credit_exhausted, confirmed
+// directly from production smooth-responder logs) — every AI call in the
+// pipeline was failing identically regardless of which batch or how many
+// times it was retried, not a pipeline defect. Balance has been topped up.
+// Files that hit credit_exhausted while it was empty were already marked
+// intake_status='failed' by haltForBilling and won't auto-resume — they
+// need a re-upload or an explicit retry. If jobs start cycling through the
+// same stuck-batch backlog again after this, re-disable and investigate
+// before assuming it's another billing outage.
+const AI_RECOVERY_DISABLED = false
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
