@@ -65,6 +65,22 @@ const MAX_STUCK_FILES_PER_RUN = 10
 // (retry_or_fail_document_job, migration 034).
 const MAX_RECOVERY_ATTEMPTS = 3
 
+// Phase 1 observation phase: how many non-terminal batches this run will
+// sweep through reconcile_estimate_run, independent of whether recovery
+// itself touched them. Production sampling during the observation phase
+// (find_estimate_run_mismatches) showed the two existing call sites (SSE
+// poll ticks, and recovery only reconciling batches it actively acted on)
+// left ~95% of batches never reconciled at all -- a batch that's
+// processing normally, or whose job sits behind another job's lock, gets
+// no SSE client still polling it and needs no recovery action, so nothing
+// ever calls reconcile_estimate_run for it. This sweep closes that
+// coverage gap without changing what recovery decides or acts on -- it's
+// the same read-only, best-effort RPC every other call site already uses,
+// just called for more rows. Bounded like every other step here for the
+// same reason (a systemic issue must not turn one cron run into unbounded
+// work).
+const MAX_RECONCILE_SWEEP_PER_RUN = 100
+
 interface RunSummary {
   document_jobs_reclaimed: number
   stalled_batches_recomputed: number
@@ -599,10 +615,47 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
   }
 
+  // Coverage sweep (see MAX_RECONCILE_SWEEP_PER_RUN above): reconcile every
+  // batch this run hasn't already touched that either (a) already has a
+  // non-terminal estimate_runs row (shrinks reconciliation lag beyond what
+  // SSE polling alone gives), or (b) has never been reconciled at all
+  // (find_estimate_run_mismatches flags these via has_estimate_run=false —
+  // reused here rather than adding a second, differently-shaped finder, so
+  // the sweep and the audit tool agree on what counts as unreconciled).
+  // Purely observational — never calls Anthropic, never triggers
+  // document-worker/smooth-responder, never affects any decision this
+  // route makes.
+  try {
+    const { data: mismatches, error } = await supabase
+      .from('estimate_runs')
+      .select('batch_id')
+      .not('status', 'in', '(complete,failed)')
+    if (error) throw error
+    const { data: unreconciled, error: unreconciledErr } = await supabase.rpc('find_estimate_run_mismatches')
+    if (unreconciledErr) throw unreconciledErr
+    const sweepCandidates = new Set<string>([
+      ...((mismatches ?? []) as Array<{ batch_id: string }>).map((r) => r.batch_id),
+      ...((unreconciled ?? []) as Array<{ batch_id: string; has_estimate_run: boolean }>)
+        .filter((r) => !r.has_estimate_run)
+        .map((r) => r.batch_id),
+    ])
+    touchedBatchIds.forEach((id) => sweepCandidates.delete(id))
+    const sweepList = Array.from(sweepCandidates).slice(0, MAX_RECONCILE_SWEEP_PER_RUN)
+    if (sweepCandidates.size > MAX_RECONCILE_SWEEP_PER_RUN) {
+      log('recovery_reconcile_sweep_cap_hit', { candidates: sweepCandidates.size, capped_to: MAX_RECONCILE_SWEEP_PER_RUN })
+    }
+    sweepList.forEach((id) => touchedBatchIds.add(id))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    summary.errors.push({ stage: 'estimate_run_reconcile_sweep', message })
+    log('recovery_stage_failed', { stage: 'estimate_run_reconcile_sweep', error: message })
+  }
+
   // Refresh the estimate_runs projection for every batch this run actually
-  // touched. Best-effort and parallel — a failure here never affects
-  // recovery's own outcome (already committed above) or this run's audit
-  // row below, only how current the projection is for that batch.
+  // touched (recovery actions above, plus the coverage sweep just above).
+  // Best-effort and parallel — a failure here never affects recovery's own
+  // outcome (already committed above) or this run's audit row below, only
+  // how current the projection is for that batch.
   if (touchedBatchIds.size > 0) {
     const reconcileResults = await Promise.allSettled(
       Array.from(touchedBatchIds).map((batchId) =>
