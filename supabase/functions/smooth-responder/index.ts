@@ -921,11 +921,29 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     } catch { /* non-fatal */ }
 
     // ── Existing state for this job (incremental upload / resume support) ─
+    // .order('id') is load-bearing, not cosmetic: without it, Postgres makes
+    // no row-order guarantee across separate executions of this same query.
+    // stage3InputHash (below) is computed from factsBlock, which is built by
+    // joining factsForPrompt in array order — and selectFactsBalancedBySource
+    // returns its input UNSORTED whenever facts.length <= MAX_FACTS_IN_PROMPT
+    // (the common case), so an unstable query order flows straight into the
+    // hash. That silently broke Stage 3's whole "stop repeating an input
+    // that's already failed identically" circuit breaker (shouldSkipStage3Call
+    // / record_stage3_failure, migration 059): every retry of an UNCHANGED
+    // fact base was hashing to something different, so record_stage3_failure
+    // saw prior_input_hash !== current hash every time, reset the streak to 1
+    // every time, and never reached maxConsecutiveOccurrences — an unbounded,
+    // real-spend retrigger loop (recovery_classification_retriggered firing
+    // every ~60s for the same batch, stage3_trades_already_completed stuck at
+    // 0, resume_kind always fresh_or_unstarted), traced live 2026-07-19/20.
+    // Deterministic order makes an unchanged fact base hash identically on
+    // every retry, so the breaker actually engages.
     const { data: existingFacts } = await supabase
       .from('project_facts')
       .select('id, category, key, value, evidence, confidence, embedding, source_document_id')
       .eq('job_id', jobId)
       .eq('superseded', false)
+      .order('id', { ascending: true })
 
     const { data: existingDocs } = await supabase
       .from('project_documents')

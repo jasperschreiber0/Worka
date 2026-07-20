@@ -143,6 +143,33 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 //     project_documents.extraction_status (migration 050) means a
 //     cron-triggered retry can't re-spend on work already durably done
 //
+// RE-DISABLED AGAIN (2026-07-20) — live incident, root cause now found and
+// fixed at the source (supabase/functions/smooth-responder/index.ts's
+// existingFacts query gained a missing `.order('id')` — see that file's own
+// comment). Deploy logs from this morning showed recovery_classification_
+// retriggered firing every single cron tick (~60s) for the same 3 batches,
+// indefinitely: stage3_trades_already_completed stuck at 0 and resume_kind
+// always fresh_or_unstarted, meaning Stage 3's own circuit breaker
+// (shouldSkipStage3Call/record_stage3_failure, migration 059 — built
+// specifically to stop exactly this) never engaged. Root cause: that
+// breaker keys on a hash of the Stage 3 prompt (stage3InputHash), computed
+// from a facts array whose DB query had no ORDER BY — Postgres gives no
+// row-order guarantee without one, so an UNCHANGED fact base was hashing
+// differently on every retry, permanently defeating the "same input failed
+// before, don't resend it" check. Genuine, real Anthropic spend every
+// minute with no cap in sight (files.intake_recovery_attempts also
+// observed NOT advancing across consecutive ticks in the same logs — a
+// second, still-unconfirmed symptom worth checking once this is back on,
+// see intake_recovery_runs / files.intake_recovery_attempts history).
+// Do not flip this back to false until: (1) the ORDER BY fix has been
+// deployed (supabase-functions-deploy.yml runs on push to
+// supabase/functions/**), (2) a real retriggered batch is watched end-to-
+// end to confirm stage3_failure_count now actually accumulates against a
+// STABLE input hash and the breaker trips after maxConsecutiveOccurrences,
+// and (3) files.intake_recovery_attempts is confirmed to be genuinely
+// monotonic across ticks for a repeatedly-retried file, not just assumed
+// fixed as a side effect of (1).
+//
 // STILL DISABLED (2026-07-19) — deliberately NOT re-enabled in the same
 // pass that re-enabled AI_RECOVERY_DISABLED below. Root cause now traced
 // (previously "not yet isolated"), but not fixed, and this is a genuinely
@@ -198,7 +225,7 @@ const DOCUMENT_RECOVERY_DISABLED = true
 // (set back to true) if retrigger-storm behavior is observed again —
 // intake_recovery_runs / recovery_classification_retriggered logs are
 // the fastest way to confirm convergence before trusting this long-term.
-const AI_RECOVERY_DISABLED = false
+const AI_RECOVERY_DISABLED = true
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
