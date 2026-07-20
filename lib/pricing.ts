@@ -14,6 +14,43 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 export const DEFAULT_MARGIN_PCT = 18
 
+// ─── GST & contingency — product decision, documented here as the single
+// source of truth (pre-first-estimate remediation pass) ────────────────────
+//
+// quotes.gst_pct (default 10) and quotes.contingency_pct (default 8) exist
+// in the schema (migration 014), whose own comment describes an intended
+// "direct cost -> contingency -> margin -> GST" breakdown. Neither column
+// has ever been read by any pricing or display code — every client-facing
+// price has always been cost * (1 + margin_pct). Separately, the PDF export
+// (app/api/quotes/[quoteId]/export-pdf/route.ts) already carries its own,
+// independently-written footer: "All amounts in AUD excluding GST unless
+// stated." That pre-existing disclaimer is the real signal of intended
+// product behaviour, not the unused column defaults.
+//
+// DECISION: GST-exclusive, explicit and consistent everywhere.
+//   Every client-facing total (QuoteView, PDF export, send-quote email
+//   draft, the quote API's client_price, the job-activation contract value)
+//   is cost * (1 + margin_pct) — UNCHANGED arithmetic — now labeled with
+//   PRICE_BASIS_LABEL/CLIENT_PRICE_DISCLAIMER below on every one of those
+//   surfaces, not just the PDF footer.
+//   Rejected: auto-applying gst_pct to produce a GST-inclusive total. That
+//   would change the literal number on WorkA's first-ever real quote,
+//   introduces new arithmetic in exactly the calculation this remediation
+//   pass exists to de-risk, and contradicts the disclaimer already shipped.
+//   If GST-inclusive quoting is wanted later, that's a deliberate product
+//   decision for a human to make, not something to infer from a default.
+//
+// DECISION: contingency_pct is NOT applied to pricing. Left in the schema
+// (dropping the column is an unnecessary migration for what is really a
+// documentation gap) but explicitly out of the pricing flow: silently
+// baking an unexplained markup into a builder's first real quote is exactly
+// the "confidently output a number nobody can explain" risk this pass
+// exists to close. A real contingency feature needs its own builder-visible
+// control (e.g. a labeled breakdown line), not an invisible multiplier —
+// that is future product work, not something to add speculatively here.
+export const PRICE_BASIS_LABEL = 'excl. GST'
+export const CLIENT_PRICE_DISCLAIMER = 'All prices are in AUD and exclude GST.'
+
 export type RateSource = 'learned' | 'preference' | 'supplier' | 'platform' | 'network'
 
 export interface PriceableItem {

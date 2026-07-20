@@ -1,0 +1,20 @@
+-- ROLLBACK for 061_quote_is_current.sql — NOT auto-applied, kept as a .txt
+-- so it's never picked up by the migration runner.
+--
+-- Safe by construction: is_current and set_current_quote are only read/
+-- written by the call sites added alongside this migration (smooth-
+-- responder's quote creation, the Revise route). If application code is
+-- reverted first, calls to set_current_quote simply stop happening
+-- (harmless — the column and index become inert, not incorrect) until
+-- this rollback runs; if this rollback runs first, a call to
+-- set_current_quote will error, which its call sites treat as best-effort
+-- (matching this codebase's established posture for every other
+-- observability/derived-state write) — never blocks quote creation itself.
+
+DROP FUNCTION IF EXISTS set_current_quote(uuid, uuid);
+DROP INDEX IF EXISTS quotes_one_current_per_job;
+
+ALTER TABLE quotes
+  DROP COLUMN IF EXISTS is_current;
+
+NOTIFY pgrst, 'reload schema';

@@ -33,6 +33,8 @@ interface QuoteSummary {
   margin_pct: number
   /** total_cost marked up by margin_pct — what the client is quoted */
   client_price: number
+  /** "excl. GST" — from the API; see lib/pricing.ts PRICE_BASIS_LABEL. Optional for older cached responses. */
+  price_basis?: string
   confidence_score: number
   unresolved_count: number
   assumption_count: number
@@ -674,7 +676,12 @@ function SummaryCard({ summary }: SummaryCardProps) {
           <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{summary.margin_pct}%</span>
         </div>
         <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-elevated)' }}>
-          <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>Client price</span>
+          <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            Client price
+            <span className="ml-1.5 text-[11px] font-normal" style={{ color: 'var(--text-tertiary)' }}>
+              ({summary.price_basis ?? 'excl. GST'})
+            </span>
+          </span>
           <span className="text-[14px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>
             {formatCurrency(summary.client_price ?? summary.total_cost)}
           </span>
@@ -754,9 +761,18 @@ function SummaryCard({ summary }: SummaryCardProps) {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
-            <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
-              Quote is ready to send
-            </span>
+            <div className="min-w-0">
+              <span className="text-[13px] font-medium" style={{ color: 'var(--status-green)' }}>
+                Quote is ready to send
+              </span>
+              {/* "Ready" means no known blocking issues remain — not a
+                  guarantee the estimate is perfect. Stated explicitly so a
+                  builder doesn't read this pill as more certainty than
+                  WorkA can actually promise. */}
+              <span className="block text-[11px]" style={{ color: 'var(--status-green)', opacity: 0.75 }}>
+                No known blocking issues remain — review the numbers below before you send.
+              </span>
+            </div>
           </div>
         )}
       </div>

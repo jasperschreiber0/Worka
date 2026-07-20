@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
-import { applyMargin } from '@/lib/pricing'
+import { applyMargin, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
@@ -401,18 +401,21 @@ ${isDraft ? `
   <div class="section-heading">Line items by trade</div>
   ${categorySections}
 
-  <!-- Grand total -->
+  <!-- Grand total — price basis stated directly on the number itself, not
+       only in the page footer, so it can't be missed if this total is
+       screenshotted, forwarded, or read out of context. -->
   <div class="total-row">
     <div class="total-box">
-      <div class="total-label">Total project price</div>
+      <div class="total-label">Total project price (${PRICE_BASIS_LABEL})</div>
       <div class="total-amount">${formatCurrency(grandTotal)}</div>
+      <div class="total-margin">${CLIENT_PRICE_DISCLAIMER}</div>
     </div>
   </div>
 
   <!-- Footer -->
   <div class="footer">
     <div class="footer-note">
-      All amounts in AUD excluding GST unless stated. Quote prepared ${quoteDate}.
+      ${CLIENT_PRICE_DISCLAIMER} Quote prepared ${quoteDate}.
     </div>
     <div class="worka-badge">Quote prepared by WorkA</div>
   </div>

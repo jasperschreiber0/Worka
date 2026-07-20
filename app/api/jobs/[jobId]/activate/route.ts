@@ -339,6 +339,14 @@ async function handleLiveActivation(
   // the progress claims the client will be billed. Generating them from raw
   // total_cost (as this used to) meant every activated job invoiced the
   // client at cost, silently forfeiting the builder's entire margin.
+  //
+  // GST: this value is GST-EXCLUSIVE, matching every other client-facing
+  // figure in the app (see lib/pricing.ts's PRICE_BASIS_LABEL/
+  // CLIENT_PRICE_DISCLAIMER for the product decision this reflects). If
+  // invoice_schedule amounts are ever surfaced to a builder or client
+  // without also surfacing that disclaimer, that surface needs the same
+  // labeling QuoteView/PDF export/send-quote already carry — do not assume
+  // it's implied.
   const clientContractValue = applyMargin(quote.total_cost, quote.margin_pct ?? DEFAULT_MARGIN_PCT)
 
   // 5. Generate and insert milestones
