@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-import { applyMargin } from '@/lib/pricing'
+import { applyMargin, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
 import { isSilentlyUnpriced } from '@/lib/estimating/readiness'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
@@ -21,6 +21,8 @@ interface QuoteSummaryForDraft {
   margin_pct: number
   /** total_cost marked up by margin — the figure quoted to the client */
   client_price: number
+  /** "excl. GST" — see lib/pricing.ts PRICE_BASIS_LABEL for the product decision this reflects. */
+  price_basis: string
   line_count: number
   address: string
 }
@@ -50,7 +52,7 @@ function buildEmailBody(params: {
 }): string {
   const { clientName, address, totalCost, lineCount, builderName, businessName, customMessage } = params
 
-  const formattedTotal = `$${totalCost.toLocaleString('en-AU')}`
+  const formattedTotal = `$${totalCost.toLocaleString('en-AU')} (${PRICE_BASIS_LABEL})`
 
   const lines: string[] = [
     `Hi ${clientName},`,
@@ -61,6 +63,7 @@ function buildEmailBody(params: {
     `• Total: ${formattedTotal}`,
     `• ${lineCount} trade items included`,
     '• Quote valid for 30 days',
+    `• ${CLIENT_PRICE_DISCLAIMER}`,
   ]
 
   if (customMessage?.trim()) {
@@ -227,7 +230,7 @@ export async function POST(
       to: resolvedClientEmail || 'client@example.com',
       subject: `Quote for ${quote.job_address} — ${resolvedBusinessName}`,
       body: emailBodyDb,
-      quote_summary: { total_cost: quote.total_cost, margin_pct: quote.margin_pct, client_price: clientPriceDb, line_count: activeItemsDb.length, address: quote.job_address },
+      quote_summary: { total_cost: quote.total_cost, margin_pct: quote.margin_pct, client_price: clientPriceDb, price_basis: PRICE_BASIS_LABEL, line_count: activeItemsDb.length, address: quote.job_address },
     }
     return NextResponse.json({ draft: draftDb, requires_confirmation: true } as SendResponse)
   }
@@ -278,6 +281,7 @@ export async function POST(
       total_cost: quote.total_cost,
       margin_pct: quote.margin_pct,
       client_price: clientPrice,
+      price_basis: PRICE_BASIS_LABEL,
       line_count: lineCount,
       address,
     },

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
-import { applyMargin, ensureQuotePriced } from '@/lib/pricing'
+import { applyMargin, ensureQuotePriced, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
 import { deriveQuoteReadiness, isSilentlyUnpriced, type QuoteReadiness } from '@/lib/estimating/readiness'
 import type { QAReport } from '@/lib/types/database.types'
 
@@ -22,6 +22,9 @@ interface QuoteSummary {
   margin_pct: number
   /** total_cost marked up by margin_pct — what the client is quoted */
   client_price: number
+  /** "excl. GST" — see lib/pricing.ts PRICE_BASIS_LABEL for the product decision this reflects. */
+  price_basis: string
+  price_disclaimer: string
   confidence_score: number
   unresolved_count: number
   assumption_count: number
@@ -114,6 +117,8 @@ function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[], qaReport: 
     total_cost: quote.total_cost,
     margin_pct: quote.margin_pct,
     client_price: applyMargin(quote.total_cost, quote.margin_pct),
+    price_basis: PRICE_BASIS_LABEL,
+    price_disclaimer: CLIENT_PRICE_DISCLAIMER,
     confidence_score: quote.confidence_score,
     unresolved_count,
     assumption_count,

@@ -76,19 +76,38 @@ export async function POST(
 
     const {
       id: _oldId, created_at: _oldCreatedAt, sent_at: _sentAt, approved_at: _approvedAt,
-      version: _oldVersion, status: _oldStatus, ...quoteFields
+      version: _oldVersion, status: _oldStatus,
+      // Deliberately NOT carried over: the old row's is_current would insert
+      // a SECOND is_current=true row for this job_id while the old row is
+      // still current, tripping quotes_one_current_per_job (migration 061)
+      // the instant this insert runs. New quotes always start not-current —
+      // set_current_quote below is what correctly flips ownership over.
+      is_current: _oldIsCurrent,
+      ...quoteFields
     } = existingQuote as Record<string, unknown>
 
     const { data: newQuote, error: insertQuoteErr } = await supabase
       .from('quotes')
       .insert({ ...quoteFields, version: newVersion, status: 'draft', sent_at: null, approved_at: null })
-      .select('id, version')
+      .select('id, version, job_id')
       .single()
 
     if (insertQuoteErr || !newQuote) {
       console.error('[quotes/revise] quote insert failed:', insertQuoteErr?.message)
       return NextResponse.json({ error: 'Failed to create revised quote' }, { status: 500 })
     }
+
+    // A revised quote is the new current one for this job — the partial
+    // unique index (migration 061) is the actual guarantee against two
+    // quotes ever both being current; this RPC is the normal, correctness-
+    // preserving path to it. Best-effort: a failure here leaves the OLD
+    // quote current (stale, but never ambiguous), matching this codebase's
+    // established posture for derived-state writes (e.g. recomputeQuoteTotals
+    // just below) — it must never block the revision itself from succeeding.
+    const { error: currentErr } = await supabase.rpc('set_current_quote', {
+      p_job_id: newQuote.job_id, p_quote_id: newQuote.id,
+    })
+    if (currentErr) console.error('[quotes/revise] set_current_quote failed:', currentErr.message)
 
     if ((existingItems ?? []).length > 0) {
       const newLineItems = (existingItems ?? []).map((item: Record<string, unknown>) => {

@@ -1955,6 +1955,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       quoteId = quoteRow.id
     }
 
+    // Mark this job's current quote (migration 061) — the read above is a
+    // SELECT-then-INSERT with no lock behind it, so two concurrent runs for
+    // this job could each insert their own quote row believing neither saw
+    // an existing one. quotes_one_current_per_job (a partial unique index)
+    // is what actually prevents both from ever being treated as authoritative
+    // — the second call here simply fails its own is_current flip and the
+    // first writer's quote stays current, rather than the job silently
+    // having two "active" quotes with nothing to say which one is real.
+    // Best-effort by design: never lets quote creation itself fail because
+    // this bookkeeping call did.
+    {
+      const { error: currentErr } = await supabase.rpc('set_current_quote', { p_job_id: jobId, p_quote_id: quoteId })
+      if (currentErr) console.error('set_current_quote failed:', currentErr.message)
+    }
+
     // ── Document contribution report (migration 039) ──────────────────────
     // The durable answer to "did WorkA actually use my drawings?": for every
     // source document, how many facts it contributed to the job and how many

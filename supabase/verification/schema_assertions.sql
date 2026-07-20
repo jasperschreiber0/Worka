@@ -330,4 +330,36 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── quotes.is_current — one active quote per job (migration 061) ──────────
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'quotes' AND column_name = 'is_current') = 1,
+    'quotes.is_current column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_indexes WHERE tablename = 'quotes' AND indexname = 'quotes_one_current_per_job') = 1,
+    'quotes_one_current_per_job partial unique index is missing'
+  );
+  -- No job can have landed two current quotes even before this assertion
+  -- suite runs (the index would already have refused a second one at write
+  -- time) — this is a defense-in-depth re-check, not the primary guarantee.
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM (SELECT job_id FROM quotes WHERE is_current GROUP BY job_id HAVING count(*) > 1) dupes) = 0,
+    'more than one is_current quote exists for at least one job_id — the partial unique index should make this impossible'
+  );
+END $$;
+
+-- set_current_quote is a plain conditional UPDATE against bogus ids — both
+-- statements inside it match zero rows for uuids that don't exist, so it's
+-- safe to call in production, same shape as record_ai_failure/
+-- record_intake_recovery_attempt above.
+DO $$
+DECLARE
+  v_bogus_uuid uuid := '00000000-0000-0000-0000-000000000000';
+BEGIN
+  PERFORM set_current_quote(v_bogus_uuid, v_bogus_uuid);
+EXCEPTION WHEN OTHERS THEN
+  RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: set_current_quote is not callable: %', SQLERRM;
+END $$;
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;
