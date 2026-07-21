@@ -402,6 +402,31 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── Canonical duplicate-candidate invariant (migration 064) ───────────────
+-- content_hash alone ("we have seen these bytes") is insufficient to
+-- identify a canonical document — a duplicate_of_file_id must always point
+-- at a file that was successfully, durably classified
+-- (project_documents.extraction_status = 'complete', migration 050), never
+-- at one that merely has a hash on record. Enforced in application code
+-- (filterToCanonicalHashCandidates, pipeline-logic.ts, called from
+-- document-worker/index.ts before duplicate_of_file_id is ever written) —
+-- this is a defense-in-depth re-check against live data, same pattern as
+-- the quotes.is_current and self-duplicate checks above, not the primary
+-- guarantee.
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (
+      SELECT count(*) FROM files f
+      WHERE f.duplicate_of_file_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM project_documents pd
+          WHERE pd.file_id = f.duplicate_of_file_id AND pd.extraction_status = 'complete'
+        )
+    ) = 0,
+    'at least one file''s duplicate_of_file_id points at a file that was never successfully, durably classified — content_hash alone must never be treated as sufficient evidence of a canonical original'
+  );
+END $$;
+
 -- document_duplicate_detection_summary itself lives in
 -- health_monitoring_views.sql, which the supabase-migrate.yml workflow
 -- runs AFTER this file — same reason document_processing_health_summary

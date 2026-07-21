@@ -28,7 +28,7 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { extractPdfTextGated, hasUsableText, isTextDense } from '../smooth-responder/pdf-text.ts'
 import { getPdfPageCount } from '../smooth-responder/pdf-chunk.ts'
-import { sha256Hex, decideDuplicateFile, type HashedFileCandidate } from '../smooth-responder/pipeline-logic.ts'
+import { sha256Hex, decideDuplicateFile, filterToCanonicalHashCandidates, type HashedFileCandidate } from '../smooth-responder/pipeline-logic.ts'
 
 const CORS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -131,11 +131,52 @@ async function processOneDocument(
     }
 
     if (contentHash) {
-      const { data: candidateRows, error: candidateErr } = await supabase
+      // content_hash alone only proves "we have seen these bytes" — it says
+      // nothing about whether that earlier file was ever actually usable.
+      // A file whose Stage 1/2 classification failed (or never ran) still
+      // gets its content_hash written (hashing happens before extraction,
+      // extraction is independent of classification), so without this
+      // check a permanently-failed original would silently poison every
+      // future identical re-upload: each one gets marked a "duplicate" of
+      // a document that never contributed anything, and the content never
+      // reaches the estimator no matter how many times it's re-uploaded.
+      //
+      // The strongest existing signal for "this file was successfully,
+      // durably processed" is project_documents.extraction_status =
+      // 'complete' (migration 050) — set ONLY inside
+      // persist_document_classification, atomically with the project_facts
+      // it depends on, specifically so it can't be trusted-but-wrong the
+      // way document_processing_jobs.status = 'completed' can (that only
+      // means EXTRACTION succeeded — classification is a separate, later
+      // step in a different invocation, and can still fail or never run).
+      // A candidate file is only eligible to be matched against if it has
+      // this row; not just any file with a hash.
+      const { data: filesWithHash, error: filesErr } = await supabase
         .from('files')
         .select('id, job_id, content_hash, created_at')
         .eq('job_id', fileRow.job_id)
         .not('content_hash', 'is', null)
+
+      const { data: completeDocs, error: completeDocsErr } = await supabase
+        .from('project_documents')
+        .select('file_id')
+        .eq('job_id', fileRow.job_id)
+        .eq('extraction_status', 'complete')
+
+      const candidateErr = filesErr ?? completeDocsErr
+      // filterToCanonicalHashCandidates (pipeline-logic.ts, unit-tested) is
+      // the actual filtering DECISION — restricting matches to files that
+      // were successfully, durably classified, not merely hashed. An empty
+      // completeDocs result is NOT an error, it's the normal state early
+      // in a job's life (nothing successfully classified yet); the pure
+      // function correctly returns no candidates for that case, same as a
+      // genuine "no match" — no lookup-failed flag either way.
+      const candidateRows = candidateErr
+        ? []
+        : filterToCanonicalHashCandidates(
+            (filesWithHash ?? []) as HashedFileCandidate[],
+            (completeDocs ?? []).map((d: { file_id: string }) => d.file_id),
+          )
 
       if (candidateErr) {
         // Fail-safe, same principle as a hash computation failure: the
@@ -154,7 +195,7 @@ async function processOneDocument(
 
       const decision = candidateErr
         ? { isDuplicate: false, originalFileId: null }
-        : decideDuplicateFile(contentHash, (candidateRows ?? []) as HashedFileCandidate[], fileRow.id, fileRow.job_id)
+        : decideDuplicateFile(contentHash, candidateRows, fileRow.id, fileRow.job_id)
 
       await supabase.from('files').update({
         content_hash: contentHash,

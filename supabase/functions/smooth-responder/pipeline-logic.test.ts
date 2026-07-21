@@ -48,6 +48,7 @@ import {
   nextStage3FailureHistory,
   sha256Hex,
   decideDuplicateFile,
+  filterToCanonicalHashCandidates,
   partitionCompletedJobsForClassification,
   type BatchableFile,
   type FactRow,
@@ -1684,4 +1685,94 @@ test('partitionCompletedJobsForClassification: a batch with no duplicates classi
   const { toClassify, duplicates } = partitionCompletedJobsForClassification(jobsForBatch)
   assert.deepEqual(toClassify, ['file-a', 'file-b'])
   assert.deepEqual(duplicates, [])
+})
+
+// ─── Phase 1 correctness fix: content_hash alone ("we have seen these
+// bytes") is not sufficient to identify a canonical document — duplicate
+// candidates must be successfully, durably processed
+// (project_documents.extraction_status = 'complete', migration 050) ───────
+
+test('filterToCanonicalHashCandidates: Test A — original document succeeds, so a same-bytes re-upload correctly matches it', () => {
+  const filesWithHash: HashedFileCandidate[] = [
+    { id: 'file-A', job_id: 'job-1', content_hash: 'abc123', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  // File A was successfully, durably classified — project_documents has a
+  // 'complete' row for it.
+  const completedFileIds = ['file-A']
+
+  const canonical = filterToCanonicalHashCandidates(filesWithHash, completedFileIds)
+  assert.deepEqual(canonical.map((c) => c.id), ['file-A'])
+
+  const decision = decideDuplicateFile('abc123', canonical, 'file-B', 'job-1')
+  assert.equal(decision.isDuplicate, true)
+  assert.equal(decision.originalFileId, 'file-A')
+})
+
+test('filterToCanonicalHashCandidates: Test B — original document FAILS classification, so a same-bytes re-upload is NOT treated as a duplicate and is allowed through extraction', () => {
+  // File A was hashed (hashing happens before extraction, unconditionally)
+  // but its Stage 1/2 classification never succeeded — no project_documents
+  // row reached extraction_status = 'complete' for it. This is the exact
+  // poisoning scenario: without the filter, File B (same bytes) would be
+  // wrongly marked a duplicate of a document that never contributed
+  // anything, and its real content would never reach the estimator no
+  // matter how many times it's re-uploaded.
+  const filesWithHash: HashedFileCandidate[] = [
+    { id: 'file-A', job_id: 'job-1', content_hash: 'abc123', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  const completedFileIds: string[] = [] // File A never reached extraction_status = 'complete'
+
+  const canonical = filterToCanonicalHashCandidates(filesWithHash, completedFileIds)
+  assert.deepEqual(canonical, [])
+
+  const decision = decideDuplicateFile('abc123', canonical, 'file-B', 'job-1')
+  // B must be allowed through extraction, not silently skipped.
+  assert.equal(decision.isDuplicate, false)
+  assert.equal(decision.originalFileId, null)
+})
+
+test('filterToCanonicalHashCandidates: Test C — original document still processing (not yet complete) when a same-bytes upload arrives — B is allowed through, matching job_intake_locks\' own intent', () => {
+  // In the live pipeline, job_intake_locks (migration 030) serializes
+  // processing per job — a second upload session for the same job queues
+  // behind the first rather than truly racing it (app/api/intake/[fileId]/
+  // route.ts acquires the lock before document-worker is ever triggered),
+  // so by the time B's own duplicate check runs, A has already reached a
+  // terminal outcome one way or another. This test covers the direct
+  // consequence at the decision level regardless of that scheduling detail:
+  // extraction_status only reaches 'complete' atomically with A's facts
+  // (migration 050) — while A is still mid-pipeline (or was reclaimed/
+  // retried and hasn't reached that atomic write yet), it is indistinguishable
+  // from Test B's "never succeeded" case to this filter, and B is
+  // correctly allowed through rather than blocked on an unfinished original.
+  const filesWithHash: HashedFileCandidate[] = [
+    { id: 'file-A', job_id: 'job-1', content_hash: 'abc123', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  const completedFileIds: string[] = [] // A's classification hasn't completed yet
+
+  const canonical = filterToCanonicalHashCandidates(filesWithHash, completedFileIds)
+  const decision = decideDuplicateFile('abc123', canonical, 'file-B', 'job-1')
+  assert.equal(decision.isDuplicate, false, 'B must be allowed through while A has not yet durably completed')
+})
+
+test('filterToCanonicalHashCandidates: a hash match against a NON-canonical file is excluded even when a DIFFERENT canonical file also shares the hash', () => {
+  const filesWithHash: HashedFileCandidate[] = [
+    { id: 'file-failed', job_id: 'job-1', content_hash: 'abc123', created_at: '2026-07-01T09:00:00Z' },
+    { id: 'file-succeeded', job_id: 'job-1', content_hash: 'abc123', created_at: '2026-07-02T09:00:00Z' },
+  ]
+  const completedFileIds = ['file-succeeded']
+
+  const canonical = filterToCanonicalHashCandidates(filesWithHash, completedFileIds)
+  assert.deepEqual(canonical.map((c) => c.id), ['file-succeeded'])
+
+  const decision = decideDuplicateFile('abc123', canonical, 'file-C', 'job-1')
+  assert.equal(decision.isDuplicate, true)
+  assert.equal(decision.originalFileId, 'file-succeeded')
+})
+
+test('filterToCanonicalHashCandidates: passes through unrelated files (different hash) untouched', () => {
+  const filesWithHash: HashedFileCandidate[] = [
+    { id: 'file-A', job_id: 'job-1', content_hash: 'hash-1', created_at: '2026-07-01T09:00:00Z' },
+    { id: 'file-B', job_id: 'job-1', content_hash: 'hash-2', created_at: '2026-07-01T09:05:00Z' },
+  ]
+  const canonical = filterToCanonicalHashCandidates(filesWithHash, ['file-A', 'file-B'])
+  assert.deepEqual(canonical.map((c) => c.id).sort(), ['file-A', 'file-B'])
 })

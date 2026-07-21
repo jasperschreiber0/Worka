@@ -1445,6 +1445,36 @@ export interface DuplicateDecision {
 }
 
 /**
+ * Pure filter, applied BEFORE decideDuplicateFile: content_hash alone only
+ * proves "we have seen these bytes" — it says nothing about whether that
+ * earlier file was ever actually usable. Hashing happens before extraction
+ * (document-worker computes and persists content_hash regardless of what
+ * happens next), so a file whose Stage 1/2 classification later failed, or
+ * hasn't run yet, still has a content_hash on record. Without this filter,
+ * that file could wrongly serve as the "canonical" match for a future
+ * identical re-upload — poisoning it too, forever, even though the
+ * original's content was never actually incorporated into any estimate.
+ *
+ * `completedFileIds` must be sourced from project_documents.extraction_status
+ * = 'complete' (migration 050) — the strongest existing signal for genuine
+ * success, since it is set ONLY inside persist_document_classification,
+ * atomically with the project_facts it depends on. document_processing_jobs
+ * .status = 'completed' is NOT sufficient on its own: it only means
+ * EXTRACTION succeeded (document-worker's job), a separate, earlier step
+ * from CLASSIFICATION (smooth-responder's Stage 1/2, a different
+ * invocation entirely) — a file can have a completed extraction job and
+ * still never be classified (a billing halt, a permanent AI failure, a
+ * crash between the two stages).
+ */
+export function filterToCanonicalHashCandidates(
+  filesWithHash: HashedFileCandidate[],
+  completedFileIds: Iterable<string>,
+): HashedFileCandidate[] {
+  const completedSet = new Set(completedFileIds)
+  return filesWithHash.filter((f) => completedSet.has(f.id))
+}
+
+/**
  * Pure decision: does `hash` match an already-hashed file in `candidates`,
  * within the SAME job (`selfJobId`), other than `selfId`? `hash` is
  * nullable so a failed hash computation can be represented directly — null
