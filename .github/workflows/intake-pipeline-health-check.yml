@@ -7,15 +7,24 @@ name: Document intake pipeline health check
 # schema check. See that script's header comment for exactly what a pass
 # does and doesn't certify.
 #
-# Deliberately scheduled rather than run per-deploy: each run creates real
-# Storage/DB rows (cleaned up after) and, once classification triggers,
-# makes real Claude API calls — running it on every push would multiply
-# that cost for no added signal between deploys.
+# SCHEDULE DISABLED (2026-07-21), deliberately, pre-first-real-estimate: this
+# check creates real Storage/DB rows (cleaned up after) and, once
+# classification triggers, makes real Claude API calls against production —
+# a genuine, bounded, by-design cost, not a bug. It ran on a Node 20 runner
+# that crashed instantly at createClient() (see git history) for several
+# days, so it had been silently spending $0 despite "succeeding" on every
+# scheduled run; fixing that Node bug (unrelated CI work) inadvertently
+# re-activated real spend on a fixed schedule with nobody having explicitly
+# decided that was wanted yet. Re-enable the `schedule:` trigger below once
+# WorkA has produced real builder estimates and automated background spend
+# is something you've deliberately opted back into — until then, run it
+# on demand via workflow_dispatch (Actions tab -> this workflow -> Run
+# workflow) whenever you want to verify the live pipeline by hand.
 
 on:
-  schedule:
-    - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
   workflow_dispatch: {}
+  # schedule:
+  #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
 concurrency:
   group: intake-pipeline-health-check
