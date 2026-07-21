@@ -88,6 +88,12 @@ export default function ClarifyingQuestionsPanel({
         ))}
       </div>
 
+      {!submitting && !error && (
+        <p className="text-[11px] text-[#777777]">
+          Answering can take a few minutes to process on larger projects, and WorkA may come back with another round of questions if something else turns out to matter — stay on this screen until it finishes.
+        </p>
+      )}
+
       {retryStatus && (
         <div className="flex items-center gap-2 text-xs text-[#ff9800]">
           <svg className="animate-spin flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">

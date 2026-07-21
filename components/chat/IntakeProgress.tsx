@@ -126,6 +126,17 @@ export default function IntakeProgress({
   const [clarifyRetryStatus, setClarifyRetryStatus] = useState<string | null>(null)
   const [resumeKey, setResumeKey] = useState(0)
   const [reconnectKey, setReconnectKey] = useState(0)
+  // True from the moment /clarify succeeds until the FIRST SSE event lands on
+  // the new connection. Exists because the server can legitimately re-enter
+  // the exact same stage it was in before the blocking question was raised
+  // (a large project's Stage 3 needs several ~2min chunks — resuming just
+  // continues the SAME 'reasoning_scope' stage) — the progress-event handler
+  // below only registers a completed-stage transition when data.stage
+  // DIFFERS from what was already showing, so "same stage, still working"
+  // otherwise renders as a frozen screen with zero sign anything is
+  // happening. This flag is the explicit "your answer was received, work
+  // has resumed" signal that doesn't depend on the stage actually changing.
+  const [justResumed, setJustResumed] = useState(false)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
@@ -167,6 +178,14 @@ export default function IntakeProgress({
         if (res.ok) {
           setClarifyRetryStatus(null)
           setClarification(null)
+          // The resumed run can legitimately re-enter the exact stage it was
+          // in when the blocking question was raised (see justResumed's own
+          // comment) — resetting prevStageRef here guarantees the NEXT
+          // progress event is treated as a real transition even if
+          // data.stage is unchanged, instead of silently matching what was
+          // already showing and updating nothing visible.
+          prevStageRef.current = null
+          setJustResumed(true)
           setResumeKey((k) => k + 1)
           setClarifySubmitting(false)
           return
@@ -214,6 +233,7 @@ export default function IntakeProgress({
     const failOnce = (message?: string, skippedFiles?: string[], failedFiles?: string[]) => {
       if (settled) return
       settled = true
+      setJustResumed(false)
       setHasError(true)
       if (message) setErrorMessage(message)
       if (skippedFiles) setErrorSkippedFiles(skippedFiles)
@@ -225,6 +245,7 @@ export default function IntakeProgress({
     es.addEventListener('progress', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as ProgressState
+        setJustResumed(false)
 
         // Move previous stage to completed list
         if (prevStageRef.current && prevStageRef.current !== data.stage) {
@@ -252,6 +273,7 @@ export default function IntakeProgress({
     es.addEventListener('document_progress', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as { documents: DocumentProgressItem[] }
+        setJustResumed(false)
         setDocumentProgress(data.documents)
         // Per-document extraction (the document-worker queue phase) doesn't
         // change files.intake_stage/pct at all — those only start moving
@@ -287,6 +309,7 @@ export default function IntakeProgress({
           skipped_files?: string[]
           failed_files?: string[]
         }
+        setJustResumed(false)
 
         // Move last active stage to completed
         if (prevStageRef.current) {
@@ -324,6 +347,7 @@ export default function IntakeProgress({
       try {
         const data = JSON.parse(e.data) as ClarificationState
         settled = true
+        setJustResumed(false)
         es.close()
         setClarification(data)
       } catch {
@@ -474,6 +498,24 @@ export default function IntakeProgress({
           )}
         </div>
       </div>
+
+      {/* Explicit "your answer was received, work has resumed" signal — see
+          justResumed's own comment for why the progress bar/stage below can
+          otherwise look completely frozen after answering a clarifying
+          question (the server can legitimately re-enter the exact stage it
+          was already in). This is not cosmetic: it's the direct fix for a
+          builder concluding the run died and leaving before it finishes. */}
+      {justResumed && !isDone && (
+        <div className="flex items-center gap-2.5 rounded-lg border border-[rgba(255,107,43,0.25)] bg-[rgba(255,107,43,0.08)] px-3 py-2.5">
+          <svg className="animate-spin flex-shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" stroke="#ff6b2b" strokeWidth="3" opacity="0.25" />
+            <path d="M22 12a10 10 0 00-10-10" stroke="#ff6b2b" strokeWidth="3" strokeLinecap="round" />
+          </svg>
+          <p className="text-[12px] font-medium text-[#ff6b2b]">
+            Got your answers — continuing to work through the estimate. For a project this size this can take several minutes and may not look like it&apos;s moving; it is. WorkA may come back with more questions if anything else turns out to matter.
+          </p>
+        </div>
+      )}
 
       {!isDone && (
         <p className="text-[11px] text-[#777777]">
