@@ -331,11 +331,22 @@ async function loadAllFromExtractionResults(
   failedOut: string[],
   duplicatesOut: string[] = []
 ): Promise<LoadedFile[]> {
+  // .order('document_id') — same load-bearing reason as existingFacts/
+  // existingDocs above: this determines the order documents are appended
+  // to Stage 1/2's `content` array, which is itself one of
+  // guardedClaudeCall's hashed inputParts. An unordered fetch here means
+  // an unchanged batch of already-completed document_processing_jobs can
+  // still produce a different content order — and therefore a different
+  // idempotency hash — on a retry, for the same underlying reason
+  // record_stage3_failure's circuit breaker was defeated before the
+  // existingFacts fix. R-03 from the architecture audit that preceded
+  // Phase 1, same bug class as that fix, different call site.
   const { data: completedJobs } = await supabase
     .from('document_processing_jobs')
     .select('document_id, result')
     .eq('parent_job_id', parentJobId)
     .eq('status', 'completed')
+    .order('document_id', { ascending: true })
 
   const loaded: LoadedFile[] = []
   for (const j of (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>) {
@@ -964,10 +975,20 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .eq('superseded', false)
       .order('id', { ascending: true })
 
+    // .order('id') for the same reason as existingFacts above: this feeds
+    // processedDocTitles -> docSystemPrompt below, which is itself one of
+    // Stage 1/2's guardedClaudeCall inputParts (callTool's `system`
+    // argument) — an unordered row order here means an unchanged set of
+    // already-processed documents can still hash differently across
+    // retries, defeating idempotent reuse for the exact same reason
+    // record_stage3_failure's circuit breaker was defeated (see that
+    // comment). Same bug class, different call site — R-03 from the
+    // architecture audit that preceded Phase 1.
     const { data: existingDocs } = await supabase
       .from('project_documents')
       .select('id, file_id, document_type, drawing_title')
       .eq('job_id', jobId)
+      .order('id', { ascending: true })
 
     // Carries id/embedding through the whole run (not just category/key/
     // value/confidence) so batched Stage 1/2 calls below can supersede
