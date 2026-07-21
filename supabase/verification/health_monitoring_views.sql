@@ -265,18 +265,54 @@ COMMENT ON FUNCTION document_processing_health_summary IS
 -- quantity without evidence"). bytes_saved is the honest, defensible proxy;
 -- a real cost figure needs the avoided call's actual token estimate, not
 -- available from a call that was never made.
+-- Extended by migration 063's production validation pass: documents_with_
+-- hash/without_hash, hash/lookup failure counts, fallback events, and
+-- stage12_calls_avoided/estimated_input_tokens_avoided (all derived from
+-- existing columns/jsonb already written by document-worker/smooth-
+-- responder — no new architecture, per that pass's own constraint).
 CREATE OR REPLACE FUNCTION document_duplicate_detection_summary(p_window interval DEFAULT interval '7 days')
 RETURNS TABLE(
   window_start timestamptz,
   total_files_uploaded bigint,
+  documents_with_hash bigint,
+  documents_without_hash bigint,
   duplicate_files_detected bigint,
   extraction_jobs_avoided bigint,
   duplicate_rate_pct numeric,
-  last_duplicate_detected_at timestamptz
+  last_duplicate_detected_at timestamptz,
+  -- ── Processing: Claude calls avoided ──────────────────────────────────
+  -- Stage 1 and Stage 2 are literally the same Claude call in this
+  -- pipeline (one call classifies documents AND builds the fact base —
+  -- see smooth-responder's own header comment), so there is no separate
+  -- "Stage 2 calls avoided" figure to report; this single column covers
+  -- both, unlike extraction_jobs_avoided/duplicate_files_detected (which
+  -- ARE 1:1 with each document), a Stage 1/2 Claude call is only fully
+  -- avoided when EVERY document in a batch turns out to be a duplicate
+  -- (smooth-responder/index.ts's all_documents_duplicate_reused_existing_
+  -- quote path) — a batch with a MIX of new and duplicate files still
+  -- makes the call, just with a smaller payload. Derived from
+  -- document_processing_jobs.result->>'duplicate' (already written by
+  -- document-worker), no new column needed for this one.
+  stage12_calls_avoided bigint,
+  -- Rough order-of-magnitude estimate only, using this codebase's own
+  -- existing approximation conventions (base64 inflates raw bytes by
+  -- ~4/3; callTool's own diagnostic logging already estimates tokens as
+  -- chars/4) rather than a fabricated precise figure — see this function's
+  -- own COMMENT for why a real dollar estimate is deliberately not
+  -- reported. Null whenever no duplicate in the window has a recorded
+  -- file_size_bytes (files uploaded before migration 063, or a hash
+  -- failure on that file).
+  estimated_input_tokens_avoided bigint,
+  -- ── Failures (all fail-safe — none of these ever blocked an upload) ───
+  hash_generation_failures bigint,
+  duplicate_lookup_failures bigint,
+  fallback_to_normal_processing_events bigint
 ) AS $$
   SELECT
     now() - p_window,
     count(*),
+    count(*) FILTER (WHERE content_hash IS NOT NULL),
+    count(*) FILTER (WHERE content_hash IS NULL),
     count(*) FILTER (WHERE duplicate_of_file_id IS NOT NULL),
     -- Equal to duplicate_files_detected by construction, not a coincidence:
     -- document-worker returns its 'duplicate' outcome (skipping all
@@ -288,10 +324,25 @@ RETURNS TABLE(
     CASE WHEN count(*) = 0 THEN 0
          ELSE round(100.0 * count(*) FILTER (WHERE duplicate_of_file_id IS NOT NULL) / count(*), 2)
     END,
-    max(created_at) FILTER (WHERE duplicate_of_file_id IS NOT NULL)
+    max(created_at) FILTER (WHERE duplicate_of_file_id IS NOT NULL),
+    (
+      SELECT count(*)
+      FROM document_processing_batches b
+      WHERE b.created_at > now() - p_window
+        AND EXISTS (SELECT 1 FROM document_processing_jobs j WHERE j.parent_job_id = b.id AND j.status = 'completed')
+        AND NOT EXISTS (
+          SELECT 1 FROM document_processing_jobs j
+          WHERE j.parent_job_id = b.id AND j.status = 'completed'
+            AND COALESCE((j.result->>'duplicate')::boolean, false) = false
+        )
+    ),
+    round(sum(file_size_bytes) FILTER (WHERE duplicate_of_file_id IS NOT NULL) / 3.0)::bigint,
+    count(*) FILTER (WHERE content_hash_failed),
+    count(*) FILTER (WHERE duplicate_lookup_failed),
+    count(*) FILTER (WHERE content_hash_failed OR duplicate_lookup_failed)
   FROM files
   WHERE created_at > now() - p_window;
 $$ LANGUAGE sql STABLE;
 
 COMMENT ON FUNCTION document_duplicate_detection_summary IS
-  'Rollup of files.duplicate_of_file_id activity (migration 062) over the trailing window: total uploads, exact duplicates detected, extraction jobs avoided (identical by construction — one avoided extraction per detected duplicate), and the resulting duplicate rate. This is the production-data source Phase 2 (reliable non-byte-identical cross-session matching) is meant to be built against, not built blind ahead of it.';
+  'Rollup of deterministic duplicate-detection activity (files.content_hash/duplicate_of_file_id, migration 062; file_size_bytes/content_hash_failed/duplicate_lookup_failed, migration 063) over the trailing window. This is the production-data source Phase 2 (reliable non-byte-identical cross-session matching) is meant to be built against, not built blind ahead of it. estimated_input_tokens_avoided is a deliberately rough, labelled order-of-magnitude estimate (bytes / 3, combining this codebase''s own existing base64-inflation and chars-per-token approximations) — NOT a dollar figure: a real cost estimate needs an avoided call''s actual token count, which does not exist for a call that was never made, and fabricating one would be the same "invented quantity without evidence" failure mode this pipeline''s own fact-extraction rules exist to avoid.';

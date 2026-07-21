@@ -1434,6 +1434,7 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 export interface HashedFileCandidate {
   id: string
+  job_id: string
   content_hash: string | null
   created_at: string
 }
@@ -1444,25 +1445,36 @@ export interface DuplicateDecision {
 }
 
 /**
- * Pure decision: does `hash` match an already-hashed file in `candidates`
- * (same job, any file other than `selfId`)? `hash` is nullable so a failed
- * hash computation can be represented directly — null always resolves to
- * "not a duplicate," which is the required fail-safe behaviour (a hashing
- * failure must never block or misroute an upload). Filename is deliberately
- * not a parameter: two files with the same name but different bytes are not
- * duplicates, and two files with different names but identical bytes are —
- * matching is content-only. Ties (more than one prior file with the same
- * hash) resolve to the earliest by created_at, then by id, for a stable,
- * deterministic "original" regardless of query row order.
+ * Pure decision: does `hash` match an already-hashed file in `candidates`,
+ * within the SAME job (`selfJobId`), other than `selfId`? `hash` is
+ * nullable so a failed hash computation can be represented directly — null
+ * always resolves to "not a duplicate," which is the required fail-safe
+ * behaviour (a hashing failure must never block or misroute an upload).
+ * Filename is deliberately not a parameter: two files with the same name
+ * but different bytes are not duplicates, and two files with different
+ * names but identical bytes are — matching is content-only. Ties (more
+ * than one prior file with the same hash) resolve to the earliest by
+ * created_at, then by id, for a stable, deterministic "original"
+ * regardless of query row order.
+ *
+ * job_id is checked HERE, inside the pure function, not left solely to the
+ * caller's SQL query filter — WorkA's product model treats each job as an
+ * independent client project (see product-readiness audit), so two
+ * different jobs containing a byte-identical file (a generic boilerplate
+ * spec page, a re-used template) must never be treated as duplicates of
+ * each other. The caller's query is still scoped by job_id for efficiency,
+ * but this is the structural guarantee: even if a future caller's query
+ * ever dropped that filter, this function still cannot cross-match jobs.
  */
 export function decideDuplicateFile(
   hash: string | null,
   candidates: HashedFileCandidate[],
   selfId: string,
+  selfJobId: string,
 ): DuplicateDecision {
   if (!hash) return { isDuplicate: false, originalFileId: null }
 
-  const matches = candidates.filter((c) => c.id !== selfId && c.content_hash === hash)
+  const matches = candidates.filter((c) => c.id !== selfId && c.job_id === selfJobId && c.content_hash === hash)
   if (matches.length === 0) return { isDuplicate: false, originalFileId: null }
 
   const earliest = [...matches].sort((a, b) => {

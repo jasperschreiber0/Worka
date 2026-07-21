@@ -386,4 +386,29 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── Duplicate-detection observability columns (migration 063) ────────────
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'file_size_bytes') = 1,
+    'files.file_size_bytes column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'content_hash_failed') = 1,
+    'files.content_hash_failed column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'duplicate_lookup_failed') = 1,
+    'files.duplicate_lookup_failed column is missing'
+  );
+END $$;
+
+-- document_duplicate_detection_summary itself lives in
+-- health_monitoring_views.sql, which the supabase-migrate.yml workflow
+-- runs AFTER this file — same reason document_processing_health_summary
+-- (defined in that same file) isn't probed from here either. Its
+-- callability is exercised simply by health_monitoring_views.sql's own
+-- CREATE OR REPLACE FUNCTION succeeding (a plain aggregate SELECT with no
+-- write and no dependency on any specific row, so a syntax/type error is
+-- the only realistic failure mode, and that fails the CREATE itself).
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;

@@ -1940,10 +1940,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Stage 6: Estimate Generation (spec Stage 5) ────────────────────────
     await setStage('generating_estimate')
 
+    // .order('trade_category_id') — same load-bearing reason as the
+    // existingFacts/existingDocs/document_processing_jobs fixes above: this
+    // feeds scopeBlock -> estimateUserContent, one of Stage 6's
+    // guardedClaudeCall inputParts (via callTool's `content` argument). An
+    // unordered fetch here means an unchanged scope_items set could still
+    // hash differently across retries, defeating idempotent reuse for
+    // Stage 6 the same way it did for Stage 3 before the existingFacts fix.
+    // Found during the R-03 follow-up review (production validation pass
+    // after Phase 1) — the earlier pass covered Stage 1/2 and Stage 3's
+    // direct inputs but had not checked Stage 6's.
     const { data: scopeForEstimate } = await supabase
       .from('scope_items')
       .select('trade_category_id, included_scope, excluded_scope, assumptions, uncertainty_notes')
       .eq('job_id', jobId)
+      .order('trade_category_id', { ascending: true })
 
     console.log(JSON.stringify({
       event: 'stage_checkpoint', job_id: jobId, batch_id: parentJobId ?? null,

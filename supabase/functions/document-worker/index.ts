@@ -122,20 +122,45 @@ async function processOneDocument(
         warning: 'hash computation failed — continuing without duplicate detection for this file',
         error: hashErr instanceof Error ? hashErr.message : String(hashErr),
       }))
+      // Persisted (not just logged) so it's queryable — see
+      // document_duplicate_detection_summary in health_monitoring_views.sql.
+      // Best-effort: a failure to record this failure must not itself
+      // block the upload, same philosophy as recordProofEvent elsewhere in
+      // this codebase.
+      await supabase.from('files').update({ content_hash_failed: true }).eq('id', fileRow.id)
     }
 
     if (contentHash) {
-      const { data: candidateRows } = await supabase
+      const { data: candidateRows, error: candidateErr } = await supabase
         .from('files')
-        .select('id, content_hash, created_at')
+        .select('id, job_id, content_hash, created_at')
         .eq('job_id', fileRow.job_id)
         .not('content_hash', 'is', null)
 
-      const decision = decideDuplicateFile(contentHash, (candidateRows ?? []) as HashedFileCandidate[], fileRow.id)
+      if (candidateErr) {
+        // Fail-safe, same principle as a hash computation failure: the
+        // duplicate LOOKUP failed (not the hash itself, which we already
+        // have) — log it, persist a distinct flag so it's queryable
+        // separately from a hash failure, and fall through to normal
+        // extraction with this file's own hash still recorded (a future
+        // upload can still match against IT, even though this attempt
+        // couldn't check whether IT matches anything earlier).
+        console.log(JSON.stringify({
+          event: 'duplicate_lookup_failed', document_id: job.document_id, filename: fileRow.filename,
+          warning: 'duplicate candidate lookup failed — continuing without duplicate detection for this file',
+          error: candidateErr.message,
+        }))
+      }
+
+      const decision = candidateErr
+        ? { isDuplicate: false, originalFileId: null }
+        : decideDuplicateFile(contentHash, (candidateRows ?? []) as HashedFileCandidate[], fileRow.id, fileRow.job_id)
 
       await supabase.from('files').update({
         content_hash: contentHash,
+        file_size_bytes: buffer.byteLength,
         duplicate_of_file_id: decision.isDuplicate ? decision.originalFileId : null,
+        duplicate_lookup_failed: Boolean(candidateErr),
       }).eq('id', fileRow.id)
 
       if (decision.isDuplicate && decision.originalFileId) {
