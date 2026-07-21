@@ -1,0 +1,7 @@
+-- Rollback for 062_document_content_hash.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-061's own rollback companions.
+
+DROP INDEX IF EXISTS idx_files_job_content_hash;
+ALTER TABLE files DROP COLUMN IF EXISTS duplicate_of_file_id;
+ALTER TABLE files DROP COLUMN IF EXISTS content_hash;

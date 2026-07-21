@@ -286,6 +286,13 @@ interface PersistedExtractionResult {
   hasUsableText: boolean
   pageCount: number | null
   durationMs: number
+  // Phase 1 deterministic duplicate detection (document-worker/index.ts) —
+  // when true, this job's content is a byte-identical re-upload of an
+  // earlier file in the same job. loadAllFromExtractionResults excludes it
+  // before ever building Claude content, regardless of blockType.
+  duplicate?: boolean
+  duplicateOfFileId?: string
+  contentHash?: string
 }
 
 async function loadBlockFromExtractionResult(
@@ -321,7 +328,8 @@ async function loadBlockFromExtractionResult(
 async function loadAllFromExtractionResults(
   supabase: SupabaseClient,
   parentJobId: string,
-  failedOut: string[]
+  failedOut: string[],
+  duplicatesOut: string[] = []
 ): Promise<LoadedFile[]> {
   const { data: completedJobs } = await supabase
     .from('document_processing_jobs')
@@ -331,6 +339,17 @@ async function loadAllFromExtractionResults(
 
   const loaded: LoadedFile[] = []
   for (const j of (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>) {
+    // Deterministic duplicate (Phase 1, document-worker) — never build
+    // Claude content for it. This is what actually stops a re-uploaded
+    // identical file from inflating the fact base/document count: it
+    // never enters `documents`/`facts` sent to Stage 1/2 at all, so
+    // Claude never returns a file_index for it and no project_documents
+    // row is created. Not a failure, so kept out of failedOut (which
+    // drives the builder-facing "these weren't processed, retry" list).
+    if (j.result?.duplicate) {
+      duplicatesOut.push(j.document_id)
+      continue
+    }
     const lf = await loadBlockFromExtractionResult(supabase, j.document_id, j.result)
     if (lf) loaded.push(lf)
     else failedOut.push(j.document_id)
@@ -984,7 +1003,53 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // never reached 'completed' (still retrying, or permanently
         // failed) is simply absent from this batch; permanently-failed
         // ones are still surfaced by filename below.
-        allLoaded = await loadAllFromExtractionResults(supabase, parentJobId, failedToLoadSiblings)
+        const skippedDuplicates: string[] = []
+        allLoaded = await loadAllFromExtractionResults(supabase, parentJobId, failedToLoadSiblings, skippedDuplicates)
+        if (skippedDuplicates.length > 0) {
+          console.log(JSON.stringify({
+            event: 'stage12_duplicates_excluded', job_id: jobId, parent_job_id: parentJobId,
+            duplicate_count: skippedDuplicates.length, duplicate_document_ids: skippedDuplicates,
+          }))
+        }
+        if (allLoaded.length === 0 && skippedDuplicates.length > 0) {
+          // Every file in this upload was a byte-identical re-upload of
+          // content already classified for this job — not a failure, and
+          // nothing about the estimate needs to change: the job's existing
+          // quote already reflects this content from when it was first
+          // uploaded. Reuse it (no new Stage 3-6 Claude calls, no new
+          // quote row) rather than treating an all-duplicates batch as an
+          // error.
+          const { data: currentQuote } = await supabase
+            .from('quotes')
+            .select('id')
+            .eq('job_id', jobId)
+            .eq('is_current', true)
+            .maybeSingle()
+
+          if (currentQuote?.id) {
+            await supabase.from('files').update({
+              intake_stage: 'complete', intake_pct: 100, pipeline_stage: 'complete',
+              quote_id: currentQuote.id, failure_stage: null, failure_reason: null,
+            }).eq('id', fileId)
+            if (parentJobId) {
+              await supabase.from('document_processing_batches').update({ quote_id: currentQuote.id, updated_at: new Date().toISOString() }).eq('id', parentJobId)
+              await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+            } else {
+              await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
+            }
+            console.log(JSON.stringify({
+              event: 'all_documents_duplicate_reused_existing_quote', job_id: jobId, parent_job_id: parentJobId,
+              quote_id: currentQuote.id, duplicate_count: skippedDuplicates.length,
+            }))
+            return
+          }
+          // No existing quote to reuse (shouldn't normally happen — a
+          // duplicate requires a prior file in this job to already have
+          // been classified) — fall through to the genuine-failure path
+          // below with a clearer reason.
+          await fail('Every document in this batch was already processed, and no existing quote was found to reuse for this job')
+          return
+        }
         if (allLoaded.length === 0) {
           await fail('No documents were successfully extracted for this batch')
           return

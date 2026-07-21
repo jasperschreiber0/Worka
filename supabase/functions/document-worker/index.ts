@@ -28,6 +28,7 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { extractPdfTextGated, hasUsableText, isTextDense } from '../smooth-responder/pdf-text.ts'
 import { getPdfPageCount } from '../smooth-responder/pdf-chunk.ts'
+import { sha256Hex, decideDuplicateFile, type HashedFileCandidate } from '../smooth-responder/pipeline-logic.ts'
 
 const CORS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -44,6 +45,15 @@ interface ExtractionResult {
   hasUsableText: boolean
   pageCount: number | null
   durationMs: number
+  // Phase 1 deterministic duplicate detection (see pipeline-logic.ts's
+  // decideDuplicateFile). When set, smooth-responder's
+  // loadAllFromExtractionResults skips this job entirely — its content
+  // never reaches Claude — regardless of blockType, which is left at its
+  // normal value here only for interface-shape compatibility and is not
+  // meaningful when duplicate is true.
+  duplicate?: boolean
+  duplicateOfFileId?: string
+  contentHash?: string
 }
 
 function toBase64(buffer: ArrayBuffer): string {
@@ -95,6 +105,66 @@ async function processOneDocument(
     }
 
     const buffer = await fileData.arrayBuffer()
+
+    // ── Phase 1: deterministic, cross-session duplicate detection ─────────
+    // Earliest point file bytes exist server-side (app/api/upload/route.ts
+    // never sees bytes — the browser PUTs directly to Storage), so hashing
+    // here adds no extra I/O beyond what extraction already needed. A
+    // failed hash computation is fail-safe: log a warning and fall through
+    // to normal extraction exactly as if this block didn't exist — hashing
+    // must never block or misroute an upload.
+    let contentHash: string | null = null
+    try {
+      contentHash = await sha256Hex(new Uint8Array(buffer))
+    } catch (hashErr) {
+      console.log(JSON.stringify({
+        event: 'content_hash_failed', document_id: job.document_id, filename: fileRow.filename,
+        warning: 'hash computation failed — continuing without duplicate detection for this file',
+        error: hashErr instanceof Error ? hashErr.message : String(hashErr),
+      }))
+    }
+
+    if (contentHash) {
+      const { data: candidateRows } = await supabase
+        .from('files')
+        .select('id, content_hash, created_at')
+        .eq('job_id', fileRow.job_id)
+        .not('content_hash', 'is', null)
+
+      const decision = decideDuplicateFile(contentHash, (candidateRows ?? []) as HashedFileCandidate[], fileRow.id)
+
+      await supabase.from('files').update({
+        content_hash: contentHash,
+        duplicate_of_file_id: decision.isDuplicate ? decision.originalFileId : null,
+      }).eq('id', fileRow.id)
+
+      if (decision.isDuplicate && decision.originalFileId) {
+        console.log(JSON.stringify({
+          event: 'duplicate_document_detected',
+          original_document_id: decision.originalFileId,
+          duplicate_document_id: fileRow.id,
+          project_id: fileRow.job_id,
+          hash: contentHash,
+          bytes_saved_estimate: buffer.byteLength,
+        }))
+        // No extraction attempted — this is the whole point: the content
+        // is already known, so no CPU-bound parsing and, more importantly,
+        // no Stage 1/2 Claude spend on this file's bytes. Recorded as a
+        // 'completed' extraction job (not a new status — see migration
+        // 034's fixed status enum) carrying a marker result;
+        // smooth-responder's loadAllFromExtractionResults excludes any job
+        // whose result.duplicate is true before ever building Claude
+        // content from it.
+        return {
+          outcome: 'completed',
+          result: {
+            blockType: 'text_only', text: null, hasUsableText: false, pageCount: null, durationMs: 0,
+            duplicate: true, duplicateOfFileId: decision.originalFileId, contentHash,
+          },
+        }
+      }
+    }
+
     const isPdf = fileRow.file_type === 'pdf'
     const isCsv = fileRow.file_type === 'other' && /\.csv$/i.test(fileRow.filename ?? '')
 

@@ -1401,3 +1401,74 @@ export function documentDisplayState(status: ChildJobStatus, attempts: number): 
   // scheduled run_after to elapse — not merely unclaimed.
   return attempts > 0 ? 'retrying' : 'waiting'
 }
+
+// ─── Deterministic cross-session duplicate detection (Phase 1) ─────────────
+//
+// Scope, deliberately narrow: byte-identical files re-uploaded to the SAME
+// job across separate sessions. Not a "same real-world drawing, re-scanned
+// or re-exported" detector (that's LLM/Claude territory — project_documents'
+// existing is_duplicate/is_superseded fields, populated per-batch by Stage 1,
+// which this deliberately does not touch or extend). This is one rung below
+// that: pure byte equality, computed once per file and persisted, so a
+// second identical upload is recognized without re-running extraction or
+// spending a Stage 1/2 Claude call on content Claude has already seen.
+
+/**
+ * SHA-256 of raw file bytes, hex-encoded. Uses the Web Crypto API
+ * (`crypto.subtle`), available as a global in both Deno (document-worker's
+ * runtime) and Node 22+ (this repo's minimum, per CLAUDE.md) — no new
+ * dependency. Same bytes always produce the same hash regardless of
+ * filename or upload session; different bytes (even a single-byte diff)
+ * produce a different hash.
+ */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // Cast needed under newer lib.dom typings: Uint8Array<ArrayBufferLike>
+  // (what callers building a view from a Storage-downloaded ArrayBuffer
+  // naturally have) isn't structurally assignable to BufferSource's
+  // ArrayBuffer-backed generic, even though it's valid at runtime.
+  const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+export interface HashedFileCandidate {
+  id: string
+  content_hash: string | null
+  created_at: string
+}
+
+export interface DuplicateDecision {
+  isDuplicate: boolean
+  originalFileId: string | null
+}
+
+/**
+ * Pure decision: does `hash` match an already-hashed file in `candidates`
+ * (same job, any file other than `selfId`)? `hash` is nullable so a failed
+ * hash computation can be represented directly — null always resolves to
+ * "not a duplicate," which is the required fail-safe behaviour (a hashing
+ * failure must never block or misroute an upload). Filename is deliberately
+ * not a parameter: two files with the same name but different bytes are not
+ * duplicates, and two files with different names but identical bytes are —
+ * matching is content-only. Ties (more than one prior file with the same
+ * hash) resolve to the earliest by created_at, then by id, for a stable,
+ * deterministic "original" regardless of query row order.
+ */
+export function decideDuplicateFile(
+  hash: string | null,
+  candidates: HashedFileCandidate[],
+  selfId: string,
+): DuplicateDecision {
+  if (!hash) return { isDuplicate: false, originalFileId: null }
+
+  const matches = candidates.filter((c) => c.id !== selfId && c.content_hash === hash)
+  if (matches.length === 0) return { isDuplicate: false, originalFileId: null }
+
+  const earliest = [...matches].sort((a, b) => {
+    const byTime = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    return byTime !== 0 ? byTime : a.id.localeCompare(b.id)
+  })[0]
+
+  return { isDuplicate: true, originalFileId: earliest.id }
+}

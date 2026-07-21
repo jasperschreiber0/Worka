@@ -46,9 +46,12 @@ import {
   mergeScopeReasoningResults,
   shouldSkipStage3Call,
   nextStage3FailureHistory,
+  sha256Hex,
+  decideDuplicateFile,
   type BatchableFile,
   type FactRow,
   type Stage3FailureHistory,
+  type HashedFileCandidate,
 } from './pipeline-logic.ts'
 
 // ─── splitIntoBatches ───────────────────────────────────────────────────────
@@ -1508,4 +1511,87 @@ test('AUDIT scenario 4: a missing document identified independently by multiple 
   assert.equal(merged.clarifying_questions.length, 2)
   assert.ok(merged.clarifying_questions.some((q) => q.question === 'No architectural drawings provided for the roof plan.' && q.reason === 'roofing quantities cannot be measured'))
   assert.ok(merged.clarifying_questions.some((q) => q.question === 'Fixture schedule not supplied.'))
+})
+
+// ─── Deterministic duplicate detection (Phase 1) ────────────────────────────
+
+test('sha256Hex: same bytes produce the same hash', async () => {
+  const bytes = new Uint8Array([37, 12, 255, 0, 8, 200])
+  const h1 = await sha256Hex(bytes)
+  const h2 = await sha256Hex(new Uint8Array([37, 12, 255, 0, 8, 200]))
+  assert.equal(h1, h2)
+  assert.equal(h1.length, 64) // hex-encoded SHA-256
+})
+
+test('sha256Hex: different bytes produce different hashes', async () => {
+  const h1 = await sha256Hex(new Uint8Array([1, 2, 3]))
+  const h2 = await sha256Hex(new Uint8Array([1, 2, 4]))
+  assert.notEqual(h1, h2)
+})
+
+test('decideDuplicateFile: Test 1 — identical PDF uploaded twice in separate sessions is detected as a duplicate of the original', () => {
+  const candidates: HashedFileCandidate[] = [
+    { id: 'file-original', content_hash: 'abc123', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  // Second upload, a later session, same job — its own hash matches the
+  // already-persisted original.
+  const result = decideDuplicateFile('abc123', candidates, 'file-second-upload')
+  assert.equal(result.isDuplicate, true)
+  assert.equal(result.originalFileId, 'file-original')
+})
+
+test('decideDuplicateFile: Test 2 — same filename, different content is NOT a duplicate', () => {
+  // Filename is not even a parameter of this function — matching is
+  // content-only. Two files named identically but with different bytes
+  // hash differently and must not collide.
+  const candidates: HashedFileCandidate[] = [
+    { id: 'file-v1', content_hash: 'hash-of-v1-content', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  const result = decideDuplicateFile('hash-of-v2-content', candidates, 'file-v2')
+  assert.equal(result.isDuplicate, false)
+  assert.equal(result.originalFileId, null)
+})
+
+test('decideDuplicateFile: Test 3 — different filename, identical content IS detected as a duplicate', () => {
+  // The candidate list carries no filename at all — only id/hash/created_at
+  // — so this is structurally identical to Test 1 from the function's
+  // point of view, proving filename plays no role in the decision either
+  // way.
+  const candidates: HashedFileCandidate[] = [
+    { id: 'plans-v1.pdf-id', content_hash: 'same-bytes-hash', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  const result = decideDuplicateFile('same-bytes-hash', candidates, 'renamed-copy.pdf-id')
+  assert.equal(result.isDuplicate, true)
+  assert.equal(result.originalFileId, 'plans-v1.pdf-id')
+})
+
+test('decideDuplicateFile: Test 4 — a failed hash computation (represented as null) never blocks the upload — always resolves to not-a-duplicate', () => {
+  const candidates: HashedFileCandidate[] = [
+    { id: 'file-original', content_hash: 'abc123', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  // Even though a candidate with a matching-looking hash exists, a null
+  // input hash (hash computation failed) must never be treated as a match
+  // — the fail-safe path always falls through to normal, non-duplicate
+  // processing.
+  const result = decideDuplicateFile(null, candidates, 'file-second-upload')
+  assert.equal(result.isDuplicate, false)
+  assert.equal(result.originalFileId, null)
+})
+
+test('decideDuplicateFile: a file never matches itself', () => {
+  const candidates: HashedFileCandidate[] = [
+    { id: 'file-a', content_hash: 'same-hash', created_at: '2026-07-01T09:00:00Z' },
+  ]
+  const result = decideDuplicateFile('same-hash', candidates, 'file-a')
+  assert.equal(result.isDuplicate, false)
+})
+
+test('decideDuplicateFile: multiple prior matches resolve deterministically to the earliest by created_at', () => {
+  const candidates: HashedFileCandidate[] = [
+    { id: 'file-later', content_hash: 'dup-hash', created_at: '2026-07-05T09:00:00Z' },
+    { id: 'file-earliest', content_hash: 'dup-hash', created_at: '2026-07-01T09:00:00Z' },
+    { id: 'file-middle', content_hash: 'dup-hash', created_at: '2026-07-03T09:00:00Z' },
+  ]
+  const result = decideDuplicateFile('dup-hash', candidates, 'file-newest-upload')
+  assert.equal(result.originalFileId, 'file-earliest')
 })

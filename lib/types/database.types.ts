@@ -304,6 +304,12 @@ export interface File {
   ai_failure_classification: string | null
   ai_failure_count: number
   created_at: string
+  // Phase 1 deterministic duplicate detection (migration 062). Optional —
+  // populated by document-worker (Deno), not by any Next.js write path —
+  // so existing literal `File`/demo-mode object constructions don't need
+  // updating just because these columns exist.
+  content_hash?: string | null
+  duplicate_of_file_id?: string | null
 }
 
 export interface Assumption {
