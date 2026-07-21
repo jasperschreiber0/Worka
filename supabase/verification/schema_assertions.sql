@@ -362,4 +362,28 @@ EXCEPTION WHEN OTHERS THEN
   RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: set_current_quote is not callable: %', SQLERRM;
 END $$;
 
+-- ─── files.content_hash / duplicate_of_file_id — Phase 1 dedup (migration 062) ──
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'content_hash') = 1,
+    'files.content_hash column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'duplicate_of_file_id') = 1,
+    'files.duplicate_of_file_id column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_indexes WHERE tablename = 'files' AND indexname = 'idx_files_job_content_hash') = 1,
+    'idx_files_job_content_hash index is missing'
+  );
+  -- A file can never be marked as its own duplicate — decideDuplicateFile
+  -- (pipeline-logic.ts) explicitly excludes selfId, so this should be
+  -- structurally impossible; a defense-in-depth re-check, same pattern as
+  -- the quotes.is_current dupe check above.
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM files WHERE duplicate_of_file_id = id) = 0,
+    'at least one file has duplicate_of_file_id pointing at itself'
+  );
+END $$;
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;

@@ -244,3 +244,54 @@ $$ LANGUAGE sql STABLE;
 
 COMMENT ON FUNCTION document_processing_health_summary IS
   'One-row rollup of every health signal above, for a single-query dashboard tile or alert-cron check rather than several separate queries. recovery_last_run_at is the fastest way to tell "pipeline is healthy" apart from "recovery cron stopped firing so nothing is being checked."';
+
+-- ─── Deterministic duplicate detection (Phase 1, migration 062) ───────────
+-- Aggregate counterpart to the per-event duplicate_document_detected log
+-- emitted in document-worker/index.ts at detection time — that log is the
+-- audit trail for any ONE duplicate; this is the queryable rollup for
+-- "how much is this actually doing," the same total-uploads/duplicates-
+-- detected/extraction-jobs-avoided breakdown called for when Phase 1 was
+-- specced. Also the concrete artifact Phase 2 ("measure real production
+-- data" before building fuzzier, non-byte-identical cross-session
+-- matching) is meant to read from — this view is what turns that from an
+-- aspiration into something with an actual query behind it.
+--
+-- Deliberately reports bytes, not a dollar estimate: this repo already has
+-- a real per-call cost figure (ai-gateway.ts's estimateCostCents, driven
+-- by actual token counts from Anthropic's response), and stacking a
+-- bytes-to-tokens-to-dollars guess on top of that here would be a fabricated
+-- number dressed as a measured one — the same failure mode this whole
+-- pipeline's fact-extraction rules exist to avoid ("never invent a
+-- quantity without evidence"). bytes_saved is the honest, defensible proxy;
+-- a real cost figure needs the avoided call's actual token estimate, not
+-- available from a call that was never made.
+CREATE OR REPLACE FUNCTION document_duplicate_detection_summary(p_window interval DEFAULT interval '7 days')
+RETURNS TABLE(
+  window_start timestamptz,
+  total_files_uploaded bigint,
+  duplicate_files_detected bigint,
+  extraction_jobs_avoided bigint,
+  duplicate_rate_pct numeric,
+  last_duplicate_detected_at timestamptz
+) AS $$
+  SELECT
+    now() - p_window,
+    count(*),
+    count(*) FILTER (WHERE duplicate_of_file_id IS NOT NULL),
+    -- Equal to duplicate_files_detected by construction, not a coincidence:
+    -- document-worker returns its 'duplicate' outcome (skipping all
+    -- extraction) exactly when it sets duplicate_of_file_id, one-to-one —
+    -- kept as its own named column since Phase 1's spec asked for this
+    -- metric by that name specifically, not merely inferable from the one
+    -- above.
+    count(*) FILTER (WHERE duplicate_of_file_id IS NOT NULL),
+    CASE WHEN count(*) = 0 THEN 0
+         ELSE round(100.0 * count(*) FILTER (WHERE duplicate_of_file_id IS NOT NULL) / count(*), 2)
+    END,
+    max(created_at) FILTER (WHERE duplicate_of_file_id IS NOT NULL)
+  FROM files
+  WHERE created_at > now() - p_window;
+$$ LANGUAGE sql STABLE;
+
+COMMENT ON FUNCTION document_duplicate_detection_summary IS
+  'Rollup of files.duplicate_of_file_id activity (migration 062) over the trailing window: total uploads, exact duplicates detected, extraction jobs avoided (identical by construction — one avoided extraction per detected duplicate), and the resulting duplicate rate. This is the production-data source Phase 2 (reliable non-byte-identical cross-session matching) is meant to be built against, not built blind ahead of it.';
