@@ -41,6 +41,7 @@ import {
   dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
+  partitionCompletedJobsForClassification,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
 } from './pipeline-logic.ts'
@@ -348,22 +349,25 @@ async function loadAllFromExtractionResults(
     .eq('status', 'completed')
     .order('document_id', { ascending: true })
 
+  // Pure partition (pipeline-logic.ts, unit-tested) decides which
+  // completed jobs are exact duplicates before any Storage I/O happens —
+  // this is what actually stops a re-uploaded identical file from
+  // inflating the fact base/document count: a duplicate's document_id
+  // never reaches loadBlockFromExtractionResult below, so it never enters
+  // `documents`/`facts` sent to Stage 1/2 at all, Claude never returns a
+  // file_index for it, and no project_documents/project_facts row can
+  // ever be created for it. Not a failure, so kept out of failedOut
+  // (which drives the builder-facing "these weren't processed, retry" list).
+  const jobRows = (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>
+  const resultByDocId = new Map(jobRows.map((j) => [j.document_id, j.result]))
+  const { toClassify, duplicates } = partitionCompletedJobsForClassification(jobRows)
+  duplicatesOut.push(...duplicates)
+
   const loaded: LoadedFile[] = []
-  for (const j of (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>) {
-    // Deterministic duplicate (Phase 1, document-worker) — never build
-    // Claude content for it. This is what actually stops a re-uploaded
-    // identical file from inflating the fact base/document count: it
-    // never enters `documents`/`facts` sent to Stage 1/2 at all, so
-    // Claude never returns a file_index for it and no project_documents
-    // row is created. Not a failure, so kept out of failedOut (which
-    // drives the builder-facing "these weren't processed, retry" list).
-    if (j.result?.duplicate) {
-      duplicatesOut.push(j.document_id)
-      continue
-    }
-    const lf = await loadBlockFromExtractionResult(supabase, j.document_id, j.result)
+  for (const documentId of toClassify) {
+    const lf = await loadBlockFromExtractionResult(supabase, documentId, resultByDocId.get(documentId)!)
     if (lf) loaded.push(lf)
-    else failedOut.push(j.document_id)
+    else failedOut.push(documentId)
   }
 
   // A permanently-failed document's job row still exists (status='failed')

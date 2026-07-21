@@ -48,10 +48,12 @@ import {
   nextStage3FailureHistory,
   sha256Hex,
   decideDuplicateFile,
+  partitionCompletedJobsForClassification,
   type BatchableFile,
   type FactRow,
   type Stage3FailureHistory,
   type HashedFileCandidate,
+  type CompletedDocumentJobRow,
 } from './pipeline-logic.ts'
 
 // ─── splitIntoBatches ───────────────────────────────────────────────────────
@@ -1625,4 +1627,61 @@ test('decideDuplicateFile: multiple prior matches in the SAME job resolve to the
   const result = decideDuplicateFile('dup-hash', candidates, 'file-newest-upload', 'job-1')
   assert.equal(result.isDuplicate, true)
   assert.equal(result.originalFileId, 'same-job-file')
+})
+
+// ─── Regression: same document uploaded twice to the same job, end to end
+// at the decision level (production validation pass, downstream impact
+// audit) ─────────────────────────────────────────────────────────────────
+//
+// Scenario: Job A gets document.pdf uploaded, processed, and classified.
+// Later, Job A gets the exact same document.pdf uploaded again (a new
+// files row, a new document_processing_jobs row — document-worker
+// computes the same content_hash, decideDuplicateFile correctly identifies
+// it as a duplicate of the first upload, and its job is completed with a
+// `duplicate: true` marker instead of ever being extracted). This test
+// picks up the story at that point and proves the marker actually does
+// what it's for: partitionCompletedJobsForClassification — the real
+// function loadAllFromExtractionResults (index.ts) calls before ever
+// touching Storage or building Claude content — permanently excludes the
+// duplicate's document_id, so it can never reach Stage 1/2, never get a
+// project_documents/project_facts row, and therefore never becomes an
+// estimator input. This is the one property Phase 1 exists to guarantee;
+// it previously had no direct unit coverage (the equivalent filtering used
+// to live inline in index.ts, untestable without a live Deno/Supabase
+// runtime) until it was extracted into this pure function.
+test('partitionCompletedJobsForClassification: REGRESSION — same document uploaded twice to the same job produces exactly one classification candidate and zero for the duplicate', () => {
+  const jobsForBatch: CompletedDocumentJobRow[] = [
+    // First upload of document.pdf: extracted normally, no duplicate marker.
+    { document_id: 'file-document-pdf-upload-1', result: { duplicate: undefined } },
+    // Second upload of the SAME document.pdf to the same job: document-worker
+    // detected the hash match and completed this job with a duplicate
+    // marker instead of ever extracting it.
+    { document_id: 'file-document-pdf-upload-2', result: { duplicate: true } },
+  ]
+
+  const { toClassify, duplicates } = partitionCompletedJobsForClassification(jobsForBatch)
+
+  // Second upload detected as a duplicate — never sent for classification.
+  assert.deepEqual(duplicates, ['file-document-pdf-upload-2'])
+  // No second extraction: only the first upload's document_id is eligible
+  // to be loaded (loadBlockFromExtractionResult, real Storage I/O) and
+  // included in the content Stage 1/2 sends to Claude.
+  assert.deepEqual(toClassify, ['file-document-pdf-upload-1'])
+  // No duplicate project facts / estimator input unchanged: since the
+  // duplicate's document_id never appears in toClassify, it structurally
+  // cannot produce a file_index in Claude's response, and therefore cannot
+  // produce a project_documents or project_facts row — the fact base Stage
+  // 3/6 reason over is exactly what it would have been had the second
+  // upload never happened.
+  assert.equal(toClassify.includes('file-document-pdf-upload-2'), false)
+})
+
+test('partitionCompletedJobsForClassification: a batch with no duplicates classifies every document', () => {
+  const jobsForBatch: CompletedDocumentJobRow[] = [
+    { document_id: 'file-a', result: { duplicate: undefined } },
+    { document_id: 'file-b', result: null },
+  ]
+  const { toClassify, duplicates } = partitionCompletedJobsForClassification(jobsForBatch)
+  assert.deepEqual(toClassify, ['file-a', 'file-b'])
+  assert.deepEqual(duplicates, [])
 })

@@ -1466,6 +1466,52 @@ export interface DuplicateDecision {
  * but this is the structural guarantee: even if a future caller's query
  * ever dropped that filter, this function still cannot cross-match jobs.
  */
+export interface CompletedDocumentJobRow {
+  document_id: string
+  result: { duplicate?: boolean } | null
+}
+
+export interface ClassificationPartition {
+  /** document_ids eligible to be loaded and sent to Stage 1/2 — everything else was excluded. */
+  toClassify: string[]
+  /** document_ids whose completed job carries a duplicate marker — never loaded, never built into Claude content. */
+  duplicates: string[]
+}
+
+/**
+ * Pure partition of a batch's completed document_processing_jobs rows into
+ * "send to Claude" vs "exact duplicate, already known — skip." This is the
+ * actual mechanism that keeps a duplicate's content out of project_facts:
+ * a document_id that lands in `duplicates` never gets its file bytes
+ * loaded (loadBlockFromExtractionResult, which does real Storage I/O, is
+ * only ever called for `toClassify` entries — see loadAllFromExtractionResults
+ * in index.ts), so it can never appear in the `documents`/`content` array
+ * Claude is given, Claude can never return a file_index for it, and no
+ * project_documents/project_facts row can ever be created for it.
+ *
+ * Extracted as its own pure function (rather than left inline in index.ts,
+ * where it originated) specifically so this exact exclusion behaviour has
+ * direct unit coverage without a live Supabase/Deno runtime — see the
+ * regression test built against this function for the "same document
+ * uploaded twice to the same job" scenario end to end at the decision
+ * level: second upload's document_id is guaranteed to land in
+ * `duplicates`, never in `toClassify`.
+ */
+export function partitionCompletedJobsForClassification(
+  jobs: CompletedDocumentJobRow[],
+): ClassificationPartition {
+  const toClassify: string[] = []
+  const duplicates: string[] = []
+  for (const j of jobs) {
+    if (j.result?.duplicate) {
+      duplicates.push(j.document_id)
+    } else {
+      toClassify.push(j.document_id)
+    }
+  }
+  return { toClassify, duplicates }
+}
+
 export function decideDuplicateFile(
   hash: string | null,
   candidates: HashedFileCandidate[],
