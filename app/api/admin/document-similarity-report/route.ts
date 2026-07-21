@@ -20,6 +20,14 @@ import {
 // export, not a classification decision — see lib/document-similarity.ts's
 // own comment on computeDocumentSimilarity.
 //
+// Each pair also carries `explanations` (deterministic, human-readable —
+// no LLM call), `revision_markers_detected`/`revision_values` (possible
+// Rev/Issue/Version/date markers found in the filenames, never ordered as
+// newer/older), and four always-null review fields (`human_label`,
+// `reviewed_by`, `reviewed_at`, `notes`) for a person to fill in externally
+// — see PHASE_2_REVIEW_PROCESS.md for the review workflow this dataset
+// feeds into.
+//
 // Auth: there is no admin/operator role anywhere in this codebase (every
 // route today is builder-session-scoped, worker-session-scoped, or
 // CRON_SECRET-scoped — see CLAUDE.md's "Auth" section). This is
@@ -62,11 +70,18 @@ interface ReportRow extends DocumentSimilarityResult {
   document_b_filename: string
 }
 
+// One row per pair, flattened for a spreadsheet — human_label/reviewed_by/
+// reviewed_at/notes are the LAST columns, deliberately, so a reviewer
+// opening this in a spreadsheet finds them right where they'll be filling
+// them in, after every explanatory column. See PHASE_2_REVIEW_PROCESS.md
+// for how these columns are meant to be used.
 function toCsv(rows: ReportRow[]): string {
   const headers = [
     'job_id', 'document_a', 'document_a_filename', 'document_b', 'document_b_filename',
-    'similarity_score', 'likely_category', 'filename_similarity', 'text_overlap',
-    'page_count_difference', 'same_file_size_range', 'same_detected_title', 'signals',
+    'similarity_score', 'likely_category', 'explanations',
+    'filename_similarity', 'text_overlap', 'page_count_difference', 'size_similarity', 'title_match',
+    'revision_markers_detected', 'revision_values', 'document_a_revision_markers', 'document_b_revision_markers',
+    'human_label', 'reviewed_by', 'reviewed_at', 'notes',
   ]
   const escape = (v: unknown): string => {
     const s = v === null || v === undefined ? '' : String(v)
@@ -76,8 +91,12 @@ function toCsv(rows: ReportRow[]): string {
   for (const r of rows) {
     lines.push([
       r.job_id, r.document_a, r.document_a_filename, r.document_b, r.document_b_filename,
-      r.similarity_score, r.likely_category, r.filename_similarity, r.text_overlap,
-      r.page_count_difference, r.same_file_size_range, r.same_detected_title, r.signals.join(';'),
+      r.similarity_score, r.likely_category, r.explanations.join('; '),
+      r.signals.filename_similarity, r.signals.text_overlap, r.signals.page_count_difference,
+      r.signals.size_similarity, r.signals.title_match,
+      r.revision_markers_detected, r.revision_values.join(';'),
+      r.document_a_revision_markers.join(';'), r.document_b_revision_markers.join(';'),
+      r.human_label, r.reviewed_by, r.reviewed_at, r.notes,
     ].map(escape).join(','))
   }
   return lines.join('\n')

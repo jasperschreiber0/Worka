@@ -4,17 +4,25 @@
 // pairs from real production data, so Gate 3 (reliable cross-session
 // matching for documents that are the SAME real-world drawing but not
 // byte-identical) can be designed against evidence instead of assumption —
-// see PHASE_2_DOCUMENT_MATCHING_READINESS.md for why that ordering matters.
+// see PHASE_2_DOCUMENT_MATCHING_READINESS.md for why that ordering matters,
+// and PHASE_2_REVIEW_PROCESS.md for how a human reviewer is meant to use
+// this dataset once exported.
 //
-// This module is DELIBERATELY inert: it only computes descriptive signals
-// and a ranking score for a pair of documents. It does not classify,
-// merge, supersede, or write anything back to project_documents/files/
-// project_facts, and nothing in the estimating pipeline (Stage 1-6) calls
-// it. `likely_category` is a coarse, human-facing triage label for a
-// person skimming an export, not a decision — see its own comment.
+// This module is DELIBERATELY inert: it only computes descriptive signals,
+// deterministic explanations, and a ranking score for a pair of documents.
+// It does not classify, merge, supersede, or write anything back to
+// project_documents/files/project_facts, and nothing in the estimating
+// pipeline (Stage 1-6) calls it. `likely_category` is a coarse, human-
+// facing triage label for a person skimming an export, not a decision —
+// see its own comment. `human_label`/`reviewed_by`/`reviewed_at`/`notes`
+// are always null at generation time — they exist as placeholders for a
+// human to fill in externally (e.g. in the exported CSV), never written by
+// this code.
 //
 // Pure and dependency-free (same reason pipeline-logic.ts is) so it's
 // directly unit-testable with `node --experimental-strip-types --test`.
+// No LLM calls anywhere in this file — every explanation is a deterministic
+// string built from already-computed signal values.
 
 // ─── Filename normalization + similarity ───────────────────────────────────
 
@@ -23,7 +31,8 @@
  * to a single space, and strip common OS/browser duplicate-upload suffixes
  * (" (1)", " - copy", "_copy2", etc.). Deliberately does NOT strip revision
  * tokens (v1/v2/rev-a/-final) — those are meaningful for a human labeling
- * the dataset, not noise to erase.
+ * the dataset, not noise to erase (see extractRevisionMarkers below, which
+ * reads the UNNORMALIZED filename for exactly this reason).
  */
 export function normalizeFilename(filename: string): string {
   const withoutExt = filename.includes('.') ? filename.slice(0, filename.lastIndexOf('.')) : filename
@@ -95,7 +104,9 @@ function shingles(text: string, size: number): Set<string> {
  * null — not 0 — when either side has no extracted text available (vision-
  * only documents have none persisted; see smooth-responder's vision-
  * selective processing), so "no signal" is never confused with "confirmed
- * different." Callers must treat null as "unknown," not "unrelated."
+ * different." Callers must treat null as "unknown," not "unrelated" —
+ * this is what requirement "missing text does not reduce safety" means in
+ * practice: a null never silently becomes a 0 anywhere downstream.
  */
 export function textShingleOverlap(textA: string | null, textB: string | null): number | null {
   if (!textA || !textB) return null
@@ -114,11 +125,30 @@ export function textShingleOverlap(textA: string | null, textB: string | null): 
 const FILE_SIZE_TOLERANCE_PCT = 0.1
 const FILE_SIZE_TOLERANCE_MIN_BYTES = 10_000 // floor so tiny files aren't falsely split by a % tolerance
 
-/** null (not false) when either side's size is unknown — see files.file_size_bytes' own caveats. */
+/**
+ * Boolean "same size bucket" check (with a tolerance floor for tiny
+ * files) — kept for likely_category's own thresholding. See
+ * fileSizeSimilarity below for the continuous score exposed to reviewers.
+ * null (not false) when either side's size is unknown.
+ */
 export function fileSizeRangeMatch(bytesA: number | null, bytesB: number | null): boolean | null {
   if (bytesA == null || bytesB == null) return null
   const tolerance = Math.max(FILE_SIZE_TOLERANCE_MIN_BYTES, Math.max(bytesA, bytesB) * FILE_SIZE_TOLERANCE_PCT)
   return Math.abs(bytesA - bytesB) <= tolerance
+}
+
+/**
+ * Continuous 0..1 file-size similarity (1 = identical size, 0 = maximally
+ * different) — more informative for a human reviewer than a bare boolean.
+ * null when either side's size is unknown (files uploaded before migration
+ * 063, or a hash failure on that file — see files.file_size_bytes' own
+ * caveats).
+ */
+export function fileSizeSimilarity(bytesA: number | null, bytesB: number | null): number | null {
+  if (bytesA == null || bytesB == null) return null
+  const maxBytes = Math.max(bytesA, bytesB)
+  if (maxBytes === 0) return 1
+  return Math.round((1 - Math.abs(bytesA - bytesB) / maxBytes) * 1000) / 1000
 }
 
 export function pageCountDifference(pageA: number | null, pageB: number | null): number | null {
@@ -130,6 +160,169 @@ export function pageCountDifference(pageA: number | null, pageB: number | null):
 export function titleMatch(titleA: string | null, titleB: string | null): boolean | null {
   if (!titleA || !titleB) return null
   return titleA.trim().toLowerCase() === titleB.trim().toLowerCase()
+}
+
+// ─── Revision markers ────────────────────────────────────────────────────────
+//
+// Detects POSSIBLE revision/issue/version markers and dates in a filename.
+// Deliberately does not compare, order, or infer "newer/older" — that
+// requires understanding a builder's own naming convention, which varies,
+// and inferring it wrong would be exactly the kind of unearned confidence
+// this whole measurement phase exists to avoid. This only reports what was
+// found, for a human to interpret.
+
+export interface RevisionMarker {
+  type: 'letter_revision' | 'numeric_revision' | 'issue' | 'version' | 'date'
+  /** The exact matched substring, e.g. "Rev A", "Issue 03" — for traceability back to the filename. */
+  raw: string
+  /** Normalized value only (leading zeros stripped for numeric types, letters uppercased) — e.g. "A", "3". Never compared/ordered by this module. */
+  value: string
+}
+
+// Boundaries use explicit lookaround, not \b — \b treats underscore as a
+// word character, so "Plans_2026-07-01.pdf" (a very plausible real
+// filename, underscore-separated) would silently fail to match a \b-based
+// pattern right after the underscore. (?<![A-Za-z0-9]) / (?![A-Za-z0-9])
+// correctly treat "_", "-", ".", and space all as valid separators on
+// either side of a marker.
+const REVISION_PATTERNS: Array<{ type: RevisionMarker['type']; regex: RegExp }> = [
+  // "Rev A", "REV-B", "Revision C", "RevD" — a single letter, never a digit
+  // (the numeric pattern below owns digits), so these two never double-match.
+  { type: 'letter_revision', regex: /(?<![A-Za-z0-9])rev(?:ision)?[\s._-]*([A-Za-z])(?![A-Za-z0-9])/gi },
+  // "Rev 2", "Revision 02"
+  { type: 'numeric_revision', regex: /(?<![A-Za-z0-9])rev(?:ision)?[\s._-]*(\d+)(?![A-Za-z0-9])/gi },
+  // "Issue 03"
+  { type: 'issue', regex: /(?<![A-Za-z0-9])issue[\s._-]*(\d+)(?![A-Za-z0-9])/gi },
+  // "Version 4", "v4", "V04" — the leading lookbehind keeps this from
+  // matching the "vision" inside "Revision" (the char immediately before
+  // that "v" is "e", which IS alphanumeric, so the lookbehind fails there
+  // — verified in this function's own tests).
+  { type: 'version', regex: /(?<![A-Za-z0-9])v(?:ersion)?[\s._-]*(\d+)(?![A-Za-z0-9])/gi },
+  // ISO-ish and DD-MM-YYYY-ish dates embedded in a filename.
+  { type: 'date', regex: /(?<![A-Za-z0-9])(\d{4}-\d{2}-\d{2})(?![A-Za-z0-9])/g },
+  { type: 'date', regex: /(?<![A-Za-z0-9])(\d{2}[-_.]\d{2}[-_.]\d{4})(?![A-Za-z0-9])/g },
+]
+
+/**
+ * Scans a FILENAME (not drawing_title/extracted text — deliberately scoped
+ * to what the task asked for; title/text-based detection is a natural
+ * extension not built here) for possible revision markers. Pure, no
+ * ordering/classification — see this section's own header comment.
+ */
+export function extractRevisionMarkers(filename: string): RevisionMarker[] {
+  const markers: RevisionMarker[] = []
+  for (const { type, regex } of REVISION_PATTERNS) {
+    for (const match of filename.matchAll(regex)) {
+      const captured = match[1]
+      const value = type === 'letter_revision' ? captured.toUpperCase()
+        : type === 'date' ? captured
+        : String(parseInt(captured, 10))
+      markers.push({ type, raw: match[0], value })
+    }
+  }
+  return markers
+}
+
+export interface RevisionPairSummary {
+  revision_markers_detected: boolean
+  revision_values: string[]
+}
+
+/** Combines both documents' detected marker values into one pair-level summary — deduped, unordered (see this section's header comment on why no newer/older inference happens here). */
+export function summarizeRevisionMarkersForPair(markersA: RevisionMarker[], markersB: RevisionMarker[]): RevisionPairSummary {
+  const combinedValues = [...markersA, ...markersB].map((m) => m.value)
+  return {
+    revision_markers_detected: combinedValues.length > 0,
+    revision_values: Array.from(new Set(combinedValues)),
+  }
+}
+
+// ─── Explanations ────────────────────────────────────────────────────────────
+
+export interface DocumentSimilaritySignals {
+  filename_similarity: number
+  text_overlap: number | null
+  page_count_difference: number | null
+  size_similarity: number | null
+  title_match: boolean | null
+}
+
+export interface ExplanationContext {
+  sameHash: boolean
+  normalizedFilenamesEqual: boolean
+  signals: DocumentSimilaritySignals
+  revisionValuesA: string[]
+  revisionValuesB: string[]
+}
+
+/**
+ * Deterministic, human-readable explanation of WHY a pair scored the way
+ * it did — generated purely from already-computed signal values, no LLM
+ * call, no new information. Every branch below reads directly off
+ * `ctx.signals`/`ctx.revisionValuesA`/`ctx.revisionValuesB`, so an
+ * explanation can never say something the signals don't support (see this
+ * function's own test — "explanations match signals"). A missing signal
+ * (null) always gets its own explicit "not available" line rather than
+ * being silently skipped, so a reviewer never mistakes "no text to
+ * compare" for "confirmed no overlap."
+ */
+export function explainSimilarity(ctx: ExplanationContext): string[] {
+  const out: string[] = []
+  const { signals } = ctx
+
+  if (ctx.sameHash) out.push('Identical file content (exact byte match)')
+
+  if (ctx.normalizedFilenamesEqual) {
+    out.push('Same normalized filename')
+  } else if (signals.filename_similarity >= 0.7) {
+    out.push(`Similar filename (${Math.round(signals.filename_similarity * 100)}% match)`)
+  } else {
+    out.push('Filenames are substantially different')
+  }
+
+  if (signals.text_overlap == null) {
+    out.push('No extracted text available for comparison')
+  } else {
+    out.push(`${Math.round(signals.text_overlap * 100)}% extracted text overlap`)
+  }
+
+  if (signals.page_count_difference == null) {
+    out.push('Page count unknown for at least one document')
+  } else if (signals.page_count_difference === 0) {
+    out.push('Same page count')
+  } else {
+    out.push(`Page count differs by ${signals.page_count_difference}`)
+  }
+
+  if (signals.size_similarity == null) {
+    out.push('File size unknown for at least one document')
+  } else if (signals.size_similarity >= 0.9) {
+    out.push('Similar file size')
+  } else if (signals.size_similarity < 0.5) {
+    out.push('File sizes differ substantially')
+  }
+  // Mid-range size similarity gets no line — not informative enough to be
+  // worth a reviewer's attention either way.
+
+  if (signals.title_match == null) {
+    out.push('Document title not detected for at least one document')
+  } else if (signals.title_match) {
+    out.push('Same detected document title')
+  } else {
+    out.push('Different detected document titles')
+  }
+
+  const bothHaveMarkers = ctx.revisionValuesA.length > 0 && ctx.revisionValuesB.length > 0
+  if (bothHaveMarkers) {
+    const setA = new Set(ctx.revisionValuesA)
+    const setB = new Set(ctx.revisionValuesB)
+    const sameValues = setA.size === setB.size && Array.from(setA).every((v) => setB.has(v))
+    out.push(sameValues ? 'Same revision marker detected on both documents' : 'Different revision markers detected')
+  } else if (ctx.revisionValuesA.length > 0 || ctx.revisionValuesB.length > 0) {
+    out.push('Revision marker present on only one document')
+  }
+
+  return out
 }
 
 // ─── Composite ───────────────────────────────────────────────────────────────
@@ -147,14 +340,26 @@ export interface DocumentSignalInput {
 export interface DocumentSimilarityResult {
   document_a: string
   document_b: string
-  signals: string[]
+  signals: DocumentSimilaritySignals
+  explanations: string[]
   similarity_score: number
-  filename_similarity: number
-  text_overlap: number | null
-  page_count_difference: number | null
-  same_file_size_range: boolean | null
-  same_detected_title: boolean | null
   likely_category: string
+  // Pair-level summary (combined across both documents) — see
+  // summarizeRevisionMarkersForPair. Never orders/classifies as newer or
+  // older; only reports what was detected.
+  revision_markers_detected: boolean
+  revision_values: string[]
+  // Per-document breakdown, additive beyond what was asked, for
+  // traceability — which document has which marker.
+  document_a_revision_markers: string[]
+  document_b_revision_markers: string[]
+  // Review fields — always null when generated. Never written by this
+  // module; exist so an exported row has somewhere for a human to record
+  // their answer (see PHASE_2_REVIEW_PROCESS.md). No automatic labelling.
+  human_label: string | null
+  reviewed_by: string | null
+  reviewed_at: string | null
+  notes: string | null
 }
 
 /**
@@ -196,16 +401,26 @@ function categorize(
  * doesn't silently drag the score down — it's excluded from the average
  * entirely rather than counted as 0. filename_similarity is always
  * available (every file has a filename) so the score is never fully
- * undefined. This ranks pairs for human review; it does not decide anything.
+ * undefined. This ranks pairs for human review; it does not decide
+ * anything, and nothing in decideDuplicateFile/filterToCanonicalHashCandidates
+ * (Phase 1's actual duplicate-suppression logic) reads similarity_score,
+ * likely_category, or any field this function produces — see this file's
+ * own header comment.
  */
 export function computeDocumentSimilarity(a: DocumentSignalInput, b: DocumentSignalInput): DocumentSimilarityResult {
   const sameHash = Boolean(a.contentHash && b.contentHash && a.contentHash === b.contentHash)
   const filenameSim = filenameSimilarity(a.filename, b.filename)
+  const normalizedFilenamesEqual = normalizeFilename(a.filename) === normalizeFilename(b.filename)
   const textOverlap = textShingleOverlap(a.extractedText, b.extractedText)
+  const sizeSimilarity = fileSizeSimilarity(a.fileSizeBytes, b.fileSizeBytes)
   const sameSizeRange = fileSizeRangeMatch(a.fileSizeBytes, b.fileSizeBytes)
   const samePageCount = a.pageCount != null && b.pageCount != null ? a.pageCount === b.pageCount : null
   const sameTitle = titleMatch(a.drawingTitle, b.drawingTitle)
   const pageDiff = pageCountDifference(a.pageCount, b.pageCount)
+
+  const markersA = extractRevisionMarkers(a.filename)
+  const markersB = extractRevisionMarkers(b.filename)
+  const revisionSummary = summarizeRevisionMarkersForPair(markersA, markersB)
 
   const weighted: Array<{ value: number; weight: number }> = [{ value: filenameSim, weight: 0.25 }]
   if (textOverlap != null) weighted.push({ value: textOverlap, weight: 0.35 })
@@ -217,27 +432,37 @@ export function computeDocumentSimilarity(a: DocumentSignalInput, b: DocumentSig
   const rawScore = weighted.reduce((sum, w) => sum + w.value * w.weight, 0) / totalWeight
   const similarityScore = sameHash ? 1 : Math.round(rawScore * 1000) / 1000
 
-  const signals: string[] = []
-  if (sameHash) signals.push('exact_content_hash_match')
-  if (normalizeFilename(a.filename) === normalizeFilename(b.filename)) signals.push('same_filename_normalized')
-  else if (filenameSim >= 0.7) signals.push('similar_filename')
-  if (samePageCount) signals.push('same_page_count')
-  if (sameSizeRange) signals.push('same_file_size_range')
-  if (sameTitle) signals.push('same_detected_title')
-  if (textOverlap != null && textOverlap >= 0.5) signals.push('high_text_overlap')
-  if (textOverlap == null) signals.push('text_unavailable')
+  const signals: DocumentSimilaritySignals = {
+    filename_similarity: Math.round(filenameSim * 1000) / 1000,
+    text_overlap: textOverlap,
+    page_count_difference: pageDiff,
+    size_similarity: sizeSimilarity,
+    title_match: sameTitle,
+  }
+
+  const explanations = explainSimilarity({
+    sameHash,
+    normalizedFilenamesEqual,
+    signals,
+    revisionValuesA: markersA.map((m) => m.value),
+    revisionValuesB: markersB.map((m) => m.value),
+  })
 
   return {
     document_a: a.fileId,
     document_b: b.fileId,
     signals,
+    explanations,
     similarity_score: similarityScore,
-    filename_similarity: Math.round(filenameSim * 1000) / 1000,
-    text_overlap: textOverlap,
-    page_count_difference: pageDiff,
-    same_file_size_range: sameSizeRange,
-    same_detected_title: sameTitle,
     likely_category: categorize(sameHash, filenameSim, textOverlap, sameTitle, samePageCount, similarityScore),
+    revision_markers_detected: revisionSummary.revision_markers_detected,
+    revision_values: revisionSummary.revision_values,
+    document_a_revision_markers: markersA.map((m) => m.value),
+    document_b_revision_markers: markersB.map((m) => m.value),
+    human_label: null,
+    reviewed_by: null,
+    reviewed_at: null,
+    notes: null,
   }
 }
 
