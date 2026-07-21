@@ -316,6 +316,25 @@ async function fetchBatchJobStatuses(
   return await res.json() as DocumentProcessingJobRow[]
 }
 
+// How many of the 13 trades Stage 3 has durably completed for this batch —
+// see lastStage3TradesCompleted's own comment in the polling loop for why
+// this needs its own poll independent of files.intake_stage, which can sit
+// at 'reasoning_scope' for the whole multi-chunk duration.
+async function fetchStage3TradesCompleted(
+  supabaseUrl: string,
+  supabaseKey: string,
+  anonKey: string,
+  batchId: string
+): Promise<number | null> {
+  const res = await fetch(
+    `${supabaseUrl}/rest/v1/document_processing_batches?id=eq.${encodeURIComponent(batchId)}&select=stage3_completed_trade_ids`,
+    { headers: { apikey: anonKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+  )
+  if (!res.ok) return null
+  const rows = await res.json() as Array<{ stage3_completed_trade_ids: number[] | null }>
+  return rows[0]?.stage3_completed_trade_ids?.length ?? null
+}
+
 // Best-effort lookup used only when giving up (timeout/failure) — the main
 // polling loop already selects these columns on every iteration, but a
 // give-up can happen before that iteration's fetch has run.
@@ -658,6 +677,20 @@ export async function GET(
         // below — otherwise a slow-but-genuinely-progressing multi-batch
         // run could look identical to a truly hung one.
         let lastBatchIndex: number | null = null
+        // How many of the 13 trades Stage 3 (Scope Reasoning) has durably
+        // completed for this batch — mirrors intake_batch_index's own
+        // "tracked separately from lastStage" reasoning above, for the same
+        // underlying problem one stage later: a large project's Stage 3 can
+        // span several ~2min chunks (see planStage3Chunks, pipeline-logic.ts)
+        // and possibly multiple reconnects/resumes, all while
+        // files.intake_stage sits at 'reasoning_scope' the entire time — the
+        // stage-change-gated emit below never fires again once the stage
+        // itself stops changing, so a genuinely-progressing multi-chunk run
+        // showed zero visible movement for minutes at a time (confirmed live
+        // against a real 12-document/13-trade test run). document_processing_
+        // batches.stage3_completed_trade_ids (migration 060) already tracks
+        // this server-side for its own resume logic; this just surfaces it.
+        let lastStage3TradesCompleted = -1
         // Per-document extraction checklist snapshot — only re-emitted when
         // it actually changes, so a steady stream of identical polls
         // doesn't spam the client with duplicate document_progress events.
@@ -799,6 +832,25 @@ export async function GET(
 
           const stage = row.intake_stage ?? 'uploading'
           const pct = row.intake_pct ?? 5
+
+          // Real trade-by-trade Stage 3 progress — independent of the
+          // stage-change gate below, since 'reasoning_scope' can be the
+          // stage for the entire multi-chunk, multi-minute duration with no
+          // transition to trigger on. The 13-trade total is the platform's
+          // own locked trade-category count (see CLAUDE.md), not a guess.
+          if (stage === 'reasoning_scope' && row.processing_batch_id) {
+            const tradesCompleted = await fetchStage3TradesCompleted(supabaseUrl!, supabaseKey!, anonKey, row.processing_batch_id)
+            if (tradesCompleted !== null && tradesCompleted !== lastStage3TradesCompleted) {
+              lastStage3TradesCompleted = tradesCompleted
+              emit('progress', {
+                stage,
+                message: `${STAGE_MESSAGE[stage]} — ${tradesCompleted} of 13 trades reasoned through`,
+                pct,
+              })
+              lastStage = stage
+              lastProgressAt = Date.now()
+            }
+          }
 
           if (stage !== lastStage && !['complete', 'failed', 'awaiting_clarification'].includes(stage)) {
             let message = STAGE_MESSAGE[stage] ?? stage
