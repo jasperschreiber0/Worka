@@ -212,7 +212,15 @@ const REVISION_PATTERNS: Array<{ type: RevisionMarker['type']; regex: RegExp }> 
 export function extractRevisionMarkers(filename: string): RevisionMarker[] {
   const markers: RevisionMarker[] = []
   for (const { type, regex } of REVISION_PATTERNS) {
-    for (const match of filename.matchAll(regex)) {
+    // Array.from(...) wrapper, not a direct for-of over matchAll()'s
+    // iterator — this project's tsconfig target doesn't enable
+    // --downlevelIteration, so a raw RegExpStringIterator can't be
+    // for-of'd directly (see CLAUDE.md's "TypeScript Compatibility Rules":
+    // the same reason Set/Map.entries() need Array.from() wrappers here).
+    // Not caught by this sandbox's own `tsc --noEmit` (missing @types/node
+    // masks it), only by Next.js's real build — verified against the
+    // actual Railway build failure this fixes.
+    for (const match of Array.from(filename.matchAll(regex))) {
       const captured = match[1]
       const value = type === 'letter_revision' ? captured.toUpperCase()
         : type === 'date' ? captured
