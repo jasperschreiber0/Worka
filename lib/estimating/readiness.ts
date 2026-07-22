@@ -44,6 +44,16 @@ export interface ReadinessSignals {
   reviewItemCount: number
   /** quotes.confidence_score — lowest included line-item confidence. */
   confidenceScore: number | null
+  /**
+   * Unresolved conservative assumptions (assumptions.gate IS NULL) —
+   * WorkA proceeded past a blocking clarifying question using a disclosed
+   * default instead of stopping the pipeline (non-blocking estimation).
+   * Deliberately a REVIEW reason, not a blocked one: unlike Gates 1-3
+   * (unresolvedAssumptions above), a $ total genuinely exists here — the
+   * estimate is complete, just built on a stated assumption worth a look,
+   * not missing information the way an unpriced/no-unit item is.
+   */
+  unresolvedConservativeAssumptions: number
 }
 
 export interface ReadinessResult {
@@ -86,6 +96,11 @@ export function deriveQuoteReadiness(signals: ReadinessSignals): ReadinessResult
   if (signals.confidenceScore !== null && signals.confidenceScore < LOW_CONFIDENCE_REVIEW_THRESHOLD) {
     reviewReasons.push(
       `Some quantities were read with low confidence (${signals.confidenceScore}%) — check the red-marked lines`
+    )
+  }
+  if (signals.unresolvedConservativeAssumptions > 0) {
+    reviewReasons.push(
+      `WorkA assumed ${signals.unresolvedConservativeAssumptions} ${plural(signals.unresolvedConservativeAssumptions, 'thing')} it couldn't confirm from your documents — review before sending`
     )
   }
 

@@ -42,8 +42,10 @@ import {
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
   partitionCompletedJobsForClassification,
+  buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
+  type ConservativeAssumption,
 } from './pipeline-logic.ts'
 import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -482,6 +484,10 @@ const SCOPE_REASONING_TOOL = {
             reason: { type: 'string', description: 'Why this materially affects the estimate.' },
             trade_category_id: { type: ['integer', 'null'] },
             blocking: { type: 'boolean', description: 'True only if the estimate cannot proceed responsibly without an answer (e.g. no structural drawings for a double-storey addition).' },
+            suggested_assumption: {
+              type: ['string', 'null'],
+              description: 'Even for a blocking question, the estimate always proceeds using a stated assumption rather than waiting for an answer — if there is a reasonable, industry-standard default for this specific project, state it here (e.g. "single storey, standard strip footing"). Null only if no reasonable default exists at all.',
+            },
           },
           required: ['question', 'reason', 'blocking'],
         },
@@ -1650,7 +1656,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         reason: 'scope_reasoning_completed_at already set for this batch — reusing persisted scope_items instead of re-running Stage 3',
       }))
     } else {
-      const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all).${memoryContext}`
+      const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all) — note that "blocking" flags a question for priority review, it does NOT stop the estimate from being generated; the pipeline always continues using your suggested_assumption (or a conservative default if you don't provide one), so always give your best industry-standard default when one exists.${memoryContext}`
 
       // Stage 3 reliability: identity of THIS batch's Stage 3 input,
       // independent of whether it ends up chunked into 1 or several calls
@@ -1737,7 +1743,6 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
         const scopeStartedAt = Date.now()
         const chunkResults: ScopeReasoningResult[] = []
-        let raisedBlocking = false
         try {
           for (const [chunkIndex, tradeChunk] of plan.chunksToRunNow.entries()) {
             const scopeUserContent = [{
@@ -1804,13 +1809,12 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
               trades_completed_total: completedTradeIds.length, trades_remaining: TRADE_CATEGORIES.length - completedTradeIds.length,
             }))
 
-            // A blocking question stops further chunks this invocation —
-            // no point spending on more trades once the run needs the
-            // builder's input regardless.
-            if (((chunkResult.clarifying_questions ?? []) as Array<Record<string, unknown>>).some((q) => q.blocking === true)) {
-              raisedBlocking = true
-              break
-            }
+            // A blocking question no longer stops further chunks — the
+            // pipeline always continues to Stage 6 (see this stage's own
+            // section below), so abandoning the remaining trades here would
+            // leave whole trades missing from the estimate instead of just
+            // one flagged, low-confidence assumption. Still reasoned about
+            // every chunk exactly as before; only the early exit is gone.
           }
         } catch (err) {
           const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
@@ -1863,7 +1867,25 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
 
         await setStage('detecting_gaps')
 
+        // De-duped against already-open questions for this job before either
+        // insert below. Previously this could only ever run once for
+        // non-blocking questions per job in practice (a blocking question
+        // always halted the pipeline, so Stage 3 could never re-run while
+        // one was open) — now that blocking no longer stops anything,
+        // Stage 3 can genuinely run again (a new incremental upload) while
+        // an earlier blocking question is still unanswered, and Claude
+        // re-raising the same real gap in near-identical wording is
+        // expected, not a bug. Without this check that would insert a
+        // duplicate row every run instead of leaving the original in place.
+        const { data: alreadyOpenRows } = await supabase
+          .from('clarifying_questions')
+          .select('question')
+          .eq('job_id', jobId)
+          .eq('status', 'open')
+        const alreadyOpenQuestions = new Set(((alreadyOpenRows ?? []) as Array<{ question: string }>).map((r) => r.question))
+
         const questions = ((scopeResult.clarifying_questions ?? []) as Array<Record<string, unknown>>)
+          .filter((q) => !alreadyOpenQuestions.has(q.question as string))
         const blockingQuestions = questions.filter((q) => q.blocking === true)
         const nonBlocking = questions.filter((q) => q.blocking !== true)
         if (nonBlocking.length > 0) {
@@ -1875,14 +1897,14 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           )
         }
 
-        if (!raisedBlocking && plan.hasMoreAfterThisInvocation) {
+        if (plan.hasMoreAfterThisInvocation) {
           // Genuine forward progress this invocation (chunksToRunNow > 0,
           // all persisted above), but the remaining trades didn't fit —
           // defer them, cleanly, to a later invocation with a fresh
-          // wall-clock window. Distinct log/stall reason from a zero-
-          // progress bail, so an operator reading document_processing_
-          // batches can immediately tell "this is converging" from "this
-          // made no progress at all."
+          // wall-clock window. Unrelated to blocking questions (that no
+          // longer stops anything — see below): this is purely a compute-
+          // budget deferral, resolved automatically by the next invocation,
+          // never exposed to the builder as something to wait on.
           console.log(JSON.stringify({
             stage: 'reasoning_scope', status: 'partial_progress_deferred', job_id: jobId, batch_id: parentJobId,
             trades_completed_total: completedTradeIds.length, trades_remaining: TRADE_CATEGORIES.length - completedTradeIds.length,
@@ -1897,6 +1919,13 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           return
         }
 
+        // Non-blocking estimation: a blocking question is persisted (audit
+        // trail, and the builder can still answer it via the existing
+        // /clarify resume flow) but no longer stops the pipeline here —
+        // Stage 6 below always runs, using an explicit, disclosed
+        // assumption in place of the missing answer (see
+        // buildConservativeAssumption, pipeline-logic.ts). WorkA should
+        // always produce an estimate on the first run.
         if (blockingQuestions.length > 0) {
           const questionInserts = blockingQuestions.map((q) => ({
             job_id: jobId,
@@ -1905,34 +1934,19 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             trade_category_id: q.trade_category_id ?? null,
             blocking: true,
             status: 'open' as const,
+            suggested_assumption: (q.suggested_assumption as string | null) ?? null,
           }))
           await supabase.from('clarifying_questions').insert(questionInserts)
-
-          await supabase
-            .from('files')
-            .update({ intake_stage: 'awaiting_clarification', intake_pct: STAGES.awaiting_clarification, pipeline_stage: 'awaiting_clarification' })
-            .eq('id', fileId)
-          if (parentJobId) {
-            // Every file in the batch, not just fileId (the primary/anchor) —
-            // recompute_file_intake_status resolves this to 'needs_info' for
-            // each since classification_triggered is already true by this
-            // point in a queue-model run (migration 052).
-            await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
-          } else {
-            await supabase.from('files').update({ intake_status: 'needs_info' }).eq('id', fileId)
-          }
-          // Deliberately NOT marking scope_reasoning_completed_at here — a run
-          // that raised a blocking question genuinely needs Stage 3 to run
-          // again once the builder answers (the merged fact base changes),
-          // not to be skipped on the resumed run.
-          return
         }
 
         // Reaching here means every remaining trade was reasoned about this
-        // invocation (plan.hasMoreAfterThisInvocation was false) and no
-        // chunk raised a blocking question — genuinely done. Durable Stage 3
-        // checkpoint: a subsequent retry against this same batch will read
-        // this and skip straight to Stage 6.
+        // invocation (plan.hasMoreAfterThisInvocation was false) — genuinely
+        // done, whether or not a blocking question was raised. Durable
+        // Stage 3 checkpoint: a subsequent same-batch retry will read this
+        // and skip straight to Stage 6. (A builder answering a blocking
+        // question afterwards goes through the /clarify route instead,
+        // which always re-runs Stage 3 regardless of this checkpoint — see
+        // that route's own comment.)
         if (parentJobId) {
           await supabase.from('document_processing_batches')
             .update({ scope_reasoning_completed_at: new Date().toISOString() })
@@ -1966,6 +1980,34 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       documents_count: null, facts_count: facts.length,
       scope_items_count: (scopeForEstimate ?? []).length, quote_created: false,
     }))
+
+    // ── Non-blocking estimation: conservative assumptions ───────────────────
+    // Read fresh from the DB rather than the in-memory blockingQuestions
+    // from the Stage 3/4 section above — that variable is scoped to a
+    // branch that's skipped entirely on a checkpoint-skip retry
+    // (scopeAlreadyComplete) or on a resume, but an open blocking question
+    // from an EARLIER invocation still needs its conservative assumption
+    // applied every time Stage 6 runs, not only the invocation that first
+    // raised it.
+    const { data: openBlockingQuestions } = await supabase
+      .from('clarifying_questions')
+      .select('question, reason, trade_category_id, suggested_assumption')
+      .eq('job_id', jobId)
+      .eq('blocking', true)
+      .eq('status', 'open')
+      .order('created_at', { ascending: true })
+
+    const conservativeAssumptions: ConservativeAssumption[] = ((openBlockingQuestions ?? []) as Array<{
+      question: string; reason: string; trade_category_id: number | null; suggested_assumption: string | null
+    }>).map((q) => buildConservativeAssumption(q))
+
+    if (conservativeAssumptions.length > 0) {
+      console.log(JSON.stringify({
+        event: 'conservative_assumptions_applied', job_id: jobId, batch_id: parentJobId ?? null,
+        count: conservativeAssumptions.length,
+        trades: conservativeAssumptions.map((a) => a.trade_category_id),
+      }))
+    }
 
     const scopeBlock = (scopeForEstimate ?? [])
       .map((s: Record<string, unknown>) => `Trade ${s.trade_category_id} (${TRADE_CATEGORIES.find((t) => t.id === s.trade_category_id)?.name}): included = ${(s.included_scope as string[]).join('; ')}. excluded = ${(s.excluded_scope as string[]).join('; ')}.`)
@@ -2005,7 +2047,17 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Validation gates ────────────────────────────────────────────────────
     await setStage('validating')
 
-    const rawItems = estimateResult.line_items as Array<Record<string, unknown>>
+    // Deterministic confidence cap for any trade a conservative assumption
+    // applies to — never relies on Claude's own Stage 6 confidence to
+    // already reflect an unanswered blocking question (see
+    // capConfidenceForBlockingTrade, pipeline-logic.ts). Confidence-only:
+    // does not touch quantity, rate, or pricing_type — Stage 6 pricing
+    // itself is unchanged.
+    const rawItems = (estimateResult.line_items as Array<Record<string, unknown>>).map((item) => {
+      if (conservativeAssumptions.length === 0) return item
+      if (!conservativeAssumptionAppliesToTrade(conservativeAssumptions, (item.trade_category_id as number) ?? null)) return item
+      return { ...item, confidence: capConfidenceForBlockingTrade((item.confidence as number) ?? 100) }
+    })
     const assumptionsToInsert: Array<{ description: string; gate: 1 | 2 | 3; message: string }> = []
 
     const validated = rawItems
@@ -2069,6 +2121,62 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     {
       const { error: currentErr } = await supabase.rpc('set_current_quote', { p_job_id: jobId, p_quote_id: quoteId })
       if (currentErr) console.error('set_current_quote failed:', currentErr.message)
+    }
+
+    // ── Non-blocking estimation: reconcile conservative-assumption rows ────
+    // gate IS NULL distinguishes these from Gate 1-3 assumptions (never
+    // touched here). Two things happen on every Stage 6 run, not just the
+    // first: (1) a currently-open blocking question not yet represented as
+    // an assumption row gets one — covers both the fresh case and a
+    // checkpoint-skip retry reusing an earlier invocation's questions; (2)
+    // a row whose question is no longer open (the builder answered it via
+    // /clarify) is auto-resolved, so "review required" actually shrinks as
+    // things get answered instead of accumulating forever. Best-effort:
+    // this bookkeeping must never fail the estimate it describes.
+    try {
+      const { data: existingConservative } = await supabase
+        .from('assumptions')
+        .select('id, description, resolution_type')
+        .eq('quote_id', quoteId)
+        .is('gate', null)
+
+      const existingByQuestion = new Map(
+        ((existingConservative ?? []) as Array<{ id: string; description: string; resolution_type: string | null }>)
+          .map((r) => [r.description, r])
+      )
+      const currentlyOpenQuestions = new Set(conservativeAssumptions.map((a) => a.question))
+
+      const newRows = conservativeAssumptions
+        .filter((a) => !existingByQuestion.has(a.question))
+        .map((a) => ({
+          quote_id: quoteId,
+          line_item_id: null,
+          description: a.question,
+          assumed_value: a.assumed_value,
+          reason: a.reason,
+          confidence_penalty: a.confidence_penalty,
+          trade_category_id: a.trade_category_id,
+          gate: null,
+          resolution_type: null,
+          resolved_at: null,
+          resolved_by: null,
+        }))
+      if (newRows.length > 0) {
+        await supabase.from('assumptions').insert(newRows)
+      }
+
+      const staleRowIds = Array.from(existingByQuestion.values())
+        .filter((r) => r.resolution_type === null && !currentlyOpenQuestions.has(r.description))
+        .map((r) => r.id)
+      if (staleRowIds.length > 0) {
+        await supabase.from('assumptions').update({
+          resolution_type: 'accepted',
+          resolved_at: new Date().toISOString(),
+          resolved_by: 'WorkA (auto-resolved: clarified)',
+        }).in('id', staleRowIds)
+      }
+    } catch (reconcileErr) {
+      console.error('conservative assumption reconciliation failed:', reconcileErr)
     }
 
     // ── Document contribution report (migration 039) ──────────────────────

@@ -17,6 +17,7 @@ const clean = {
   topRiskCount: 0,
   reviewItemCount: 0,
   confidenceScore: 90,
+  unresolvedConservativeAssumptions: 0,
 }
 
 test('readiness: nothing outstanding is ready', () => {
@@ -59,6 +60,28 @@ test('readiness: low confidence alone triggers review_required at the shared thr
 
 test('readiness: null confidence (never computed) does not trigger the low-confidence review on its own', () => {
   assert.equal(deriveQuoteReadiness({ ...clean, confidenceScore: null }).readiness, 'ready')
+})
+
+// ─── Non-blocking estimation: conservative assumptions ─────────────────────
+
+test('readiness: unresolved conservative assumptions are review_required, NOT blocked — the estimate is complete, just disclosed as assumed', () => {
+  const r = deriveQuoteReadiness({ ...clean, unresolvedConservativeAssumptions: 2 })
+  assert.equal(r.readiness, 'review_required')
+  assert.deepEqual(r.blockedReasons, [])
+  assert.equal(r.reviewReasons.length, 1)
+  assert.match(r.reviewReasons[0], /assumed 2/)
+})
+
+test('readiness: a genuine Gate 1-3 unresolved assumption still blocks even alongside conservative assumptions — the two signals stay independent', () => {
+  const r = deriveQuoteReadiness({ ...clean, unresolvedAssumptions: 1, unresolvedConservativeAssumptions: 2 })
+  assert.equal(r.readiness, 'blocked')
+  assert.equal(r.blockedReasons.length, 1)
+  assert.equal(r.reviewReasons.length, 1) // the conservative-assumption review reason still surfaces alongside
+})
+
+test('readiness: zero conservative assumptions does not add a review reason', () => {
+  const r = deriveQuoteReadiness(clean)
+  assert.equal(r.reviewReasons.length, 0)
 })
 
 // ─── isSilentlyUnpriced ─────────────────────────────────────────────────────

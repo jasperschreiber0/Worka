@@ -28,6 +28,16 @@ interface LineItemsByCategory {
   min_confidence: number
 }
 
+interface CriticalAssumption {
+  id: string
+  question: string
+  assumed_value: string
+  reason: string
+  confidence_penalty: number
+  trade_category_id: number | null
+  resolved: boolean
+}
+
 interface QuoteSummary {
   total_cost: number
   margin_pct: number
@@ -43,6 +53,8 @@ interface QuoteSummary {
   blocked_reasons: string[]
   review_reasons: string[]
   can_send: boolean
+  /** WorkA assumed these to avoid blocking the estimate — see WORKA_IMPLEMENTATION notes on non-blocking estimation. Optional for older cached responses. */
+  critical_assumptions?: CriticalAssumption[]
 }
 
 interface QAReportPayload {
@@ -727,25 +739,34 @@ function SummaryCard({ summary }: SummaryCardProps) {
           </div>
         )}
         {summary.readiness === 'review_required' && (
-          <div className="flex items-center gap-2 px-4 py-2.5" style={{ backgroundColor: 'rgba(255,152,0,0.1)' }}>
-            <svg
-              className="w-4 h-4 flex-shrink-0"
-              style={{ color: 'var(--status-amber)' }}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
-              />
-            </svg>
-            <span className="text-[13px] font-medium" style={{ color: 'var(--status-amber)' }}>
-              The numbers are complete — check the items below before sending
-            </span>
+          <div className="px-4 py-2.5" style={{ backgroundColor: 'rgba(255,152,0,0.1)' }}>
+            <div className="flex items-center gap-2">
+              <svg
+                className="w-4 h-4 flex-shrink-0"
+                style={{ color: 'var(--status-amber)' }}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                />
+              </svg>
+              <span className="text-[13px] font-medium" style={{ color: 'var(--status-amber)' }}>
+                The numbers are complete — check the items below before sending
+              </span>
+            </div>
+            {summary.review_reasons.length > 0 && (
+              <ul className="mt-1 ml-6 space-y-0.5">
+                {summary.review_reasons.map((reason, i) => (
+                  <li key={i} className="text-[12px]" style={{ color: 'var(--status-amber)' }}>{reason}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
         {summary.readiness === 'ready' && (
@@ -775,6 +796,46 @@ function SummaryCard({ summary }: SummaryCardProps) {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ─── "WorkA assumed" — conservative assumptions made in place of an unanswered
+// blocking clarifying question (see assumptions.gate IS NULL, migration 066).
+// The estimate never waits on these — this is where they're disclosed so the
+// builder can see exactly what to check, and answering the question in chat
+// resolves the row automatically on the next pipeline run.
+
+function AssumptionsMade({ assumptions }: { assumptions: CriticalAssumption[] }) {
+  const unresolved = assumptions.filter((a) => !a.resolved)
+  if (unresolved.length === 0) return null
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
+      <div className="px-4 py-2" style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderBottom: '1px solid rgba(255,152,0,0.2)' }}>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>
+          WorkA assumed these
+        </h3>
+        <p className="text-[11px] mt-0.5" style={{ color: 'var(--status-amber)' }}>
+          Couldn&apos;t be confirmed from your documents — estimated with a conservative default so you get a number now. Answer in chat to replace the assumption.
+        </p>
+      </div>
+      <div style={{ backgroundColor: 'var(--bg-surface)' }}>
+        {unresolved.map((a) => (
+          <div key={a.id} className="px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+            <div className="flex items-start justify-between gap-2">
+              <span className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>{a.question}</span>
+              <span className="flex-shrink-0 text-[11px] tabular-nums" style={{ color: 'var(--status-amber)' }}>
+                -{a.confidence_penalty} confidence
+              </span>
+            </div>
+            <p className="text-[12px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+              Assumed: <span style={{ color: 'var(--text-primary)' }}>{a.assumed_value}</span>
+            </p>
+            <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>{a.reason}</p>
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -1300,6 +1361,11 @@ function QuoteViewInner({
             <div className="pt-4 pb-2">
               {/* Summary card */}
               <SummaryCard summary={data.summary} />
+
+              {/* What did WorkA assume in place of an unanswered blocking question? */}
+              {data.summary.critical_assumptions && data.summary.critical_assumptions.length > 0 && (
+                <AssumptionsMade assumptions={data.summary.critical_assumptions} />
+              )}
 
               {/* What should I check? — QA output, shown before the numbers */}
               {data.qa_report && <CheckBeforeSending report={data.qa_report} />}

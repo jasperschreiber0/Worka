@@ -17,6 +17,23 @@ interface LineItemsByCategory {
   min_confidence: number
 }
 
+/**
+ * WorkA proceeded past a blocking clarifying question using this disclosed
+ * default instead of stopping the pipeline — non-blocking estimation, see
+ * buildConservativeAssumption (pipeline-logic.ts). Distinct from Gate 1-3
+ * assumptions (assumptions.gate IS NOT NULL, tied to one line item) — these
+ * are project/trade-level, never tied to a single line_item_id.
+ */
+interface CriticalAssumption {
+  id: string
+  question: string
+  assumed_value: string
+  reason: string
+  confidence_penalty: number
+  trade_category_id: number | null
+  resolved: boolean
+}
+
 interface QuoteSummary {
   total_cost: number
   margin_pct: number
@@ -35,6 +52,8 @@ interface QuoteSummary {
   blocked_reasons: string[]
   review_reasons: string[]
   can_send: boolean
+  /** "We assumed these — review them." Empty unless a blocking question was answered with a disclosed default instead of stopping the pipeline. */
+  critical_assumptions: CriticalAssumption[]
 }
 
 /** Per-source-document accounting written by the estimating engine — see
@@ -97,13 +116,19 @@ function groupByCategory(items: DemoQuoteLineItem[]): LineItemsByCategory[] {
 
 // ─── Helper: compute summary ──────────────────────────────────────────────────
 
-function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[], qaReport: QAReport | null): QuoteSummary {
+function computeSummary(
+  quote: DemoQuote,
+  items: DemoQuoteLineItem[],
+  qaReport: QAReport | null,
+  criticalAssumptions: CriticalAssumption[] = []
+): QuoteSummary {
   const unresolved_count = items.filter(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
   ).length
 
   const assumption_count = items.filter((i) => i.is_assumption).length
   const unpriced_count = items.filter((i) => isSilentlyUnpriced(i)).length
+  const unresolvedConservativeAssumptions = criticalAssumptions.filter((a) => !a.resolved).length
 
   const { readiness, blockedReasons, reviewReasons } = deriveQuoteReadiness({
     unresolvedAssumptions: unresolved_count,
@@ -111,6 +136,7 @@ function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[], qaReport: 
     topRiskCount: qaReport?.top_risks?.length ?? 0,
     reviewItemCount: qaReport?.review_items?.length ?? 0,
     confidenceScore: quote.confidence_score,
+    unresolvedConservativeAssumptions,
   })
 
   return {
@@ -130,6 +156,7 @@ function computeSummary(quote: DemoQuote, items: DemoQuoteLineItem[], qaReport: 
     // enforce the same rule server-side, so this is display truth, not the
     // only line of defense.
     can_send: readiness !== 'blocked',
+    critical_assumptions: criticalAssumptions,
   }
 }
 
@@ -355,8 +382,31 @@ export async function GET(
       }
     }
 
+    // Non-blocking estimation: conservative assumptions WorkA made in place
+    // of an unanswered blocking clarifying question — gate IS NULL is what
+    // distinguishes these from Gate 1-3 assumptions (never touched here).
+    const { data: criticalAssumptionRows } = await supabase
+      .from('assumptions')
+      .select('id, description, assumed_value, reason, confidence_penalty, trade_category_id, resolution_type')
+      .eq('quote_id', quoteId)
+      .is('gate', null)
+      .order('created_at', { ascending: true })
+
+    const criticalAssumptions: CriticalAssumption[] = ((criticalAssumptionRows ?? []) as Array<{
+      id: string; description: string; assumed_value: string | null; reason: string | null
+      confidence_penalty: number | null; trade_category_id: number | null; resolution_type: string | null
+    }>).map((r) => ({
+      id: r.id,
+      question: r.description,
+      assumed_value: r.assumed_value ?? '',
+      reason: r.reason ?? '',
+      confidence_penalty: r.confidence_penalty ?? 0,
+      trade_category_id: r.trade_category_id,
+      resolved: r.resolution_type !== null,
+    }))
+
     const line_items_by_category = groupByCategory(items)
-    const summary = computeSummary(quote, items, qaReport)
+    const summary = computeSummary(quote, items, qaReport, criticalAssumptions)
 
     const response: QuoteResponse = {
       quote,

@@ -50,11 +50,18 @@ import {
   decideDuplicateFile,
   filterToCanonicalHashCandidates,
   partitionCompletedJobsForClassification,
+  buildConservativeAssumption,
+  capConfidenceForBlockingTrade,
+  conservativeAssumptionAppliesToTrade,
+  BLOCKING_ASSUMPTION_CONFIDENCE_CAP,
+  BLOCKING_ASSUMPTION_CONFIDENCE_PENALTY,
+  CONSERVATIVE_ASSUMPTION_FALLBACK,
   type BatchableFile,
   type FactRow,
   type Stage3FailureHistory,
   type HashedFileCandidate,
   type CompletedDocumentJobRow,
+  type ConservativeAssumption,
 } from './pipeline-logic.ts'
 
 // ─── splitIntoBatches ───────────────────────────────────────────────────────
@@ -1775,4 +1782,64 @@ test('filterToCanonicalHashCandidates: passes through unrelated files (different
   ]
   const canonical = filterToCanonicalHashCandidates(filesWithHash, ['file-A', 'file-B'])
   assert.deepEqual(canonical.map((c) => c.id).sort(), ['file-A', 'file-B'])
+})
+
+// ─── Non-blocking estimation: conservative assumptions ─────────────────────
+
+test('buildConservativeAssumption: uses Claude\'s own suggested default when supplied', () => {
+  const result = buildConservativeAssumption({
+    question: 'No structural drawings — what is the footing/slab type?',
+    reason: 'Footing type materially changes site works quantities',
+    trade_category_id: 1,
+    suggested_assumption: 'Standard strip footing, single storey',
+  })
+  assert.equal(result.assumed_value, 'Standard strip footing, single storey')
+  assert.equal(result.question, 'No structural drawings — what is the footing/slab type?')
+  assert.equal(result.reason, 'Footing type materially changes site works quantities')
+  assert.equal(result.trade_category_id, 1)
+  assert.equal(result.confidence_penalty, BLOCKING_ASSUMPTION_CONFIDENCE_PENALTY)
+})
+
+test('buildConservativeAssumption: never leaves an assumption blank — falls back to the conservative default when Claude supplied none', () => {
+  const result = buildConservativeAssumption({
+    question: 'No structural drawings — what is the footing/slab type?',
+    reason: 'Footing type materially changes site works quantities',
+    trade_category_id: 1,
+    suggested_assumption: null,
+  })
+  assert.equal(result.assumed_value, CONSERVATIVE_ASSUMPTION_FALLBACK)
+  assert.ok(result.assumed_value.length > 0)
+})
+
+test('buildConservativeAssumption: whitespace-only suggested_assumption is treated as not supplied', () => {
+  const result = buildConservativeAssumption({
+    question: 'Q', reason: 'R', trade_category_id: null, suggested_assumption: '   ',
+  })
+  assert.equal(result.assumed_value, CONSERVATIVE_ASSUMPTION_FALLBACK)
+})
+
+test('capConfidenceForBlockingTrade: caps high confidence down, never raises low confidence', () => {
+  assert.equal(capConfidenceForBlockingTrade(95), BLOCKING_ASSUMPTION_CONFIDENCE_CAP)
+  assert.equal(capConfidenceForBlockingTrade(20), 20) // already below the cap — never raised
+  assert.equal(capConfidenceForBlockingTrade(BLOCKING_ASSUMPTION_CONFIDENCE_CAP), BLOCKING_ASSUMPTION_CONFIDENCE_CAP)
+})
+
+test('conservativeAssumptionAppliesToTrade: matches a specific trade_category_id', () => {
+  const assumptions: ConservativeAssumption[] = [
+    { question: 'Q', assumed_value: 'V', reason: 'R', confidence_penalty: 60, trade_category_id: 1 },
+  ]
+  assert.equal(conservativeAssumptionAppliesToTrade(assumptions, 1), true)
+  assert.equal(conservativeAssumptionAppliesToTrade(assumptions, 2), false)
+})
+
+test('conservativeAssumptionAppliesToTrade: trade_category_id null applies to every trade (project-wide gap)', () => {
+  const assumptions: ConservativeAssumption[] = [
+    { question: 'Q', assumed_value: 'V', reason: 'R', confidence_penalty: 60, trade_category_id: null },
+  ]
+  assert.equal(conservativeAssumptionAppliesToTrade(assumptions, 1), true)
+  assert.equal(conservativeAssumptionAppliesToTrade(assumptions, 13), true)
+})
+
+test('conservativeAssumptionAppliesToTrade: no assumptions means no trade is affected', () => {
+  assert.equal(conservativeAssumptionAppliesToTrade([], 1), false)
 })

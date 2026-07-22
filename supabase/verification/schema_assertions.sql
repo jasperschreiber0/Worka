@@ -438,6 +438,38 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── Conservative assumptions (migration 066) — non-blocking estimation ────
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'clarifying_questions' AND column_name = 'suggested_assumption') = 1,
+    'clarifying_questions.suggested_assumption column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'assumptions' AND column_name = 'assumed_value') = 1,
+    'assumptions.assumed_value column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'assumptions' AND column_name = 'reason') = 1,
+    'assumptions.reason column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'assumptions' AND column_name = 'confidence_penalty') = 1,
+    'assumptions.confidence_penalty column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'assumptions' AND column_name = 'trade_category_id') = 1,
+    'assumptions.trade_category_id column is missing'
+  );
+  -- A clarifying-question-derived assumption is never mistaken for a Gate
+  -- 1-3 one, and vice versa — gate IS NULL is exactly the assumed_value/
+  -- reason/confidence_penalty rows, gate IS NOT NULL is exactly the
+  -- line-item-tied Gate 1-3 rows (existing behaviour, unchanged).
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM assumptions WHERE gate IS NOT NULL AND (assumed_value IS NOT NULL OR reason IS NOT NULL OR confidence_penalty IS NOT NULL)) = 0,
+    'at least one Gate 1-3 assumption has assumed_value/reason/confidence_penalty set — these are reserved for clarifying-question-derived assumptions (gate IS NULL)'
+  );
+END $$;
+
 -- document_duplicate_detection_summary itself lives in
 -- health_monitoring_views.sql, which the supabase-migrate.yml workflow
 -- runs AFTER this file — same reason document_processing_health_summary

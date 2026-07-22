@@ -1,0 +1,9 @@
+-- Rollback for 066_conservative_assumptions.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-065's own rollback companions.
+
+ALTER TABLE assumptions DROP COLUMN IF EXISTS trade_category_id;
+ALTER TABLE assumptions DROP COLUMN IF EXISTS confidence_penalty;
+ALTER TABLE assumptions DROP COLUMN IF EXISTS reason;
+ALTER TABLE assumptions DROP COLUMN IF EXISTS assumed_value;
+ALTER TABLE clarifying_questions DROP COLUMN IF EXISTS suggested_assumption;

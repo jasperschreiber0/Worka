@@ -1560,3 +1560,97 @@ export function decideDuplicateFile(
 
   return { isDuplicate: true, originalFileId: earliest.id }
 }
+
+// ─── Non-blocking estimation: blocking clarifying questions become
+// disclosed, conservative assumptions instead of stopping the pipeline ───
+//
+// Principle: WorkA should always produce an estimate on the first run. A
+// clarifying question Stage 3/4 flags as "blocking" no longer halts
+// runPipeline — it's still persisted (audit/history, and so the builder
+// can still answer it via the existing /clarify resume flow) but Stage 6
+// now always runs, using an explicit, disclosed assumption in place of the
+// missing answer. See runPipeline's Stage 3/4 and Stage 6 sections
+// (index.ts) for where these are actually applied.
+
+/**
+ * Below this, a trade whose scope depended on an unanswered blocking
+ * question can never present as confident, regardless of what Claude's
+ * own Stage 6 call happened to output for that line — deterministic, not
+ * hoped-for. Deliberately below readiness.ts's LOW_CONFIDENCE_REVIEW_THRESHOLD
+ * (50) so the existing "low confidence" review reason fires too, reinforcing
+ * the same signal through two independent paths rather than contradicting it.
+ */
+export const BLOCKING_ASSUMPTION_CONFIDENCE_CAP = 40
+
+/**
+ * Fixed, always-the-same discount reported on the assumption record itself
+ * — how many points below the maximum this assumption guarantees, not a
+ * variable delta computed per affected line (which would have no single
+ * well-defined value when one assumption affects several line items with
+ * different starting confidences).
+ */
+export const BLOCKING_ASSUMPTION_CONFIDENCE_PENALTY = 100 - BLOCKING_ASSUMPTION_CONFIDENCE_CAP
+
+/**
+ * Used only when Claude's own Stage 3/4 call didn't supply a usable
+ * suggested_assumption for a blocking question — deliberately generic
+ * rather than a fabricated specific value ("assumed 150mm slab" would be
+ * inventing a fact with no evidence). States plainly that nothing could be
+ * determined, which is the honest thing to disclose.
+ */
+export const CONSERVATIVE_ASSUMPTION_FALLBACK =
+  'Unable to determine from the documents provided — proceeded using a standard AU residential assumption for this trade. Confirm before relying on this figure.'
+
+export interface BlockingClarifyingQuestion {
+  question: string
+  reason: string
+  trade_category_id: number | null
+  /** Claude's own proposed default from the SAME Stage 3/4 call, if it gave one. */
+  suggested_assumption?: string | null
+}
+
+export interface ConservativeAssumption {
+  question: string
+  assumed_value: string
+  reason: string
+  confidence_penalty: number
+  trade_category_id: number | null
+}
+
+/**
+ * Never leaves an assumption blank: uses Claude's own suggested default
+ * when it supplied one, otherwise the generic conservative fallback above
+ * — there is no third case where this returns nothing to show the builder.
+ */
+export function buildConservativeAssumption(q: BlockingClarifyingQuestion): ConservativeAssumption {
+  const suggested = q.suggested_assumption?.trim()
+  return {
+    question: q.question,
+    assumed_value: suggested ? suggested : CONSERVATIVE_ASSUMPTION_FALLBACK,
+    reason: q.reason,
+    confidence_penalty: BLOCKING_ASSUMPTION_CONFIDENCE_PENALTY,
+    trade_category_id: q.trade_category_id,
+  }
+}
+
+/**
+ * Deterministic floor applied to a line item's own Stage 6 confidence —
+ * never trusts Claude's per-line confidence to already reflect an
+ * unanswered blocking question on its own; this guarantees it regardless.
+ */
+export function capConfidenceForBlockingTrade(confidence: number): number {
+  return Math.min(confidence, BLOCKING_ASSUMPTION_CONFIDENCE_CAP)
+}
+
+/**
+ * True when a conservative assumption applies to the given trade —
+ * `trade_category_id: null` means the underlying question was project-wide
+ * (not scoped to one trade by Claude), so it applies to every trade's line
+ * items, not just one.
+ */
+export function conservativeAssumptionAppliesToTrade(
+  assumptions: ConservativeAssumption[],
+  tradeCategoryId: number | null,
+): boolean {
+  return assumptions.some((a) => a.trade_category_id === null || a.trade_category_id === tradeCategoryId)
+}
