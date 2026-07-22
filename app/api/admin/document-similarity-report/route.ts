@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   computeJobDocumentSimilarityPairs,
+  groupFilesByJob,
+  capDocumentsPerJob,
+  capReturnedPairs,
+  evaluateAdminAuth,
+  TEXT_OVERLAP_MAX_CHARS,
   type DocumentSignalInput,
   type DocumentSimilarityResult,
 } from '@/lib/document-similarity'
@@ -36,13 +41,35 @@ import {
 // answer "what do non-identical duplicates look like across real usage" —
 // so it's gated the same way the existing platform-level routes
 // (/api/cron/*) already are: a shared secret Bearer token, fail-closed in
-// real mode exactly like CRON_SECRET. If a real admin-role system is ever
-// built, this should move onto it instead of its own secret.
+// real mode exactly like CRON_SECRET (see evaluateAdminAuth,
+// lib/document-similarity.ts). If a real admin-role system is ever built,
+// this should move onto it instead of its own secret.
+//
+// Scalability (production safety audit): pair generation is O(n²) per job,
+// and this codebase has already seen a job accumulate an unusually large
+// file count from repeated re-uploads before Phase 1 existed (the "16
+// Alfred Street" test fixture referenced throughout CLAUDE.md). Two
+// independent caps bound the worst case regardless of how much data
+// exists: MAX_DOCUMENTS_PER_JOB bounds any single job's O(n²) cost at the
+// source (capDocumentsPerJob), and MAX_PAIRS_RETURNED bounds the total
+// response size across however many jobs were scanned (capReturnedPairs).
+// Both truncations are reported in the response, never silent.
 
 export const dynamic = 'force-dynamic'
 
 const DEFAULT_MAX_JOBS = 25
 const HARD_MAX_JOBS = 200
+// Matches MAX_SIBLINGS_CONSIDERED's own precedent in the estimating
+// pipeline (app/api/intake/[fileId]/route.ts) for the same underlying
+// reason: bound per-job document processing cost. 30 documents = 435
+// pairs worst case per job — trivial to compute regardless of how many
+// jobs are scanned in one request.
+const MAX_DOCUMENTS_PER_JOB = 30
+// Bounds total response size/memory even at HARD_MAX_JOBS with every job
+// at its own per-job cap (200 * 435 = 87,000 possible without this).
+// Pairs are sorted by similarity_score descending before this cap is
+// applied, so truncation always keeps the most useful pairs first.
+const MAX_PAIRS_RETURNED = 5_000
 
 interface FileRow {
   id: string
@@ -108,13 +135,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const isRealMode = Boolean(supabaseUrl && supabaseKey)
 
   // ── Auth guard — fail closed, same pattern as every /api/cron/* route ──
+  // Decision logic lives in evaluateAdminAuth (lib/document-similarity.ts)
+  // so it's independently unit-tested without a live request.
   const adminSecret = process.env.ADMIN_REPORT_SECRET
-  if (isRealMode && !adminSecret) {
-    return NextResponse.json({ error: 'ADMIN_REPORT_SECRET is not configured' }, { status: 503 })
-  }
   const authHeader = request.headers.get('authorization')
-  if (adminSecret && authHeader !== `Bearer ${adminSecret}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const auth = evaluateAdminAuth(isRealMode, adminSecret, authHeader)
+  if (!auth.allowed) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
 
   if (!isRealMode) {
@@ -146,7 +173,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       // files and group client-side. Bounded to keep this a lightweight
       // admin report, not a full-table scan: a job needs 2+ files to
       // produce any pair, and the most recent activity is the most
-      // representative of current upload patterns.
+      // representative of current upload patterns. Backed by
+      // idx_files_created_at (migration 065) so ORDER BY created_at DESC
+      // LIMIT 5000 doesn't force a full-table sort as the files table
+      // grows.
       const { data: recentFiles, error: recentErr } = await supabase
         .from('files')
         .select('job_id, created_at')
@@ -175,9 +205,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ pairs: [], jobs_scanned: 0, total_pairs: 0 })
     }
 
+    // Defense-in-depth row cap, independent of the per-job document cap
+    // applied further down — bounds a single pathological query result
+    // (e.g. one job with an unexpectedly enormous file count) before any
+    // JS-side processing even begins. maxJobs * MAX_DOCUMENTS_PER_JOB is
+    // the largest amount of data this request could ever legitimately
+    // need; padded 2x since real jobs are rarely exactly at the cap.
+    const rowCap = maxJobs * MAX_DOCUMENTS_PER_JOB * 2
+
     const [{ data: fileRows, error: fileErr }, { data: docRows, error: docErr }] = await Promise.all([
-      supabase.from('files').select('id, job_id, filename, content_hash, file_size_bytes, created_at').in('job_id', jobIds),
-      supabase.from('project_documents').select('file_id, page_count, drawing_title').in('job_id', jobIds),
+      supabase.from('files').select('id, job_id, filename, content_hash, file_size_bytes, created_at').in('job_id', jobIds).limit(rowCap),
+      supabase.from('project_documents').select('file_id, page_count, drawing_title').in('job_id', jobIds).limit(rowCap),
     ])
 
     if (fileErr) return NextResponse.json({ error: `Failed to load files: ${fileErr.message}` }, { status: 500 })
@@ -187,30 +225,36 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const fileIds = files.map((f) => f.id)
 
     const { data: extractionRows, error: extractionErr } = fileIds.length > 0
-      ? await supabase.from('document_processing_jobs').select('document_id, result').eq('status', 'completed').in('document_id', fileIds)
+      ? await supabase.from('document_processing_jobs').select('document_id, result').eq('status', 'completed').in('document_id', fileIds).limit(rowCap)
       : { data: [] as DocumentProcessingJobRow[], error: null }
 
     if (extractionErr) return NextResponse.json({ error: `Failed to load extraction results: ${extractionErr.message}` }, { status: 500 })
 
     const docByFileId = new Map((docRows as ProjectDocumentRow[] ?? []).map((d) => [d.file_id, d]))
+    // Truncated immediately on load, not just at comparison time —
+    // textShingleOverlap only ever looks at the first TEXT_OVERLAP_MAX_CHARS
+    // characters anyway (lib/document-similarity.ts), so this changes
+    // nothing about the computed result while bounding how much text this
+    // request holds in memory for its whole lifetime, not just during the
+    // comparison itself. A text-dense document's full extracted text can
+    // be tens to hundreds of KB; across many documents in many jobs that's
+    // real memory, none of which is ever actually used past this length.
     const textByFileId = new Map(
       (extractionRows as DocumentProcessingJobRow[] ?? [])
         .filter((r) => r.result?.text)
-        .map((r) => [r.document_id, r.result!.text as string])
+        .map((r) => [r.document_id, (r.result!.text as string).slice(0, TEXT_OVERLAP_MAX_CHARS)])
     )
 
-    const filesByJob = new Map<string, FileRow[]>()
-    for (const f of files) {
-      const list = filesByJob.get(f.job_id) ?? []
-      list.push(f)
-      filesByJob.set(f.job_id, list)
-    }
-
+    const filesByJob = groupFilesByJob(files)
     const filenameById = new Map(files.map((f) => [f.id, f.filename]))
     const allPairs: ReportRow[] = []
+    let jobsTruncated = 0
 
     filesByJob.forEach((jobFiles, jobId) => {
-      const signalInputs: DocumentSignalInput[] = jobFiles.map((f) => ({
+      const cap = capDocumentsPerJob(jobFiles, MAX_DOCUMENTS_PER_JOB)
+      if (cap.truncated) jobsTruncated++
+
+      const signalInputs: DocumentSignalInput[] = cap.files.map((f) => ({
         fileId: f.id,
         filename: f.filename,
         contentHash: f.content_hash,
@@ -233,11 +277,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     })
 
     // Highest-similarity pairs first — the most useful ones for a human to
-    // look at first when triaging the export.
+    // look at first when triaging the export, and what capReturnedPairs
+    // keeps if the total exceeds MAX_PAIRS_RETURNED.
     allPairs.sort((a, b) => b.similarity_score - a.similarity_score)
+    const pairCap = capReturnedPairs(allPairs, MAX_PAIRS_RETURNED)
 
     if (format === 'csv') {
-      return new NextResponse(toCsv(allPairs), {
+      return new NextResponse(toCsv(pairCap.pairs), {
         status: 200,
         headers: {
           'Content-Type': 'text/csv',
@@ -248,8 +294,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({
       jobs_scanned: filesByJob.size,
-      total_pairs: allPairs.length,
-      pairs: allPairs,
+      jobs_truncated: jobsTruncated,
+      max_documents_per_job: MAX_DOCUMENTS_PER_JOB,
+      total_pairs_computed: pairCap.totalBeforeCap,
+      total_pairs: pairCap.pairs.length,
+      pairs_truncated: pairCap.truncated,
+      pairs: pairCap.pairs,
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

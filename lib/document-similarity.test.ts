@@ -13,6 +13,10 @@ import {
   explainSimilarity,
   computeDocumentSimilarity,
   computeJobDocumentSimilarityPairs,
+  groupFilesByJob,
+  capDocumentsPerJob,
+  capReturnedPairs,
+  evaluateAdminAuth,
   type DocumentSignalInput,
   type DocumentSimilaritySignals,
 } from './document-similarity.ts'
@@ -373,4 +377,138 @@ test('computeJobDocumentSimilarityPairs: N files produce exactly N*(N-1)/2 unord
 test('computeJobDocumentSimilarityPairs: empty or single-file input produces no pairs', () => {
   assert.equal(computeJobDocumentSimilarityPairs([]).length, 0)
   assert.equal(computeJobDocumentSimilarityPairs([doc({ fileId: 'a' })]).length, 0)
+})
+
+// ─── Production safety audit: report safety utilities ─────────────────────
+
+// ── A. Large document set does not create unbounded output ────────────────
+
+test('capDocumentsPerJob: a job under the cap is returned untouched, not truncated', () => {
+  const files = [{ id: 'a', created_at: '2026-07-01T09:00:00Z' }, { id: 'b', created_at: '2026-07-02T09:00:00Z' }]
+  const result = capDocumentsPerJob(files, 30)
+  assert.equal(result.truncated, false)
+  assert.equal(result.files.length, 2)
+  assert.equal(result.totalBeforeCap, 2)
+})
+
+test('capDocumentsPerJob: a job over the cap is truncated to the most recent N files, reporting how many were dropped', () => {
+  // Mirrors the real scenario this exists for: a job accumulated far more
+  // files than any single upload session would produce (repeated
+  // re-uploads over time — see this codebase's own "16 Alfred Street" test
+  // fixture history).
+  const files = Array.from({ length: 50 }, (_, i) => ({
+    id: `file-${i}`,
+    created_at: new Date(2026, 0, i + 1).toISOString(), // ascending — file-49 is most recent
+  }))
+  const result = capDocumentsPerJob(files, 30)
+  assert.equal(result.truncated, true)
+  assert.equal(result.files.length, 30)
+  assert.equal(result.totalBeforeCap, 50)
+  // Keeps the MOST RECENT files, not an arbitrary slice.
+  assert.ok(result.files.some((f) => f.id === 'file-49'))
+  assert.ok(!result.files.some((f) => f.id === 'file-0'))
+})
+
+test('capDocumentsPerJob combined with computeJobDocumentSimilarityPairs: bounds pair count to O(maxDocuments²), not O(totalFiles²)', () => {
+  const files = Array.from({ length: 50 }, (_, i) => doc({ fileId: `file-${i}`, filename: `file-${i}.pdf` }))
+    .map((f, i) => ({ ...f, created_at: new Date(2026, 0, i + 1).toISOString() }))
+  const capped = capDocumentsPerJob(files, 30)
+  const pairs = computeJobDocumentSimilarityPairs(capped.files)
+  // 30*29/2 = 435, NOT 50*49/2 = 1225 — the cap actually bounds the O(n²)
+  // pair-generation cost, not just cosmetic truncation after the fact.
+  assert.equal(pairs.length, 435)
+})
+
+test('capReturnedPairs: under the cap returns everything untouched', () => {
+  const pairs = [{ similarity_score: 0.9 }, { similarity_score: 0.5 }]
+  const result = capReturnedPairs(pairs, 5000)
+  assert.equal(result.truncated, false)
+  assert.equal(result.pairs.length, 2)
+})
+
+test('capReturnedPairs: over the cap truncates and reports the true total, keeping the caller\'s existing order (highest-similarity-first, if pre-sorted)', () => {
+  const pairs = Array.from({ length: 10 }, (_, i) => ({ id: i, similarity_score: 1 - i * 0.1 })) // already sorted descending
+  const result = capReturnedPairs(pairs, 3)
+  assert.equal(result.truncated, true)
+  assert.equal(result.totalBeforeCap, 10)
+  assert.deepEqual(result.pairs.map((p) => p.id), [0, 1, 2]) // the three highest-scoring, since input was pre-sorted
+})
+
+// ── B. Authentication failure returns expected response ────────────────────
+
+test('evaluateAdminAuth: real mode with no configured secret fails closed (503) before any header is checked', () => {
+  const result = evaluateAdminAuth(true, undefined, null)
+  assert.equal(result.allowed, false)
+  assert.equal(result.status, 503)
+})
+
+test('evaluateAdminAuth: real mode, secret configured, wrong header fails closed (401)', () => {
+  const result = evaluateAdminAuth(true, 'correct-secret', 'Bearer wrong-secret')
+  assert.equal(result.allowed, false)
+  assert.equal(result.status, 401)
+})
+
+test('evaluateAdminAuth: real mode, secret configured, missing Authorization header fails closed (401)', () => {
+  const result = evaluateAdminAuth(true, 'correct-secret', null)
+  assert.equal(result.allowed, false)
+  assert.equal(result.status, 401)
+})
+
+test('evaluateAdminAuth: real mode, secret configured, correct header is allowed', () => {
+  const result = evaluateAdminAuth(true, 'correct-secret', 'Bearer correct-secret')
+  assert.equal(result.allowed, true)
+})
+
+test('evaluateAdminAuth: demo mode (isRealMode=false) with no secret configured is allowed — harmless, no real data behind it', () => {
+  const result = evaluateAdminAuth(false, undefined, null)
+  assert.equal(result.allowed, true)
+})
+
+test('evaluateAdminAuth: never echoes the configured secret or the provided header back in its own output', () => {
+  const result = evaluateAdminAuth(true, 'super-secret-value', 'Bearer wrong-value')
+  const serialized = JSON.stringify(result)
+  assert.ok(!serialized.includes('super-secret-value'))
+  assert.ok(!serialized.includes('wrong-value'))
+})
+
+// ── C. Documents from different jobs never appear as pairs ─────────────────
+
+test('groupFilesByJob: partitions files strictly by job_id, preserving every file exactly once', () => {
+  const files = [
+    { id: 'a1', job_id: 'job-1' }, { id: 'a2', job_id: 'job-1' },
+    { id: 'b1', job_id: 'job-2' }, { id: 'b2', job_id: 'job-2' }, { id: 'b3', job_id: 'job-2' },
+  ]
+  const grouped = groupFilesByJob(files)
+  assert.equal(grouped.size, 2)
+  assert.deepEqual(grouped.get('job-1')!.map((f) => f.id).sort(), ['a1', 'a2'])
+  assert.deepEqual(grouped.get('job-2')!.map((f) => f.id).sort(), ['b1', 'b2', 'b3'])
+})
+
+test('groupFilesByJob + computeJobDocumentSimilarityPairs: a byte-identical filename/content pair split across two jobs never appears as a pair, even though both files exist in the same overall dataset', () => {
+  // Mirrors Phase 1's own cross-job isolation rule (decideDuplicateFile) —
+  // this is the Phase 2 report's equivalent guarantee: pairing only ever
+  // happens within one job's own group, never across the grouped Map.
+  const files = [
+    { ...doc({ fileId: 'job1-file', filename: 'spec.pdf', contentHash: 'same-hash' }), job_id: 'job-1' },
+    { ...doc({ fileId: 'job2-file', filename: 'spec.pdf', contentHash: 'same-hash' }), job_id: 'job-2' },
+  ]
+  const grouped = groupFilesByJob(files)
+  const allPairs: Array<{ document_a: string; document_b: string }> = []
+  grouped.forEach((jobFiles) => {
+    allPairs.push(...computeJobDocumentSimilarityPairs(jobFiles))
+  })
+  // Two files total, one per job — grouping leaves each job with exactly
+  // one file, so zero pairs can ever be generated, even though the two
+  // files are byte-identical and would score 1.0 if ever compared.
+  assert.equal(allPairs.length, 0)
+})
+
+// ── D. Missing extracted text does not break report generation ─────────────
+
+test('computeJobDocumentSimilarityPairs: an entire job with zero extracted text anywhere still produces valid pairs, not an error', () => {
+  const files = ['a', 'b', 'c'].map((id) => doc({ fileId: id, filename: `${id}.pdf`, extractedText: null }))
+  const pairs = computeJobDocumentSimilarityPairs(files)
+  assert.equal(pairs.length, 3) // 3*2/2
+  assert.ok(pairs.every((p) => p.signals.text_overlap === null))
+  assert.ok(pairs.every((p) => p.explanations.includes('No extracted text available for comparison')))
 })

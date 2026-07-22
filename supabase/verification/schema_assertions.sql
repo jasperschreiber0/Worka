@@ -427,6 +427,17 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── files.created_at index (migration 065) ────────────────────────────────
+-- Supports the Phase 2 document-similarity report's platform-wide
+-- job-selection scan without forcing a full-table sort as files grows —
+-- see that migration's own header comment.
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_indexes WHERE tablename = 'files' AND indexname = 'idx_files_created_at') = 1,
+    'idx_files_created_at index is missing'
+  );
+END $$;
+
 -- document_duplicate_detection_summary itself lives in
 -- health_monitoring_views.sql, which the supabase-migrate.yml workflow
 -- runs AFTER this file — same reason document_processing_health_summary

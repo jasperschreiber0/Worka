@@ -476,3 +476,114 @@ export function computeJobDocumentSimilarityPairs(files: DocumentSignalInput[]):
   }
   return results
 }
+
+// ─── Report safety utilities ────────────────────────────────────────────────
+//
+// Pure, extracted from the admin route (app/api/admin/document-similarity-
+// report/route.ts) for the same reason everything else in this file is
+// pure: direct unit coverage without a live Supabase/Next.js runtime. These
+// exist to bound the report's own cost (pair generation is O(n²) per job)
+// and to make its auth decision independently verifiable — see the
+// "production safety audit" that added this section for the reasoning.
+
+export interface JobFileGroupable {
+  job_id: string
+}
+
+/**
+ * Groups a flat file list by job_id — the sole mechanism that keeps every
+ * downstream pair a same-job pair. computeJobDocumentSimilarityPairs takes
+ * no job_id at all (by design — see its own comment), so THIS is where
+ * cross-job isolation is actually enforced: as long as every call to
+ * computeJobDocumentSimilarityPairs is given one group from this map's
+ * output, two different jobs' documents can never appear in the same pair.
+ */
+export function groupFilesByJob<T extends JobFileGroupable>(files: T[]): Map<string, T[]> {
+  const map = new Map<string, T[]>()
+  for (const f of files) {
+    const list = map.get(f.job_id) ?? []
+    list.push(f)
+    map.set(f.job_id, list)
+  }
+  return map
+}
+
+export interface RecencyOrderable {
+  created_at: string
+}
+
+export interface DocumentCapResult<T> {
+  files: T[]
+  truncated: boolean
+  totalBeforeCap: number
+}
+
+/**
+ * Caps ONE job's files to the most recent `maxDocuments` before pair
+ * generation — pair generation is O(n²), so this bounds a single job's
+ * worst-case cost to O(maxDocuments²) regardless of how many files that
+ * job has actually accumulated. Real, not hypothetical: this exact
+ * codebase's own test fixture ("16 Alfred Street," referenced throughout
+ * CLAUDE.md) was re-uploaded many times before Phase 1 existed, and
+ * nothing stops a job from accumulating an unusually large file count over
+ * many incremental upload sessions. Keeps the MOST RECENT files (most
+ * representative of current state), not an arbitrary subset.
+ */
+export function capDocumentsPerJob<T extends RecencyOrderable>(files: T[], maxDocuments: number): DocumentCapResult<T> {
+  if (files.length <= maxDocuments) return { files, truncated: false, totalBeforeCap: files.length }
+  const sorted = [...files].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  return { files: sorted.slice(0, maxDocuments), truncated: true, totalBeforeCap: files.length }
+}
+
+export interface PairCapResult<T> {
+  pairs: T[]
+  truncated: boolean
+  totalBeforeCap: number
+}
+
+/**
+ * Caps the FINAL returned pair list, independent of the per-job cap above
+ * — bounds total response size/memory even when scanning many jobs at
+ * once (up to HARD_MAX_JOBS in the route). Assumes the caller has already
+ * sorted `pairs` by priority (similarity_score descending, as the route
+ * does) before calling this, so truncation keeps the most useful pairs
+ * for a reviewer rather than an arbitrary slice.
+ */
+export function capReturnedPairs<T>(pairs: T[], maxPairs: number): PairCapResult<T> {
+  if (pairs.length <= maxPairs) return { pairs, truncated: false, totalBeforeCap: pairs.length }
+  return { pairs: pairs.slice(0, maxPairs), truncated: true, totalBeforeCap: pairs.length }
+}
+
+export interface AdminAuthDecision {
+  allowed: boolean
+  status: number
+  error: string | null
+}
+
+/**
+ * Pure auth decision for the admin-secret-gated report route — see that
+ * route's own header comment for why a shared secret (not a role system)
+ * is used. Fails closed: real mode with no configured secret is rejected
+ * (503) before any header is even checked, so a deploy that forgot to set
+ * ADMIN_REPORT_SECRET can never accidentally serve real data. A configured
+ * secret with a non-matching (or absent) Authorization header is rejected
+ * (401), regardless of what the header contains. Demo mode
+ * (isRealMode=false) with no configured secret allows through — matches
+ * this codebase's existing demo-mode auth posture elsewhere (e.g.
+ * middleware.ts skips auth checks in demo mode too), and is harmless here
+ * specifically because the route's own demo-mode branch returns zero real
+ * data regardless.
+ */
+export function evaluateAdminAuth(
+  isRealMode: boolean,
+  configuredSecret: string | undefined | null,
+  providedAuthHeader: string | null,
+): AdminAuthDecision {
+  if (isRealMode && !configuredSecret) {
+    return { allowed: false, status: 503, error: 'ADMIN_REPORT_SECRET is not configured' }
+  }
+  if (configuredSecret && providedAuthHeader !== `Bearer ${configuredSecret}`) {
+    return { allowed: false, status: 401, error: 'Unauthorized' }
+  }
+  return { allowed: true, status: 200, error: null }
+}
