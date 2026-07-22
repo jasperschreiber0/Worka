@@ -1,0 +1,309 @@
+import { NextRequest, NextResponse } from 'next/server'
+import {
+  computeJobDocumentSimilarityPairs,
+  groupFilesByJob,
+  capDocumentsPerJob,
+  capReturnedPairs,
+  evaluateAdminAuth,
+  TEXT_OVERLAP_MAX_CHARS,
+  type DocumentSignalInput,
+  type DocumentSimilarityResult,
+} from '@/lib/document-similarity'
+
+// ─── GET /api/admin/document-similarity-report ───────────────────────────────
+//
+// Phase 2 measurement tool (see PHASE_2_DOCUMENT_MATCHING_READINESS.md):
+// generates a labelled dataset of candidate near-duplicate document pairs
+// across real production jobs, so Gate 3 (reliable cross-session matching
+// for documents that are the SAME real-world drawing but not byte-
+// identical) can be designed against evidence, not assumption.
+//
+// This route is READ-ONLY and has no effect on the estimating pipeline —
+// it does not write to project_documents/files/project_facts, does not
+// call Claude, and nothing in Stage 1-6 reads its output. `likely_category`
+// in the response is a coarse triage label for a human skimming the
+// export, not a classification decision — see lib/document-similarity.ts's
+// own comment on computeDocumentSimilarity.
+//
+// Each pair also carries `explanations` (deterministic, human-readable —
+// no LLM call), `revision_markers_detected`/`revision_values` (possible
+// Rev/Issue/Version/date markers found in the filenames, never ordered as
+// newer/older), and four always-null review fields (`human_label`,
+// `reviewed_by`, `reviewed_at`, `notes`) for a person to fill in externally
+// — see PHASE_2_REVIEW_PROCESS.md for the review workflow this dataset
+// feeds into.
+//
+// Auth: there is no admin/operator role anywhere in this codebase (every
+// route today is builder-session-scoped, worker-session-scoped, or
+// CRON_SECRET-scoped — see CLAUDE.md's "Auth" section). This is
+// deliberately platform-wide (across every builder's jobs, not one
+// builder's) since a single builder's upload history isn't enough to
+// answer "what do non-identical duplicates look like across real usage" —
+// so it's gated the same way the existing platform-level routes
+// (/api/cron/*) already are: a shared secret Bearer token, fail-closed in
+// real mode exactly like CRON_SECRET (see evaluateAdminAuth,
+// lib/document-similarity.ts). If a real admin-role system is ever built,
+// this should move onto it instead of its own secret.
+//
+// Scalability (production safety audit): pair generation is O(n²) per job,
+// and this codebase has already seen a job accumulate an unusually large
+// file count from repeated re-uploads before Phase 1 existed (the "16
+// Alfred Street" test fixture referenced throughout CLAUDE.md). Two
+// independent caps bound the worst case regardless of how much data
+// exists: MAX_DOCUMENTS_PER_JOB bounds any single job's O(n²) cost at the
+// source (capDocumentsPerJob), and MAX_PAIRS_RETURNED bounds the total
+// response size across however many jobs were scanned (capReturnedPairs).
+// Both truncations are reported in the response, never silent.
+
+export const dynamic = 'force-dynamic'
+
+const DEFAULT_MAX_JOBS = 25
+const HARD_MAX_JOBS = 200
+// Matches MAX_SIBLINGS_CONSIDERED's own precedent in the estimating
+// pipeline (app/api/intake/[fileId]/route.ts) for the same underlying
+// reason: bound per-job document processing cost. 30 documents = 435
+// pairs worst case per job — trivial to compute regardless of how many
+// jobs are scanned in one request.
+const MAX_DOCUMENTS_PER_JOB = 30
+// Bounds total response size/memory even at HARD_MAX_JOBS with every job
+// at its own per-job cap (200 * 435 = 87,000 possible without this).
+// Pairs are sorted by similarity_score descending before this cap is
+// applied, so truncation always keeps the most useful pairs first.
+const MAX_PAIRS_RETURNED = 5_000
+
+interface FileRow {
+  id: string
+  job_id: string
+  filename: string
+  content_hash: string | null
+  file_size_bytes: number | null
+  created_at: string
+}
+
+interface ProjectDocumentRow {
+  file_id: string
+  page_count: number | null
+  drawing_title: string | null
+}
+
+interface DocumentProcessingJobRow {
+  document_id: string
+  result: { text?: string | null } | null
+}
+
+interface ReportRow extends DocumentSimilarityResult {
+  job_id: string
+  document_a_filename: string
+  document_b_filename: string
+}
+
+// One row per pair, flattened for a spreadsheet — human_label/reviewed_by/
+// reviewed_at/notes are the LAST columns, deliberately, so a reviewer
+// opening this in a spreadsheet finds them right where they'll be filling
+// them in, after every explanatory column. See PHASE_2_REVIEW_PROCESS.md
+// for how these columns are meant to be used.
+function toCsv(rows: ReportRow[]): string {
+  const headers = [
+    'job_id', 'document_a', 'document_a_filename', 'document_b', 'document_b_filename',
+    'similarity_score', 'likely_category', 'explanations',
+    'filename_similarity', 'text_overlap', 'page_count_difference', 'size_similarity', 'title_match',
+    'revision_markers_detected', 'revision_values', 'document_a_revision_markers', 'document_b_revision_markers',
+    'human_label', 'reviewed_by', 'reviewed_at', 'notes',
+  ]
+  const escape = (v: unknown): string => {
+    const s = v === null || v === undefined ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const lines = [headers.join(',')]
+  for (const r of rows) {
+    lines.push([
+      r.job_id, r.document_a, r.document_a_filename, r.document_b, r.document_b_filename,
+      r.similarity_score, r.likely_category, r.explanations.join('; '),
+      r.signals.filename_similarity, r.signals.text_overlap, r.signals.page_count_difference,
+      r.signals.size_similarity, r.signals.title_match,
+      r.revision_markers_detected, r.revision_values.join(';'),
+      r.document_a_revision_markers.join(';'), r.document_b_revision_markers.join(';'),
+      r.human_label, r.reviewed_by, r.reviewed_at, r.notes,
+    ].map(escape).join(','))
+  }
+  return lines.join('\n')
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const isRealMode = Boolean(supabaseUrl && supabaseKey)
+
+  // ── Auth guard — fail closed, same pattern as every /api/cron/* route ──
+  // Decision logic lives in evaluateAdminAuth (lib/document-similarity.ts)
+  // so it's independently unit-tested without a live request.
+  const adminSecret = process.env.ADMIN_REPORT_SECRET
+  const authHeader = request.headers.get('authorization')
+  const auth = evaluateAdminAuth(isRealMode, adminSecret, authHeader)
+  if (!auth.allowed) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
+
+  if (!isRealMode) {
+    return NextResponse.json({
+      pairs: [],
+      jobs_scanned: 0,
+      total_pairs: 0,
+      skipped: 'demo mode — no Supabase configured; this tool needs real production data to be meaningful',
+    })
+  }
+
+  const url = new URL(request.url)
+  const jobIdParam = url.searchParams.get('job_id')
+  const format = url.searchParams.get('format') === 'csv' ? 'csv' : 'json'
+  const minScore = Number(url.searchParams.get('min_score') ?? '0') || 0
+  const maxJobsParam = Number(url.searchParams.get('max_jobs') ?? String(DEFAULT_MAX_JOBS))
+  const maxJobs = Math.min(HARD_MAX_JOBS, Math.max(1, Number.isFinite(maxJobsParam) ? maxJobsParam : DEFAULT_MAX_JOBS))
+
+  try {
+    const { createClient } = await import('@supabase/supabase-js')
+    const supabase = createClient(supabaseUrl!, supabaseKey!)
+
+    let jobIds: string[]
+
+    if (jobIdParam) {
+      jobIds = [jobIdParam]
+    } else {
+      // No RPC/GROUP BY needed — pull a bounded, recency-ordered slice of
+      // files and group client-side. Bounded to keep this a lightweight
+      // admin report, not a full-table scan: a job needs 2+ files to
+      // produce any pair, and the most recent activity is the most
+      // representative of current upload patterns. Backed by
+      // idx_files_created_at (migration 065) so ORDER BY created_at DESC
+      // LIMIT 5000 doesn't force a full-table sort as the files table
+      // grows.
+      const { data: recentFiles, error: recentErr } = await supabase
+        .from('files')
+        .select('job_id, created_at')
+        .order('created_at', { ascending: false })
+        .limit(5000)
+
+      if (recentErr) {
+        return NextResponse.json({ error: `Failed to scan recent files: ${recentErr.message}` }, { status: 500 })
+      }
+
+      const countByJob = new Map<string, number>()
+      const latestByJob = new Map<string, string>()
+      for (const row of (recentFiles ?? []) as Array<{ job_id: string | null; created_at: string }>) {
+        if (!row.job_id) continue
+        countByJob.set(row.job_id, (countByJob.get(row.job_id) ?? 0) + 1)
+        if (!latestByJob.has(row.job_id)) latestByJob.set(row.job_id, row.created_at) // first seen = most recent, since already ordered desc
+      }
+      jobIds = Array.from(countByJob.entries())
+        .filter(([, count]) => count >= 2)
+        .sort((a, b) => new Date(latestByJob.get(b[0])!).getTime() - new Date(latestByJob.get(a[0])!).getTime())
+        .slice(0, maxJobs)
+        .map(([jobId]) => jobId)
+    }
+
+    if (jobIds.length === 0) {
+      return NextResponse.json({ pairs: [], jobs_scanned: 0, total_pairs: 0 })
+    }
+
+    // Defense-in-depth row cap, independent of the per-job document cap
+    // applied further down — bounds a single pathological query result
+    // (e.g. one job with an unexpectedly enormous file count) before any
+    // JS-side processing even begins. maxJobs * MAX_DOCUMENTS_PER_JOB is
+    // the largest amount of data this request could ever legitimately
+    // need; padded 2x since real jobs are rarely exactly at the cap.
+    const rowCap = maxJobs * MAX_DOCUMENTS_PER_JOB * 2
+
+    const [{ data: fileRows, error: fileErr }, { data: docRows, error: docErr }] = await Promise.all([
+      supabase.from('files').select('id, job_id, filename, content_hash, file_size_bytes, created_at').in('job_id', jobIds).limit(rowCap),
+      supabase.from('project_documents').select('file_id, page_count, drawing_title').in('job_id', jobIds).limit(rowCap),
+    ])
+
+    if (fileErr) return NextResponse.json({ error: `Failed to load files: ${fileErr.message}` }, { status: 500 })
+    if (docErr) return NextResponse.json({ error: `Failed to load project_documents: ${docErr.message}` }, { status: 500 })
+
+    const files = (fileRows ?? []) as FileRow[]
+    const fileIds = files.map((f) => f.id)
+
+    const { data: extractionRows, error: extractionErr } = fileIds.length > 0
+      ? await supabase.from('document_processing_jobs').select('document_id, result').eq('status', 'completed').in('document_id', fileIds).limit(rowCap)
+      : { data: [] as DocumentProcessingJobRow[], error: null }
+
+    if (extractionErr) return NextResponse.json({ error: `Failed to load extraction results: ${extractionErr.message}` }, { status: 500 })
+
+    const docByFileId = new Map((docRows as ProjectDocumentRow[] ?? []).map((d) => [d.file_id, d]))
+    // Truncated immediately on load, not just at comparison time —
+    // textShingleOverlap only ever looks at the first TEXT_OVERLAP_MAX_CHARS
+    // characters anyway (lib/document-similarity.ts), so this changes
+    // nothing about the computed result while bounding how much text this
+    // request holds in memory for its whole lifetime, not just during the
+    // comparison itself. A text-dense document's full extracted text can
+    // be tens to hundreds of KB; across many documents in many jobs that's
+    // real memory, none of which is ever actually used past this length.
+    const textByFileId = new Map(
+      (extractionRows as DocumentProcessingJobRow[] ?? [])
+        .filter((r) => r.result?.text)
+        .map((r) => [r.document_id, (r.result!.text as string).slice(0, TEXT_OVERLAP_MAX_CHARS)])
+    )
+
+    const filesByJob = groupFilesByJob(files)
+    const filenameById = new Map(files.map((f) => [f.id, f.filename]))
+    const allPairs: ReportRow[] = []
+    let jobsTruncated = 0
+
+    filesByJob.forEach((jobFiles, jobId) => {
+      const cap = capDocumentsPerJob(jobFiles, MAX_DOCUMENTS_PER_JOB)
+      if (cap.truncated) jobsTruncated++
+
+      const signalInputs: DocumentSignalInput[] = cap.files.map((f) => ({
+        fileId: f.id,
+        filename: f.filename,
+        contentHash: f.content_hash,
+        fileSizeBytes: f.file_size_bytes,
+        pageCount: docByFileId.get(f.id)?.page_count ?? null,
+        drawingTitle: docByFileId.get(f.id)?.drawing_title ?? null,
+        extractedText: textByFileId.get(f.id) ?? null,
+      }))
+
+      const pairs = computeJobDocumentSimilarityPairs(signalInputs)
+      for (const p of pairs) {
+        if (p.similarity_score < minScore) continue
+        allPairs.push({
+          ...p,
+          job_id: jobId,
+          document_a_filename: filenameById.get(p.document_a) ?? '',
+          document_b_filename: filenameById.get(p.document_b) ?? '',
+        })
+      }
+    })
+
+    // Highest-similarity pairs first — the most useful ones for a human to
+    // look at first when triaging the export, and what capReturnedPairs
+    // keeps if the total exceeds MAX_PAIRS_RETURNED.
+    allPairs.sort((a, b) => b.similarity_score - a.similarity_score)
+    const pairCap = capReturnedPairs(allPairs, MAX_PAIRS_RETURNED)
+
+    if (format === 'csv') {
+      return new NextResponse(toCsv(pairCap.pairs), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/csv',
+          'Content-Disposition': 'attachment; filename="document-similarity-report.csv"',
+        },
+      })
+    }
+
+    return NextResponse.json({
+      jobs_scanned: filesByJob.size,
+      jobs_truncated: jobsTruncated,
+      max_documents_per_job: MAX_DOCUMENTS_PER_JOB,
+      total_pairs_computed: pairCap.totalBeforeCap,
+      total_pairs: pairCap.pairs.length,
+      pairs_truncated: pairCap.truncated,
+      pairs: pairCap.pairs,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[admin/document-similarity-report] error:', msg)
+    return NextResponse.json({ error: `Report generation failed: ${msg}` }, { status: 500 })
+  }
+}

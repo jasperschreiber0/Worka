@@ -1,0 +1,5 @@
+-- Rollback for 065_files_created_at_index.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-064's own rollback companions.
+
+DROP INDEX IF EXISTS idx_files_created_at;

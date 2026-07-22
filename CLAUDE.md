@@ -370,6 +370,7 @@ This table is now generated to match `app/api/**/route.ts` exactly — a prior v
 | `GET /api/cron/morning-brief` | Triggered daily by `.github/workflows/morning-brief-cron.yml` (not Vercel Cron — see "Hosting" above) — emails the daily brief to every builder (guarded by `CRON_SECRET`, fails closed if unset in real mode) |
 | `GET /api/cron/network-rates` | Triggered daily by `.github/workflows/network-rates-cron.yml` — nightly Tier-5 aggregation: anonymised P25/P50/P75 of learned rates (min 3 builders per aggregate; guarded by `CRON_SECRET`, fails closed if unset in real mode) |
 | `GET /api/cron/intake-recovery` | Triggered every 5 min by `.github/workflows/intake-recovery-cron.yml` — the independent intake-pipeline recovery service. See "Independent Intake Recovery Service" below. |
+| `GET /api/admin/document-similarity-report` | Phase 2 measurement tool — read-only, platform-wide, non-identical document similarity signals for building a labelled dataset ahead of designing Gate 3. Guarded by `ADMIN_REPORT_SECRET` (fails closed if unset in real mode, same pattern as `CRON_SECRET`). Never called by the estimating pipeline; see `lib/document-similarity.ts`. |
 
 **Rate limiting**: `lib/rate-limit.ts` caps requests per builder on the Claude-backed routes (`chat`, `classify-document`, `email-draft`) — a DB-backed atomic counter in real mode (`api_rate_limits` table, migration 021), an in-memory fixed window in demo mode.
 
@@ -1497,5 +1498,6 @@ See `.env.local.example`. Key variables:
 | `EMAIL_FROM_ADDRESS` | From address for outbound client emails; defaults to `hello@getworka.com` if unset |
 | `CRON_SECRET` | Auth for all three `/api/cron/*` routes (morning-brief, network-rates, intake-recovery) — sent as a Bearer token by the GitHub Actions workflows that trigger them (see "Hosting" above; NOT Vercel Cron, despite the routes' own `RequestOptions` shape looking generic). Must be set on **Railway → Variables** (the actual running app) — setting it only on Vercel has no effect. All three routes fail closed (503) if unset while Supabase is configured — never fail open. |
 | `MORNING_BRIEF_TEST_EMAIL` | Demo-mode recipient for the daily brief email |
+| `ADMIN_REPORT_SECRET` | Auth for `GET /api/admin/document-similarity-report` (Phase 2 measurement tool) — sent as a Bearer token by whoever runs the report manually; no scheduled trigger. Fails closed (503) if unset while Supabase is configured. Same "no admin-role system exists yet" rationale as `CRON_SECRET` — see that route's own header comment. |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | **Reserved, not implemented.** No code reads these — SMS notifications were never built. |
 | `STRIPE_SECRET_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | **Reserved, not implemented.** No code reads these (though `builders.stripe_customer_id` exists in the schema) — payment collection was never built. |

@@ -1401,3 +1401,162 @@ export function documentDisplayState(status: ChildJobStatus, attempts: number): 
   // scheduled run_after to elapse — not merely unclaimed.
   return attempts > 0 ? 'retrying' : 'waiting'
 }
+
+// ─── Deterministic cross-session duplicate detection (Phase 1) ─────────────
+//
+// Scope, deliberately narrow: byte-identical files re-uploaded to the SAME
+// job across separate sessions. Not a "same real-world drawing, re-scanned
+// or re-exported" detector (that's LLM/Claude territory — project_documents'
+// existing is_duplicate/is_superseded fields, populated per-batch by Stage 1,
+// which this deliberately does not touch or extend). This is one rung below
+// that: pure byte equality, computed once per file and persisted, so a
+// second identical upload is recognized without re-running extraction or
+// spending a Stage 1/2 Claude call on content Claude has already seen.
+
+/**
+ * SHA-256 of raw file bytes, hex-encoded. Uses the Web Crypto API
+ * (`crypto.subtle`), available as a global in both Deno (document-worker's
+ * runtime) and Node 22+ (this repo's minimum, per CLAUDE.md) — no new
+ * dependency. Same bytes always produce the same hash regardless of
+ * filename or upload session; different bytes (even a single-byte diff)
+ * produce a different hash.
+ */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // Cast needed under newer lib.dom typings: Uint8Array<ArrayBufferLike>
+  // (what callers building a view from a Storage-downloaded ArrayBuffer
+  // naturally have) isn't structurally assignable to BufferSource's
+  // ArrayBuffer-backed generic, even though it's valid at runtime.
+  const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+export interface HashedFileCandidate {
+  id: string
+  job_id: string
+  content_hash: string | null
+  created_at: string
+}
+
+export interface DuplicateDecision {
+  isDuplicate: boolean
+  originalFileId: string | null
+}
+
+/**
+ * Pure filter, applied BEFORE decideDuplicateFile: content_hash alone only
+ * proves "we have seen these bytes" — it says nothing about whether that
+ * earlier file was ever actually usable. Hashing happens before extraction
+ * (document-worker computes and persists content_hash regardless of what
+ * happens next), so a file whose Stage 1/2 classification later failed, or
+ * hasn't run yet, still has a content_hash on record. Without this filter,
+ * that file could wrongly serve as the "canonical" match for a future
+ * identical re-upload — poisoning it too, forever, even though the
+ * original's content was never actually incorporated into any estimate.
+ *
+ * `completedFileIds` must be sourced from project_documents.extraction_status
+ * = 'complete' (migration 050) — the strongest existing signal for genuine
+ * success, since it is set ONLY inside persist_document_classification,
+ * atomically with the project_facts it depends on. document_processing_jobs
+ * .status = 'completed' is NOT sufficient on its own: it only means
+ * EXTRACTION succeeded (document-worker's job), a separate, earlier step
+ * from CLASSIFICATION (smooth-responder's Stage 1/2, a different
+ * invocation entirely) — a file can have a completed extraction job and
+ * still never be classified (a billing halt, a permanent AI failure, a
+ * crash between the two stages).
+ */
+export function filterToCanonicalHashCandidates(
+  filesWithHash: HashedFileCandidate[],
+  completedFileIds: Iterable<string>,
+): HashedFileCandidate[] {
+  const completedSet = new Set(completedFileIds)
+  return filesWithHash.filter((f) => completedSet.has(f.id))
+}
+
+/**
+ * Pure decision: does `hash` match an already-hashed file in `candidates`,
+ * within the SAME job (`selfJobId`), other than `selfId`? `hash` is
+ * nullable so a failed hash computation can be represented directly — null
+ * always resolves to "not a duplicate," which is the required fail-safe
+ * behaviour (a hashing failure must never block or misroute an upload).
+ * Filename is deliberately not a parameter: two files with the same name
+ * but different bytes are not duplicates, and two files with different
+ * names but identical bytes are — matching is content-only. Ties (more
+ * than one prior file with the same hash) resolve to the earliest by
+ * created_at, then by id, for a stable, deterministic "original"
+ * regardless of query row order.
+ *
+ * job_id is checked HERE, inside the pure function, not left solely to the
+ * caller's SQL query filter — WorkA's product model treats each job as an
+ * independent client project (see product-readiness audit), so two
+ * different jobs containing a byte-identical file (a generic boilerplate
+ * spec page, a re-used template) must never be treated as duplicates of
+ * each other. The caller's query is still scoped by job_id for efficiency,
+ * but this is the structural guarantee: even if a future caller's query
+ * ever dropped that filter, this function still cannot cross-match jobs.
+ */
+export interface CompletedDocumentJobRow {
+  document_id: string
+  result: { duplicate?: boolean } | null
+}
+
+export interface ClassificationPartition {
+  /** document_ids eligible to be loaded and sent to Stage 1/2 — everything else was excluded. */
+  toClassify: string[]
+  /** document_ids whose completed job carries a duplicate marker — never loaded, never built into Claude content. */
+  duplicates: string[]
+}
+
+/**
+ * Pure partition of a batch's completed document_processing_jobs rows into
+ * "send to Claude" vs "exact duplicate, already known — skip." This is the
+ * actual mechanism that keeps a duplicate's content out of project_facts:
+ * a document_id that lands in `duplicates` never gets its file bytes
+ * loaded (loadBlockFromExtractionResult, which does real Storage I/O, is
+ * only ever called for `toClassify` entries — see loadAllFromExtractionResults
+ * in index.ts), so it can never appear in the `documents`/`content` array
+ * Claude is given, Claude can never return a file_index for it, and no
+ * project_documents/project_facts row can ever be created for it.
+ *
+ * Extracted as its own pure function (rather than left inline in index.ts,
+ * where it originated) specifically so this exact exclusion behaviour has
+ * direct unit coverage without a live Supabase/Deno runtime — see the
+ * regression test built against this function for the "same document
+ * uploaded twice to the same job" scenario end to end at the decision
+ * level: second upload's document_id is guaranteed to land in
+ * `duplicates`, never in `toClassify`.
+ */
+export function partitionCompletedJobsForClassification(
+  jobs: CompletedDocumentJobRow[],
+): ClassificationPartition {
+  const toClassify: string[] = []
+  const duplicates: string[] = []
+  for (const j of jobs) {
+    if (j.result?.duplicate) {
+      duplicates.push(j.document_id)
+    } else {
+      toClassify.push(j.document_id)
+    }
+  }
+  return { toClassify, duplicates }
+}
+
+export function decideDuplicateFile(
+  hash: string | null,
+  candidates: HashedFileCandidate[],
+  selfId: string,
+  selfJobId: string,
+): DuplicateDecision {
+  if (!hash) return { isDuplicate: false, originalFileId: null }
+
+  const matches = candidates.filter((c) => c.id !== selfId && c.job_id === selfJobId && c.content_hash === hash)
+  if (matches.length === 0) return { isDuplicate: false, originalFileId: null }
+
+  const earliest = [...matches].sort((a, b) => {
+    const byTime = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    return byTime !== 0 ? byTime : a.id.localeCompare(b.id)
+  })[0]
+
+  return { isDuplicate: true, originalFileId: earliest.id }
+}

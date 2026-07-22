@@ -1,0 +1,7 @@
+-- Rollback for 063_duplicate_detection_observability.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-062's own rollback companions.
+
+ALTER TABLE files DROP COLUMN IF EXISTS duplicate_lookup_failed;
+ALTER TABLE files DROP COLUMN IF EXISTS content_hash_failed;
+ALTER TABLE files DROP COLUMN IF EXISTS file_size_bytes;

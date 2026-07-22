@@ -41,6 +41,7 @@ import {
   dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
+  partitionCompletedJobsForClassification,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
 } from './pipeline-logic.ts'
@@ -286,6 +287,13 @@ interface PersistedExtractionResult {
   hasUsableText: boolean
   pageCount: number | null
   durationMs: number
+  // Phase 1 deterministic duplicate detection (document-worker/index.ts) —
+  // when true, this job's content is a byte-identical re-upload of an
+  // earlier file in the same job. loadAllFromExtractionResults excludes it
+  // before ever building Claude content, regardless of blockType.
+  duplicate?: boolean
+  duplicateOfFileId?: string
+  contentHash?: string
 }
 
 async function loadBlockFromExtractionResult(
@@ -321,19 +329,45 @@ async function loadBlockFromExtractionResult(
 async function loadAllFromExtractionResults(
   supabase: SupabaseClient,
   parentJobId: string,
-  failedOut: string[]
+  failedOut: string[],
+  duplicatesOut: string[] = []
 ): Promise<LoadedFile[]> {
+  // .order('document_id') — same load-bearing reason as existingFacts/
+  // existingDocs above: this determines the order documents are appended
+  // to Stage 1/2's `content` array, which is itself one of
+  // guardedClaudeCall's hashed inputParts. An unordered fetch here means
+  // an unchanged batch of already-completed document_processing_jobs can
+  // still produce a different content order — and therefore a different
+  // idempotency hash — on a retry, for the same underlying reason
+  // record_stage3_failure's circuit breaker was defeated before the
+  // existingFacts fix. R-03 from the architecture audit that preceded
+  // Phase 1, same bug class as that fix, different call site.
   const { data: completedJobs } = await supabase
     .from('document_processing_jobs')
     .select('document_id, result')
     .eq('parent_job_id', parentJobId)
     .eq('status', 'completed')
+    .order('document_id', { ascending: true })
+
+  // Pure partition (pipeline-logic.ts, unit-tested) decides which
+  // completed jobs are exact duplicates before any Storage I/O happens —
+  // this is what actually stops a re-uploaded identical file from
+  // inflating the fact base/document count: a duplicate's document_id
+  // never reaches loadBlockFromExtractionResult below, so it never enters
+  // `documents`/`facts` sent to Stage 1/2 at all, Claude never returns a
+  // file_index for it, and no project_documents/project_facts row can
+  // ever be created for it. Not a failure, so kept out of failedOut
+  // (which drives the builder-facing "these weren't processed, retry" list).
+  const jobRows = (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>
+  const resultByDocId = new Map(jobRows.map((j) => [j.document_id, j.result]))
+  const { toClassify, duplicates } = partitionCompletedJobsForClassification(jobRows)
+  duplicatesOut.push(...duplicates)
 
   const loaded: LoadedFile[] = []
-  for (const j of (completedJobs ?? []) as Array<{ document_id: string; result: PersistedExtractionResult }>) {
-    const lf = await loadBlockFromExtractionResult(supabase, j.document_id, j.result)
+  for (const documentId of toClassify) {
+    const lf = await loadBlockFromExtractionResult(supabase, documentId, resultByDocId.get(documentId)!)
     if (lf) loaded.push(lf)
-    else failedOut.push(j.document_id)
+    else failedOut.push(documentId)
   }
 
   // A permanently-failed document's job row still exists (status='failed')
@@ -945,10 +979,20 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .eq('superseded', false)
       .order('id', { ascending: true })
 
+    // .order('id') for the same reason as existingFacts above: this feeds
+    // processedDocTitles -> docSystemPrompt below, which is itself one of
+    // Stage 1/2's guardedClaudeCall inputParts (callTool's `system`
+    // argument) — an unordered row order here means an unchanged set of
+    // already-processed documents can still hash differently across
+    // retries, defeating idempotent reuse for the exact same reason
+    // record_stage3_failure's circuit breaker was defeated (see that
+    // comment). Same bug class, different call site — R-03 from the
+    // architecture audit that preceded Phase 1.
     const { data: existingDocs } = await supabase
       .from('project_documents')
       .select('id, file_id, document_type, drawing_title')
       .eq('job_id', jobId)
+      .order('id', { ascending: true })
 
     // Carries id/embedding through the whole run (not just category/key/
     // value/confidence) so batched Stage 1/2 calls below can supersede
@@ -984,7 +1028,53 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // never reached 'completed' (still retrying, or permanently
         // failed) is simply absent from this batch; permanently-failed
         // ones are still surfaced by filename below.
-        allLoaded = await loadAllFromExtractionResults(supabase, parentJobId, failedToLoadSiblings)
+        const skippedDuplicates: string[] = []
+        allLoaded = await loadAllFromExtractionResults(supabase, parentJobId, failedToLoadSiblings, skippedDuplicates)
+        if (skippedDuplicates.length > 0) {
+          console.log(JSON.stringify({
+            event: 'stage12_duplicates_excluded', job_id: jobId, parent_job_id: parentJobId,
+            duplicate_count: skippedDuplicates.length, duplicate_document_ids: skippedDuplicates,
+          }))
+        }
+        if (allLoaded.length === 0 && skippedDuplicates.length > 0) {
+          // Every file in this upload was a byte-identical re-upload of
+          // content already classified for this job — not a failure, and
+          // nothing about the estimate needs to change: the job's existing
+          // quote already reflects this content from when it was first
+          // uploaded. Reuse it (no new Stage 3-6 Claude calls, no new
+          // quote row) rather than treating an all-duplicates batch as an
+          // error.
+          const { data: currentQuote } = await supabase
+            .from('quotes')
+            .select('id')
+            .eq('job_id', jobId)
+            .eq('is_current', true)
+            .maybeSingle()
+
+          if (currentQuote?.id) {
+            await supabase.from('files').update({
+              intake_stage: 'complete', intake_pct: 100, pipeline_stage: 'complete',
+              quote_id: currentQuote.id, failure_stage: null, failure_reason: null,
+            }).eq('id', fileId)
+            if (parentJobId) {
+              await supabase.from('document_processing_batches').update({ quote_id: currentQuote.id, updated_at: new Date().toISOString() }).eq('id', parentJobId)
+              await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+            } else {
+              await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
+            }
+            console.log(JSON.stringify({
+              event: 'all_documents_duplicate_reused_existing_quote', job_id: jobId, parent_job_id: parentJobId,
+              quote_id: currentQuote.id, duplicate_count: skippedDuplicates.length,
+            }))
+            return
+          }
+          // No existing quote to reuse (shouldn't normally happen — a
+          // duplicate requires a prior file in this job to already have
+          // been classified) — fall through to the genuine-failure path
+          // below with a clearer reason.
+          await fail('Every document in this batch was already processed, and no existing quote was found to reuse for this job')
+          return
+        }
         if (allLoaded.length === 0) {
           await fail('No documents were successfully extracted for this batch')
           return
@@ -1854,10 +1944,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // ── Stage 6: Estimate Generation (spec Stage 5) ────────────────────────
     await setStage('generating_estimate')
 
+    // .order('trade_category_id') — same load-bearing reason as the
+    // existingFacts/existingDocs/document_processing_jobs fixes above: this
+    // feeds scopeBlock -> estimateUserContent, one of Stage 6's
+    // guardedClaudeCall inputParts (via callTool's `content` argument). An
+    // unordered fetch here means an unchanged scope_items set could still
+    // hash differently across retries, defeating idempotent reuse for
+    // Stage 6 the same way it did for Stage 3 before the existingFacts fix.
+    // Found during the R-03 follow-up review (production validation pass
+    // after Phase 1) — the earlier pass covered Stage 1/2 and Stage 3's
+    // direct inputs but had not checked Stage 6's.
     const { data: scopeForEstimate } = await supabase
       .from('scope_items')
       .select('trade_category_id, included_scope, excluded_scope, assumptions, uncertainty_notes')
       .eq('job_id', jobId)
+      .order('trade_category_id', { ascending: true })
 
     console.log(JSON.stringify({
       event: 'stage_checkpoint', job_id: jobId, batch_id: parentJobId ?? null,

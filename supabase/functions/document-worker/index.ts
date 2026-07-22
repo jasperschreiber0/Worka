@@ -28,6 +28,7 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { extractPdfTextGated, hasUsableText, isTextDense } from '../smooth-responder/pdf-text.ts'
 import { getPdfPageCount } from '../smooth-responder/pdf-chunk.ts'
+import { sha256Hex, decideDuplicateFile, filterToCanonicalHashCandidates, type HashedFileCandidate } from '../smooth-responder/pipeline-logic.ts'
 
 const CORS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -44,6 +45,15 @@ interface ExtractionResult {
   hasUsableText: boolean
   pageCount: number | null
   durationMs: number
+  // Phase 1 deterministic duplicate detection (see pipeline-logic.ts's
+  // decideDuplicateFile). When set, smooth-responder's
+  // loadAllFromExtractionResults skips this job entirely — its content
+  // never reaches Claude — regardless of blockType, which is left at its
+  // normal value here only for interface-shape compatibility and is not
+  // meaningful when duplicate is true.
+  duplicate?: boolean
+  duplicateOfFileId?: string
+  contentHash?: string
 }
 
 function toBase64(buffer: ArrayBuffer): string {
@@ -95,6 +105,132 @@ async function processOneDocument(
     }
 
     const buffer = await fileData.arrayBuffer()
+
+    // ── Phase 1: deterministic, cross-session duplicate detection ─────────
+    // Earliest point file bytes exist server-side (app/api/upload/route.ts
+    // never sees bytes — the browser PUTs directly to Storage), so hashing
+    // here adds no extra I/O beyond what extraction already needed. A
+    // failed hash computation is fail-safe: log a warning and fall through
+    // to normal extraction exactly as if this block didn't exist — hashing
+    // must never block or misroute an upload.
+    let contentHash: string | null = null
+    try {
+      contentHash = await sha256Hex(new Uint8Array(buffer))
+    } catch (hashErr) {
+      console.log(JSON.stringify({
+        event: 'content_hash_failed', document_id: job.document_id, filename: fileRow.filename,
+        warning: 'hash computation failed — continuing without duplicate detection for this file',
+        error: hashErr instanceof Error ? hashErr.message : String(hashErr),
+      }))
+      // Persisted (not just logged) so it's queryable — see
+      // document_duplicate_detection_summary in health_monitoring_views.sql.
+      // Best-effort: a failure to record this failure must not itself
+      // block the upload, same philosophy as recordProofEvent elsewhere in
+      // this codebase.
+      await supabase.from('files').update({ content_hash_failed: true }).eq('id', fileRow.id)
+    }
+
+    if (contentHash) {
+      // content_hash alone only proves "we have seen these bytes" — it says
+      // nothing about whether that earlier file was ever actually usable.
+      // A file whose Stage 1/2 classification failed (or never ran) still
+      // gets its content_hash written (hashing happens before extraction,
+      // extraction is independent of classification), so without this
+      // check a permanently-failed original would silently poison every
+      // future identical re-upload: each one gets marked a "duplicate" of
+      // a document that never contributed anything, and the content never
+      // reaches the estimator no matter how many times it's re-uploaded.
+      //
+      // The strongest existing signal for "this file was successfully,
+      // durably processed" is project_documents.extraction_status =
+      // 'complete' (migration 050) — set ONLY inside
+      // persist_document_classification, atomically with the project_facts
+      // it depends on, specifically so it can't be trusted-but-wrong the
+      // way document_processing_jobs.status = 'completed' can (that only
+      // means EXTRACTION succeeded — classification is a separate, later
+      // step in a different invocation, and can still fail or never run).
+      // A candidate file is only eligible to be matched against if it has
+      // this row; not just any file with a hash.
+      const { data: filesWithHash, error: filesErr } = await supabase
+        .from('files')
+        .select('id, job_id, content_hash, created_at')
+        .eq('job_id', fileRow.job_id)
+        .not('content_hash', 'is', null)
+
+      const { data: completeDocs, error: completeDocsErr } = await supabase
+        .from('project_documents')
+        .select('file_id')
+        .eq('job_id', fileRow.job_id)
+        .eq('extraction_status', 'complete')
+
+      const candidateErr = filesErr ?? completeDocsErr
+      // filterToCanonicalHashCandidates (pipeline-logic.ts, unit-tested) is
+      // the actual filtering DECISION — restricting matches to files that
+      // were successfully, durably classified, not merely hashed. An empty
+      // completeDocs result is NOT an error, it's the normal state early
+      // in a job's life (nothing successfully classified yet); the pure
+      // function correctly returns no candidates for that case, same as a
+      // genuine "no match" — no lookup-failed flag either way.
+      const candidateRows = candidateErr
+        ? []
+        : filterToCanonicalHashCandidates(
+            (filesWithHash ?? []) as HashedFileCandidate[],
+            (completeDocs ?? []).map((d: { file_id: string }) => d.file_id),
+          )
+
+      if (candidateErr) {
+        // Fail-safe, same principle as a hash computation failure: the
+        // duplicate LOOKUP failed (not the hash itself, which we already
+        // have) — log it, persist a distinct flag so it's queryable
+        // separately from a hash failure, and fall through to normal
+        // extraction with this file's own hash still recorded (a future
+        // upload can still match against IT, even though this attempt
+        // couldn't check whether IT matches anything earlier).
+        console.log(JSON.stringify({
+          event: 'duplicate_lookup_failed', document_id: job.document_id, filename: fileRow.filename,
+          warning: 'duplicate candidate lookup failed — continuing without duplicate detection for this file',
+          error: candidateErr.message,
+        }))
+      }
+
+      const decision = candidateErr
+        ? { isDuplicate: false, originalFileId: null }
+        : decideDuplicateFile(contentHash, candidateRows, fileRow.id, fileRow.job_id)
+
+      await supabase.from('files').update({
+        content_hash: contentHash,
+        file_size_bytes: buffer.byteLength,
+        duplicate_of_file_id: decision.isDuplicate ? decision.originalFileId : null,
+        duplicate_lookup_failed: Boolean(candidateErr),
+      }).eq('id', fileRow.id)
+
+      if (decision.isDuplicate && decision.originalFileId) {
+        console.log(JSON.stringify({
+          event: 'duplicate_document_detected',
+          original_document_id: decision.originalFileId,
+          duplicate_document_id: fileRow.id,
+          project_id: fileRow.job_id,
+          hash: contentHash,
+          bytes_saved_estimate: buffer.byteLength,
+        }))
+        // No extraction attempted — this is the whole point: the content
+        // is already known, so no CPU-bound parsing and, more importantly,
+        // no Stage 1/2 Claude spend on this file's bytes. Recorded as a
+        // 'completed' extraction job (not a new status — see migration
+        // 034's fixed status enum) carrying a marker result;
+        // smooth-responder's loadAllFromExtractionResults excludes any job
+        // whose result.duplicate is true before ever building Claude
+        // content from it.
+        return {
+          outcome: 'completed',
+          result: {
+            blockType: 'text_only', text: null, hasUsableText: false, pageCount: null, durationMs: 0,
+            duplicate: true, duplicateOfFileId: decision.originalFileId, contentHash,
+          },
+        }
+      }
+    }
+
     const isPdf = fileRow.file_type === 'pdf'
     const isCsv = fileRow.file_type === 'other' && /\.csv$/i.test(fileRow.filename ?? '')
 

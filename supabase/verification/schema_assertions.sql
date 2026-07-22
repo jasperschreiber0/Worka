@@ -362,4 +362,89 @@ EXCEPTION WHEN OTHERS THEN
   RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: set_current_quote is not callable: %', SQLERRM;
 END $$;
 
+-- ─── files.content_hash / duplicate_of_file_id — Phase 1 dedup (migration 062) ──
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'content_hash') = 1,
+    'files.content_hash column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'duplicate_of_file_id') = 1,
+    'files.duplicate_of_file_id column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_indexes WHERE tablename = 'files' AND indexname = 'idx_files_job_content_hash') = 1,
+    'idx_files_job_content_hash index is missing'
+  );
+  -- A file can never be marked as its own duplicate — decideDuplicateFile
+  -- (pipeline-logic.ts) explicitly excludes selfId, so this should be
+  -- structurally impossible; a defense-in-depth re-check, same pattern as
+  -- the quotes.is_current dupe check above.
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM files WHERE duplicate_of_file_id = id) = 0,
+    'at least one file has duplicate_of_file_id pointing at itself'
+  );
+END $$;
+
+-- ─── Duplicate-detection observability columns (migration 063) ────────────
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'file_size_bytes') = 1,
+    'files.file_size_bytes column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'content_hash_failed') = 1,
+    'files.content_hash_failed column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'duplicate_lookup_failed') = 1,
+    'files.duplicate_lookup_failed column is missing'
+  );
+END $$;
+
+-- ─── Canonical duplicate-candidate invariant (migration 064) ───────────────
+-- content_hash alone ("we have seen these bytes") is insufficient to
+-- identify a canonical document — a duplicate_of_file_id must always point
+-- at a file that was successfully, durably classified
+-- (project_documents.extraction_status = 'complete', migration 050), never
+-- at one that merely has a hash on record. Enforced in application code
+-- (filterToCanonicalHashCandidates, pipeline-logic.ts, called from
+-- document-worker/index.ts before duplicate_of_file_id is ever written) —
+-- this is a defense-in-depth re-check against live data, same pattern as
+-- the quotes.is_current and self-duplicate checks above, not the primary
+-- guarantee.
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (
+      SELECT count(*) FROM files f
+      WHERE f.duplicate_of_file_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM project_documents pd
+          WHERE pd.file_id = f.duplicate_of_file_id AND pd.extraction_status = 'complete'
+        )
+    ) = 0,
+    'at least one file''s duplicate_of_file_id points at a file that was never successfully, durably classified — content_hash alone must never be treated as sufficient evidence of a canonical original'
+  );
+END $$;
+
+-- ─── files.created_at index (migration 065) ────────────────────────────────
+-- Supports the Phase 2 document-similarity report's platform-wide
+-- job-selection scan without forcing a full-table sort as files grows —
+-- see that migration's own header comment.
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_indexes WHERE tablename = 'files' AND indexname = 'idx_files_created_at') = 1,
+    'idx_files_created_at index is missing'
+  );
+END $$;
+
+-- document_duplicate_detection_summary itself lives in
+-- health_monitoring_views.sql, which the supabase-migrate.yml workflow
+-- runs AFTER this file — same reason document_processing_health_summary
+-- (defined in that same file) isn't probed from here either. Its
+-- callability is exercised simply by health_monitoring_views.sql's own
+-- CREATE OR REPLACE FUNCTION succeeding (a plain aggregate SELECT with no
+-- write and no dependency on any specific row, so a syntax/type error is
+-- the only realistic failure mode, and that fails the CREATE itself).
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;
