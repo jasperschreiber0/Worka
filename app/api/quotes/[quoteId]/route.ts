@@ -385,11 +385,15 @@ export async function GET(
     // Non-blocking estimation: conservative assumptions WorkA made in place
     // of an unanswered blocking clarifying question — gate IS NULL is what
     // distinguishes these from Gate 1-3 assumptions (never touched here).
+    // line_item_id IS NULL too: a pre-migration-026 legacy Gate 1-3 row can
+    // also have gate IS NULL (the column didn't exist yet when it was
+    // written), but always has line_item_id set — our new rows never do.
     const { data: criticalAssumptionRows } = await supabase
       .from('assumptions')
       .select('id, description, assumed_value, reason, confidence_penalty, trade_category_id, resolution_type')
       .eq('quote_id', quoteId)
       .is('gate', null)
+      .is('line_item_id', null)
       .order('created_at', { ascending: true })
 
     const criticalAssumptions: CriticalAssumption[] = ((criticalAssumptionRows ?? []) as Array<{

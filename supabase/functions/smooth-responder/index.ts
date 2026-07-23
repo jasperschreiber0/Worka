@@ -2134,11 +2134,15 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // things get answered instead of accumulating forever. Best-effort:
     // this bookkeeping must never fail the estimate it describes.
     try {
+      // line_item_id IS NULL disambiguates from a pre-migration-026 legacy
+      // Gate 1-3 row, which can also have gate IS NULL (written before that
+      // column existed) but always has line_item_id set — these rows never do.
       const { data: existingConservative } = await supabase
         .from('assumptions')
         .select('id, description, resolution_type')
         .eq('quote_id', quoteId)
         .is('gate', null)
+        .is('line_item_id', null)
 
       const existingByQuestion = new Map(
         ((existingConservative ?? []) as Array<{ id: string; description: string; resolution_type: string | null }>)
