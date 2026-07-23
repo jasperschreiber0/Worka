@@ -43,10 +43,10 @@ import {
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
-  buildProjectModel,
+  buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
-  type ConservativeAssumption, type BucketableFact,
+  type ConservativeAssumption, type BucketableFact, type ProjectModelSections,
 } from './pipeline-logic.ts'
 import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -2383,7 +2383,168 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       console.error('Failed to release job intake lock:', lockErr)
     }
   }
+
+  // ── Project Model shadow estimate (estimator rebuild, Phase 3) ──────────
+  // Runs AFTER the lock is released (above) and the real quote is already
+  // committed — a legitimate second upload for this job must never wait on
+  // a benchmarking run that has nothing to do with real estimating, and a
+  // failure or wall-clock kill here can never affect a quote that already
+  // exists. Gated off by default; see PROJECT_MODEL_SHADOW_MODE_ENABLED.
+  if (PROJECT_MODEL_SHADOW_MODE_ENABLED) {
+    try {
+      const { data: quoteCheck } = await supabase
+        .from('quotes').select('id').eq('job_id', jobId).eq('is_current', true).maybeSingle()
+      if (quoteCheck?.id) {
+        await runProjectModelShadowEstimate(supabase, anthropic, builderId, jobId, parentJobId ?? null, quoteCheck.id)
+      }
+    } catch (shadowErr) {
+      console.error('project_model_shadow_estimate failed:', shadowErr)
+    }
+  }
 }
+
+// ── Feature flag — shipped dark. Every run this shadows roughly doubles
+// Stage 3+6 Anthropic spend for that run; enable deliberately once ready
+// to benchmark, same "ship dark, enable deliberately" pattern this
+// codebase already uses for anything that increases AI call volume (see
+// AI_RECOVERY_DISABLED / DOCUMENT_RECOVERY_DISABLED history). Still bounded
+// by the shared AI gateway's circuit breaker/daily spend ceiling even when
+// enabled — every call below goes through callTool, same as the real
+// pipeline's calls.
+const PROJECT_MODEL_SHADOW_MODE_ENABLED = false
+
+// Independent of the real run's own WALL_CLOCK_SAFETY_MS budget — the real
+// work is already committed by the time this runs, so a kill mid-shadow
+// only loses that one benchmark data point, not anything real. Still
+// hard-capped, well under Supabase's isolate ceiling, to bound how long a
+// single invocation can run for a purely diagnostic purpose.
+const SHADOW_SECTION_BUDGET_MS = 300_000
+
+async function runProjectModelShadowEstimate(
+  supabase: SupabaseClient,
+  anthropic: Anthropic,
+  builderId: string,
+  jobId: string,
+  batchId: string | null,
+  quoteId: string,
+): Promise<void> {
+  const shadowStartedAt = Date.now()
+  const hasShadowBudget = (neededMs: number) => (Date.now() - shadowStartedAt) + neededMs <= SHADOW_SECTION_BUDGET_MS
+
+  const { data: modelRow } = await supabase.from('project_models').select('sections, source_fact_count').eq('job_id', jobId).maybeSingle()
+  if (!modelRow?.sections) {
+    console.log(JSON.stringify({ event: 'project_model_shadow_run_skipped', job_id: jobId, reason: 'no project_models row for this job' }))
+    return
+  }
+  const sections = modelRow.sections as ProjectModelSections
+
+  // Same chunk-or-not decision the real Stage 3 makes, using the model's
+  // own source_fact_count as the volume proxy — the routed, per-trade
+  // context each individual call sees is smaller than this, but the
+  // DECISION to chunk at all should still track total project size.
+  const plan = planStage3Chunks(TRADE_CATEGORIES, SHADOW_SECTION_BUDGET_MS, modelRow.source_fact_count ?? 0)
+  if (plan.chunksToRunNow.length === 0) {
+    console.log(JSON.stringify({ event: 'project_model_shadow_run_skipped', job_id: jobId, reason: 'no wall-clock budget for even one chunk' }))
+    return
+  }
+
+  const chunkResults: ScopeReasoningResult[] = []
+  const tradesReasoned: number[] = []
+  for (const tradeChunk of plan.chunksToRunNow) {
+    if (!hasShadowBudget(STAGE3_PER_CALL_TIMEOUT_MS)) break
+    const viewNames = Array.from(new Set(tradeChunk.flatMap((t) => viewsForTradeCategory(t.id))))
+    const context = formatTradeViewsForPrompt(sections, viewNames)
+    const userContent = [{
+      type: 'text' as const,
+      text: `PROJECT MODEL:\n${context}\n\nTrade categories to reason about in THIS call:\n${tradeChunk.map((c) => `${c.id}. ${c.name}`).join('\n')}\n\nUse the reason_about_scope tool.`,
+    }]
+    try {
+      const chunkResult = await callTool(
+        anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning_shadow' },
+        SHADOW_SCOPE_SYSTEM_PROMPT, userContent, SCOPE_REASONING_TOOL, 16000, STAGE3_PER_CALL_TIMEOUT_MS
+      ) as ScopeReasoningResult
+      chunkResults.push(chunkResult)
+      tradesReasoned.push(...tradeChunk.map((t) => t.id))
+    } catch (err) {
+      console.log(JSON.stringify({ event: 'project_model_shadow_scope_call_failed', job_id: jobId, error: err instanceof Error ? err.message : String(err) }))
+      break
+    }
+  }
+
+  if (chunkResults.length === 0) {
+    console.log(JSON.stringify({ event: 'project_model_shadow_run_skipped', job_id: jobId, reason: 'no shadow scope chunk succeeded' }))
+    return
+  }
+
+  const shadowScope = mergeScopeReasoningResults(chunkResults)
+
+  let shadowLineItemCount = 0
+  let shadowConfidences: number[] = []
+  if (hasShadowBudget(150_000) && (shadowScope.scope ?? []).length > 0) {
+    const viewNames = Array.from(new Set(tradesReasoned.flatMap((id) => viewsForTradeCategory(id))))
+    const context = formatTradeViewsForPrompt(sections, viewNames)
+    const scopeBlock = (shadowScope.scope ?? [])
+      .map((s: Record<string, unknown>) => `Trade ${s.trade_category_id} (${TRADE_CATEGORIES.find((t) => t.id === s.trade_category_id)?.name}): included = ${(s.included_scope as string[]).join('; ')}. excluded = ${(s.excluded_scope as string[]).join('; ')}.`)
+      .join('\n')
+    const userContent = [{ type: 'text' as const, text: `PROJECT MODEL:\n${context}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
+    try {
+      const estimateResult = await callTool(
+        anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation_shadow' },
+        SHADOW_ESTIMATE_SYSTEM_PROMPT, userContent, ESTIMATE_GENERATION_TOOL, 16000
+      ) as { line_items?: Array<{ confidence?: number }> }
+      const items = estimateResult?.line_items ?? []
+      shadowLineItemCount = items.length
+      shadowConfidences = items.map((i) => i.confidence ?? 0)
+    } catch (err) {
+      console.log(JSON.stringify({ event: 'project_model_shadow_estimate_call_failed', job_id: jobId, error: err instanceof Error ? err.message : String(err) }))
+    }
+  }
+
+  // ── Comparable metrics for the real run, read fresh from what's already
+  // persisted (not reconstructed from in-memory state) ────────────────────
+  const [{ data: realScopeRows }, { count: realQuestionCount }, { data: realLineItems }] = await Promise.all([
+    supabase.from('scope_items').select('trade_category_id').eq('job_id', jobId),
+    supabase.from('clarifying_questions').select('id', { count: 'exact', head: true }).eq('job_id', jobId).eq('status', 'open'),
+    supabase.from('quote_line_items').select('confidence').eq('quote_id', quoteId),
+  ])
+  const realConfidences = (realLineItems ?? []).map((r: { confidence: number | null }) => r.confidence ?? 0)
+
+  const [{ data: realScopeOp }, { data: shadowScopeOp }, { data: realEstimateOp }, { data: shadowEstimateOp }] = await Promise.all([
+    supabase.from('ai_operations').select('id, input_tokens, output_tokens, duration_ms').eq('scope_key', `${jobId}:stage_scope_reasoning`).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('ai_operations').select('id, input_tokens, output_tokens, duration_ms').eq('scope_key', `${jobId}:stage_scope_reasoning_shadow`).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('ai_operations').select('id, input_tokens, output_tokens, duration_ms').eq('scope_key', `${jobId}:stage_estimate_generation`).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('ai_operations').select('id, input_tokens, output_tokens, duration_ms').eq('scope_key', `${jobId}:stage_estimate_generation_shadow`).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+  ])
+
+  const avg = (nums: number[]) => (nums.length === 0 ? null : Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) / 100)
+
+  await supabase.from('estimator_shadow_runs').insert({
+    job_id: jobId, batch_id: batchId, quote_id: quoteId,
+    real_scope_operation_id: realScopeOp?.id ?? null, shadow_scope_operation_id: shadowScopeOp?.id ?? null,
+    real_estimate_operation_id: realEstimateOp?.id ?? null, shadow_estimate_operation_id: shadowEstimateOp?.id ?? null,
+    real_input_tokens: realScopeOp?.input_tokens ?? null, shadow_input_tokens: shadowScopeOp?.input_tokens ?? null,
+    real_output_tokens: realScopeOp?.output_tokens ?? null, shadow_output_tokens: shadowScopeOp?.output_tokens ?? null,
+    real_duration_ms: realScopeOp?.duration_ms ?? null, shadow_duration_ms: shadowScopeOp?.duration_ms ?? null,
+    real_scope_trade_count: (realScopeRows ?? []).length, shadow_scope_trade_count: (shadowScope.scope ?? []).length,
+    real_clarifying_question_count: realQuestionCount ?? null, shadow_clarifying_question_count: (shadowScope.clarifying_questions ?? []).length,
+    real_line_item_count: (realLineItems ?? []).length, shadow_line_item_count: shadowLineItemCount,
+    real_avg_confidence: avg(realConfidences), shadow_avg_confidence: avg(shadowConfidences),
+    trades_shadow_reasoned: tradesReasoned,
+    notes: tradesReasoned.length < TRADE_CATEGORIES.length
+      ? `Shadow run covered ${tradesReasoned.length}/${TRADE_CATEGORIES.length} trades (wall-clock budget) — a partial comparison, not a failure.`
+      : null,
+  })
+
+  console.log(JSON.stringify({
+    event: 'project_model_shadow_run_complete', job_id: jobId,
+    trades_shadow_reasoned: tradesReasoned.length, trades_total: TRADE_CATEGORIES.length,
+    shadow_line_item_count: shadowLineItemCount, real_line_item_count: (realLineItems ?? []).length,
+  }))
+}
+
+const SHADOW_SCOPE_SYSTEM_PROMPT = 'You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer — note that "blocking" flags a question for priority review, it does NOT stop the estimate from being generated. You are given a PROJECT MODEL — facts already organised by what matters to each trade — instead of a flat fact list; reason from it directly.'
+
+const SHADOW_ESTIMATE_SYSTEM_PROMPT = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project model and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured, pc_allowance, or provisional_sum.'
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 

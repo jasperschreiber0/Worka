@@ -1677,6 +1677,7 @@ export interface BucketableFact {
 }
 
 export interface ProjectFactRef {
+  category: string
   key: string
   value: string
   confidence: number
@@ -1700,7 +1701,7 @@ export interface ProjectModelSections {
 }
 
 function toFactRef(f: BucketableFact): ProjectFactRef {
-  return { key: f.key, value: f.value, confidence: f.confidence, source_document_id: f.source_document_id, evidence: f.evidence }
+  return { category: f.category, key: f.key, value: f.value, confidence: f.confidence, source_document_id: f.source_document_id, evidence: f.evidence }
 }
 
 // Ordered: structure checked before external before internal before
@@ -1786,4 +1787,100 @@ export function buildProjectModel(facts: BucketableFact[]): ProjectModelSections
   }
 
   return sections
+}
+
+// ─── Trade views (estimator rebuild, Phase 3) ───────────────────────────────
+// Deterministic (no AI) grouping of a ProjectModelSections object into the
+// 7 named views a trade estimator actually reasons from — narrower and
+// more purpose-built than the raw section tree, and distinct from the 13
+// DB-locked trade_categories: several of those trades share one view (e.g.
+// Insulation reads the same framing+roof facts Framing/Roofing do), and
+// "Site Works & Concrete" (trade 1) is deliberately split into two views
+// here (concrete vs. site) since a concreter and a site-works subbie read
+// genuinely different facts even though WorkA prices them as one trade.
+
+export const TRADE_VIEW_NAMES = ['concrete', 'framing', 'roofing', 'external', 'internal', 'services', 'site'] as const
+export type TradeViewName = (typeof TRADE_VIEW_NAMES)[number]
+
+const TRADE_VIEW_SECTION_PATHS: Record<TradeViewName, string[]> = {
+  concrete: ['structure.foundations', 'structure.slab'],
+  framing: ['structure.framing'],
+  roofing: ['structure.roof'],
+  external: ['external.walls', 'external.windows', 'external.doors', 'external.cladding'],
+  internal: ['internal.flooring', 'internal.bathrooms', 'internal.kitchens', 'internal.joinery'],
+  services: ['services.electrical', 'services.hydraulic', 'services.mechanical'],
+  site: ['site.slope', 'site.access', 'site.retaining', 'site.excavation'],
+}
+
+// Maps each of the 13 real, DB-locked trade_category_id values to the
+// view(s) relevant to it — the same routing intent as
+// trade_project_model_map (migration 068), expressed as named views
+// instead of raw paths for readability at the Stage 3 call site. Kept in
+// sync by hand; both describe the same underlying routing decision.
+export const TRADE_CATEGORY_TO_VIEWS: Record<number, TradeViewName[]> = {
+  1: ['concrete', 'site'],       // Site Works & Concrete
+  2: ['framing'],                // Framing
+  3: ['roofing'],                // Roofing
+  4: ['external'],                // External Cladding
+  5: ['framing', 'roofing'],     // Insulation
+  6: ['internal'],                // Internal Linings
+  7: ['internal', 'external'],   // Fit-out Carpentry
+  8: ['internal'],                // Cabinetry
+  9: ['internal', 'external'],   // Paint
+  10: ['internal'],               // Flooring
+  11: ['internal', 'services'],  // Fixtures & Tapware
+  12: ['services'],               // Electrical
+  13: ['site'],                   // Preliminaries
+}
+
+function getByPath(sections: ProjectModelSections, path: string): ProjectFactRef[] {
+  const [top, leaf] = path.split('.') as [keyof ProjectModelSections, string]
+  const bucket = sections[top] as unknown as Record<string, ProjectFactRef[]>
+  return bucket[leaf] ?? []
+}
+
+export function buildTradeViews(sections: ProjectModelSections): Record<TradeViewName, ProjectFactRef[]> {
+  const views = {} as Record<TradeViewName, ProjectFactRef[]>
+  for (const name of TRADE_VIEW_NAMES) {
+    views[name] = TRADE_VIEW_SECTION_PATHS[name].flatMap((path) => getByPath(sections, path))
+  }
+  return views
+}
+
+/** Which named views apply to a given real trade_category_id (1-13). Unknown ids get no views — callers fall back to the flat fact path rather than reasoning from nothing. */
+export function viewsForTradeCategory(tradeCategoryId: number): TradeViewName[] {
+  return TRADE_CATEGORY_TO_VIEWS[tradeCategoryId] ?? []
+}
+
+/**
+ * Formats a trade's routed views (plus the project model's summary
+ * scalars, always included — every trade needs to know storeys/floor
+ * area/construction method) into the same evidence-labelled text shape
+ * formatFactForScopePrompt already produces per fact, so a Stage 3 prompt
+ * built from this is structurally comparable to one built from the flat
+ * fact list — only the SELECTION of facts differs, not their formatting.
+ */
+export function formatTradeViewsForPrompt(
+  sections: ProjectModelSections,
+  viewNames: TradeViewName[],
+): string {
+  const lines: string[] = []
+  const summary = sections.summary
+  const summaryParts = Object.entries(summary)
+    .filter(([, ref]) => ref !== null)
+    .map(([key, ref]) => `${key}: ${(ref as ProjectFactRef).value}`)
+  if (summaryParts.length > 0) {
+    lines.push(`Project summary — ${summaryParts.join('; ')}`)
+  }
+
+  const views = buildTradeViews(sections)
+  for (const viewName of viewNames) {
+    const facts = views[viewName]
+    if (facts.length === 0) continue
+    lines.push(`\n${viewName.toUpperCase()} VIEW:`)
+    for (const f of facts) {
+      lines.push(formatFactForScopePrompt(f))
+    }
+  }
+  return lines.join('\n')
 }

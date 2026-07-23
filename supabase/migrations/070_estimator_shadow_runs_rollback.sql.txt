@@ -1,0 +1,8 @@
+-- Rollback for 070_estimator_shadow_runs.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-069's own rollback companions.
+-- Safe to drop outright: nothing in the live pipeline reads this table —
+-- it is a write-only observability log for a shadow comparison that never
+-- influences a real quote.
+
+DROP TABLE IF EXISTS estimator_shadow_runs;

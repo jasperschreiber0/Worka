@@ -57,6 +57,12 @@ import {
   BLOCKING_ASSUMPTION_CONFIDENCE_PENALTY,
   CONSERVATIVE_ASSUMPTION_FALLBACK,
   buildProjectModel,
+  buildTradeViews,
+  viewsForTradeCategory,
+  formatTradeViewsForPrompt,
+  TRADE_VIEW_NAMES,
+  TRADE_CATEGORY_TO_VIEWS,
+  type TradeViewName,
   type BatchableFile,
   type FactRow,
   type Stage3FailureHistory,
@@ -1928,4 +1934,61 @@ test('buildProjectModel: empty fact list produces an empty-but-valid model', () 
   assert.equal(model.unclassified.length, 0)
   assert.equal(model.structure.foundations.length, 0)
   assert.equal(model.summary.project_type, null)
+})
+
+// ─── Trade views (Phase 3) ──────────────────────────────────────────────────
+
+test('buildTradeViews: routes foundation + slab facts into the concrete view', () => {
+  const sections = buildProjectModel([
+    pmFact({ key: 'footing_type', value: 'strip footing' }),
+    pmFact({ key: 'slab_type', value: 'waffle pod slab' }),
+  ])
+  const views = buildTradeViews(sections)
+  assert.equal(views.concrete.length, 2)
+  assert.equal(views.framing.length, 0)
+})
+
+test('buildTradeViews: produces exactly the 7 named views, every time', () => {
+  const views = buildTradeViews(buildProjectModel([]))
+  assert.deepEqual(Object.keys(views).sort(), [...TRADE_VIEW_NAMES].sort())
+})
+
+test('viewsForTradeCategory: Site Works & Concrete (trade 1) gets both concrete and site', () => {
+  const views = viewsForTradeCategory(1)
+  assert.deepEqual(views.sort(), ['concrete', 'site'].sort())
+})
+
+test('viewsForTradeCategory: Electrical (trade 12) gets only services', () => {
+  assert.deepEqual(viewsForTradeCategory(12), ['services'])
+})
+
+test('viewsForTradeCategory: an unknown trade id returns no views rather than throwing', () => {
+  assert.deepEqual(viewsForTradeCategory(999), [])
+})
+
+test('TRADE_CATEGORY_TO_VIEWS: every one of the 13 real trades has at least one view mapped', () => {
+  for (let id = 1; id <= 13; id++) {
+    const views: TradeViewName[] = TRADE_CATEGORY_TO_VIEWS[id] ?? []
+    assert.ok(views.length > 0, `trade ${id} has no views mapped`)
+  }
+})
+
+test('formatTradeViewsForPrompt: includes the project summary and only the requested views', () => {
+  const sections = buildProjectModel([
+    pmFact({ category: 'storeys', key: 'storeys', value: '2' }),
+    pmFact({ key: 'footing_type', value: 'strip footing' }),
+    pmFact({ key: 'kitchen_benchtop', value: 'stone benchtop' }),
+  ])
+  const text = formatTradeViewsForPrompt(sections, ['concrete'])
+  assert.match(text, /storeys: 2/)
+  assert.match(text, /CONCRETE VIEW/)
+  assert.match(text, /strip footing/)
+  assert.doesNotMatch(text, /benchtop/)
+})
+
+test('formatTradeViewsForPrompt: a view with no matching facts is omitted entirely, not shown empty', () => {
+  const sections = buildProjectModel([pmFact({ key: 'footing_type', value: 'strip footing' })])
+  const text = formatTradeViewsForPrompt(sections, ['concrete', 'roofing'])
+  assert.match(text, /CONCRETE VIEW/)
+  assert.doesNotMatch(text, /ROOFING VIEW/)
 })

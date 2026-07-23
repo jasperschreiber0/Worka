@@ -526,4 +526,16 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── Shadow estimator comparison (migration 070) — estimator rebuild Phase 3
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.tables WHERE table_name = 'estimator_shadow_runs') = 1,
+    'estimator_shadow_runs table is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'estimator_shadow_runs' AND column_name = 'trades_shadow_reasoned') = 1,
+    'estimator_shadow_runs.trades_shadow_reasoned column is missing'
+  );
+END $$;
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;
