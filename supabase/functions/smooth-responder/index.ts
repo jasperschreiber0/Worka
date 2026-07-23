@@ -38,7 +38,7 @@ import {
   splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
-  dedupeRealFileIds, splitBatchForRetry, formatWallClockStallReason,
+  splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
   partitionCompletedJobsForClassification,
@@ -1303,30 +1303,27 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         .map((d) => (d.drawing_title as string) ?? (d.document_type as string))
         .filter((t): t is string => Boolean(t))
 
-      for (let batchIdx = 0; batchIdx < fileBatches.length; batchIdx++) {
-        const batchFiles = fileBatches[batchIdx]
-          .map((bf) => blockById.get(bf.fileId))
-          .filter((f): f is LoadedFile => Boolean(f))
-
-        // A solo batch (forced by a prior AI failure — see forcedSoloInput
-        // above) gets the wider 220s budget: confirmed in production that a
-        // genuinely large/complex document (a full structural drawing set)
-        // can still exceed the standard 150s even completely alone, and
-        // retrying it identically at the same 150s ceiling is guaranteed to
-        // reproduce the identical timeout. A bundled (non-solo) batch stays
-        // at 150s — MAX_BATCHES already bounds how many of these one
-        // invocation can attempt, and widening every batch risks the same
-        // wall-clock exhaustion this budget guard exists to prevent.
-        const batchTimeoutMs = batchFiles.length === 1 ? 220_000 : 150_000
-        if (!hasWallClockBudget(batchTimeoutMs)) {
-          await bailForWallClockBudget('classifying_documents', batchTimeoutMs)
-          break
-        }
-
-        await supabase.from('files').update({ intake_batch_index: batchIdx + 1 }).eq('id', fileId)
-        await touchLockProgress()
-        await setStage('classifying_documents')
-
+      // Classifies ONE group of documents (a multi-document batch, or a
+      // single document on a solo retry) — extracted so a failed
+      // multi-document batch can immediately retry each document ALONE in
+      // this same invocation (see the failure branch in the loop below)
+      // instead of only recording the failure and waiting for a LATER
+      // invocation's forced-solo retry, which was previously the only
+      // recovery path for "one bad document poisoned a shared batch call."
+      // Identical logic to before for a successful call — persists
+      // documents/facts, mutates `facts`/`processedDocTitles` via closure.
+      // On failure it returns the classification instead of recording it
+      // itself: the caller decides whether this was already an isolated
+      // solo attempt (genuinely failed — record it) or the first attempt
+      // at a multi-document batch (try the documents alone before
+      // recording anything against them).
+      const classifyBatch = async (
+        batchFiles: LoadedFile[],
+        batchTimeoutMs: number,
+      ): Promise<
+        | { ok: true; factsFound: number; documentsClassified: number }
+        | { ok: false; billingHalt: boolean; classification: AnthropicFailureClassification; errMessage: string }
+      > => {
         // Prior facts, so extraction of a newly-uploaded document isn't blind
         // to what earlier documents/batches already established. This used
         // to be title-only ("you cannot see the old files directly") — Claude
@@ -1368,60 +1365,32 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // 16000 for this same model/API rather than guessing at another cap.
           docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence' }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
         } catch (err) {
-          // A single batch's Claude call failing (a transient API error, a
-          // truncated/malformed response) used to abort the ENTIRE run via
-          // fail()+return — losing every fact already extracted by earlier,
-          // successful batches. This is a genuinely catchable, in-band
-          // failure (unlike the CPU-governor kill this pipeline separately
-          // guards against above, which no catch block can intercept) — so
-          // it should cost this batch's files, not the whole run, EXCEPT
-          // for a billing-halt classification (credit_exhausted /
+          // A batch's Claude call failing (a transient API error, a
+          // truncated/malformed response) is a genuinely catchable,
+          // in-band failure (unlike the CPU-governor kill this pipeline
+          // separately guards against, which no catch block can
+          // intercept) — the caller decides how to isolate it, EXCEPT for
+          // a billing-halt classification (credit_exhausted /
           // authentication_failed): every remaining call in this run would
-          // fail identically, so continuing to the next batch/stage would
-          // just keep spending on calls guaranteed to fail — that's the
-          // second half of the incident this closes (see haltForBilling).
+          // fail identically, so the caller must stop the whole run rather
+          // than isolate-and-retry (see haltForBilling).
           const classification = (err as { classification?: AnthropicFailureClassification })?.classification
             ?? classifyAnthropicError(err)
           const errMessage = err instanceof Error ? err.message : String(err)
           console.log(JSON.stringify({
-            batch: batchIdx + 1, totalBatches: fileBatches.length,
             documents: batchFiles.map((f) => f.filename), status: 'failed',
             durationMs: Date.now() - batchStartedAt,
             classification, error: errMessage,
           }))
-
-          if (isBillingHaltClassification(classification)) {
-            await haltForBilling(classification, errMessage)
-            return
-          }
-
-          // Persist this failure against every REAL file in the batch — this
-          // is what lets a LATER invocation retry this exact grouping
-          // smaller (forced solo batching above) instead of resending it
-          // whole, and what stops it for good after too many identical
-          // failures (maxConsecutiveOccurrences, inside recordAiFailure).
-          // Deduplicated by real file id (dedupeRealFileIds): a page-
-          // chunked PDF contributes multiple batchFiles entries
-          // (`${realId}#pStart-End`) for ONE real file — recording this ONE
-          // Claude-call failure once per chunk would inflate one real
-          // failure into several counted occurrences (production readiness
-          // review, blocking issue 2), so this call is one per underlying
-          // file, not one per batch entry.
-          for (const rfid of dedupeRealFileIds(batchFiles.map((f) => f.fileId))) {
-            await recordAiFailure(rfid, classification, errMessage)
-          }
-          failedToLoadSiblings.push(...batchFiles.map((f) => f.filename))
-          continue
+          return { ok: false, billingHalt: isBillingHaltClassification(classification), classification, errMessage }
         }
         if (!docResult) {
           console.log(JSON.stringify({
-            batch: batchIdx + 1, totalBatches: fileBatches.length,
             documents: batchFiles.map((f) => f.filename), status: 'failed',
             durationMs: Date.now() - batchStartedAt,
             error: 'no structured response from document intelligence stage',
           }))
-          failedToLoadSiblings.push(...batchFiles.map((f) => f.filename))
-          continue
+          return { ok: false, billingHalt: false, classification: 'unknown', errMessage: 'no structured response from document intelligence stage' }
         }
 
         // Structured observability log — real per-batch duration and token
@@ -1430,7 +1399,6 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // the API for a multi-document call, so this deliberately reports
         // at batch granularity rather than fabricating a per-document split.
         console.log(JSON.stringify({
-          batch: batchIdx + 1, totalBatches: fileBatches.length,
           documents: batchFiles.map((f) => f.filename), status: 'processed',
           durationMs: Date.now() - batchStartedAt,
           factsFound: (docResult.facts ?? []).length,
@@ -1557,6 +1525,124 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
               })),
             ]
           }
+        }
+
+        return { ok: true, factsFound: (docResult.facts ?? []).length, documentsClassified: (docResult.documents ?? []).length }
+      }
+
+      for (let batchIdx = 0; batchIdx < fileBatches.length; batchIdx++) {
+        const batchFiles = fileBatches[batchIdx]
+          .map((bf) => blockById.get(bf.fileId))
+          .filter((f): f is LoadedFile => Boolean(f))
+
+        // A solo batch (forced by a prior AI failure — see forcedSoloInput
+        // above) gets the wider 220s budget: confirmed in production that a
+        // genuinely large/complex document (a full structural drawing set)
+        // can still exceed the standard 150s even completely alone, and
+        // retrying it identically at the same 150s ceiling is guaranteed to
+        // reproduce the identical timeout. A bundled (non-solo) batch stays
+        // at 150s — MAX_BATCHES already bounds how many of these one
+        // invocation can attempt, and widening every batch risks the same
+        // wall-clock exhaustion this budget guard exists to prevent.
+        const batchTimeoutMs = batchFiles.length === 1 ? 220_000 : 150_000
+        if (!hasWallClockBudget(batchTimeoutMs)) {
+          await bailForWallClockBudget('classifying_documents', batchTimeoutMs)
+          break
+        }
+
+        await supabase.from('files').update({ intake_batch_index: batchIdx + 1 }).eq('id', fileId)
+        await touchLockProgress()
+        await setStage('classifying_documents')
+
+        const result = await classifyBatch(batchFiles, batchTimeoutMs)
+
+        if (result.ok) {
+          console.log(JSON.stringify({
+            batch: batchIdx + 1, totalBatches: fileBatches.length,
+            documents: batchFiles.map((f) => f.filename), status: 'processed',
+            factsFound: result.factsFound, documentsClassified: result.documentsClassified,
+          }))
+          continue
+        }
+
+        if (result.billingHalt) {
+          await haltForBilling(result.classification, result.errMessage)
+          return
+        }
+
+        // ── Batch failure isolation ─────────────────────────────────────
+        // A single bad document must not take down every document it
+        // happened to be bin-packed with — previously the only recovery
+        // was a LATER invocation (recovery cron) forcing each file solo,
+        // which could take multiple cron cycles and, in the meantime,
+        // surfaced as a hard "no project facts could be established"
+        // failure to the builder even when most documents were fine.
+        //
+        // A batch that was already solo (length 1) has nothing left to
+        // isolate — it genuinely failed alone, record it directly exactly
+        // as before.
+        if (batchFiles.length === 1) {
+          const rfid = realFileId(batchFiles[0].fileId)
+          await recordAiFailure(rfid, result.classification, result.errMessage)
+          failedToLoadSiblings.push(batchFiles[0].filename)
+          console.log(JSON.stringify({
+            batch: batchIdx + 1, totalBatches: fileBatches.length,
+            event: 'document_genuinely_failed', filename: batchFiles[0].filename,
+            classification: result.classification, error: result.errMessage,
+          }))
+          continue
+        }
+
+        // Multi-document batch failed — immediately retry every document
+        // in it ALONE, in this same invocation, instead of waiting for a
+        // later one. Nothing is recorded as failed yet: the shared-batch
+        // failure says nothing about which specific document (if any) was
+        // actually the problem, so recording it against all of them would
+        // violate "only mark genuinely failed documents as failed."
+        console.log(JSON.stringify({
+          batch: batchIdx + 1, totalBatches: fileBatches.length,
+          event: 'batch_failed_retrying_solo', documents: batchFiles.map((f) => f.filename),
+          classification: result.classification, error: result.errMessage,
+        }))
+
+        // Dedup by real file id, same reasoning as the removed
+        // dedupeRealFileIds call this replaces: a page-chunked PDF
+        // contributes multiple batchFiles entries for ONE real file, and
+        // recording a failure once per chunk would inflate one real
+        // failure into several counted occurrences.
+        const recordedFailedRealIds = new Set<string>()
+        for (const soloFile of batchFiles) {
+          if (!hasWallClockBudget(220_000)) {
+            // Out of budget for the rest of this batch — leave them
+            // unprocessed, not "failed": a scheduling gap says nothing
+            // about the document itself, so this must not consume the
+            // AI-failure retry budget (recordAiFailure deliberately not
+            // called). A later invocation picks these up fresh, same as
+            // any other wall-clock deferral in this pipeline.
+            failedToLoadSiblings.push(soloFile.filename)
+            console.log(JSON.stringify({ event: 'document_solo_retry_skipped_wall_clock', filename: soloFile.filename }))
+            continue
+          }
+
+          const soloResult = await classifyBatch([soloFile], 220_000)
+          if (soloResult.ok) {
+            console.log(JSON.stringify({ event: 'document_solo_retry_succeeded', filename: soloFile.filename, factsFound: soloResult.factsFound }))
+            continue
+          }
+          if (soloResult.billingHalt) {
+            await haltForBilling(soloResult.classification, soloResult.errMessage)
+            return
+          }
+          const rfid = realFileId(soloFile.fileId)
+          if (!recordedFailedRealIds.has(rfid)) {
+            recordedFailedRealIds.add(rfid)
+            await recordAiFailure(rfid, soloResult.classification, soloResult.errMessage)
+          }
+          failedToLoadSiblings.push(soloFile.filename)
+          console.log(JSON.stringify({
+            event: 'document_genuinely_failed', filename: soloFile.filename,
+            classification: soloResult.classification, error: soloResult.errMessage,
+          }))
         }
       }
 
