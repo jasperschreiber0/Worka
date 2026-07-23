@@ -1,0 +1,7 @@
+-- Rollback for 069_estimator_corrections.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-068's own rollback companions.
+
+ALTER TABLE quote_line_items DROP COLUMN IF EXISTS correction_id;
+ALTER TABLE quote_line_items DROP COLUMN IF EXISTS predicted_by;
+DROP TABLE IF EXISTS estimator_corrections;

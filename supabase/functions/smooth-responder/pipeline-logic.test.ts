@@ -56,12 +56,14 @@ import {
   BLOCKING_ASSUMPTION_CONFIDENCE_CAP,
   BLOCKING_ASSUMPTION_CONFIDENCE_PENALTY,
   CONSERVATIVE_ASSUMPTION_FALLBACK,
+  buildProjectModel,
   type BatchableFile,
   type FactRow,
   type Stage3FailureHistory,
   type HashedFileCandidate,
   type CompletedDocumentJobRow,
   type ConservativeAssumption,
+  type BucketableFact,
 } from './pipeline-logic.ts'
 
 // ─── splitIntoBatches ───────────────────────────────────────────────────────
@@ -1842,4 +1844,88 @@ test('conservativeAssumptionAppliesToTrade: trade_category_id null applies to ev
 
 test('conservativeAssumptionAppliesToTrade: no assumptions means no trade is affected', () => {
   assert.equal(conservativeAssumptionAppliesToTrade([], 1), false)
+})
+
+// ─── buildProjectModel ──────────────────────────────────────────────────────
+
+function pmFact(overrides: Partial<BucketableFact>): BucketableFact {
+  return {
+    category: 'materials', key: 'note', value: 'note', confidence: 80,
+    source_document_id: null, evidence: null, ...overrides,
+  }
+}
+
+test('buildProjectModel: routes a footing fact to structure.foundations', () => {
+  const model = buildProjectModel([pmFact({ key: 'footing_type', value: 'Strip footing, 300mm wide' })])
+  assert.equal(model.structure.foundations.length, 1)
+  assert.equal(model.structure.foundations[0].value, 'Strip footing, 300mm wide')
+})
+
+test('buildProjectModel: routes a kitchen benchtop fact to internal.kitchens, not joinery', () => {
+  const model = buildProjectModel([pmFact({ key: 'benchtop', value: '40mm stone benchtop' })])
+  assert.equal(model.internal.kitchens.length, 1)
+  assert.equal(model.internal.joinery.length, 0)
+})
+
+test('buildProjectModel: a fact matching no keyword lands in unclassified, never dropped', () => {
+  const model = buildProjectModel([pmFact({ key: 'client_preference', value: 'wants a quiet completion date' })])
+  assert.equal(model.unclassified.length, 1)
+  assert.equal(model.unclassified[0].key, 'client_preference')
+})
+
+test('buildProjectModel: total fact count is preserved across every section + unclassified', () => {
+  const facts = [
+    pmFact({ key: 'footing_type', value: 'strip footing' }),
+    pmFact({ key: 'roof_type', value: 'colorbond roof' }),
+    pmFact({ key: 'window_count', value: '12 aluminium windows' }),
+    pmFact({ key: 'random_note', value: 'nothing structural here' }),
+  ]
+  const model = buildProjectModel(facts)
+  const total =
+    model.structure.foundations.length + model.structure.slab.length + model.structure.framing.length + model.structure.roof.length +
+    model.external.walls.length + model.external.windows.length + model.external.doors.length + model.external.cladding.length +
+    model.internal.flooring.length + model.internal.bathrooms.length + model.internal.kitchens.length + model.internal.joinery.length +
+    model.services.electrical.length + model.services.hydraulic.length + model.services.mechanical.length +
+    model.site.slope.length + model.site.access.length + model.site.retaining.length + model.site.excavation.length +
+    model.unclassified.length
+  assert.equal(total, facts.length)
+})
+
+test('buildProjectModel: summary.project_type picks the highest-confidence project_type fact', () => {
+  const facts = [
+    pmFact({ category: 'project_type', key: 'type', value: 'Renovation', confidence: 60 }),
+    pmFact({ category: 'project_type', key: 'type', value: 'Rear extension', confidence: 90 }),
+  ]
+  const model = buildProjectModel(facts)
+  assert.equal(model.summary.project_type?.value, 'Rear extension')
+})
+
+test('buildProjectModel: summary.floor_area matches on key containing floor_area regardless of category', () => {
+  const model = buildProjectModel([pmFact({ category: 'rooms', key: 'floor_area_m2', value: '108.2' })])
+  assert.equal(model.summary.floor_area?.value, '108.2')
+})
+
+test('buildProjectModel: no matching facts leaves a summary scalar null, not a fabricated default', () => {
+  const model = buildProjectModel([pmFact({ key: 'unrelated', value: 'unrelated' })])
+  assert.equal(model.summary.project_type, null)
+  assert.equal(model.summary.storeys, null)
+  assert.equal(model.summary.construction_method, null)
+})
+
+test('buildProjectModel: evidence and confidence survive the reorganisation untouched', () => {
+  const model = buildProjectModel([pmFact({
+    key: 'footing_type', value: 'strip footing', confidence: 72,
+    source_document_id: 'doc-1', evidence: 'Structural notes, sheet S1.1',
+  })])
+  const ref = model.structure.foundations[0]
+  assert.equal(ref.confidence, 72)
+  assert.equal(ref.source_document_id, 'doc-1')
+  assert.equal(ref.evidence, 'Structural notes, sheet S1.1')
+})
+
+test('buildProjectModel: empty fact list produces an empty-but-valid model', () => {
+  const model = buildProjectModel([])
+  assert.equal(model.unclassified.length, 0)
+  assert.equal(model.structure.foundations.length, 0)
+  assert.equal(model.summary.project_type, null)
 })

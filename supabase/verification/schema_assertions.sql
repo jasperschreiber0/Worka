@@ -479,4 +479,51 @@ END $$;
 -- write and no dependency on any specific row, so a syntax/type error is
 -- the only realistic failure mode, and that fails the CREATE itself).
 
+-- ─── Project Knowledge Model (migration 068) — estimator rebuild Phase 1 ───
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.tables WHERE table_name = 'project_models') = 1,
+    'project_models table is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'project_models' AND column_name = 'sections') = 1,
+    'project_models.sections column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.tables WHERE table_name = 'trade_project_model_map') = 1,
+    'trade_project_model_map table is missing'
+  );
+  -- Every one of the 13 locked trade categories has at least one routed
+  -- section path — a trade with zero rows here would silently receive only
+  -- the implicit "summary" section from any future consumer.
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM trade_categories tc
+       WHERE NOT EXISTS (SELECT 1 FROM trade_project_model_map m WHERE m.trade_category_id = tc.id)) = 0,
+    'at least one trade_category has no rows in trade_project_model_map'
+  );
+END $$;
+
+-- ─── Learning engine capture (migration 069) — estimator rebuild Phase 2 ───
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.tables WHERE table_name = 'estimator_corrections') = 1,
+    'estimator_corrections table is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'quote_line_items' AND column_name = 'predicted_by') = 1,
+    'quote_line_items.predicted_by column is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'quote_line_items' AND column_name = 'correction_id') = 1,
+    'quote_line_items.correction_id column is missing'
+  );
+  -- A row claiming to be a 'human' prediction with no correction on record
+  -- would mean the two columns this migration added have already drifted
+  -- out of sync with each other.
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM quote_line_items WHERE predicted_by = 'human' AND correction_id IS NULL) = 0,
+    'at least one quote_line_item is predicted_by=human with no correction_id'
+  );
+END $$;
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;

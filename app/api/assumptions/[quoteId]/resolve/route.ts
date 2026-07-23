@@ -10,6 +10,10 @@ interface ResolveInput {
   adjusted_quantity?: number
   adjusted_unit?: string
   builder_id: string
+  // Learning-engine capture (migration 069) — optional, never required.
+  // No UI passes this yet; the field exists so a future "why did you
+  // change this?" prompt has somewhere to land without a second migration.
+  reason?: string
 }
 
 interface ResolvedAssumption {
@@ -46,7 +50,7 @@ export async function POST(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { assumption_id, resolution, adjusted_quantity, adjusted_unit } = body
+  const { assumption_id, resolution, adjusted_quantity, adjusted_unit, reason } = body
 
   if (!assumption_id || !resolution) {
     return NextResponse.json(
@@ -150,18 +154,29 @@ export async function POST(
         assumption_status: resolution,
       }
 
+      // Learning-engine capture (migration 069): the AI-predicted values as
+      // they stand right now, before this resolution overwrites them —
+      // fetched together with the existing rate lookup below rather than a
+      // second round trip.
+      let priorQuantity: number | null = null
+      let priorUnit: string | null = null
+      let priorTradeCategoryId: number | null = null
+
       if (resolution === 'adjusted') {
+        const { data: lineItem } = await supabase
+          .from('quote_line_items')
+          .select('rate, quantity, unit, trade_category_id')
+          .eq('id', assumptionRow.line_item_id)
+          .single()
+
+        priorQuantity = lineItem?.quantity ?? null
+        priorUnit = lineItem?.unit ?? null
+        priorTradeCategoryId = lineItem?.trade_category_id ?? null
+
         lineItemUpdate.quantity = adjusted_quantity
         if (adjusted_unit !== undefined) {
           lineItemUpdate.unit = adjusted_unit
         }
-        // Recalculate total if rate is known — fetch rate first
-        const { data: lineItem } = await supabase
-          .from('quote_line_items')
-          .select('rate')
-          .eq('id', assumptionRow.line_item_id)
-          .single()
-
         if (lineItem?.rate && adjusted_quantity !== undefined) {
           lineItemUpdate.total = adjusted_quantity * lineItem.rate
         }
@@ -176,6 +191,46 @@ export async function POST(
         .from('quote_line_items')
         .update(lineItemUpdate)
         .eq('id', assumptionRow.line_item_id)
+
+      // Learning-engine capture (migration 069) — only for genuine
+      // corrections, and only the field(s) that actually changed. A Gate 1
+      // item with priorQuantity/priorUnit both null still gets a row: "AI
+      // had nothing, builder supplied X" is exactly the kind of gap the
+      // learning engine exists to notice, not a value to skip recording.
+      // Best-effort — a capture failure must never break the resolution
+      // it's describing.
+      if (resolution === 'adjusted' && priorTradeCategoryId !== null) {
+        try {
+          const correctionRows: Array<Record<string, unknown>> = []
+          if (adjusted_quantity !== undefined && adjusted_quantity !== priorQuantity) {
+            correctionRows.push({
+              job_id: ownedQuote.job_id, quote_id: quoteId, quote_line_item_id: assumptionRow.line_item_id,
+              trade_category_id: priorTradeCategoryId, field: 'quantity',
+              ai_predicted: priorQuantity === null ? null : String(priorQuantity),
+              human_corrected: String(adjusted_quantity), reason: reason ?? null, corrected_by: builder_id,
+            })
+          }
+          if (adjusted_unit !== undefined && adjusted_unit !== priorUnit) {
+            correctionRows.push({
+              job_id: ownedQuote.job_id, quote_id: quoteId, quote_line_item_id: assumptionRow.line_item_id,
+              trade_category_id: priorTradeCategoryId, field: 'unit',
+              ai_predicted: priorUnit, human_corrected: adjusted_unit, reason: reason ?? null, corrected_by: builder_id,
+            })
+          }
+          if (correctionRows.length > 0) {
+            const { data: inserted } = await supabase.from('estimator_corrections').insert(correctionRows).select('id')
+            const lastCorrectionId = inserted?.[inserted.length - 1]?.id ?? null
+            if (lastCorrectionId) {
+              await supabase
+                .from('quote_line_items')
+                .update({ predicted_by: 'human', correction_id: lastCorrectionId })
+                .eq('id', assumptionRow.line_item_id)
+            }
+          }
+        } catch (captureErr) {
+          console.error('[assumptions/resolve] estimator_corrections capture failed:', captureErr)
+        }
+      }
 
       // If the item is still unpriced (e.g. Gate 1 — unit was missing and has
       // now been supplied), try to resolve a rate via the 5-tier hierarchy

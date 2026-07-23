@@ -1,0 +1,8 @@
+-- Rollback for 068_project_knowledge_model.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-067's own rollback companions.
+-- Safe to drop outright: nothing in the live pipeline reads project_models
+-- or trade_project_model_map yet (Phase 1 is write-through population only).
+
+DROP TABLE IF EXISTS trade_project_model_map;
+DROP TABLE IF EXISTS project_models;

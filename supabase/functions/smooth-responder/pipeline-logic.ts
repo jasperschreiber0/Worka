@@ -1654,3 +1654,136 @@ export function conservativeAssumptionAppliesToTrade(
 ): boolean {
   return assumptions.some((a) => a.trade_category_id === null || a.trade_category_id === tradeCategoryId)
 }
+
+// ─── Project Knowledge Model (estimator rebuild, Phase 1) ──────────────────
+// Turns a flat list of active project_facts into a structured object
+// organised the way a trade actually needs to read it — no additional
+// Claude call. Stage 1/2's own extraction schema already constrains
+// project_facts.category to a controlled enum; this buckets by that
+// category first, then refines structure/external/internal/services/site
+// facts into a finer sub-bucket via a small, explicit keyword match on
+// each fact's key+value text. Anything that matches no keyword still lands
+// in `unclassified`, fully traceable — never silently dropped. See
+// migration 068's header comment for why this is a pure projection, not a
+// new source of truth.
+
+export interface BucketableFact {
+  category: string
+  key: string
+  value: string
+  confidence: number
+  source_document_id: string | null
+  evidence: string | null
+}
+
+export interface ProjectFactRef {
+  key: string
+  value: string
+  confidence: number
+  source_document_id: string | null
+  evidence: string | null
+}
+
+export interface ProjectModelSections {
+  summary: {
+    project_type: ProjectFactRef | null
+    storeys: ProjectFactRef | null
+    floor_area: ProjectFactRef | null
+    construction_method: ProjectFactRef | null
+  }
+  structure: { foundations: ProjectFactRef[]; slab: ProjectFactRef[]; framing: ProjectFactRef[]; roof: ProjectFactRef[] }
+  external: { walls: ProjectFactRef[]; windows: ProjectFactRef[]; doors: ProjectFactRef[]; cladding: ProjectFactRef[] }
+  internal: { flooring: ProjectFactRef[]; bathrooms: ProjectFactRef[]; kitchens: ProjectFactRef[]; joinery: ProjectFactRef[] }
+  services: { electrical: ProjectFactRef[]; hydraulic: ProjectFactRef[]; mechanical: ProjectFactRef[] }
+  site: { slope: ProjectFactRef[]; access: ProjectFactRef[]; retaining: ProjectFactRef[]; excavation: ProjectFactRef[] }
+  unclassified: ProjectFactRef[]
+}
+
+function toFactRef(f: BucketableFact): ProjectFactRef {
+  return { key: f.key, value: f.value, confidence: f.confidence, source_document_id: f.source_document_id, evidence: f.evidence }
+}
+
+// Ordered: structure checked before external before internal before
+// services before site, so a fact matching more than one bucket's keywords
+// (e.g. "wall" appearing in both a framing note and a cladding note) lands
+// in one place deterministically rather than being duplicated or picked
+// arbitrarily. Documented here rather than left implicit, since this is a
+// heuristic, not a guarantee — a genuinely ambiguous fact goes to whichever
+// section is checked first.
+const SECTION_KEYWORD_ORDER: Array<{ path: string; keywords: string[] }> = [
+  { path: 'structure.foundations', keywords: ['footing', 'foundation', 'pier', 'bored pier'] },
+  { path: 'structure.slab', keywords: ['slab', 'sog', 'waffle pod'] },
+  { path: 'structure.framing', keywords: ['frame', 'framing', 'stud', 'joist', 'beam', 'lvl', 'structural steel', 'truss'] },
+  { path: 'structure.roof', keywords: ['roof', 'gutter', 'downpipe', 'fascia', 'colorbond'] },
+  { path: 'external.windows', keywords: ['window', 'glazing', 'glaze'] },
+  { path: 'external.doors', keywords: ['door'] },
+  { path: 'external.cladding', keywords: ['cladding', 'render', 'weatherboard', 'fibre cement', 'brick', 'stone cladding'] },
+  { path: 'external.walls', keywords: ['external wall', 'wall'] },
+  { path: 'internal.bathrooms', keywords: ['bathroom', 'ensuite', 'wet area', 'shower', 'vanity', 'toilet', 'bath'] },
+  { path: 'internal.kitchens', keywords: ['kitchen', 'benchtop', 'splashback'] },
+  { path: 'internal.joinery', keywords: ['joinery', 'cabinetry', 'wardrobe', 'shelving', 'cabinet'] },
+  { path: 'internal.flooring', keywords: ['floor', 'flooring', 'tile', 'carpet', 'timber floor', 'polished concrete', 'vinyl'] },
+  { path: 'services.electrical', keywords: ['electrical', 'gpo', 'switchboard', 'downlight', 'data point', 'alarm'] },
+  { path: 'services.hydraulic', keywords: ['hydraulic', 'plumbing', 'drainage', 'stormwater', 'sewer', 'water supply'] },
+  { path: 'services.mechanical', keywords: ['mechanical', 'hvac', 'ducted', 'air conditioning', 'exhaust fan'] },
+  { path: 'site.retaining', keywords: ['retaining wall', 'retaining'] },
+  { path: 'site.excavation', keywords: ['excavation', 'cut and fill', 'earthworks', 'bulk excavation'] },
+  { path: 'site.slope', keywords: ['slope', 'gradient', 'fall', 'contour'] },
+  { path: 'site.access', keywords: ['access', 'driveway'] },
+]
+
+function matchSectionPath(fact: BucketableFact): string | null {
+  const haystack = `${fact.key} ${fact.value}`.toLowerCase()
+  for (const { path, keywords } of SECTION_KEYWORD_ORDER) {
+    if (keywords.some((kw) => haystack.includes(kw))) return path
+  }
+  return null
+}
+
+function pushToSection(sections: ProjectModelSections, path: string, ref: ProjectFactRef): void {
+  const [top, leaf] = path.split('.') as [keyof ProjectModelSections, string]
+  const bucket = sections[top] as unknown as Record<string, ProjectFactRef[]>
+  bucket[leaf].push(ref)
+}
+
+// Highest confidence wins for a summary scalar; ties keep whichever fact
+// was seen first in the input, matching selectFactsForPrompt's own
+// documented tie-breaking philosophy (deterministic, not arbitrary).
+function pickBestForSummary(candidates: BucketableFact[]): ProjectFactRef | null {
+  if (candidates.length === 0) return null
+  const best = candidates.reduce((a, b) => (b.confidence > a.confidence ? b : a))
+  return toFactRef(best)
+}
+
+export function buildProjectModel(facts: BucketableFact[]): ProjectModelSections {
+  const sections: ProjectModelSections = {
+    summary: { project_type: null, storeys: null, floor_area: null, construction_method: null },
+    structure: { foundations: [], slab: [], framing: [], roof: [] },
+    external: { walls: [], windows: [], doors: [], cladding: [] },
+    internal: { flooring: [], bathrooms: [], kitchens: [], joinery: [] },
+    services: { electrical: [], hydraulic: [], mechanical: [] },
+    site: { slope: [], access: [], retaining: [], excavation: [] },
+    unclassified: [],
+  }
+
+  sections.summary.project_type = pickBestForSummary(facts.filter((f) => f.category === 'project_type'))
+  sections.summary.storeys = pickBestForSummary(facts.filter((f) => f.category === 'storeys'))
+  sections.summary.construction_method = pickBestForSummary(facts.filter((f) => f.category === 'construction_method'))
+  sections.summary.floor_area = pickBestForSummary(facts.filter((f) => f.key.toLowerCase().includes('floor_area') || f.key.toLowerCase().includes('gfa')))
+
+  // A builder_answer fact carries no different routing rule than any other
+  // category here — it's still keyword-routed by its own key/value text so
+  // a trade agent sees it in context, never silently skipped. Its higher
+  // trust (confidence 100, set at write time) is what already gives it
+  // priority in pickBestForSummary and in any future consumer.
+  for (const fact of facts) {
+    const path = matchSectionPath(fact)
+    if (path) {
+      pushToSection(sections, path, toFactRef(fact))
+    } else {
+      sections.unclassified.push(toFactRef(fact))
+    }
+  }
+
+  return sections
+}

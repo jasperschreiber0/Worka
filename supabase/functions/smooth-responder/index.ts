@@ -43,9 +43,10 @@ import {
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
+  buildProjectModel,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
-  type ConservativeAssumption,
+  type ConservativeAssumption, type BucketableFact,
 } from './pipeline-logic.ts'
 import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -1593,6 +1594,26 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         documents_count: documentsCount ?? null, facts_count: facts.length,
         scope_items_count: null, quote_created: false,
       }))
+    }
+
+    // ── Project Knowledge Model (estimator rebuild, Phase 1) ────────────────
+    // Write-through only — nothing in Stage 3/6 reads project_models yet.
+    // Rebuilt from the FULL active fact set (not the 200-cap prompt
+    // selection below), since this is meant to be the structured superset a
+    // future single estimator (and, later, per-trade agents) reads from
+    // instead of a flat fact list. Best-effort: a failure here must never
+    // block the estimate it doesn't yet influence.
+    try {
+      const bucketable: BucketableFact[] = facts.map((f) => ({
+        category: f.category, key: f.key, value: f.value, confidence: f.confidence,
+        source_document_id: f.source_document_id ?? null, evidence: f.evidence,
+      }))
+      const sections = buildProjectModel(bucketable)
+      await supabase.from('project_models').upsert({
+        job_id: jobId, sections, source_fact_count: facts.length, derived_at: new Date().toISOString(),
+      })
+    } catch (projectModelErr) {
+      console.error('project_models write-through failed:', projectModelErr)
     }
 
     // ── Stage 3 + 4: Scope Reasoning + Gap Detection ───────────────────────
