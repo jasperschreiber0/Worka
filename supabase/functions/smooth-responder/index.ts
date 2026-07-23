@@ -1610,21 +1610,37 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // contributes multiple batchFiles entries for ONE real file, and
         // recording a failure once per chunk would inflate one real
         // failure into several counted occurrences.
+        //
+        // Adaptive timeout, not a flat 220s requirement — confirmed live
+        // (52 Bendio Street, 23 Jul 2026): a 6-document batch's shared call
+        // genuinely needed more than 150s and was aborted by our own
+        // timeout at 150003ms, leaving only ~190s of the 340s total budget.
+        // Requiring the full 220s per solo attempt meant EVERY document in
+        // that batch was skipped as "insufficient budget" — not attempted,
+        // not failed — even though 190s was real, usable room. Each solo
+        // attempt now gets whatever budget actually remains (capped at
+        // 220s, the same ceiling a genuinely large solo document needs),
+        // only skipping once what's left drops below a floor too small to
+        // be worth attempting even a small document.
+        const MIN_SOLO_RETRY_BUDGET_MS = 60_000
+        const MAX_SOLO_TIMEOUT_MS = 220_000
         const recordedFailedRealIds = new Set<string>()
         for (const soloFile of batchFiles) {
-          if (!hasWallClockBudget(220_000)) {
-            // Out of budget for the rest of this batch — leave them
+          const remainingMs = WALL_CLOCK_SAFETY_MS - (Date.now() - startedAt)
+          if (remainingMs < MIN_SOLO_RETRY_BUDGET_MS) {
+            // Out of usable budget for the rest of this batch — leave them
             // unprocessed, not "failed": a scheduling gap says nothing
             // about the document itself, so this must not consume the
             // AI-failure retry budget (recordAiFailure deliberately not
             // called). A later invocation picks these up fresh, same as
             // any other wall-clock deferral in this pipeline.
             failedToLoadSiblings.push(soloFile.filename)
-            console.log(JSON.stringify({ event: 'document_solo_retry_skipped_wall_clock', filename: soloFile.filename }))
+            console.log(JSON.stringify({ event: 'document_solo_retry_skipped_wall_clock', filename: soloFile.filename, remaining_ms: remainingMs }))
             continue
           }
 
-          const soloResult = await classifyBatch([soloFile], 220_000)
+          const soloTimeoutMs = Math.min(MAX_SOLO_TIMEOUT_MS, remainingMs)
+          const soloResult = await classifyBatch([soloFile], soloTimeoutMs)
           if (soloResult.ok) {
             console.log(JSON.stringify({ event: 'document_solo_retry_succeeded', filename: soloFile.filename, factsFound: soloResult.factsFound }))
             continue
