@@ -781,17 +781,19 @@ export default function JobSnapshotPanel({
               </div>
             </SectionGroup>
 
-            {/* ── 3.5. CLARIFYING QUESTIONS — the estimating engine paused here
-                 (Stage 4/5) and won't resume until these are answered. Previously
-                 only ever visible inside the live upload SSE session
-                 (IntakeProgress) — a builder who closed that panel or reloaded
-                 the page had no way back to it. See snapshot route for
-                 pending_clarifying_questions / clarify_file_id. ── */}
+            {/* ── 3.5. CLARIFYING QUESTIONS — Stage 4/5 raised these, but the
+                 pipeline no longer pauses on them (see smooth-responder/index.ts):
+                 a quote already exists, generated using a disclosed conservative
+                 assumption in place of an answer. Answering here replaces that
+                 assumption and reruns the pipeline to refresh the estimate. See
+                 snapshot route for pending_clarifying_questions / clarify_file_id. ── */}
             {pendingQuestions.length > 0 && (
               <SectionGroup label="Needs your input">
                 {answeringQuestions ? (
                   <ClarifyingQuestionsPanel
-                    message="The estimate is paused until these are answered."
+                    title="Refine this estimate"
+                    submitLabel="Update estimate"
+                    message="WorkA already estimated this job using its best assumption for these — answering will replace the assumption and refresh the numbers."
                     questions={pendingQuestions}
                     submitting={clarifySubmitting}
                     error={clarifyError}
@@ -811,10 +813,10 @@ export default function JobSnapshotPanel({
                     }}
                   >
                     <span style={{ fontSize: 12, fontWeight: 600, color: '#ff9800' }}>
-                      {pendingQuestions.length} question{pendingQuestions.length > 1 ? 's' : ''} need{pendingQuestions.length > 1 ? '' : 's'} your answer
+                      {pendingQuestions.length} assumption{pendingQuestions.length > 1 ? 's' : ''} to review
                     </span>
                     <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 3 }}>
-                      Tap to answer — the estimate won&apos;t generate until this is resolved.
+                      WorkA already estimated using its best guess — tap to answer and refine the numbers.
                     </p>
                   </button>
                 )}

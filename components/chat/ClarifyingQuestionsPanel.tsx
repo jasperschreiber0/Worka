@@ -11,6 +11,10 @@ export interface ClarifyingQuestion {
 }
 
 export interface ClarifyingQuestionsPanelProps {
+  /** Defaults to "Before I estimate this job" — pass a different title when an estimate already exists (e.g. answering to refine it). */
+  title?: string
+  /** Defaults to "Continue estimating" — pass a different label when an estimate already exists. */
+  submitLabel?: string
   message: string
   questions: ClarifyingQuestion[]
   submitting: boolean
@@ -31,6 +35,8 @@ export interface ClarifyingQuestionsPanelProps {
 // change the estimate.
 
 export default function ClarifyingQuestionsPanel({
+  title = 'Before I estimate this job',
+  submitLabel = 'Continue estimating',
   message,
   questions,
   submitting,
@@ -62,7 +68,7 @@ export default function ClarifyingQuestionsPanel({
           </svg>
         </div>
         <div className="min-w-0">
-          <p className="text-[13px] font-semibold text-[#ff9800]">Before I estimate this job</p>
+          <p className="text-[13px] font-semibold text-[#ff9800]">{title}</p>
           <p className="text-xs mt-0.5 text-[#a0a0a0] leading-snug">{message}</p>
         </div>
       </div>
@@ -110,7 +116,7 @@ export default function ClarifyingQuestionsPanel({
         disabled={!allAnswered || submitting}
         className="w-full btn-primary py-2.5 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
       >
-        {submitting ? 'Continuing...' : 'Continue estimating'}
+        {submitting ? 'Continuing...' : submitLabel}
       </button>
     </div>
   )

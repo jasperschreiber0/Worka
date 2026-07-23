@@ -1,0 +1,55 @@
+-- Rollback for 067_remove_needs_info_status.sql
+-- Not auto-applied — see the .sql.txt convention established by
+-- migrations 056-066's own rollback companions.
+-- Restores recompute_file_intake_status to its migration-052 form, which
+-- can derive 'needs_info' from a job-wide open blocking clarifying
+-- question. Note: reverting this does NOT restore any files that migration
+-- 067's backfill already flipped away from 'needs_info' — those will only
+-- return to 'needs_info' the next time something calls
+-- recompute_file_intake_status for them.
+
+CREATE OR REPLACE FUNCTION recompute_file_intake_status(p_file_id uuid)
+RETURNS text AS $$
+DECLARE
+  v_job document_processing_jobs%ROWTYPE;
+  v_batch document_processing_batches%ROWTYPE;
+  v_needs_info boolean;
+  v_new_status text;
+BEGIN
+  SELECT * INTO v_job
+  FROM document_processing_jobs
+  WHERE document_id = p_file_id
+  ORDER BY created_at DESC
+  LIMIT 1;
+
+  IF v_job.id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO v_batch FROM document_processing_batches WHERE id = v_job.parent_job_id;
+
+  IF v_job.status = 'failed' THEN
+    v_new_status := 'failed';
+  ELSIF v_job.status IN ('pending', 'running') THEN
+    v_new_status := 'processing';
+  ELSE -- v_job.status = 'completed'
+    SELECT EXISTS (
+      SELECT 1 FROM clarifying_questions
+      WHERE job_id = v_batch.job_id AND blocking = true AND status = 'open'
+    ) INTO v_needs_info;
+
+    v_new_status := CASE
+      WHEN v_batch.quote_id IS NOT NULL THEN 'extracted'
+      WHEN v_needs_info AND v_batch.classification_triggered THEN 'needs_info'
+      WHEN v_batch.status = 'failed' THEN 'failed'
+      ELSE 'processing'
+    END;
+  END IF;
+
+  UPDATE files SET intake_status = v_new_status WHERE id = p_file_id;
+  RETURN v_new_status;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION recompute_file_intake_status IS
+  'Derives and writes one file''s intake_status from document_processing_jobs (this file''s own extraction outcome) and document_processing_batches (the run it was part of) — the single writer of files.intake_status for files that went through the document-processing queue. Never authoritative itself; recomputed and overwritten from the two real truth tables (document_processing_jobs, project_documents-backed batch outcome) every time it is called. Returns NULL (no write) for a file that never entered the queue model.';

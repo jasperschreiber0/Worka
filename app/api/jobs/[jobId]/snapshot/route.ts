@@ -145,10 +145,12 @@ export async function GET(
     .eq('job_id', jobId)
     .order('created_at', { ascending: false })
 
-  // Open blocking clarifying questions — the estimating engine paused here
-  // (Stage 4/5) and won't resume until these are answered. Previously only
-  // ever visible inside the live upload SSE session; surfaced here so a
-  // builder who closed that panel isn't stuck with no way back to it.
+  // Open blocking clarifying questions. The estimating engine no longer
+  // pauses on these (see supabase/functions/smooth-responder/index.ts —
+  // Stage 6 always runs, using a disclosed conservative assumption in place
+  // of an answer) — a quote already exists by the time a builder sees these.
+  // Kept open here so the builder can still answer and refine the estimate;
+  // "blocking" now means "worth prioritising," not "stops the estimate."
   const { data: openQuestions } = await sb
     .from('clarifying_questions')
     .select('id, question, reason')
@@ -169,15 +171,6 @@ export async function GET(
     .eq('blocking', false)
     .eq('status', 'open')
     .order('created_at', { ascending: true })
-
-  const { data: pausedFile } = await sb
-    .from('files')
-    .select('id')
-    .eq('job_id', jobId)
-    .eq('intake_status', 'needs_info')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
 
   // Last activity: most recent of comms, files, or job.updated_at
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -209,7 +202,7 @@ export async function GET(
 
   if ((openQuestions ?? []).length > 0) {
     const n = (openQuestions ?? []).length
-    risks.push({ level: 'high', message: `${n} question${n > 1 ? 's' : ''} need your answer before the estimate can be generated.` })
+    risks.push({ level: 'medium', message: `WorkA assumed ${n} thing${n > 1 ? 's' : ''} it couldn't confirm from your documents — review before sending.` })
   }
 
   const typedFiles = (files ?? []) as Array<{ intake_status: string }>
@@ -325,7 +318,11 @@ export async function GET(
       question: q.question,
       reason: q.reason,
     })),
-    clarify_file_id: pausedFile?.id ?? null,
+    // A valid file id for this job to answer against — /clarify only needs
+    // one belonging to the job (it resolves everything else via job_id), so
+    // the most recent upload works regardless of that file's own intake
+    // status. Only populated when there's actually something to answer.
+    clarify_file_id: (openQuestions ?? []).length > 0 ? (files?.[0]?.id ?? null) : null,
   }
 
   return NextResponse.json({ snapshot })
