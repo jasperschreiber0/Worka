@@ -2403,16 +2403,13 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   }
 }
 
-// ── Feature flag — enabled 23 Jul 2026 to start collecting real Phase 1
-// benchmark data (PROJECT_MODEL_BENCHMARK.md) for the estimator-rebuild
-// cutover decision; estimator_shadow_runs had zero rows before this.
-// Applies to every completed run, not a sampled percentage — roughly
-// doubles Stage 3+6 Anthropic spend for as long as this stays true. Still
-// bounded by the shared AI gateway's circuit breaker/daily spend ceiling —
-// every call below goes through callTool, same as the real pipeline's
-// calls. Turn back to false once enough runs have accumulated to make the
-// benchmark meaningful; see estimator_shadow_runs for row count/volume.
-const PROJECT_MODEL_SHADOW_MODE_ENABLED = true
+// ── Feature flag — off again as of 23 Jul 2026. Briefly enabled the same
+// day to start Phase 1 benchmark collection, then deprioritized in favor
+// of hardening the live end-to-end pipeline (multi-PDF ingest reliability,
+// pricing/margin/GST correctness) before any rebuild cutover decision is
+// revisited. Re-enable only when benchmarking is actually the priority
+// again — every run this shadows roughly doubles Stage 3+6 spend.
+const PROJECT_MODEL_SHADOW_MODE_ENABLED = false
 
 // Independent of the real run's own WALL_CLOCK_SAFETY_MS budget — the real
 // work is already committed by the time this runs, so a kill mid-shadow
