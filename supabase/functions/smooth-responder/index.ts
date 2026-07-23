@@ -2403,15 +2403,16 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   }
 }
 
-// ── Feature flag — shipped dark. Every run this shadows roughly doubles
-// Stage 3+6 Anthropic spend for that run; enable deliberately once ready
-// to benchmark, same "ship dark, enable deliberately" pattern this
-// codebase already uses for anything that increases AI call volume (see
-// AI_RECOVERY_DISABLED / DOCUMENT_RECOVERY_DISABLED history). Still bounded
-// by the shared AI gateway's circuit breaker/daily spend ceiling even when
-// enabled — every call below goes through callTool, same as the real
-// pipeline's calls.
-const PROJECT_MODEL_SHADOW_MODE_ENABLED = false
+// ── Feature flag — enabled 23 Jul 2026 to start collecting real Phase 1
+// benchmark data (PROJECT_MODEL_BENCHMARK.md) for the estimator-rebuild
+// cutover decision; estimator_shadow_runs had zero rows before this.
+// Applies to every completed run, not a sampled percentage — roughly
+// doubles Stage 3+6 Anthropic spend for as long as this stays true. Still
+// bounded by the shared AI gateway's circuit breaker/daily spend ceiling —
+// every call below goes through callTool, same as the real pipeline's
+// calls. Turn back to false once enough runs have accumulated to make the
+// benchmark meaningful; see estimator_shadow_runs for row count/volume.
+const PROJECT_MODEL_SHADOW_MODE_ENABLED = true
 
 // Independent of the real run's own WALL_CLOCK_SAFETY_MS budget — the real
 // work is already committed by the time this runs, so a kill mid-shadow
