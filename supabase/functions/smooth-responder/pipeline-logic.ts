@@ -999,11 +999,43 @@ export const STAGE3_TRADE_CHUNK_FACT_THRESHOLD = 100
 // production timing data to tune safely.
 export const STAGE3_DEFAULT_CHUNK_COUNT = 2
 
+// A second, higher tier for genuinely large projects. Measured this
+// session (23 Jul 2026): two REAL, successful reason_about_scope calls at
+// the current 2-chunk split (~6-7 trades/call, 200 facts in prompt) took
+// 123.5s and 168.7s — comfortably under the 220s per-call ceiling, but
+// with real margin risk, and output tokens tracked duration almost exactly
+// linearly in both observations (~45 tokens/sec both times). A project at
+// or near MAX_FACTS_IN_PROMPT (200) is the case with the least margin —
+// splitting it into 3 chunks instead of 2 drops trades/call from ~6-7 to
+// ~4-5, directly shrinking the requested output per call (the confirmed
+// co-dominant latency driver, alongside prompt size) without touching
+// MAX_FACTS_IN_PROMPT, evidence caps, or anything else already measured
+// and ruled out as a bottleneck. 150 is deliberately below the 200 cap
+// (catches any project actually hitting it) and above the existing 100
+// threshold (a merely-large project still gets the proven 2-chunk split).
+export const STAGE3_LARGE_PROJECT_FACT_THRESHOLD = 150
+export const STAGE3_LARGE_PROJECT_CHUNK_COUNT = 3
+
 export function shouldChunkTradeReasoning(
   factsInPromptCount: number,
   threshold: number = STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
 ): boolean {
   return factsInPromptCount > threshold
+}
+
+// How many groups to split the trade list into, given how many facts are
+// in this call's prompt. Layered on top of shouldChunkTradeReasoning (still
+// the "chunk at all" decision) rather than replacing it, so a small project
+// stays a single call exactly as before.
+export function desiredStage3ChunkCount(
+  factsInPromptCount: number,
+  chunkThreshold: number = STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
+  chunkCount: number = STAGE3_DEFAULT_CHUNK_COUNT,
+  largeProjectThreshold: number = STAGE3_LARGE_PROJECT_FACT_THRESHOLD,
+  largeProjectChunkCount: number = STAGE3_LARGE_PROJECT_CHUNK_COUNT,
+): number {
+  if (!shouldChunkTradeReasoning(factsInPromptCount, chunkThreshold)) return 1
+  return factsInPromptCount > largeProjectThreshold ? largeProjectChunkCount : chunkCount
 }
 
 // Deterministic, order-preserving split into `chunkCount` contiguous,
@@ -1074,7 +1106,7 @@ export function planStage3Chunks<T>(
     return { chunksToRunNow: [], hasMoreAfterThisInvocation: true }
   }
 
-  const desiredGroups = shouldChunkTradeReasoning(factsInPromptCount, chunkThreshold) ? desiredChunkCount : 1
+  const desiredGroups = desiredStage3ChunkCount(factsInPromptCount, chunkThreshold, desiredChunkCount)
   const fullPlan = splitTradeCategoriesIntoChunks(remainingTrades, desiredGroups)
   const chunksToRunNow = fullPlan.slice(0, maxAffordableCalls)
   const hasMoreAfterThisInvocation = fullPlan.length > chunksToRunNow.length

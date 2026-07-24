@@ -597,14 +597,31 @@ async function callTool(
   const nonTextBlockTypes = content.filter((b) => b && b.type !== 'text').map((b) => b.type)
   const userContentChars = textBlocks.reduce((sum, b) => sum + (b.text?.length ?? 0), 0)
   const systemChars = system.length
-  // Rough, explicitly-approximate estimate (chars/4 is a common English-text
-  // heuristic) — good enough to distinguish "obviously fine" from "possibly
-  // near a limit" without adding a tokenizer dependency for temporary logging.
-  const approxInputTokens = Math.ceil((systemChars + userContentChars) / 4)
+  // The tool schema is a real part of every request (Anthropic tokenizes
+  // it like any other input) but was previously excluded from this
+  // estimate entirely — measured this session at 1,919 chars for
+  // SCOPE_REASONING_TOOL alone, ~480-650 tokens unaccounted for on every
+  // Stage 3 call.
+  const toolSchemaChars = JSON.stringify(tool.input_schema ?? {}).length
+  // Chars-per-token divisor, corrected from real evidence, not the prior
+  // flat 4. Two completed reason_about_scope calls this session (23 Jul
+  // 2026) had real Anthropic-reported usage.input_tokens ~30% higher than
+  // (system_chars+user_text_chars)/4 predicted, even after separately
+  // accounting for the schema gap above — consistent with ~3.1 chars/token
+  // on this codebase's structured, evidence-heavy fact text (drawing
+  // references, dimensions, category/key labels), which tokenizes less
+  // efficiently than plain English. 3.5 is a deliberately conservative
+  // correction (between the measured 3.1 and the old 4), since this same
+  // call site also serves more conversational Next.js routes this specific
+  // ratio wasn't validated against. Still labeled "approx" — real usage
+  // always comes from the API response itself (ai_operations.input_tokens),
+  // this is a pre-call triage signal, not a billing-accurate count.
+  const CHARS_PER_TOKEN_ESTIMATE = 3.5
+  const approxInputTokens = Math.ceil((systemChars + userContentChars + toolSchemaChars) / CHARS_PER_TOKEN_ESTIMATE)
   console.log(JSON.stringify({
     event: 'claude_call_request', tool: tool.name, model: 'claude-sonnet-4-6',
     max_tokens: maxTokens, tool_choice: tool.name,
-    system_chars: systemChars, user_text_chars: userContentChars,
+    system_chars: systemChars, user_text_chars: userContentChars, tool_schema_chars: toolSchemaChars,
     non_text_block_types: nonTextBlockTypes, non_text_block_count: nonTextBlockTypes.length,
     approx_input_tokens: approxInputTokens,
     tool_schema: tool.input_schema,

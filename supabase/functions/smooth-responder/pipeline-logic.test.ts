@@ -38,7 +38,10 @@ import {
   formatFactForScopePrompt,
   STAGE3_MAX_EVIDENCE_CHARS,
   shouldChunkTradeReasoning,
+  desiredStage3ChunkCount,
   STAGE3_TRADE_CHUNK_FACT_THRESHOLD,
+  STAGE3_LARGE_PROJECT_FACT_THRESHOLD,
+  STAGE3_LARGE_PROJECT_CHUNK_COUNT,
   splitTradeCategoriesIntoChunks,
   planStage3Chunks,
   STAGE3_PER_CALL_TIMEOUT_MS,
@@ -1130,6 +1133,25 @@ test('shouldChunkTradeReasoning: true once strictly over the threshold', () => {
   assert.equal(shouldChunkTradeReasoning(200), true)
 })
 
+test('desiredStage3ChunkCount: at or under the chunk threshold -> 1 (no chunking)', () => {
+  assert.equal(desiredStage3ChunkCount(STAGE3_TRADE_CHUNK_FACT_THRESHOLD), 1)
+  assert.equal(desiredStage3ChunkCount(10), 1)
+})
+
+test('desiredStage3ChunkCount: over the chunk threshold but at or under the large-project threshold -> the default 2', () => {
+  assert.equal(desiredStage3ChunkCount(STAGE3_TRADE_CHUNK_FACT_THRESHOLD + 1), 2)
+  assert.equal(desiredStage3ChunkCount(STAGE3_LARGE_PROJECT_FACT_THRESHOLD), 2)
+})
+
+test('desiredStage3ChunkCount: strictly over the large-project threshold -> the wider large-project count', () => {
+  assert.equal(desiredStage3ChunkCount(STAGE3_LARGE_PROJECT_FACT_THRESHOLD + 1), STAGE3_LARGE_PROJECT_CHUNK_COUNT)
+  assert.equal(desiredStage3ChunkCount(200), STAGE3_LARGE_PROJECT_CHUNK_COUNT)
+})
+
+test('desiredStage3ChunkCount: at the real MAX_FACTS_IN_PROMPT cap (200) uses 3 chunks, not 2 — the exact scenario a real project hit', () => {
+  assert.equal(desiredStage3ChunkCount(200), 3)
+})
+
 test('splitTradeCategoriesIntoChunks: splits 13 trades into 2 near-equal, contiguous, order-preserving groups', () => {
   const trades = Array.from({ length: 13 }, (_, i) => ({ id: i + 1 }))
   const chunks = splitTradeCategoriesIntoChunks(trades, 2)
@@ -1174,6 +1196,12 @@ test('planStage3Chunks: plenty of budget, below chunk threshold -> single chunk 
   assert.equal(plan.chunksToRunNow.length, 1)
   assert.equal(plan.chunksToRunNow[0].length, 13)
   assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage3Chunks: 200 facts (the real MAX_FACTS_IN_PROMPT cap) plans 3 chunks, not 2 -- fewer trades/call for the case with the least wall-clock margin', () => {
+  const plan = planStage3Chunks(TRADES_13, 1_000_000, 200)
+  assert.equal(plan.chunksToRunNow.length, 3)
+  assert.equal(plan.chunksToRunNow.reduce((sum, c) => sum + c.length, 0), 13)
 })
 
 test('planStage3Chunks: plenty of budget, above chunk threshold -> the full desired chunk plan runs now', () => {
