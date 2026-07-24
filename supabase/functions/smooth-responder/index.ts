@@ -1562,7 +1562,34 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // invocation can attempt, and widening every batch risks the same
         // wall-clock exhaustion this budget guard exists to prevent.
         const batchTimeoutMs = batchFiles.length === 1 ? 220_000 : 150_000
-        if (!hasWallClockBudget(batchTimeoutMs)) {
+
+        // ── Reserve room for Stage 3, don't let classification spend the
+        // whole invocation ─────────────────────────────────────────────────
+        // Root cause of "documents classify fine but no estimate ever
+        // appears": hasWallClockBudget only ever checked whether THIS batch
+        // fit — nothing reserved room for Stage 3 afterwards. A 6-document
+        // job split into MAX_BATCHES=3 batches (up to 3 x 150s = 450s, or
+        // 220s + 2x150s = 520s with a forced-solo batch) can fully exhaust
+        // WALL_CLOCK_SAFETY_MS (340s) on classification alone — every batch
+        // individually "fit," so the loop kept going, leaving Stage 3's
+        // planStage3Chunks 0ms to work with and zero forward progress on
+        // scope reasoning THIS invocation, even though facts.length > 0 (so
+        // it wasn't recognised as a hard failure either — just silent
+        // starvation). Once at least one batch has already been classified
+        // this invocation (so Stage 3 has real facts to reason about),
+        // require enough budget left over after this batch for at least one
+        // Stage 3 chunk — deferring any further classification batches to a
+        // later invocation instead. This does not require every document to
+        // be classified before estimating (Stage 3 already runs on whatever
+        // facts exist; batches deferred here are picked up by the next
+        // invocation exactly like a wall-clock deferral anywhere else in
+        // this pipeline) and adds no new retry — it only changes when the
+        // EXISTING deferral triggers.
+        const hasClassifiedAnyBatchThisRun = batchIdx > 0
+        const budgetNeededNow = hasClassifiedAnyBatchThisRun
+          ? batchTimeoutMs + STAGE3_PER_CALL_TIMEOUT_MS
+          : batchTimeoutMs
+        if (!hasWallClockBudget(budgetNeededNow)) {
           await bailForWallClockBudget('classifying_documents', batchTimeoutMs)
           break
         }

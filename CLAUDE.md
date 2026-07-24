@@ -1358,23 +1358,54 @@ text-extraction queue) and `AI_RECOVERY_DISABLED` (steps 4-5: `find_stale_job_in
 both, so the emergency stop for the AI-spend incident also silently disabled the everyday,
 zero-cost document-extraction recovery — an ordinary stuck upload (a crashed extraction worker, or
 a lost `triggerNext`/`triggerClassification` fetch) had no automatic fix either while that flag was
-on. Current state: `DOCUMENT_RECOVERY_DISABLED = false` (restored by migration 044, safe — this
-half has never been implicated in any incident), `AI_RECOVERY_DISABLED = false` (re-enabled after an
-architecture review re-verified every specific cause of the original incident is independently
-closed: solo-forcing on `ai_failure_count>=1` means a retry can never resend the identical payload
-that just timed out; `maxConsecutiveOccurrences` is enforced *inside* `record_ai_failure`, migration
-043, regardless of trigger source, so a cron-triggered retry is bound by the exact same cap a live
-client's retry is; `haltForBilling` marks a file `'failed'` immediately on a billing-classified
-error, which both this route's own queries and Stage 1/2's batch-planning filter skip on every
-future tick, bounding a billing outage to at most `MAX_LOCKS_PER_RUN + MAX_STUCK_FILES_PER_RUN`
-wasted calls, once, self-terminating; the wall-clock budget guard means an invocation this cron
-triggers now always stops itself cleanly and releases `job_intake_locks` promptly instead of ever
-dying uncleanly mid-flight; and `project_documents.extraction_status` — migration 050 — means a
-cron-triggered retry can't burn a Claude call re-classifying a document already durably done). The
-pg_cron schedule firing does not by itself imply Anthropic calls can happen; `AI_RECOVERY_DISABLED`
-is checked inside the route regardless of how the route was invoked (pg_cron, GitHub Actions, or a
-manual curl) — flipping it back to `true` remains the fastest kill switch if a new incident ever
-warrants one.
+on. Current state (as of 2026-07-24, verified directly against `route.ts`, not assumed from this
+paragraph — the two had drifted out of sync, see below): `DOCUMENT_RECOVERY_DISABLED = true` — still
+disabled, unresolved oscillation risk between `find_and_fail_abandoned_files` and
+`recompute_file_intake_status` documented under "Known open issue" further up; do not flip without
+fixing that first. `AI_RECOVERY_DISABLED = false` — genuinely re-enabled now (see the dated note
+immediately below for why "genuinely" is doing real work in that sentence). Every specific cause of
+the original spend incident is independently closed: solo-forcing on `ai_failure_count>=1` means a
+retry can never resend the identical payload that just timed out; `maxConsecutiveOccurrences` is
+enforced *inside* `record_ai_failure`, migration 043, regardless of trigger source, so a cron-triggered
+retry is bound by the exact same cap a live client's retry is; `haltForBilling` marks a file `'failed'`
+immediately on a billing-classified error, which both this route's own queries and Stage 1/2's
+batch-planning filter skip on every future tick, bounding a billing outage to at most
+`MAX_LOCKS_PER_RUN + MAX_STUCK_FILES_PER_RUN` wasted calls, once, self-terminating; the wall-clock
+budget guard means an invocation this cron triggers now always stops itself cleanly and releases
+`job_intake_locks` promptly instead of ever dying uncleanly mid-flight; and
+`project_documents.extraction_status` — migration 050 — means a cron-triggered retry can't burn a
+Claude call re-classifying a document already durably done. The pg_cron schedule firing does not by
+itself imply Anthropic calls can happen; `AI_RECOVERY_DISABLED` is checked inside the route regardless
+of how the route was invoked (pg_cron, GitHub Actions, or a manual curl) — flipping it back to `true`
+remains the fastest kill switch if a new incident ever warrants one.
+
+**2026-07-24 — `AI_RECOVERY_DISABLED` was documentation-only-enabled, not actually enabled; this is
+what was silently blocking every estimate.** Traced live on the Alfred St job: document extraction
+completed, Stage 1/2 classification succeeded for whichever documents got a Claude call within one
+`smooth-responder` invocation's `WALL_CLOCK_SAFETY_MS` (340s) budget, and the run then bailed cleanly
+(`bailForWallClockBudget`, `stall_stage`/`stall_reason` persisted, `job_intake_locks` released) once
+that budget was spent — exactly the resumable-stall design described throughout this section. But
+steps 4-5 (`find_stale_job_intake_locks` + `acquire_or_reclaim_job_intake_lock`,
+`find_stuck_files_needing_classification_retry`) are the *only* code path that re-triggers
+`smooth-responder` for an already-stalled batch — and the const guarding them was still literally
+`const AI_RECOVERY_DISABLED = true`, even though the comment directly above it (the paragraph you're
+reading, in its pre-2026-07-24 form) narrated re-enabling it. The comment was updated; the line of
+code never was. Net effect: every job whose documents didn't all fit inside one invocation's wall-clock
+budget stalled after its first invocation and *stayed stalled* — nothing was ever coming back to run
+Stage 3 or Stage 6, regardless of how many facts had already been extracted. Fixed by actually setting
+the const to `false`. Paired with a second, independent fix in the same pass: the Stage 1/2
+classification loop (`supabase/functions/smooth-responder/index.ts`, the `for (batchIdx...)` loop just
+above the `classifyBatch` call) previously only checked whether the *next* classification batch itself
+fit inside the remaining wall-clock budget — nothing reserved room for Stage 3 afterwards, so a
+multi-batch job (e.g. Alfred St's 6 documents, split across up to `MAX_BATCHES` = 3 batches) could have
+every batch individually "fit" while collectively consuming the entire invocation, leaving Stage 3's
+`planStage3Chunks` 0ms to work with. Once at least one batch has already been classified this
+invocation, the loop now also requires `STAGE3_PER_CALL_TIMEOUT_MS` (220s) of headroom left over before
+starting another classification batch, deferring any further batches to the next (now actually
+reachable, thanks to the fix above) invocation instead. Neither change requires 100% document
+classification before Stage 3 runs — that was never the gate; Stage 3 already proceeds on `facts.length
+> 0`, i.e. whatever's been classified so far — and neither adds a new retry mechanism, both just make
+the existing resumable-stall design in this section actually resumable.
 
 **Operational considerations:**
 - **Actual trigger, live today**: `supabase/migrations/038_intake_recovery_pg_cron.sql` — `pg_cron`

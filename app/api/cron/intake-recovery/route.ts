@@ -205,27 +205,28 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 // hypothesis above is confirmed against live data and a fix for it is
 // implemented and tested.
 const DOCUMENT_RECOVERY_DISABLED = true
-// RE-ENABLED (2026-07-19, wall-clock redesign): was emergency-disabled
-// after a live retrigger storm — recovery_classification_retriggered
-// firing every ~60s for the same files, each retrigger re-running the
-// FULL Stage 3 call from scratch, because WALL_CLOCK_SAFETY_MS (340s) is
-// structurally less than the room a chunked Stage 3 attempt could need
-// (2 x STAGE3_PER_CALL_TIMEOUT_MS = 440s) — a chunked project could never
-// complete Stage 3 in one invocation, and every retry repeated both
-// chunks. Root cause closed by document_processing_batches.stage3_
-// completed_trade_ids (migration 060) + planStage3Chunks (pipeline-
-// logic.ts): a retrigger now resumes with only the REMAINING trades (a
-// genuinely smaller request, per-chunk scope_items already durably
-// written), converging toward completion instead of repeating finished
-// work — a chunked project needs at most ~2 real retries to finish,
-// comfortably inside MAX_RECOVERY_ATTEMPTS (3) below. The
-// recovery_classification_retriggered log now reports stage3_trades_
-// already_completed / resume_kind so a converging resume is visibly
-// distinguishable from a genuinely stuck one. Re-disable immediately
-// (set back to true) if retrigger-storm behavior is observed again —
-// intake_recovery_runs / recovery_classification_retriggered logs are
-// the fastest way to confirm convergence before trusting this long-term.
-const AI_RECOVERY_DISABLED = true
+// ACTUALLY RE-ENABLED NOW (2026-07-24) — the 2026-07-19 comment above
+// already documented every reason this was safe to flip back on (chunked
+// Stage 3 resumability via stage3_completed_trade_ids/planStage3Chunks,
+// the retry cap, billing halt, wall-clock self-termination), but the
+// const itself was left at `true`, so none of that ever actually ran:
+// this is what was silently preventing ANY stalled batch — classification
+// OR Stage 3 OR Stage 6 running out of wall-clock room — from ever being
+// resumed. Confirmed as the live blocker on the Alfred St job: extraction
+// completes, classification succeeds for whichever documents get a Claude
+// call this invocation, and the run cleanly bails (stall_stage/stall_reason
+// persisted, lock released) once WALL_CLOCK_SAFETY_MS is spent — but with
+// this flag on, steps 4-5 (the only path that re-triggers smooth-responder
+// for an already-stalled batch) never ran, so nothing ever picked it back
+// up. Paired with a classification-loop budget reserve (smooth-responder/
+// index.ts) so a batch that DOES get retriggered is less likely to spend
+// its entire fresh window on more Stage 1/2 work before Stage 3 gets a
+// look-in. Re-disable immediately (set back to true) if retrigger-storm
+// behavior (recovery_classification_retriggered firing every tick for the
+// same batch with stage3_trades_already_completed stuck at 0) is observed
+// again — intake_recovery_runs / recovery_classification_retriggered logs
+// are the fastest way to confirm convergence.
+const AI_RECOVERY_DISABLED = false
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
