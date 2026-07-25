@@ -3,7 +3,8 @@ import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { calculateClientPrice, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
-import { isSilentlyUnpriced } from '@/lib/estimating/readiness'
+import { getSendBlockingReasons } from '@/lib/estimating/readiness'
+import type { QAReport } from '@/lib/types/database.types'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -127,13 +128,24 @@ export async function POST(
     const { createClient } = await import('@supabase/supabase-js')
     const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
 
-    const [{ data: quoteRow }, { data: lineItems }] = await Promise.all([
+    const [{ data: quoteRow }, { data: lineItems }, { data: openConservativeAssumptions }] = await Promise.all([
       sb.from('quotes')
-        .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
+        .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at, qa_report')
         .eq('id', quoteId).eq('builder_id', sessionBuilderId).single(),
       sb.from('quote_line_items')
         .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status, margin_pct')
         .eq('quote_id', quoteId),
+      // Conservative assumptions: assumptions.gate IS NULL AND line_item_id
+      // IS NULL is what distinguishes a non-blocking-estimation default
+      // (project/trade-wide, from an unanswered "blocking" clarifying
+      // question) from a Gate 1-3 per-line assumption — same query shape
+      // quotes/[quoteId]/route.ts already runs for critical_assumptions.
+      sb.from('assumptions')
+        .select('id')
+        .eq('quote_id', quoteId)
+        .is('gate', null)
+        .is('line_item_id', null)
+        .is('resolution_type', null),
     ])
 
     if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
@@ -150,21 +162,24 @@ export async function POST(
       )
     }
 
-    // Pricing safety: an included line item with no total contributes $0 to
-    // the quoted price while still describing real scope. That quote is
-    // understated, not complete — refuse to even build the send draft.
-    // (Same isSilentlyUnpriced definition the quote GET's blocked state and
-    // confirm-send's final guard use, so all three can never disagree.)
-    const unpricedForDraft = ((lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>)
-      .filter((li) => isSilentlyUnpriced(li))
-    if (unpricedForDraft.length > 0) {
-      const names = unpricedForDraft.slice(0, 3).map((li) => `"${li.description}"`).join(', ')
-      return NextResponse.json(
-        {
-          error: `${unpricedForDraft.length} item${unpricedForDraft.length !== 1 ? 's' : ''} (${names}${unpricedForDraft.length > 3 ? ', …' : ''}) have no price and currently add $0 to this quote. Set a rate or exclude them before sending.`,
-        },
-        { status: 422 }
-      )
+    // Send gate: the one shared enforcement (lib/estimating/readiness.ts)
+    // also used by confirm-send's final guard, so a draft this route agrees
+    // to build can never be refused later by confirm-send for a reason this
+    // route didn't already check. Three hard blockers: a line item silently
+    // contributing $0, a scoped trade with no line items generated at all
+    // (invisible to the per-item check above — there's no row for it to see),
+    // and an unanswered "blocking" clarifying question WorkA proceeded past
+    // using an unconfirmed default (Estimate Completeness & Confidence
+    // Integrity Audit, P0-1/P0-2 — detection already existed for both; this
+    // is what makes it actually refuse to send, not just display a warning).
+    const qaReportForDraft = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
+    const blockingReasons = getSendBlockingReasons({
+      lineItems: (lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>,
+      missingTrades: qaReportForDraft?.missing_trade_details ?? [],
+      unresolvedConservativeAssumptionCount: (openConservativeAssumptions ?? []).length,
+    })
+    if (blockingReasons.length > 0) {
+      return NextResponse.json({ error: blockingReasons.join(' ') }, { status: 422 })
     }
 
     type QuoteRow = { id: string; job_id: string; status: string; total_cost: number; margin_pct: number; confidence_score: number; version: number; created_at: string }

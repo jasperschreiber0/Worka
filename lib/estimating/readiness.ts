@@ -3,9 +3,13 @@
 // line items, QA risks, extraction confidence) into exactly three states a
 // non-technical builder can act on:
 //
-//   blocked          — this quote's TOTAL IS WRONG (items missing answers or
-//                      missing prices contribute $0). Sending is refused
-//                      server-side, not just discouraged in the UI.
+//   blocked          — this quote is not safe to send: items missing answers
+//                      or missing prices contribute $0, a whole scoped trade
+//                      has no line items yet, or WorkA proceeded past an
+//                      unanswered blocking clarifying question using an
+//                      unconfirmed default. Sending is refused server-side
+//                      (getSendBlockingReasons below), not just discouraged
+//                      in the UI.
 //   review_required  — the number is complete but WorkA found things worth a
 //                      human look before it goes to a client (QA risks,
 //                      document conflicts, low-confidence extractions).
@@ -45,15 +49,30 @@ export interface ReadinessSignals {
   /** quotes.confidence_score — lowest included line-item confidence. */
   confidenceScore: number | null
   /**
-   * Unresolved conservative assumptions (assumptions.gate IS NULL) —
-   * WorkA proceeded past a blocking clarifying question using a disclosed
-   * default instead of stopping the pipeline (non-blocking estimation).
-   * Deliberately a REVIEW reason, not a blocked one: unlike Gates 1-3
-   * (unresolvedAssumptions above), a $ total genuinely exists here — the
-   * estimate is complete, just built on a stated assumption worth a look,
-   * not missing information the way an unpriced/no-unit item is.
+   * Unresolved conservative assumptions (assumptions.gate IS NULL) — WorkA
+   * proceeded past a blocking clarifying question using a disclosed default
+   * instead of stopping the pipeline (non-blocking estimation). Promoted to
+   * a BLOCKED reason (Estimate Completeness & Confidence Integrity Audit,
+   * P0-1): the pipeline's own "blocking" label exists specifically for
+   * questions it judges the estimate cannot proceed responsibly without —
+   * treating that as merely worth a look, not a hard stop, let a
+   * structurally under-specified estimate (the audit's own example: a
+   * double-storey addition with no structural drawings) look fully priced
+   * and sendable. A $ total existing doesn't mean the total is trustworthy
+   * when it rests on an unconfirmed default for exactly the question WorkA
+   * itself flagged as highest-severity.
    */
   unresolvedConservativeAssumptions: number
+  /**
+   * Scoped trades (Stage 3) with zero generated line items (qa_report.
+   * missing_trade_details) — including any that Stage 6's own completeness
+   * recovery attempted and still could not fill. Promoted to a BLOCKED
+   * reason for the same reason as unresolvedConservativeAssumptions above
+   * (audit P0-2): an entirely absent trade is invisible to unpricedItems
+   * (there is no line item for that check to even see), so without this a
+   * quote missing a whole trade could look completely priced and sendable.
+   */
+  missingTradeCount: number
 }
 
 export interface ReadinessResult {
@@ -82,6 +101,16 @@ export function deriveQuoteReadiness(signals: ReadinessSignals): ReadinessResult
       `${signals.unpricedItems} ${plural(signals.unpricedItems, 'item has', 'items have')} no price and currently ${plural(signals.unpricedItems, 'adds', 'add')} $0 to the total — set a rate or exclude ${plural(signals.unpricedItems, 'it', 'them')}`
     )
   }
+  if (signals.missingTradeCount > 0) {
+    blockedReasons.push(
+      `${signals.missingTradeCount} scoped ${plural(signals.missingTradeCount, 'trade has', 'trades have')} no line items yet — review before sending`
+    )
+  }
+  if (signals.unresolvedConservativeAssumptions > 0) {
+    blockedReasons.push(
+      `WorkA assumed ${signals.unresolvedConservativeAssumptions} ${plural(signals.unresolvedConservativeAssumptions, 'thing')} it couldn't confirm from your documents (an unanswered blocking question) — confirm before sending`
+    )
+  }
 
   if (signals.topRiskCount > 0) {
     reviewReasons.push(
@@ -98,12 +127,6 @@ export function deriveQuoteReadiness(signals: ReadinessSignals): ReadinessResult
       `Some quantities were read with low confidence (${signals.confidenceScore}%) — check the red-marked lines`
     )
   }
-  if (signals.unresolvedConservativeAssumptions > 0) {
-    reviewReasons.push(
-      `WorkA assumed ${signals.unresolvedConservativeAssumptions} ${plural(signals.unresolvedConservativeAssumptions, 'thing')} it couldn't confirm from your documents — review before sending`
-    )
-  }
-
   if (blockedReasons.length > 0) {
     return { readiness: 'blocked', blockedReasons, reviewReasons }
   }
@@ -131,4 +154,58 @@ export function isSilentlyUnpriced(item: {
   // flow — counting it here too would double-report the same line.
   if (item.is_assumption && item.assumption_status === 'unresolved') return false
   return true
+}
+
+// ─── The send gate — the one shared source of truth for "can this quote go
+// out" ──────────────────────────────────────────────────────────────────────
+// readiness.ts / deriveQuoteReadiness above feeds the quote GET response's
+// display state (can_send, blocked_reasons) — it does NOT, by itself, stop
+// an email from being sent. The actual enforcement is this function, called
+// identically by the send-draft route and confirm-send's final server-side
+// guard, so a quote that display says is blocked and a quote the server
+// will actually refuse to send can never disagree (Estimate Completeness &
+// Confidence Integrity Audit: "detection exists, enforcement does not" —
+// this closes that gap for the three signals below). Returns an empty array
+// when the quote is safe to send.
+
+export interface SendBlockingLineItem {
+  description: string
+  total: number | null
+  assumption_status: string | null
+  is_assumption?: boolean | null
+}
+
+export interface SendBlockingMissingTrade {
+  trade_name: string
+}
+
+export function getSendBlockingReasons(input: {
+  lineItems: SendBlockingLineItem[]
+  missingTrades: SendBlockingMissingTrade[]
+  unresolvedConservativeAssumptionCount: number
+}): string[] {
+  const reasons: string[] = []
+
+  const unpriced = input.lineItems.filter((li) => isSilentlyUnpriced(li))
+  if (unpriced.length > 0) {
+    const names = unpriced.slice(0, 3).map((li) => `"${li.description}"`).join(', ')
+    reasons.push(
+      `${unpriced.length} item${unpriced.length !== 1 ? 's' : ''} (${names}${unpriced.length > 3 ? ', …' : ''}) have no price and currently add $0 to this quote. Set a rate or exclude them before sending.`
+    )
+  }
+
+  if (input.missingTrades.length > 0) {
+    const names = input.missingTrades.map((t) => t.trade_name).join(', ')
+    reasons.push(
+      `${input.missingTrades.length} scoped trade${input.missingTrades.length !== 1 ? 's' : ''} (${names}) ${input.missingTrades.length !== 1 ? 'have' : 'has'} no line items generated yet. Review before sending.`
+    )
+  }
+
+  if (input.unresolvedConservativeAssumptionCount > 0) {
+    reasons.push(
+      `WorkA assumed ${input.unresolvedConservativeAssumptionCount} thing${input.unresolvedConservativeAssumptionCount !== 1 ? 's' : ''} it couldn't confirm from your documents (an unanswered blocking question). Review and confirm before sending.`
+    )
+  }
+
+  return reasons
 }

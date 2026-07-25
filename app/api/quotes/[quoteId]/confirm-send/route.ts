@@ -5,6 +5,8 @@ import { requirePermission } from '@/lib/auth/role-guard'
 import { randomUUID } from 'crypto'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getSendBlockingReasons } from '@/lib/estimating/readiness'
+import type { QAReport } from '@/lib/types/database.types'
 
 // Quote job IDs for proof recording in demo mode
 const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
@@ -118,7 +120,7 @@ export async function POST(
   // 1. Verify quote exists and belongs to this builder
   const { data: quoteRow, error: fetchErr } = await supabase
     .from('quotes')
-    .select('id, status, job_id')
+    .select('id, status, job_id, qa_report')
     .eq('id', quoteId)
     .eq('builder_id', sessionBuilderId)
     .single()
@@ -135,28 +137,39 @@ export async function POST(
     )
   }
 
-  // 3. Pricing safety — the last server-side line of defense before a real
-  // email reaches a real client. An included line item with no total is
-  // silently contributing $0; the quoted price is understated and must not
-  // go out. (Same shared isSilentlyUnpriced rule the quote GET and the
-  // draft route apply — this re-checks against the DB at send time in case
-  // anything changed since the draft was built.)
+  // 3. Send gate — the last server-side line of defense before a real email
+  // reaches a real client. Same shared enforcement (lib/estimating/
+  // readiness.ts getSendBlockingReasons) the draft route applies — this
+  // re-checks against the DB at send time in case anything changed since the
+  // draft was built. Three hard blockers: an included line item with no
+  // total (silently contributing $0), a scoped trade with zero line items
+  // generated at all, and an unanswered "blocking" clarifying question WorkA
+  // proceeded past using an unconfirmed default (Estimate Completeness &
+  // Confidence Integrity Audit, P0-1/P0-2). This is the route that actually
+  // dispatches the email — getting this check right here matters more than
+  // anywhere else in the send flow.
   {
-    const { data: lineItems } = await supabase
-      .from('quote_line_items')
-      .select('description, total, is_assumption, assumption_status')
-      .eq('quote_id', quoteId)
-    const { isSilentlyUnpriced } = await import('@/lib/estimating/readiness')
-    const unpriced = ((lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>)
-      .filter((li) => isSilentlyUnpriced(li))
-    if (unpriced.length > 0) {
-      const names = unpriced.slice(0, 3).map((li) => `"${li.description}"`).join(', ')
-      return NextResponse.json(
-        {
-          error: `Cannot send: ${unpriced.length} item${unpriced.length !== 1 ? 's' : ''} (${names}${unpriced.length > 3 ? ', …' : ''}) have no price and add $0 to the total. Set a rate or exclude them first.`,
-        },
-        { status: 422 }
-      )
+    const [{ data: lineItems }, { data: openConservativeAssumptions }] = await Promise.all([
+      supabase
+        .from('quote_line_items')
+        .select('description, total, is_assumption, assumption_status')
+        .eq('quote_id', quoteId),
+      supabase
+        .from('assumptions')
+        .select('id')
+        .eq('quote_id', quoteId)
+        .is('gate', null)
+        .is('line_item_id', null)
+        .is('resolution_type', null),
+    ])
+    const qaReportForSend = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
+    const blockingReasons = getSendBlockingReasons({
+      lineItems: (lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>,
+      missingTrades: qaReportForSend?.missing_trade_details ?? [],
+      unresolvedConservativeAssumptionCount: (openConservativeAssumptions ?? []).length,
+    })
+    if (blockingReasons.length > 0) {
+      return NextResponse.json({ error: `Cannot send: ${blockingReasons.join(' ')}` }, { status: 422 })
     }
   }
 

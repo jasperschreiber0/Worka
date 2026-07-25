@@ -137,6 +137,7 @@ function computeSummary(
     reviewItemCount: qaReport?.review_items?.length ?? 0,
     confidenceScore: quote.confidence_score,
     unresolvedConservativeAssumptions,
+    missingTradeCount: qaReport?.missing_trade_details?.length ?? 0,
   })
 
   return {
