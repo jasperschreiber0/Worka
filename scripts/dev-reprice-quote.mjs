@@ -88,13 +88,18 @@ async function main() {
   // the subset this script touched.
   const pricedById = new Map(priced.map((p) => [p.id, p]))
   const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
-  const { total_cost, confidence_score, price_coverage_pct } = computeQuoteTotals(finalItems)
-  await supabase.from('quotes').update({ total_cost, confidence_score, price_coverage_pct, margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT }).eq('id', quoteId)
+  // Was missing pricing_match_rate_pct entirely — destructuring only the
+  // three older fields meant it was silently never computed into this
+  // script's update payload, so the column stayed null even after a
+  // successful reprice. computeQuoteTotals always returns it; this was
+  // purely this script not asking for it.
+  const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct } = computeQuoteTotals(finalItems)
+  await supabase.from('quotes').update({ total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT }).eq('id', quoteId)
 
   console.log(JSON.stringify({
     event: 'reprice_complete', quote_id: quoteId,
     line_items_repriced_this_run: rowsToUpdate.length, line_items_total: items.length,
-    total_cost, confidence_score, price_coverage_pct,
+    total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct,
   }, null, 2))
 }
 
