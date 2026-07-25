@@ -50,9 +50,16 @@ async function main() {
     .single()
   if (quoteErr || !quote) throw new Error(`Quote not found: ${quoteErr?.message ?? quoteId}`)
 
+  // pricing_source must be selected here even though this script only WRITES
+  // it for the subset it reprices — computeQuoteTotals's pricing_match_rate_pct
+  // reads it off every included item, and an item this run doesn't touch
+  // (already priced by a prior run) would otherwise come back as undefined
+  // here and get counted as unreliable regardless of its real stored source.
+  // Confirmed on a real run: with 0 items left to reprice, pricing_match_rate_pct
+  // read back as a flat 0% instead of the true ~18%, purely from this omission.
   const { data: items, error: itemsErr } = await supabase
     .from('quote_line_items')
-    .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status')
+    .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status, pricing_source')
     .eq('quote_id', quoteId)
   if (itemsErr) throw new Error(`Could not load line items: ${itemsErr.message}`)
   if (!items || items.length === 0) throw new Error('No line items on this quote')
@@ -74,6 +81,7 @@ async function main() {
       id: p.id, quote_id: quoteId,
       trade_category_id: p.trade_category_id, description: p.description,
       rate: p.rate, total: p.total,
+      pricing_source: p.pricing_source, pricing_basis: p.pricing_basis, confidence: p.confidence,
     }))
     .filter((row) => row.rate !== null)
 
