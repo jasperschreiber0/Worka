@@ -34,7 +34,8 @@ import { priceLineItems, computeQuoteTotals, DEFAULT_MARGIN_PCT } from '../lib/p
 import { runQualityAssurance } from '../lib/estimating/qa.ts'
 import {
   findMissingTrades, filterNewLineItems, lineItemKey,
-  buildTradeRecoveryPrompt, buildTradeRecoveryReport,
+  buildTradeRecoveryPrompt, buildTradeRecoveryReport, callWithTradeRecoveryRetry,
+  TRUNCATED_RESPONSE_PREFIX,
 } from '../supabase/functions/smooth-responder/pipeline-logic.ts'
 
 const args = Object.fromEntries(
@@ -179,6 +180,17 @@ async function callTool(system, content, tool, maxTokens = 4000) {
     tools: [tool], tool_choice: { type: 'tool', name: tool.name },
   })
   log('claude_call_complete', { tool: tool.name, stop_reason: resp.stop_reason, output_tokens: resp.usage?.output_tokens ?? null })
+  // Bug fix: this previously did NOT throw on a truncated response — a
+  // tool_use block can still be present (with partial/empty input) even
+  // when stop_reason is 'max_tokens', so the old code silently treated a
+  // truncated call as "zero items returned" with no error at all. Confirmed
+  // on a real run: stop_reason max_tokens logged, then recovered_trades: []
+  // with no failure log in between. Matches production's index.ts callTool
+  // exactly (same TRUNCATED_RESPONSE_PREFIX) so isTruncatedResponseError /
+  // callWithTradeRecoveryRetry work identically here.
+  if (resp.stop_reason === 'max_tokens') {
+    throw new Error(`${TRUNCATED_RESPONSE_PREFIX}${maxTokens} — increase the token budget for this stage`)
+  }
   const toolUse = resp.content.find((b) => b.type === 'tool_use')
   if (!toolUse) throw new Error(`No tool_use block returned for ${tool.name} (stop_reason: ${resp.stop_reason})`)
   return toolUse.input
@@ -219,27 +231,46 @@ async function main() {
   const recoveredDetail = []
   for (const tradeId of initialMissingTrades) {
     const scopeRow = (scopeRows ?? []).find((s) => s.trade_category_id === tradeId)
-    if (!scopeRow) { recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 }); continue }
+    if (!scopeRow) {
+      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'No scope_items row found for this trade', retry_attempted: false })
+      continue
+    }
     const tradeName = tradeCategoryName(tradeId)
     const { system, userText } = buildTradeRecoveryPrompt(tradeId, tradeName, scopeRow, factsBlock)
     log('trade_recovery_calling', { job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, trade_name: tradeName })
 
-    let result
-    try {
-      result = await callTool(system, [{ type: 'text', text: userText }], ESTIMATE_GENERATION_TOOL, 4000)
-    } catch (err) {
-      log('trade_recovery_failed', { job_id: jobId, trade_category_id: tradeId, error: err.message })
-      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+    // Same shared retry orchestration as production (pipeline-logic.ts):
+    // initial call at TRADE_RECOVERY_INITIAL_MAX_TOKENS, exactly one retry
+    // at TRADE_RECOVERY_RETRY_MAX_TOKENS if — and only if — the failure is
+    // a max_tokens truncation. Confirmed bug this fixes: the old flat 4000
+    // budget truncated the Colorbond roofing/sarking/flashings/gutters/
+    // skylights/solar PV trade with no error at all (see callTool's fix
+    // above), so recovery silently reported 0 items generated.
+    const { result, failureReason, retryAttempted } = await callWithTradeRecoveryRetry(
+      (maxTokens) => callTool(system, [{ type: 'text', text: userText }], ESTIMATE_GENERATION_TOOL, maxTokens)
+    )
+    if (failureReason !== null) {
+      log('trade_recovery_failed', { job_id: jobId, trade_category_id: tradeId, retry_attempted: retryAttempted, error: failureReason })
+      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: failureReason, retry_attempted: retryAttempted })
       continue
+    }
+    if (retryAttempted) {
+      log('trade_recovery_retry_succeeded', { job_id: jobId, trade_category_id: tradeId })
     }
 
     const rawItems = (result.line_items ?? []).filter((item) => item.trade_category_id === tradeId)
-    if (rawItems.length === 0) { recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 }); continue }
+    if (rawItems.length === 0) {
+      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'Call succeeded but returned no usable line items for this trade', retry_attempted: retryAttempted })
+      continue
+    }
 
     const validated = validateItems(rawItems)
     const toInsert = filterNewLineItems(validated, existingKeys)
     const inserts = buildInsertRows(toInsert, quoteId)
-    if (inserts.length === 0) { recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 }); continue }
+    if (inserts.length === 0) {
+      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'Every returned item was excluded by validation gates or already existed on this quote', retry_attempted: retryAttempted })
+      continue
+    }
 
     const { data: insertedRaw, error: insertErr } = await supabase
       .from('quote_line_items')
@@ -247,7 +278,7 @@ async function main() {
       .select()
     if (insertErr) {
       log('trade_recovery_insert_failed', { job_id: jobId, trade_category_id: tradeId, error: insertErr.message })
-      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+      recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: `Line items generated but insert failed: ${insertErr.message}`, retry_attempted: retryAttempted })
       continue
     }
     const inserted = insertedRaw ?? []

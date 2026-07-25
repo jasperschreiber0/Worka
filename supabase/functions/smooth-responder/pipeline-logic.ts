@@ -2011,10 +2011,110 @@ export function buildTradeRecoveryPrompt(
   return { system, userText }
 }
 
-/** One trade's recovery attempt outcome — `items_generated: 0` covers both "the model returned nothing usable" and "the call failed outright" identically, since a report reader only needs to know whether the gap closed. */
+// ─── Trade recovery: truncated-response detection and retry ───────────────
+//
+// Confirmed on a real run: the recovery call for External Cladding
+// (Colorbond roofing + sarking + flashings + gutters + skylights + solar PV
+// — a genuinely multi-line-item trade) hit `stop_reason: 'max_tokens'` at
+// the original 4000-token budget. callTool (index.ts) already throws a
+// distinguishable error in that exact case — `${TRUNCATED_RESPONSE_PREFIX}
+// ${maxTokens}...` — rather than silently returning malformed/partial JSON,
+// so truncation is detectable from the thrown error alone, with no need to
+// inspect a raw Claude response.
+
+/** The exact prefix callTool's thrown Error uses on `stop_reason === 'max_tokens'` — shared so detection here can never drift from what's actually thrown. */
+export const TRUNCATED_RESPONSE_PREFIX = 'Response truncated at max_tokens='
+
+/** True only for the specific "the model's response was cut off before a complete tool call was returned" failure — never true for a genuine API error (billing, validation, timeout), which must not be retried the same way. */
+export function isTruncatedResponseError(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith(TRUNCATED_RESPONSE_PREFIX)
+}
+
+/**
+ * Baseline budget for one targeted trade regeneration (Stage 6 completeness
+ * recovery) — comfortably below the main multi-trade Stage 6 budget (16000)
+ * since exactly one trade's items are requested, but confirmed insufficient
+ * at the old 4000 on the real project this was built against.
+ */
+export const TRADE_RECOVERY_INITIAL_MAX_TOKENS = 8000
+
+/**
+ * One-shot retry ceiling once truncation is detected at the initial budget
+ * — deliberately above the main Stage 6 call's own 16000, since a single
+ * trade's recovery prompt should never legitimately need more room than a
+ * full multi-trade takeoff. If this also truncates, the trade is recorded
+ * as failed rather than retried again (see shouldRetryTradeRecovery below)
+ * — an unbounded token-budget escalation is exactly the kind of "keep
+ * throwing more resources at it" behaviour this codebase's own Anthropic
+ * failure-classification work (see CLAUDE.md) already rejected for a
+ * different failure mode.
+ */
+export const TRADE_RECOVERY_RETRY_MAX_TOKENS = 24000
+
+/**
+ * Exactly one retry, and only for a truncation — a non-truncation failure
+ * (billing halt, validation error, network issue) is not made more likely
+ * to succeed by a bigger token budget, so it's recorded as a failure
+ * immediately rather than retried the same way this codebase already
+ * decided not to retry other deterministic failures (see
+ * isRetryableClassification above).
+ */
+export function shouldRetryTradeRecovery(err: unknown, alreadyRetried: boolean): boolean {
+  return !alreadyRetried && isTruncatedResponseError(err)
+}
+
+export interface TradeRecoveryCallOutcome<T> {
+  result: T | null
+  failureReason: string | null
+  retryAttempted: boolean
+}
+
+/**
+ * Shared retry orchestration for a single trade's recovery call — takes the
+ * actual Claude-calling closure as a parameter so this same, tested logic
+ * runs identically from index.ts (Deno, real Anthropic call) and the dev
+ * script (Node, same Anthropic SDK, different runtime) rather than being
+ * hand-copied into each. `attempt(maxTokens)` should reject with the exact
+ * error callTool throws on truncation (TRUNCATED_RESPONSE_PREFIX) for retry
+ * detection to work; any other rejection is treated as non-retryable.
+ */
+export async function callWithTradeRecoveryRetry<T>(
+  attempt: (maxTokens: number) => Promise<T>,
+): Promise<TradeRecoveryCallOutcome<T>> {
+  try {
+    const result = await attempt(TRADE_RECOVERY_INITIAL_MAX_TOKENS)
+    return { result, failureReason: null, retryAttempted: false }
+  } catch (err) {
+    if (!shouldRetryTradeRecovery(err, false)) {
+      return { result: null, failureReason: err instanceof Error ? err.message : String(err), retryAttempted: false }
+    }
+    try {
+      const result = await attempt(TRADE_RECOVERY_RETRY_MAX_TOKENS)
+      return { result, failureReason: null, retryAttempted: true }
+    } catch (retryErr) {
+      const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr)
+      return {
+        result: null,
+        retryAttempted: true,
+        failureReason: `Truncated at ${TRADE_RECOVERY_INITIAL_MAX_TOKENS} tokens; retry at ${TRADE_RECOVERY_RETRY_MAX_TOKENS} tokens also failed: ${retryMessage}`,
+      }
+    }
+  }
+}
+
+/**
+ * One trade's recovery attempt outcome. `items_generated: 0` covers both
+ * "the model returned nothing usable" and "the call failed outright" —
+ * `failure_reason`/`retry_attempted` (added for the max_tokens fix) give a
+ * report reader the detail behind a zero without needing raw logs.
+ */
 export interface TradeRecoveryResult {
   trade_category_id: number
   items_generated: number
+  /** Human-readable cause when items_generated === 0; null on success. */
+  failure_reason?: string | null
+  /** True once a truncation triggered the one-shot higher-budget retry for this trade, regardless of whether the retry itself then succeeded. */
+  retry_attempted?: boolean
 }
 
 /** QA-visible summary of a completeness recovery pass — see requirement 4: initial missing trades, which ones recovered, and which are still missing after recovery was attempted. */
@@ -2022,12 +2122,15 @@ export interface TradeRecoveryReport {
   initial_missing_trades: number[]
   recovered_trades: TradeRecoveryResult[]
   remaining_missing_trades: number[]
+  /** Full failure detail (reason + whether a retry was attempted) for every trade that did not recover — a superset of remaining_missing_trades' bare ids, never silently dropped. */
+  failures: TradeRecoveryResult[]
 }
 
 /**
  * A trade is only "recovered" once it actually produced at least one new
  * line item — a failed call or an empty/all-duplicate response leaves it in
- * `remaining_missing_trades`, visible rather than silently dropped.
+ * `remaining_missing_trades` (and `failures`, with detail), visible rather
+ * than silently dropped.
  */
 export function buildTradeRecoveryReport(
   initialMissingTrades: number[],
@@ -2038,5 +2141,6 @@ export function buildTradeRecoveryReport(
     initial_missing_trades: initialMissingTrades,
     recovered_trades: recoveryResults.filter((r) => r.items_generated > 0),
     remaining_missing_trades: initialMissingTrades.filter((id) => !recoveredIds.has(id)),
+    failures: recoveryResults.filter((r) => r.items_generated === 0),
   }
 }

@@ -45,6 +45,7 @@ import {
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
   findMissingTrades, filterNewLineItems, lineItemKey, buildTradeRecoveryPrompt, buildTradeRecoveryReport,
+  callWithTradeRecoveryRetry, TRUNCATED_RESPONSE_PREFIX,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
   type ConservativeAssumption, type BucketableFact, type ProjectModelSections,
@@ -693,7 +694,7 @@ async function callTool(
     // array where the model just hadn't reached that field yet) rather than
     // a genuine "nothing found" result — fail loudly here instead of letting
     // corrupted data flow downstream as if it were complete.
-    throw new Error(`Response truncated at max_tokens=${maxTokens} — increase the token budget for this stage`)
+    throw new Error(`${TRUNCATED_RESPONSE_PREFIX}${maxTokens} — increase the token budget for this stage`)
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const block = response.content.find((b: any) => b.type === 'tool_use' && b.name === tool.name)
@@ -2536,31 +2537,44 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // budget without a durable checkpoint the way Stage 3/6 have.
       if (!hasWallClockBudget(60_000)) {
         console.log(JSON.stringify({ event: 'stage6_completeness_recovery_skipped', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, reason: 'insufficient wall-clock budget' }))
-        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'Insufficient wall-clock budget remaining in this invocation', retry_attempted: false })
         continue
       }
       const scopeRow = (scopeForEstimate ?? []).find((s: Record<string, unknown>) => s.trade_category_id === tradeId) as
         | { trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }
         | undefined
-      if (!scopeRow) { recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 }); continue }
+      if (!scopeRow) {
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'No scope_items row found for this trade at recovery time', retry_attempted: false })
+        continue
+      }
       const tradeName = TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}`
       const { system: recoverySystemPrompt, userText: recoveryUserText } = buildTradeRecoveryPrompt(tradeId, tradeName, scopeRow, factsBlock)
       const recoveryUserContent = [{ type: 'text' as const, text: recoveryUserText }]
 
-      let recoveryResult: { line_items?: unknown[] } | null = null
-      try {
-        recoveryResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_recovery' }, recoverySystemPrompt, recoveryUserContent, ESTIMATE_GENERATION_TOOL, 4000)
-      } catch (err) {
-        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_failed', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, error: err instanceof Error ? err.message : String(err) }))
-        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+      // Shared retry orchestration (pipeline-logic.ts): the initial call
+      // uses TRADE_RECOVERY_INITIAL_MAX_TOKENS; a max_tokens truncation
+      // (confirmed on a real run — Colorbond roofing + sarking + flashings
+      // + gutters + skylights + solar PV truncated the old 4000-token
+      // budget) triggers exactly one retry at TRADE_RECOVERY_RETRY_MAX_TOKENS
+      // with the SAME prompt/scope — never a full re-estimate. Any other
+      // failure (billing, validation, network) is not retried.
+      const { result: recoveryResult, failureReason: recoveryFailureReason, retryAttempted } = await callWithTradeRecoveryRetry(
+        (maxTokens) => callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_recovery' }, recoverySystemPrompt, recoveryUserContent, ESTIMATE_GENERATION_TOOL, maxTokens)
+      )
+      if (recoveryFailureReason !== null) {
+        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_failed', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, retry_attempted: retryAttempted, error: recoveryFailureReason }))
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: recoveryFailureReason, retry_attempted: retryAttempted })
         continue
+      }
+      if (retryAttempted) {
+        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_retry_succeeded', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId }))
       }
       // Defense in depth: discard any item that ignored the single-trade
       // instruction rather than trusting the model to have fully complied.
       const recoveredRawItems = ((recoveryResult?.line_items ?? []) as Array<Record<string, unknown>>)
         .filter((item) => item.trade_category_id === tradeId)
       if (recoveredRawItems.length === 0) {
-        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'Call succeeded but returned no usable line items for this trade', retry_attempted: retryAttempted })
         continue
       }
 
@@ -2569,7 +2583,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const recoveredInserts = buildLineItemInsertRows(recoveredToInsert, quoteId)
 
       if (recoveredInserts.length === 0) {
-        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: 'Every returned item was excluded by validation gates or already existed on this quote', retry_attempted: retryAttempted })
         continue
       }
       const { data: insertedRecoveredRaw, error: recoveryInsertErr } = await supabase
@@ -2578,7 +2592,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         .select()
       if (recoveryInsertErr) {
         console.log(JSON.stringify({ event: 'stage6_completeness_recovery_insert_failed', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, error: recoveryInsertErr.message }))
-        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: `Line items generated but insert failed: ${recoveryInsertErr.message}`, retry_attempted: retryAttempted })
         continue
       }
       const insertedRecovered = insertedRecoveredRaw ?? []

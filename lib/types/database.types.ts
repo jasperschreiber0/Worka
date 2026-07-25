@@ -140,10 +140,21 @@ export interface Quote {
   trade_recovery_report: TradeRecoveryReport | null
 }
 
+export interface TradeRecoveryResultDetail {
+  trade_category_id: number
+  items_generated: number
+  /** Populated when items_generated === 0; null on success. */
+  failure_reason?: string | null
+  /** True once a max_tokens truncation triggered the one-shot higher-budget retry for this trade. */
+  retry_attempted?: boolean
+}
+
 export interface TradeRecoveryReport {
   initial_missing_trades: number[]
-  recovered_trades: Array<{ trade_category_id: number; items_generated: number }>
+  recovered_trades: TradeRecoveryResultDetail[]
   remaining_missing_trades: number[]
+  /** Full failure detail for every trade that did not recover — a superset of remaining_missing_trades' bare ids. */
+  failures: TradeRecoveryResultDetail[]
 }
 
 export interface DocumentContributionReport {

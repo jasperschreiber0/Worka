@@ -213,10 +213,17 @@ export async function runQualityAssurance(
       reviewItems.push(`Completeness recovery generated missing line items for: ${names} — these were scoped but not produced by the initial estimate pass.`)
     }
     if (tradeRecovery && tradeRecovery.remaining_missing_trades.length > 0) {
-      const names = tradeRecovery.remaining_missing_trades
-        .map((id) => TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`)
-        .join(', ')
-      topRisks.push(`Completeness recovery could not generate line items for: ${names} — still missing after a targeted retry.`)
+      // Prefer the recorded failure_reason (migration 074's max_tokens
+      // retry fix) so "still missing" comes with a concrete cause — e.g.
+      // "truncated at 8000 tokens, retry at 24000 also failed" — rather
+      // than a bare trade name with nothing to act on.
+      const failuresByTrade = new Map((tradeRecovery.failures ?? []).map((f) => [f.trade_category_id, f]))
+      const details = tradeRecovery.remaining_missing_trades.map((id) => {
+        const name = TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`
+        const failure = failuresByTrade.get(id)
+        return failure?.failure_reason ? `${name} (${failure.failure_reason})` : name
+      })
+      topRisks.push(`Completeness recovery could not generate line items for: ${details.join(', ')} — still missing after a targeted retry.`)
     }
 
     // ── Price coverage — a top risk, not a footnote, below 90% ──

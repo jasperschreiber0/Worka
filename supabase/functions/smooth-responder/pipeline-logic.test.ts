@@ -70,6 +70,12 @@ import {
   filterNewLineItems,
   buildTradeRecoveryPrompt,
   buildTradeRecoveryReport,
+  isTruncatedResponseError,
+  shouldRetryTradeRecovery,
+  callWithTradeRecoveryRetry,
+  TRUNCATED_RESPONSE_PREFIX,
+  TRADE_RECOVERY_INITIAL_MAX_TOKENS,
+  TRADE_RECOVERY_RETRY_MAX_TOKENS,
   type TradeViewName,
   type BatchableFile,
   type FactRow,
@@ -2151,9 +2157,125 @@ test('buildTradeRecoveryReport: mixed outcome across trades — recovered and re
   assert.deepEqual(report.remaining_missing_trades, [8])
 })
 
+test('isTruncatedResponseError: true for callTool\'s exact max_tokens truncation message', () => {
+  const err = new Error(`${TRUNCATED_RESPONSE_PREFIX}4000 — increase the token budget for this stage`)
+  assert.equal(isTruncatedResponseError(err), true)
+})
+
+test('isTruncatedResponseError: false for an unrelated error, even with similar wording', () => {
+  assert.equal(isTruncatedResponseError(new Error('Estimate generation call failed: network timeout')), false)
+  assert.equal(isTruncatedResponseError(new Error('token limit exceeded')), false)
+})
+
+test('isTruncatedResponseError: false for a non-Error thrown value', () => {
+  assert.equal(isTruncatedResponseError('some string'), false)
+  assert.equal(isTruncatedResponseError(null), false)
+  assert.equal(isTruncatedResponseError(undefined), false)
+})
+
+test('shouldRetryTradeRecovery: retries a truncation that has not been retried yet', () => {
+  const err = new Error(`${TRUNCATED_RESPONSE_PREFIX}8000 — increase the token budget for this stage`)
+  assert.equal(shouldRetryTradeRecovery(err, false), true)
+})
+
+test('shouldRetryTradeRecovery: never retries twice, even on a second truncation', () => {
+  const err = new Error(`${TRUNCATED_RESPONSE_PREFIX}24000 — increase the token budget for this stage`)
+  assert.equal(shouldRetryTradeRecovery(err, true), false)
+})
+
+test('shouldRetryTradeRecovery: never retries a non-truncation failure (billing, validation, network)', () => {
+  assert.equal(shouldRetryTradeRecovery(new Error('Estimate generation call failed: 400 invalid_request_error'), false), false)
+})
+
+test('trade recovery token budgets: the retry ceiling is above both the initial budget and the main Stage 6 budget (16000)', () => {
+  assert.ok(TRADE_RECOVERY_INITIAL_MAX_TOKENS > 4000, 'initial budget must exceed the confirmed-insufficient 4000')
+  assert.ok(TRADE_RECOVERY_RETRY_MAX_TOKENS > TRADE_RECOVERY_INITIAL_MAX_TOKENS)
+  assert.ok(TRADE_RECOVERY_RETRY_MAX_TOKENS > 16000)
+})
+
+test('callWithTradeRecoveryRetry: successful trade recovery on the first attempt uses the initial budget and never retries', async () => {
+  const calls: number[] = []
+  const outcome = await callWithTradeRecoveryRetry(async (maxTokens) => {
+    calls.push(maxTokens)
+    return { line_items: [{ trade_category_id: 4, description: 'Colorbond roof sheeting' }] }
+  })
+  assert.deepEqual(calls, [TRADE_RECOVERY_INITIAL_MAX_TOKENS])
+  assert.equal(outcome.retryAttempted, false)
+  assert.equal(outcome.failureReason, null)
+  assert.deepEqual(outcome.result, { line_items: [{ trade_category_id: 4, description: 'Colorbond roof sheeting' }] })
+})
+
+test('callWithTradeRecoveryRetry: max_tokens truncation on the first attempt triggers exactly one retry at the higher budget', async () => {
+  const calls: number[] = []
+  const outcome = await callWithTradeRecoveryRetry(async (maxTokens) => {
+    calls.push(maxTokens)
+    if (maxTokens === TRADE_RECOVERY_INITIAL_MAX_TOKENS) {
+      throw new Error(`${TRUNCATED_RESPONSE_PREFIX}${maxTokens} — increase the token budget for this stage`)
+    }
+    return { line_items: [{ trade_category_id: 4, description: 'Box gutters' }] }
+  })
+  assert.deepEqual(calls, [TRADE_RECOVERY_INITIAL_MAX_TOKENS, TRADE_RECOVERY_RETRY_MAX_TOKENS])
+  assert.equal(outcome.retryAttempted, true)
+  assert.equal(outcome.failureReason, null)
+  assert.deepEqual(outcome.result, { line_items: [{ trade_category_id: 4, description: 'Box gutters' }] })
+})
+
+test('callWithTradeRecoveryRetry: truncation on both attempts is a visible failure, not a silent continue — exactly one retry, never more', async () => {
+  const calls: number[] = []
+  const outcome = await callWithTradeRecoveryRetry(async (maxTokens) => {
+    calls.push(maxTokens)
+    throw new Error(`${TRUNCATED_RESPONSE_PREFIX}${maxTokens} — increase the token budget for this stage`)
+  })
+  assert.deepEqual(calls, [TRADE_RECOVERY_INITIAL_MAX_TOKENS, TRADE_RECOVERY_RETRY_MAX_TOKENS])
+  assert.equal(outcome.result, null)
+  assert.equal(outcome.retryAttempted, true)
+  assert.match(outcome.failureReason ?? '', /Truncated at 8000 tokens/)
+  assert.match(outcome.failureReason ?? '', /retry at 24000 tokens also failed/)
+})
+
+test('callWithTradeRecoveryRetry: a non-truncation failure (e.g. billing/validation) is never retried', async () => {
+  const calls: number[] = []
+  const outcome = await callWithTradeRecoveryRetry(async (maxTokens) => {
+    calls.push(maxTokens)
+    throw new Error('Estimate generation call failed: 400 invalid_request_error')
+  })
+  assert.deepEqual(calls, [TRADE_RECOVERY_INITIAL_MAX_TOKENS])
+  assert.equal(outcome.retryAttempted, false)
+  assert.equal(outcome.failureReason, 'Estimate generation call failed: 400 invalid_request_error')
+})
+
+test('no duplicate line items after a retry: items already present (e.g. from a partial first attempt) are filtered out regardless of which attempt produced them', async () => {
+  const existingKeys = new Set([lineItemKey(4, 'Colorbond roof sheeting')])
+  const outcome = await callWithTradeRecoveryRetry(async (maxTokens) => {
+    if (maxTokens === TRADE_RECOVERY_INITIAL_MAX_TOKENS) {
+      throw new Error(`${TRUNCATED_RESPONSE_PREFIX}${maxTokens} — increase the token budget for this stage`)
+    }
+    // The retry's own full response — includes an item that (hypothetically,
+    // e.g. from a differently-scoped prior run) already exists on the quote.
+    return {
+      line_items: [
+        { trade_category_id: 4, description: 'Colorbond roof sheeting', assumption_status: null },
+        { trade_category_id: 4, description: 'Box gutters', assumption_status: null },
+      ],
+    }
+  })
+  const candidates = (outcome.result?.line_items ?? []) as Array<{ trade_category_id: number; description: string; assumption_status: string | null }>
+  const toInsert = filterNewLineItems(candidates, existingKeys)
+  assert.deepEqual(toInsert.map((i) => i.description), ['Box gutters'])
+})
+
 test('buildTradeRecoveryReport: no missing trades at all produces an empty, not null, report', () => {
   const report = buildTradeRecoveryReport([], [])
-  assert.deepEqual(report, { initial_missing_trades: [], recovered_trades: [], remaining_missing_trades: [] })
+  assert.deepEqual(report, { initial_missing_trades: [], recovered_trades: [], remaining_missing_trades: [], failures: [] })
+})
+
+test('buildTradeRecoveryReport: failures carries full detail (reason + retry_attempted), not just the bare id', () => {
+  const results: TradeRecoveryResult[] = [
+    { trade_category_id: 4, items_generated: 0, failure_reason: 'Truncated at 8000 tokens; retry at 24000 tokens also failed: still truncated', retry_attempted: true },
+  ]
+  const report = buildTradeRecoveryReport([4], results)
+  assert.deepEqual(report.failures, [results[0]])
+  assert.deepEqual(report.remaining_missing_trades, [4])
 })
 
 test('formatTradeViewsForPrompt: a view with no matching facts is omitted entirely, not shown empty', () => {
