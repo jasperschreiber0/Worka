@@ -1275,6 +1275,38 @@ export function nextStage3FailureHistory(
   }
 }
 
+// ─── Stage 6 (Estimate Generation) failure escalation — mirrors Stage 3's
+// shouldSkipStage3Call/nextStage3FailureHistory exactly (migration 077).
+// Stage 6 had no equivalent before this: unlike Stage 1/2 (files.ai_failure_
+// count) and Stage 3 (stage3_failure_*), a deterministic Stage 6 failure had
+// nothing to stop the recovery cron re-triggering it indefinitely — the
+// second job (stage_estimate_generation, batch 8d553ebe) in the confirmed
+// 2026-07-25 incident.
+export interface Stage6FailureHistory {
+  inputHash: string | null
+  classification: AnthropicFailureClassification | null
+  count: number
+}
+
+export function shouldSkipStage6Call(prior: Stage6FailureHistory, currentInputHash: string): boolean {
+  if (!prior.inputHash || !prior.classification) return false
+  if (prior.inputHash !== currentInputHash) return false
+  return prior.count > maxConsecutiveOccurrences(prior.classification)
+}
+
+export function nextStage6FailureHistory(
+  prior: Stage6FailureHistory,
+  current: { inputHash: string; classification: AnthropicFailureClassification },
+): Stage6FailureHistory {
+  const sameInputAndClassification =
+    prior.inputHash === current.inputHash && prior.classification === current.classification
+  return {
+    inputHash: current.inputHash,
+    classification: current.classification,
+    count: sameInputAndClassification ? prior.count + 1 : 1,
+  }
+}
+
 // ─── AI call timeout + retry ────────────────────────────────────────────────
 //
 // No Claude (or any provider) call anywhere in this codebase had an explicit

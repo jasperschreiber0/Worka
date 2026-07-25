@@ -1,0 +1,33 @@
+-- ROLLBACK for 077_stage6_failure_protection_and_batch_ai_ceiling.sql — NOT
+-- auto-applied, kept as a .txt so it's never picked up by the migration
+-- runner.
+--
+-- Restores find_stuck_batches_needing_classification_retry to its
+-- migration-052 definition (drops the stage3/stage6 failure-count
+-- exclusion — re-introduces the confirmed 2026-07-25 retry-loop bug, only
+-- roll back if this migration itself is the proven cause of a NEW
+-- problem). Drops the new columns/functions. Does not touch
+-- system_status.ai_circuit_breaker — if it was auto-tripped, clear it
+-- manually via SQL once the underlying issue is confirmed resolved.
+
+CREATE OR REPLACE FUNCTION find_stuck_batches_needing_classification_retry(p_grace interval DEFAULT interval '3 minutes')
+RETURNS TABLE(batch_id uuid, job_id uuid, builder_id uuid, primary_file_id uuid) AS $$
+  SELECT b.id, b.job_id, b.builder_id, b.primary_file_id
+  FROM document_processing_batches b
+  WHERE b.status IN ('completed', 'completed_with_failures', 'failed')
+    AND b.classification_triggered = true
+    AND b.updated_at < now() - p_grace
+    AND NOT EXISTS (SELECT 1 FROM job_intake_locks l WHERE l.job_id = b.job_id);
+$$ LANGUAGE sql STABLE;
+
+DROP FUNCTION IF EXISTS increment_batch_ai_attempts(uuid, int);
+DROP FUNCTION IF EXISTS record_stage6_failure(uuid, text, text, int);
+
+ALTER TABLE document_processing_batches
+  DROP COLUMN IF EXISTS total_ai_call_attempts,
+  DROP COLUMN IF EXISTS stage6_failure_input_hash,
+  DROP COLUMN IF EXISTS stage6_failure_classification,
+  DROP COLUMN IF EXISTS stage6_failure_count,
+  DROP COLUMN IF EXISTS stage6_last_failure_at;
+
+NOTIFY pgrst, 'reload schema';

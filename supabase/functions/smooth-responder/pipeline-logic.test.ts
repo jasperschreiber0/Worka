@@ -49,6 +49,8 @@ import {
   mergeScopeReasoningResults,
   shouldSkipStage3Call,
   nextStage3FailureHistory,
+  shouldSkipStage6Call,
+  nextStage6FailureHistory,
   sha256Hex,
   decideDuplicateFile,
   filterToCanonicalHashCandidates,
@@ -80,6 +82,7 @@ import {
   type BatchableFile,
   type FactRow,
   type Stage3FailureHistory,
+  type Stage6FailureHistory,
   type HashedFileCandidate,
   type CompletedDocumentJobRow,
   type ConservativeAssumption,
@@ -1407,6 +1410,52 @@ test('nextStage3FailureHistory: end-to-end — identical input escalates to skip
   assert.equal(shouldSkipStage3Call(history, HASH_A), true, 'a repeat of the identical input must now be skipped')
   // A genuinely new upload changes the merged fact base -> different hash -> fresh allowance
   assert.equal(shouldSkipStage3Call(history, HASH_B), false, 'a changed document set must not inherit the exhausted history')
+})
+
+// ─── Stage 6: failure-escalation identity (mirrors Stage 3's exactly, migration 077) ─
+
+const NO_HISTORY_STAGE6: Stage6FailureHistory = { inputHash: null, classification: null, count: 0 }
+
+test('shouldSkipStage6Call: never skips when there is no prior history', () => {
+  assert.equal(shouldSkipStage6Call(NO_HISTORY_STAGE6, HASH_A), false)
+})
+
+test('shouldSkipStage6Call: never skips a genuinely different input, regardless of prior count', () => {
+  const prior: Stage6FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 5 }
+  assert.equal(shouldSkipStage6Call(prior, HASH_B), false)
+})
+
+test('shouldSkipStage6Call: does NOT skip after exactly one recorded failure — "one more attempt" must still fire', () => {
+  const max = maxConsecutiveOccurrences('application_timeout')
+  const prior: Stage6FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: max }
+  assert.equal(shouldSkipStage6Call(prior, HASH_A), false)
+})
+
+test('shouldSkipStage6Call: skips once a SECOND identical failure has been recorded for the same input', () => {
+  const max = maxConsecutiveOccurrences('application_timeout')
+  const prior: Stage6FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: max + 1 }
+  assert.equal(shouldSkipStage6Call(prior, HASH_A), true)
+})
+
+test('nextStage6FailureHistory: identical input + identical classification increments the streak', () => {
+  const prior: Stage6FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 1 }
+  const next = nextStage6FailureHistory(prior, { inputHash: HASH_A, classification: 'application_timeout' })
+  assert.deepEqual(next, { inputHash: HASH_A, classification: 'application_timeout', count: 2 })
+})
+
+test('nextStage6FailureHistory: a genuinely different input resets the streak to 1, even with the same classification', () => {
+  const prior: Stage6FailureHistory = { inputHash: HASH_A, classification: 'application_timeout', count: 3 }
+  const next = nextStage6FailureHistory(prior, { inputHash: HASH_B, classification: 'application_timeout' })
+  assert.deepEqual(next, { inputHash: HASH_B, classification: 'application_timeout', count: 1 })
+})
+
+test('nextStage6FailureHistory: end-to-end — identical input escalates to skip, changed input gets a fresh allowance', () => {
+  let history: Stage6FailureHistory = NO_HISTORY_STAGE6
+  history = nextStage6FailureHistory(history, { inputHash: HASH_A, classification: 'application_timeout' })
+  assert.equal(shouldSkipStage6Call(history, HASH_A), false, 'first failure alone must not skip the next attempt')
+  history = nextStage6FailureHistory(history, { inputHash: HASH_A, classification: 'application_timeout' })
+  assert.equal(shouldSkipStage6Call(history, HASH_A), true, 'a repeat of the identical input must now be skipped')
+  assert.equal(shouldSkipStage6Call(history, HASH_B), false, 'a changed input must not inherit the exhausted history')
 })
 
 // ─── Audit: chunk merge behaviour against 4 specific scenarios ─────────────

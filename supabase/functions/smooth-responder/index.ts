@@ -41,6 +41,7 @@ import {
   splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
+  shouldSkipStage6Call,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
@@ -48,6 +49,7 @@ import {
   callWithTradeRecoveryRetry, TRUNCATED_RESPONSE_PREFIX,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
+  type Stage6FailureHistory,
   type ConservativeAssumption, type BucketableFact, type ProjectModelSections,
   type TradeRecoveryResult,
 } from './pipeline-logic.ts'
@@ -567,7 +569,21 @@ interface StageGatewayCtx {
   builderId: string
   jobId: string
   stage: string
+  // Optional: when set, callTool enforces the global per-batch AI-call
+  // ceiling (migration 077) before this call. Omitted at the shadow-run
+  // call sites (project-model comparison, not the live pipeline) — those
+  // stay ungated, same scope as before this migration.
+  parentJobId?: string | null
 }
+
+// Defense-in-depth ceiling (migration 077): total Anthropic call attempts
+// across every stage for one batch, independent of any single stage's own
+// escalation counter. Deliberately generous — well above what a healthy
+// run of any complexity tier needs (Stage 1/2 batches + Stage 3 chunks +
+// Stage 6 + trade recovery rarely exceeds ~10-12 calls even for a large
+// project) — this exists to catch a genuinely non-convergent loop, not to
+// constrain normal operation.
+const MAX_TOTAL_AI_ATTEMPTS_PER_BATCH = 20
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function callTool(
@@ -631,6 +647,43 @@ async function callTool(
     approx_input_tokens: approxInputTokens,
     tool_schema: tool.input_schema,
   }))
+
+  // Defense-in-depth ceiling (migration 077): checked here, the one shared
+  // call site every stage (1/2, 3, 6, trade recovery) already routes
+  // through, so it applies uniformly without four separate implementations
+  // and independent of whether any single stage's own escalation counter
+  // (e.g. Stage 3's shouldSkipStage3Call) is working correctly — the
+  // confirmed 2026-07-25 incident showed a per-stage-only design can still
+  // loop if the cron path that decides whether to retrigger an invocation
+  // at all doesn't consult those counters. Fails closed: never calls
+  // Anthropic once a batch crosses the ceiling, and trips the global
+  // circuit breaker so the condition is visible platform-wide, not just
+  // silently absorbed by this one batch refusing further calls.
+  if (gw.parentJobId) {
+    const { data: ceilingData, error: ceilingErr } = await gw.supabase.rpc('increment_batch_ai_attempts', {
+      p_batch_id: gw.parentJobId,
+      p_max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
+    })
+    if (ceilingErr) {
+      // Best-effort in the sense that a failure to CHECK the ceiling must
+      // never itself throw and mask an otherwise-healthy call — but it is
+      // logged loudly, since a silently-failing gate here is exactly the
+      // kind of gap this migration exists to close.
+      console.error('increment_batch_ai_attempts RPC failed (proceeding without the ceiling check for this call):', ceilingErr)
+    } else {
+      const ceilingResult = (ceilingData as Array<{ attempts: number; exceeded: boolean }> | null)?.[0]
+      if (ceilingResult?.exceeded) {
+        console.log(JSON.stringify({
+          event: 'batch_ai_ceiling_exceeded', batch_id: gw.parentJobId, job_id: gw.jobId, stage: gw.stage,
+          total_ai_call_attempts: ceilingResult.attempts, max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
+        }))
+        throw Object.assign(
+          new Error(`Batch exceeded ${MAX_TOTAL_AI_ATTEMPTS_PER_BATCH} total AI call attempts — stopped before calling Anthropic to prevent a non-convergent retry loop from spending further.`),
+          { classification: 'unknown' as AnthropicFailureClassification }
+        )
+      }
+    }
+  }
 
   // Routed through the shared AI gateway (ai-gateway.ts): budget/breaker
   // check before the call (fails closed — an over-limit run stops with a
@@ -1469,7 +1522,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // plus supporting documents (confirmed via the stop_reason=max_tokens
           // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
           // 16000 for this same model/API rather than guessing at another cap.
-          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence' }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
+          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
         } catch (err) {
           // A batch's Claude call failing (a transient API error, a
           // truncated/malformed response) is a genuinely catchable,
@@ -2022,7 +2075,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             // isolate wall-clock ceiling even when this stage runs after
             // Stage 1/2 in the same invocation.
             const chunkResult = await callTool(
-              anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning' },
+              anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning', parentJobId },
               scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, STAGE3_PER_CALL_TIMEOUT_MS
             ) as ScopeReasoningResult
             chunkResults.push(chunkResult)
@@ -2278,10 +2331,42 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       return
     }
 
+    // Stage 6 failure escalation (migration 077, mirrors Stage 3's identical
+    // shouldSkipStage3Call/record_stage3_failure pattern) — closes the gap
+    // the confirmed 2026-07-25 incident exposed: Stage 6 had no equivalent
+    // to Stage 3's circuit breaker, so a deterministic Stage 6 failure had
+    // nothing stopping the recovery cron re-triggering it every ~60s
+    // indefinitely (job 8d553ebe / 52 Bendio St, stage_estimate_generation).
+    const stage6InputHash = await hashAiInput([factsBlock, scopeBlock])
+    let stage6History: Stage6FailureHistory = { inputHash: null, classification: null, count: 0 }
+    if (parentJobId) {
+      const { data: stage6FailureRow } = await supabase
+        .from('document_processing_batches')
+        .select('stage6_failure_input_hash, stage6_failure_classification, stage6_failure_count')
+        .eq('id', parentJobId)
+        .single()
+      if (stage6FailureRow) {
+        stage6History = {
+          inputHash: stage6FailureRow.stage6_failure_input_hash ?? null,
+          classification: (stage6FailureRow.stage6_failure_classification as AnthropicFailureClassification | null) ?? null,
+          count: stage6FailureRow.stage6_failure_count ?? 0,
+        }
+      }
+    }
+    if (shouldSkipStage6Call(stage6History, stage6InputHash)) {
+      console.log(JSON.stringify({
+        stage: 'generating_estimate', status: 'skipped_exhausted_retries', job_id: jobId, batch_id: parentJobId,
+        prior_classification: stage6History.classification, prior_count: stage6History.count,
+        reason: 'identical Stage 6 input already failed the maximum tolerated number of times — not resending',
+      }))
+      await fail(`Estimate generation previously failed repeatedly with an unchanged project fact base/scope (${stage6History.classification}) — resolve the underlying issue or upload additional documents before retrying.`)
+      return
+    }
+
     const estimateStartedAt = Date.now()
     let estimateResult: { line_items?: unknown[] } | null = null
     try {
-      estimateResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation' }, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
+      estimateResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation', parentJobId }, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
     } catch (err) {
       const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
       const errMessage = err instanceof Error ? err.message : String(err)
@@ -2289,6 +2374,25 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       if (isBillingHaltClassification(classification)) {
         await haltForBilling(classification, errMessage)
         return
+      }
+      // Race-safe, atomic — mirrors record_stage3_failure exactly (migration 077).
+      if (parentJobId) {
+        try {
+          const { data: recordData, error: recordErr } = await supabase.rpc('record_stage6_failure', {
+            p_batch_id: parentJobId,
+            p_input_hash: stage6InputHash,
+            p_classification: classification,
+            p_max_occurrences: maxConsecutiveOccurrences(classification),
+          })
+          if (recordErr) throw recordErr
+          const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
+          console.log(JSON.stringify({
+            event: 'stage6_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
+            consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
+          }))
+        } catch (recordErr) {
+          console.error('record_stage6_failure RPC failed:', recordErr)
+        }
       }
       await fail(`Estimate generation call failed: ${errMessage}`)
       return
@@ -2573,7 +2677,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // with the SAME prompt/scope — never a full re-estimate. Any other
       // failure (billing, validation, network) is not retried.
       const { result: recoveryResult, failureReason: recoveryFailureReason, retryAttempted } = await callWithTradeRecoveryRetry(
-        (maxTokens) => callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_recovery' }, recoverySystemPrompt, recoveryUserContent, ESTIMATE_GENERATION_TOOL, maxTokens)
+        (maxTokens) => callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_recovery', parentJobId }, recoverySystemPrompt, recoveryUserContent, ESTIMATE_GENERATION_TOOL, maxTokens)
       )
       if (recoveryFailureReason !== null) {
         console.log(JSON.stringify({ event: 'stage6_completeness_recovery_failed', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, retry_attempted: retryAttempted, error: recoveryFailureReason }))
