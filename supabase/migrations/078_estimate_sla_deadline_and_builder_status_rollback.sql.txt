@@ -1,0 +1,108 @@
+-- ROLLBACK for 078_estimate_sla_deadline_and_builder_status.sql — NOT
+-- auto-applied, kept as a .txt so it's never picked up by the migration
+-- runner.
+--
+-- Restores find_stuck_batches_needing_classification_retry/find_batches_
+-- with_claimable_work to their migration-077 definitions (drops the
+-- builder_status exclusion), drops the new functions, and drops the new
+-- estimate_runs columns. Safe: estimate_runs/estimate_run_events are not
+-- read by anything to make a live pipeline decision outside the recovery
+-- cron's own retrigger eligibility, which reverts to its migration-077
+-- behavior.
+
+CREATE OR REPLACE FUNCTION find_stuck_batches_needing_classification_retry(p_grace interval DEFAULT interval '3 minutes')
+RETURNS TABLE(batch_id uuid, job_id uuid, builder_id uuid, primary_file_id uuid) AS $$
+  SELECT b.id, b.job_id, b.builder_id, b.primary_file_id
+  FROM document_processing_batches b
+  WHERE b.status IN ('completed', 'completed_with_failures', 'failed')
+    AND b.classification_triggered = true
+    AND b.updated_at < now() - p_grace
+    AND b.stage3_failure_count = 0
+    AND b.stage6_failure_count = 0
+    AND NOT EXISTS (SELECT 1 FROM job_intake_locks l WHERE l.job_id = b.job_id);
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION find_batches_with_claimable_work()
+RETURNS TABLE(parent_job_id uuid, job_id uuid, builder_id uuid, pending_count bigint) AS $$
+  SELECT b.id, b.job_id, b.builder_id, count(j.id)
+  FROM document_processing_batches b
+  JOIN document_processing_jobs j ON j.parent_job_id = b.id
+  WHERE b.status IN ('pending', 'running')
+    AND j.status = 'pending'
+    AND j.run_after <= now()
+    AND NOT EXISTS (
+      SELECT 1 FROM files f
+      WHERE f.id = j.document_id
+        AND f.intake_status = 'failed'
+        AND f.failure_stage = 'ABANDONED'
+    )
+  GROUP BY b.id, b.job_id, b.builder_id;
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION reconcile_estimate_run(p_batch_id uuid)
+RETURNS uuid AS $$
+DECLARE
+  v_batch    document_processing_batches%ROWTYPE;
+  v_proj     estimate_run_projection;
+  v_run_id   uuid;
+  v_prev_status text;
+BEGIN
+  SELECT * INTO v_batch FROM document_processing_batches WHERE id = p_batch_id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  v_proj := derive_estimate_run_projection(p_batch_id);
+
+  SELECT status INTO v_prev_status FROM estimate_runs WHERE batch_id = p_batch_id;
+
+  INSERT INTO estimate_runs AS er (
+    job_id, builder_id, batch_id, status, quote_id,
+    documents_total, documents_processed, documents_failed,
+    blocking_questions_open, lock_held, stall_reason, failure_reason,
+    last_progress_at, completed_at, reconciled_at
+  ) VALUES (
+    v_batch.job_id, v_batch.builder_id, p_batch_id, v_proj.status, v_proj.quote_id,
+    v_proj.documents_total, v_proj.documents_processed, v_proj.documents_failed,
+    v_proj.blocking_questions_open, v_proj.lock_held, v_proj.stall_reason, v_proj.failure_reason,
+    v_proj.last_progress_at,
+    CASE WHEN v_proj.status IN ('complete', 'failed') THEN now() ELSE NULL END,
+    now()
+  )
+  ON CONFLICT (batch_id) DO UPDATE SET
+    status = EXCLUDED.status,
+    quote_id = EXCLUDED.quote_id,
+    documents_total = EXCLUDED.documents_total,
+    documents_processed = EXCLUDED.documents_processed,
+    documents_failed = EXCLUDED.documents_failed,
+    blocking_questions_open = EXCLUDED.blocking_questions_open,
+    lock_held = EXCLUDED.lock_held,
+    stall_reason = EXCLUDED.stall_reason,
+    failure_reason = EXCLUDED.failure_reason,
+    last_progress_at = EXCLUDED.last_progress_at,
+    completed_at = COALESCE(er.completed_at, EXCLUDED.completed_at),
+    reconciled_at = now()
+  RETURNING er.id INTO v_run_id;
+
+  IF v_prev_status IS DISTINCT FROM v_proj.status THEN
+    INSERT INTO estimate_run_events (estimate_run_id, from_status, to_status, detail)
+    VALUES (v_run_id, v_prev_status, v_proj.status, jsonb_build_object(
+      'documents_total', v_proj.documents_total, 'documents_processed', v_proj.documents_processed,
+      'documents_failed', v_proj.documents_failed
+    ));
+  END IF;
+
+  RETURN v_run_id;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP FUNCTION IF EXISTS estimate_reliability_summary(interval);
+DROP FUNCTION IF EXISTS enforce_estimate_deadlines();
+DROP FUNCTION IF EXISTS compute_builder_status(uuid);
+
+ALTER TABLE estimate_runs
+  DROP COLUMN IF EXISTS deadline_at,
+  DROP COLUMN IF EXISTS builder_status,
+  DROP COLUMN IF EXISTS needs_review_reason;
+
+NOTIFY pgrst, 'reload schema';

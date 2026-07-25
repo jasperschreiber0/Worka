@@ -90,6 +90,7 @@ interface RunSummary {
   job_locks_reclaimed: number
   stuck_files_retried: number
   files_permanently_failed: number
+  deadlines_enforced: number
   errors: Array<{ stage: string; message: string }>
 }
 
@@ -265,10 +266,39 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     job_locks_reclaimed: 0,
     stuck_files_retried: 0,
     files_permanently_failed: 0,
+    deadlines_enforced: 0,
     errors: [],
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey)
+
+  // ── 0. Enforce the 15-minute estimate SLA (migration 078) — independent of
+  // DOCUMENT_RECOVERY_DISABLED/AI_RECOVERY_DISABLED, deliberately: finalizing
+  // a builder_status makes no Anthropic call and triggers no worker, so
+  // there is no reason this should ever wait on either kill switch. This is
+  // what guarantees a builder returning after 15 minutes always finds
+  // ESTIMATE_READY / ESTIMATE_READY_WITH_WARNINGS / NEEDS_REVIEW, never
+  // silence — and, since find_stuck_batches_needing_classification_retry /
+  // find_batches_with_claimable_work now exclude any batch with a finalized
+  // builder_status (migration 078), running this FIRST means a run whose
+  // deadline just passed is correctly excluded from retriggering later in
+  // this SAME tick, not just on the next one.
+  try {
+    const { data, error } = await supabase.rpc('enforce_estimate_deadlines')
+    if (error) throw error
+    const enforced = (data ?? []) as Array<{ estimate_run_id: string; job_id: string; batch_id: string; builder_status: string; reason: string }>
+    summary.deadlines_enforced = enforced.length
+    for (const e of enforced) {
+      log('estimate_deadline_enforced', {
+        estimate_run_id: e.estimate_run_id, job_id: e.job_id, batch_id: e.batch_id,
+        builder_status: e.builder_status, reason: e.reason,
+      })
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    summary.errors.push({ stage: 'enforce_estimate_deadlines', message })
+    log('recovery_stage_failed', { stage: 'enforce_estimate_deadlines', error: message })
+  }
 
   // Phase 1, increment 1 (migration 056): estimate_runs is a derived
   // projection reconciled from the same tables/RPCs this route already
@@ -465,8 +495,41 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  if (AI_RECOVERY_DISABLED) {
-    log('recovery_ai_steps_skipped', { reason: 'AI_RECOVERY_DISABLED' })
+  // Check the global AI circuit breaker BEFORE deciding to retrigger
+  // anything — closes a real gap found live (2026-07-25): steps 4-5 had no
+  // awareness of system_status.ai_circuit_breaker at all, so even after an
+  // operator manually tripped it (or it auto-tripped, migration 054/077),
+  // this route kept invoking smooth-responder every ~60s regardless —
+  // pointless (the gateway's own checkBudget refuses the call downstream
+  // either way, so no additional Anthropic spend resulted) but noisy, and
+  // worse, it meant a billing-halted batch's failure was never attributed
+  // to the real cause in this route's own logs. A tripped breaker is an
+  // account-level condition (e.g. Anthropic credit exhausted, confirmed
+  // live via 203 credit_exhausted ai_operations rows over 90+ minutes on
+  // this exact incident) — retrying can never fix it, only spending more
+  // effort reproducing the identical refusal.
+  let aiCircuitBreakerTripped = false
+  try {
+    const { data: breakerRow } = await supabase
+      .from('system_status')
+      .select('value')
+      .eq('key', 'ai_circuit_breaker')
+      .single()
+    aiCircuitBreakerTripped = Boolean((breakerRow?.value as { tripped?: boolean } | null)?.tripped)
+  } catch (err) {
+    // Fail closed is the wrong instinct here specifically — if this read
+    // fails, we don't know the breaker's state, and the existing per-batch/
+    // per-file retry caps (MAX_RECOVERY_ATTEMPTS, stage3/6 escalation,
+    // total_ai_call_attempts) still bound the worst case even without this
+    // additional gate. Log and proceed rather than silently skip recovery
+    // over a transient read failure.
+    log('recovery_stage_failed', { stage: 'ai_circuit_breaker_check', error: err instanceof Error ? err.message : String(err) })
+  }
+
+  if (AI_RECOVERY_DISABLED || aiCircuitBreakerTripped) {
+    log('recovery_ai_steps_skipped', {
+      reason: AI_RECOVERY_DISABLED ? 'AI_RECOVERY_DISABLED' : 'ai_circuit_breaker_tripped',
+    })
   } else {
       // ── 4. Reclaim stale job_intake_locks and resume the pipeline itself ────
       // A dead smooth-responder run (its own EdgeRuntime.waitUntil killed
@@ -524,6 +587,31 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             if (!fileRow || ['extracted', 'failed', 'needs_info'].includes(fileRow.intake_status)) {
               await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
               continue
+            }
+
+            // SLA eligibility (migration 078): "is this incomplete AND still
+            // eligible for recovery" — this path (job_intake_locks reclaim)
+            // isn't covered by the builder_status exclusion baked into
+            // find_stuck_batches_needing_classification_retry/find_batches_
+            // with_claimable_work (those key off document_processing_batches,
+            // this one off job_intake_locks directly), so it's checked
+            // explicitly here. A batch whose 15-minute deadline has already
+            // passed is not "eligible for recovery" regardless of remaining
+            // retry-attempt budget — enforce_estimate_deadlines (step 0,
+            // above) already finalized its builder_status this same tick, so
+            // simply not retriggering it is enough; no separate lock cleanup
+            // needed here since that finalization didn't touch the lock.
+            if (fileRow.processing_batch_id) {
+              const { data: runRow } = await supabase
+                .from('estimate_runs')
+                .select('deadline_at, builder_status')
+                .eq('batch_id', fileRow.processing_batch_id)
+                .maybeSingle()
+              if (runRow?.builder_status || (runRow?.deadline_at && new Date(runRow.deadline_at).getTime() < Date.now())) {
+                await supabase.from('job_intake_locks').delete().eq('job_id', candidate.job_id)
+                log('recovery_skipped_past_deadline', { job_id: candidate.job_id, file_id: candidate.file_id, batch_id: fileRow.processing_batch_id })
+                continue
+              }
             }
 
             // Retry cap: a lock that keeps going stale means the pipeline run
@@ -758,6 +846,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     duration_ms: durationMs,
     document_recovery_enabled: !DOCUMENT_RECOVERY_DISABLED,
     ai_recovery_enabled: !AI_RECOVERY_DISABLED,
+    ai_circuit_breaker_tripped: aiCircuitBreakerTripped,
     ...summary,
   })
 
@@ -766,6 +855,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     duration_ms: durationMs,
     document_recovery_enabled: !DOCUMENT_RECOVERY_DISABLED,
     ai_recovery_enabled: !AI_RECOVERY_DISABLED,
+    ai_circuit_breaker_tripped: aiCircuitBreakerTripped,
     ...summary,
   })
 }
