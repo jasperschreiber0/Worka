@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'
-import { applyMargin, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
+import { calculateClientPrice } from '@/lib/pricing'
 import { isDemoMode } from '@/lib/auth/api-auth'
 import { computeLastActivityByJob } from '@/lib/job-activity'
 import { computeJobFeedAttention, BUCKET_ORDER, type JobBucket } from '@/lib/job-attention'
@@ -349,19 +349,38 @@ export async function GET() {
     if (pipelineJobIds.length > 0) {
       const { data: pipelineQuotes } = await supabase
         .from('quotes')
-        .select('job_id, total_cost, margin_pct, version, status')
+        .select('id, job_id, total_cost, margin_pct, version, status')
         .in('job_id', pipelineJobIds)
         .neq('status', 'rejected')
 
-      const latestByJob = new Map<string, { total_cost: number | null; margin_pct: number | null; version: number }>()
+      const latestByJob = new Map<string, { id: string; total_cost: number | null; margin_pct: number | null; version: number }>()
       for (const q of pipelineQuotes ?? []) {
         const existing = latestByJob.get(q.job_id)
         if (!existing || q.version > existing.version) latestByJob.set(q.job_id, q)
       }
 
+      // Canonical: sum of each line item's own margin_pct-marked-up total —
+      // never total_cost * quote.margin_pct, which ignores provisional
+      // sums' 0% margin and disagrees with the client_price every other
+      // surface (quote API, PDF, send, invoice, chat margin insights)
+      // already derives this way. See lib/pricing.ts's calculateClientPrice.
+      const latestQuoteIds = Array.from(latestByJob.values()).map((q) => q.id)
+      const { data: pipelineLineItems } = latestQuoteIds.length > 0
+        ? await supabase
+            .from('quote_line_items')
+            .select('quote_id, total, margin_pct, assumption_status')
+            .in('quote_id', latestQuoteIds)
+        : { data: [] }
+      const itemsByQuote = new Map<string, Array<{ total: number | null; margin_pct: number | null; assumption_status: string | null }>>()
+      for (const li of pipelineLineItems ?? []) {
+        const arr = itemsByQuote.get(li.quote_id) ?? []
+        arr.push(li)
+        itemsByQuote.set(li.quote_id, arr)
+      }
+
       Array.from(latestByJob.entries()).forEach(([jobId, q]) => {
         if (q.total_cost === null) return
-        estimatedValueByJob.set(jobId, applyMargin(q.total_cost, q.margin_pct ?? DEFAULT_MARGIN_PCT))
+        estimatedValueByJob.set(jobId, calculateClientPrice(itemsByQuote.get(q.id) ?? []))
       })
       pipelineValue = Array.from(estimatedValueByJob.values()).reduce((sum, v) => sum + v, 0)
     }
