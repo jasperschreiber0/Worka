@@ -72,6 +72,30 @@ export async function POST(
       return NextResponse.json({ error: 'Failed to load quote line items' }, { status: 500 })
     }
 
+    // Unresolved conservative assumptions (non-blocking-estimation defaults —
+    // gate IS NULL AND line_item_id IS NULL distinguishes these from Gate 1-3
+    // per-line assumptions, which are never touched here). Quote lifecycle
+    // integrity fix: revise previously copied line items and qa_report but
+    // never these rows, so a quote WorkA correctly refused to send (an
+    // unresolved "blocking" clarifying question) could be revised into a
+    // fresh draft with zero assumption rows — the send gate
+    // (getSendBlockingReasons) would then find nothing to block on, even
+    // though the underlying uncertainty was never actually resolved. Only
+    // unresolved rows are copied — a resolved one carries no risk to
+    // preserve, and re-copying it would just be dead weight on the new quote.
+    const { data: unresolvedConservativeAssumptions, error: assumptionsErr } = await supabase
+      .from('assumptions')
+      .select('*')
+      .eq('quote_id', quoteId)
+      .is('gate', null)
+      .is('line_item_id', null)
+      .is('resolution_type', null)
+
+    if (assumptionsErr) {
+      console.error('[quotes/revise] conservative assumption fetch failed:', assumptionsErr.message)
+      return NextResponse.json({ error: 'Failed to load quote assumptions' }, { status: 500 })
+    }
+
     const newVersion = (existingQuote.version ?? 1) + 1
 
     const {
@@ -83,6 +107,14 @@ export async function POST(
       // the instant this insert runs. New quotes always start not-current —
       // set_current_quote below is what correctly flips ownership over.
       is_current: _oldIsCurrent,
+      // Also deliberately NOT carried over (quote lifecycle integrity fix):
+      // a copied qa_report would be a stale snapshot from the OLD quote,
+      // and — critically — a non-null value here suppresses the quote GET
+      // route's existing lazy-refresh-on-GET fallback (it only runs
+      // runQualityAssurance when qa_report is null). Left null here so that
+      // fallback stays live as a safety net even if the explicit
+      // runQualityAssurance call below (best-effort, never throws) fails.
+      qa_report: _oldQaReport,
       ...quoteFields
     } = existingQuote as Record<string, unknown>
 
@@ -122,7 +154,38 @@ export async function POST(
       }
     }
 
+    // Quote lifecycle integrity fix (see the fetch above): carry forward
+    // every unresolved conservative assumption so the send gate
+    // (getSendBlockingReasons) sees the same unresolved risk on the revised
+    // quote that it saw on the original — a revision must never be a way to
+    // silently shed a "blocking" clarifying question WorkA never actually
+    // got an answer to. New ids (never reuse the old row's id — it's a
+    // separate row on a separate quote), line_item_id/gate stay null by
+    // construction (that's what the fetch filtered on), resolution stays
+    // unresolved (that's the whole point of only copying these rows).
+    if ((unresolvedConservativeAssumptions ?? []).length > 0) {
+      const newAssumptions = (unresolvedConservativeAssumptions ?? []).map((a: Record<string, unknown>) => {
+        const { id: _assumptionId, quote_id: _assumptionQuoteId, created_at: _assumptionCreatedAt, ...assumptionFields } = a
+        return { ...assumptionFields, quote_id: newQuote.id }
+      })
+
+      const { error: insertAssumptionsErr } = await supabase.from('assumptions').insert(newAssumptions)
+      if (insertAssumptionsErr) {
+        console.error('[quotes/revise] conservative assumption copy failed:', insertAssumptionsErr.message)
+        return NextResponse.json({ error: 'Failed to copy quote assumptions' }, { status: 500 })
+      }
+    }
+
     await recomputeQuoteTotals(supabase, newQuote.id)
+
+    // Recalculated, not copied (qa_report was stripped from the insert
+    // above) — the new quote gets its own accurate QA state, including a
+    // fresh missing-trade check against its own (copied) line items, rather
+    // than trusting a snapshot computed for a different quote row. Same
+    // best-effort semantics as everywhere else this is called — never
+    // blocks the revision itself from succeeding.
+    const { runQualityAssurance } = await import('@/lib/estimating/qa')
+    await runQualityAssurance(supabase, newQuote.id, newQuote.job_id)
 
     const response: ReviseResponse = { new_quote_id: newQuote.id, version: newQuote.version }
     return NextResponse.json(response, { status: 201 })
