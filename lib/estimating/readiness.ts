@@ -188,17 +188,37 @@ export interface SendBlockingMissingTrade {
 // one shared function so the definition of "unresolved conservative
 // assumption" can't drift between the routes that read it and the routes
 // that enforce on it.
+// Two functions, not one parameterized by a runtime `columns: string` —
+// supabase-js's `.select()` types resolve the returned row shape from a
+// *literal* string argument; a variable typed as plain `string` (even with
+// a literal default) makes it fall back to a `{ error: true } & string`
+// placeholder type, which fails to build wherever the result is later spread
+// or destructured (confirmed: broke the production build in revise/route.ts,
+// which needs the full rows, not just ids). Two thin literal-select
+// functions avoid the fallback entirely.
+
+/** Cheap existence/count check — used by send and confirm-send's send-gate. */
 export async function getUnresolvedConservativeAssumptions(
   supabase: SupabaseClient,
-  quoteId: string,
-  // Callers that only need a count (send, confirm-send) use the cheap
-  // default; revise/route.ts passes '*' since it copies the full rows
-  // forward onto the new quote version.
-  columns: string = 'id'
+  quoteId: string
 ) {
   return supabase
     .from('assumptions')
-    .select(columns)
+    .select('id')
+    .eq('quote_id', quoteId)
+    .is('gate', null)
+    .is('line_item_id', null)
+    .is('resolution_type', null)
+}
+
+/** Full rows — used by revise/route.ts, which copies them onto the new quote version. */
+export async function getUnresolvedConservativeAssumptionRows(
+  supabase: SupabaseClient,
+  quoteId: string
+) {
+  return supabase
+    .from('assumptions')
+    .select('*')
     .eq('quote_id', quoteId)
     .is('gate', null)
     .is('line_item_id', null)

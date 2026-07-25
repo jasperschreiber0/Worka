@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { DEMO_QUOTE } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { recomputeQuoteTotals } from '@/lib/pricing'
-import { getUnresolvedConservativeAssumptions } from '@/lib/estimating/readiness'
+import { getUnresolvedConservativeAssumptionRows } from '@/lib/estimating/readiness'
 import { runInBackground } from '@/lib/run-background'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ export async function POST(
     // though the underlying uncertainty was never actually resolved. Only
     // unresolved rows are copied — a resolved one carries no risk to
     // preserve, and re-copying it would just be dead weight on the new quote.
-    const { data: unresolvedConservativeAssumptions, error: assumptionsErr } = await getUnresolvedConservativeAssumptions(supabase, quoteId, '*')
+    const { data: unresolvedConservativeAssumptions, error: assumptionsErr } = await getUnresolvedConservativeAssumptionRows(supabase, quoteId)
 
     if (assumptionsErr) {
       console.error('[quotes/revise] conservative assumption fetch failed:', assumptionsErr.message)
