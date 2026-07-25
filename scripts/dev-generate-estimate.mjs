@@ -451,7 +451,13 @@ async function main() {
       unit: item.manual_input_required ? null : (item.unit ?? null),
       confidence: item.confidence ?? 50, dimensions_string: item.dimensions_string ?? null,
       is_assumption: item.is_assumption ?? false, assumption_status: item.assumption_status ?? null,
-      pricing_type: item.pricing_type ?? 'measured', source_ref: item.source_ref ?? null,
+      // quote_line_items.source_ref is varchar(100) — Claude occasionally
+      // writes a longer note here instead of a short drawing reference
+      // ("A3.1"). Truncate rather than reject the whole insert over one
+      // field on one line item (confirmed on a real run: this alone failed
+      // an otherwise-good 60+ item takeoff).
+      pricing_type: item.pricing_type ?? 'measured',
+      source_ref: item.source_ref ? String(item.source_ref).slice(0, 100) : null,
       margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
     }))
   const { data: insertedItems, error: liErr } = await supabase
