@@ -11,6 +11,11 @@
 // rate = null / total = null and is simply not counted in the quote total.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
+// Relative, not the '@/*' alias used elsewhere — this file must resolve
+// identically under plain `node --experimental-strip-types` (the dev
+// scripts import it directly) and under Next.js/webpack. Same reasoning
+// pipeline-logic.ts's own cross-runtime imports document.
+import { tradeCategoryName } from './trade-taxonomy.ts'
 
 export const DEFAULT_MARGIN_PCT = 18
 
@@ -58,6 +63,11 @@ export interface PriceableItem {
   description: string
   quantity: number | null
   unit: string | null
+  /** Optional — when present, priceLineItems takes the MIN of this and any
+   *  fallback tier's own confidence (weakest-link, same philosophy as
+   *  computeQuoteTotals), so a low-confidence pricing tier can never make a
+   *  quote look more certain than it is. */
+  confidence?: number | null
 }
 
 export interface ResolvedRate {
@@ -129,7 +139,7 @@ const TOKEN_SYNONYMS: Record<string, string> = {
   'scaffold': 'scaffolding',
 }
 
-function tokenize(text: string): Set<string> {
+export function tokenize(text: string): Set<string> {
   const out = new Set<string>()
   for (const raw of text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
     if (raw.length < 2 || STOP_WORDS.has(raw)) continue
@@ -141,7 +151,7 @@ function tokenize(text: string): Set<string> {
   return out
 }
 
-interface CatalogueEntry {
+export interface CatalogueEntry {
   line_item_key: string
   trade_category_id: number
   description: string
@@ -149,20 +159,37 @@ interface CatalogueEntry {
   tokens: Set<string>
 }
 
+export type MatchStrength = 'exact' | 'normalized'
+
+export interface CatalogueMatch {
+  key: string
+  strength: MatchStrength
+}
+
 /**
  * Match a line item description to a catalogue line_item_key.
  * Requires same trade category and a compatible unit; scores by token overlap.
+ *
+ * strength: 'exact' when every one of the catalogue entry's tokens is present
+ * in the item's own tokens (branded/verbose descriptions routinely contain
+ * the catalogue's plain-language term plus extra product detail — e.g.
+ * "VELUX Solar Powered Skylight" fully contains a "skylight" entry's tokens
+ * even though the strings don't match verbatim). 'normalized' is a partial
+ * overlap — real signal (via TOKEN_SYNONYMS/singularisation), but weaker:
+ * some of the catalogue entry's own concept isn't accounted for in the item
+ * description, so this is a plausible match, not a confirmed one.
  */
-function matchLineItemKey(
+export function matchLineItemKey(
   item: PriceableItem,
   catalogue: CatalogueEntry[]
-): string | null {
+): CatalogueMatch | null {
   const itemTokens = tokenize(item.description)
   const itemUnit = normalizeUnit(item.unit)
   if (itemTokens.size === 0) return null
 
   let bestKey: string | null = null
   let bestScore = 0
+  let bestEntryTokenCount = 0
 
   for (const entry of catalogue) {
     if (entry.trade_category_id !== item.trade_category_id) continue
@@ -176,10 +203,13 @@ function matchLineItemKey(
     if (score > bestScore) {
       bestScore = score
       bestKey = entry.line_item_key
+      bestEntryTokenCount = entry.tokens.size
     }
   }
 
-  return bestScore >= 1 ? bestKey : null
+  if (bestScore < 1 || !bestKey) return null
+  const strength: MatchStrength = bestEntryTokenCount > 0 && bestScore >= bestEntryTokenCount ? 'exact' : 'normalized'
+  return { key: bestKey, strength }
 }
 
 // ─── Rate resolution (5-tier hierarchy) ───────────────────────────────────────
@@ -204,6 +234,7 @@ interface RateRow {
 
 interface StateRateRow extends RateRow {
   state: string | null
+  trade_category_id: number
 }
 
 interface NetworkRateRow {
@@ -212,7 +243,7 @@ interface NetworkRateRow {
   rate_p50: number | null
 }
 
-interface RateContext {
+export interface RateContext {
   learned: RateRow[]
   preferences: RateRow[]
   supplier: RateRow[]
@@ -237,7 +268,7 @@ async function loadRateContext(
     supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50').or(stateFilter),
   ])
 
-  const platform = (platformRes.data ?? []) as Array<StateRateRow & { trade_category_id: number; description: string }>
+  const platform = (platformRes.data ?? []) as Array<StateRateRow & { description: string }>
 
   // The matching catalogue is built from national default rows (state IS NULL)
   const catalogue: CatalogueEntry[] = platform
@@ -261,7 +292,7 @@ async function loadRateContext(
   }
 }
 
-function resolveRateForKey(
+export function resolveRateForKey(
   key: string,
   itemUnit: string | null,
   ctx: RateContext
@@ -309,6 +340,156 @@ function resolveRateForKey(
   return null
 }
 
+/**
+ * Category fallback (tier 3 of the measured-item fallback chain, migration
+ * 072): when no catalogue entry matches this item's description at all —
+ * confirmed on a real quote to be common for branded/specific products
+ * (skylights, floor wastes, mirrors) the 630-row cost_rates seed simply has
+ * no entry for, at any match strength — fall back to the average of every
+ * national platform rate in the same trade + compatible unit. A rough
+ * per-unit proxy, not a specific-item price, which is exactly why it's a
+ * distinct, lower-confidence pricing_source rather than being folded into
+ * cost_rates_normalized.
+ */
+export function resolveCategoryFallbackRate(
+  tradeCategoryId: number,
+  itemUnit: string | null,
+  ctx: RateContext
+): { rate: number; sampleCount: number } | null {
+  if (!itemUnit) return null
+  const candidates = ctx.platform.filter(
+    (r) => r.state === null && r.trade_category_id === tradeCategoryId && normalizeUnit(r.unit) === itemUnit
+  )
+  if (candidates.length === 0) return null
+  const avg = candidates.reduce((sum, r) => sum + r.rate, 0) / candidates.length
+  return { rate: round2(avg), sampleCount: candidates.length }
+}
+
+// ─── AI measured-rate fallback (tier 4, migration 072) ─────────────────────
+// Only reached once exact/normalized/category matching have all failed. This
+// is deliberately distinct from an AI Allowance: an allowance is for scope
+// with NO measurable quantity ("I need a reasonable budget figure"); this is
+// for scope that WAS measured — a real quantity and unit already exist — but
+// nothing in the rate hierarchy could price it. The prompt is scoped tightly
+// to proposing a $/unit RATE for the given quantity/unit; it is never asked
+// for (and the tool schema has no field for) a quantity — that's already
+// fixed by Stage 6, and this function has no business revising it.
+
+/**
+ * Pure gating predicate, extracted so the "when is AI allowed to propose a
+ * measured rate" rule is independently testable without a live Claude/DB
+ * call. An item only reaches this tier if every earlier tier already failed
+ * to match it AND it has a genuine quantity + unit — this is what keeps the
+ * distinction from AI Allowance real: no quantity means no eligibility here,
+ * full stop, regardless of how clear the description is.
+ */
+export function isEligibleForAiMeasuredRate(item: { matched: boolean; unit: string | null; quantity: number | null }): boolean {
+  if (item.matched) return false
+  if (!item.unit) return false
+  if (item.quantity === null || item.quantity <= 0) return false
+  return true
+}
+
+interface AiRateCandidate {
+  index: number
+  description: string
+  tradeName: string
+  unit: string
+  quantity: number | null
+}
+
+interface AiRateEstimate {
+  rate: number | null
+  reasoning: string | null
+  confidence: number | null
+}
+
+const AI_RATE_TOOL = {
+  name: 'estimate_measured_rates',
+  description: 'Propose a $/unit cost rate for each line item — never a quantity, which is already fixed.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      estimates: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            index: { type: 'integer', description: 'The item index from the input list.' },
+            rate: { type: ['number', 'null'], description: 'Your best-estimate AUD $/unit rate (supply + install) for this exact item and unit. Null only if you genuinely cannot estimate any reasonable rate for this description.' },
+            reasoning: { type: 'string', description: 'One sentence — what this rate is based on (e.g. comparable products/trade norms).' },
+            confidence: { type: 'integer', minimum: 0, maximum: 100, description: 'Confidence in this rate specifically. This is a judgment call standing in for a missing rate-table match, so should rarely exceed 60.' },
+          },
+          required: ['index', 'rate', 'reasoning', 'confidence'],
+        },
+      },
+    },
+    required: ['estimates'],
+  },
+}
+
+/**
+ * Batches every item that reached this tier into one Claude call (mirrors
+ * Stage 6's own batching philosophy — one call, not N). Routed through the
+ * shared spend-protected gateway (ai-gateway.ts) like every other Anthropic
+ * call in the codebase; never called directly. Best-effort: any failure
+ * (missing key, network, malformed response) returns an empty map, leaving
+ * those items to fall through to 'unresolved' — this must never throw and
+ * break the pricing pass it's a fallback tier within.
+ */
+async function resolveAiMeasuredRates(
+  supabase: SupabaseClient,
+  builderId: string,
+  candidates: AiRateCandidate[]
+): Promise<Map<number, AiRateEstimate>> {
+  const results = new Map<number, AiRateEstimate>()
+  if (candidates.length === 0) return results
+
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+  if (!anthropicKey) return results
+
+  try {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk')
+    // Relative, same cross-runtime reason as the trade-taxonomy import above.
+    const { guardedClaudeCall } = await import('../supabase/functions/smooth-responder/ai-gateway.ts')
+    const client = new Anthropic({ apiKey: anthropicKey })
+
+    const itemsBlock = candidates
+      .map((c) => `${c.index}. [${c.tradeName}] ${c.description} — quantity: ${c.quantity ?? 'unknown'} ${c.unit}`)
+      .join('\n')
+
+    const prompt = `You are a senior Australian residential quantity surveyor. Each item below has an already-confirmed quantity and unit — do NOT question or revise them. None of these matched the platform's cost rate catalogue (often because they're specific branded products), so propose your own best-estimate $/unit rate (supply + install, AUD, excluding margin and GST) for each, based on trade norms and comparable products.\n\n${itemsBlock}\n\nUse the estimate_measured_rates tool.`
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { response } = await guardedClaudeCall<any>(
+      { supabase, attribution: { kind: 'builder', builderId }, callSite: 'measured_rate_fallback', model: 'claude-sonnet-4-6' },
+      (signal) => client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [AI_RATE_TOOL],
+        tool_choice: { type: 'tool', name: AI_RATE_TOOL.name },
+      }, { signal }),
+      { timeoutMs: 60_000, maxRetries: 1, label: 'measured_rate_fallback' }
+    )
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolUse = response.content?.find((b: any) => b.type === 'tool_use')
+    const estimates = (toolUse?.input?.estimates ?? []) as Array<{ index: number; rate: number | null; reasoning: string; confidence: number }>
+    for (const e of estimates) {
+      if (typeof e.index !== 'number') continue
+      results.set(e.index, {
+        rate: typeof e.rate === 'number' && isFinite(e.rate) && e.rate > 0 ? e.rate : null,
+        reasoning: e.reasoning ?? null,
+        confidence: typeof e.confidence === 'number' ? e.confidence : null,
+      })
+    }
+  } catch (err) {
+    console.error('resolveAiMeasuredRates failed:', err)
+  }
+  return results
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 function round2(n: number): number {
@@ -324,41 +505,141 @@ export function applyMargin(cost: number, marginPct: number): number {
   return round2(cost * (1 + marginPct / 100))
 }
 
+export type MeasuredPricingSource = 'cost_rates_exact' | 'cost_rates_normalized' | 'builder_rate' | 'network_rate' | 'category_rate' | 'ai_measured_rate' | 'unresolved'
+
+export interface PricedItemResult {
+  rate: number | null
+  total: number | null
+  pricing_source: MeasuredPricingSource | null
+  pricing_basis: string | null
+  confidence: number | null
+}
+
+const RATE_SOURCE_TO_PRICING_SOURCE: Record<RateSource, MeasuredPricingSource> = {
+  learned: 'builder_rate', preference: 'builder_rate', supplier: 'builder_rate',
+  platform: 'cost_rates_exact', // overridden to cost_rates_normalized below when the match was partial
+  network: 'network_rate',
+}
+
 /**
- * Price a batch of extracted line items. Returns each item with rate and total
- * filled in where a rate could be resolved (null otherwise — never throws).
+ * Price a batch of extracted line items via the measured-item fallback
+ * chain (migration 072):
+ *   exact cost_rates match -> normalized cost_rates match ->
+ *   same-trade/unit category average -> AI measured-rate estimate ->
+ *   unresolved
+ * Returns each item with rate/total AND its pricing_source/pricing_basis/
+ * confidence filled in — never throws, never invents a quantity (only ever
+ * proposes a $/unit RATE for a quantity that already exists).
  */
 export async function priceLineItems<T extends PriceableItem>(
   supabase: SupabaseClient,
   builderId: string,
   builderState: string | null,
   items: T[]
-): Promise<Array<T & { rate: number | null; total: number | null }>> {
+): Promise<Array<Omit<T, 'confidence'> & PricedItemResult>> {
   let ctx: RateContext
   try {
     ctx = await loadRateContext(supabase, builderId, builderState)
   } catch (err) {
     console.error('priceLineItems: failed to load rate context', err)
-    return items.map((item) => ({ ...item, rate: null, total: null }))
+    return items.map((item) => ({ ...item, rate: null, total: null, pricing_source: null, pricing_basis: null, confidence: item.confidence ?? null }))
   }
 
-  return items.map((item) => {
+  const withMinConfidence = (item: T, tierConfidence: number | null): number | null => {
+    if (item.confidence == null) return tierConfidence
+    if (tierConfidence == null) return item.confidence
+    return Math.min(item.confidence, tierConfidence)
+  }
+
+  // Tier 1-3: exact / normalized cost_rates + the existing 5-tier hierarchy
+  // (learned/preference/supplier/platform/network), run synchronously first
+  // since these are cheap DB lookups with no external call.
+  const afterCatalogue = items.map((item) => {
     // No unit means the quantity cannot be safely priced — the builder must
     // resolve the assumption first (never invent quantities)
     if (!item.unit) {
-      return { ...item, rate: null, total: null }
+      return { item, rate: null as number | null, total: null as number | null, pricing_source: null as MeasuredPricingSource | null, pricing_basis: null as string | null, matched: false }
     }
 
-    const key = matchLineItemKey(item, ctx.catalogue)
-    const resolved = key ? resolveRateForKey(key, normalizeUnit(item.unit), ctx) : null
+    const match = matchLineItemKey(item, ctx.catalogue)
+    const resolved = match ? resolveRateForKey(match.key, normalizeUnit(item.unit), ctx) : null
 
-    const rate = resolved?.rate ?? null
-    const total =
-      rate !== null && item.quantity !== null && item.quantity > 0
-        ? round2(item.quantity * rate)
-        : null
+    if (!resolved) {
+      return { item, rate: null, total: null, pricing_source: null, pricing_basis: null, matched: false }
+    }
 
-    return { ...item, rate, total }
+    const pricingSource: MeasuredPricingSource =
+      resolved.source === 'platform' && match?.strength === 'normalized'
+        ? 'cost_rates_normalized'
+        : RATE_SOURCE_TO_PRICING_SOURCE[resolved.source]
+
+    const rate = resolved.rate
+    const total = item.quantity !== null && item.quantity > 0 ? round2(item.quantity * rate) : null
+    return { item, rate, total, pricing_source: pricingSource, pricing_basis: null, matched: true }
+  })
+
+  // Tier 3b: category fallback — same trade, same unit, no item-specific
+  // match required. Cheap (in-memory average over already-loaded rates), no
+  // external call, so still run synchronously before the AI tier.
+  const afterCategory = afterCatalogue.map((r) => {
+    if (r.matched || !r.item.unit) return r
+    const fallback = resolveCategoryFallbackRate(r.item.trade_category_id, normalizeUnit(r.item.unit), ctx)
+    if (!fallback) return r
+    const total = r.item.quantity !== null && r.item.quantity > 0 ? round2(r.item.quantity * fallback.rate) : null
+    const tradeName = tradeCategoryName(r.item.trade_category_id)
+    return {
+      ...r,
+      rate: fallback.rate, total,
+      pricing_source: 'category_rate' as MeasuredPricingSource,
+      pricing_basis: `No exact cost rate match. Used ${tradeName} category average (${fallback.sampleCount} comparable rate${fallback.sampleCount === 1 ? '' : 's'}).`,
+      matched: true,
+    }
+  })
+
+  // Tier 4: AI measured-rate — only items that are still unmatched AND have
+  // a real quantity+unit (guarantees this is a "measured but unpriceable"
+  // case, never a stand-in for a genuinely unmeasured item — that's what AI
+  // Allowance, a completely separate code path in Stage 6, is for).
+  const aiCandidates: AiRateCandidate[] = []
+  afterCategory.forEach((r, index) => {
+    if (!isEligibleForAiMeasuredRate({ matched: r.matched, unit: r.item.unit, quantity: r.item.quantity })) return
+    aiCandidates.push({
+      index, description: r.item.description, tradeName: tradeCategoryName(r.item.trade_category_id),
+      unit: r.item.unit as string, quantity: r.item.quantity,
+    })
+  })
+  const aiResults = await resolveAiMeasuredRates(supabase, builderId, aiCandidates)
+
+  const final = afterCategory.map((r, index) => {
+    if (r.matched) return r
+    const ai = aiResults.get(index)
+    if (!ai || ai.rate === null) {
+      return { ...r, pricing_source: 'unresolved' as MeasuredPricingSource }
+    }
+    const total = r.item.quantity !== null && r.item.quantity > 0 ? round2(r.item.quantity * ai.rate) : null
+    return {
+      ...r,
+      rate: ai.rate, total,
+      pricing_source: 'ai_measured_rate' as MeasuredPricingSource,
+      pricing_basis: ai.reasoning,
+      matched: true,
+      _aiConfidence: ai.confidence,
+    }
+  })
+
+  return final.map((r) => {
+    const aiConfidence = (r as { _aiConfidence?: number | null })._aiConfidence ?? null
+    const tierConfidence = r.pricing_source === 'ai_measured_rate' ? aiConfidence
+      : r.pricing_source === 'category_rate' ? 55
+      : r.pricing_source === 'cost_rates_normalized' ? 70
+      : r.pricing_source === 'cost_rates_exact' ? 90
+      : null
+    return {
+      ...r.item,
+      rate: r.rate, total: r.total,
+      pricing_source: r.pricing_source, pricing_basis: r.pricing_basis,
+      confidence: withMinConfidence(r.item, tierConfidence),
+    }
   })
 }
 
@@ -374,13 +655,20 @@ export async function priceLineItems<T extends PriceableItem>(
  * because both happen to render as a dollar figure. 100 when there are no
  * included items (nothing to fall short of covering).
  */
+// Sources that reflect an actual market/measured rate, not a judgment call —
+// the distinction pricing_match_rate_pct exists to draw (migration 072).
+// ai_measured_rate, category_rate, ai_allowance, and manual are all
+// legitimate ways to get a price, but none of them are a confirmed rate.
+const RELIABLE_PRICING_SOURCES = new Set(['cost_rates_exact', 'cost_rates_normalized', 'document', 'builder_rate', 'network_rate'])
+
 export function computeQuoteTotals(
   items: Array<{
     total: number | null
     confidence: number | null
     assumption_status: string | null
+    pricing_source?: string | null
   }>
-): { total_cost: number; confidence_score: number; price_coverage_pct: number } {
+): { total_cost: number; confidence_score: number; price_coverage_pct: number; pricing_match_rate_pct: number } {
   const included = items.filter((i) => i.assumption_status !== 'excluded')
   const total_cost = round2(included.reduce((sum, i) => sum + (i.total ?? 0), 0))
   const confidences = included
@@ -389,7 +677,9 @@ export function computeQuoteTotals(
   const confidence_score = confidences.length > 0 ? Math.min(...confidences) : 0
   const pricedCount = included.filter((i) => i.total !== null).length
   const price_coverage_pct = included.length > 0 ? round2((pricedCount / included.length) * 100) : 100
-  return { total_cost, confidence_score, price_coverage_pct }
+  const reliableCount = included.filter((i) => i.pricing_source && RELIABLE_PRICING_SOURCES.has(i.pricing_source)).length
+  const pricing_match_rate_pct = included.length > 0 ? round2((reliableCount / included.length) * 100) : 100
+  return { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct }
 }
 
 /**
@@ -414,7 +704,7 @@ export async function ensureQuotePriced(
 
     const { data: items } = await supabase
       .from('quote_line_items')
-      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status')
+      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status, pricing_source')
       .eq('quote_id', quoteId)
     if (!items || items.length === 0) return false
 
@@ -460,6 +750,7 @@ export async function ensureQuotePriced(
         id: unpriced[i].id, quote_id: quoteId,
         trade_category_id: unpriced[i].trade_category_id, description: unpriced[i].description,
         rate: p.rate, total: p.total,
+        pricing_source: p.pricing_source, pricing_basis: p.pricing_basis, confidence: p.confidence,
       }))
       .filter((row) => row.rate !== null)
 
@@ -471,7 +762,7 @@ export async function ensureQuotePriced(
     // Merge priced values back for the totals computation
     const pricedById = new Map(priced.map((p, i) => [unpriced[i].id, p]))
     const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
-    const { total_cost, confidence_score, price_coverage_pct } = computeQuoteTotals(finalItems)
+    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct } = computeQuoteTotals(finalItems)
 
     await supabase
       .from('quotes')
@@ -479,6 +770,7 @@ export async function ensureQuotePriced(
         total_cost,
         confidence_score,
         price_coverage_pct,
+        pricing_match_rate_pct,
         margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)
@@ -502,12 +794,12 @@ export async function recomputeQuoteTotals(
   try {
     const { data: items } = await supabase
       .from('quote_line_items')
-      .select('total, confidence, assumption_status')
+      .select('total, confidence, assumption_status, pricing_source')
       .eq('quote_id', quoteId)
 
     if (!items) return
 
-    const { total_cost, confidence_score, price_coverage_pct } = computeQuoteTotals(items)
+    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct } = computeQuoteTotals(items)
 
     const { data: quote } = await supabase
       .from('quotes')
@@ -521,6 +813,7 @@ export async function recomputeQuoteTotals(
         total_cost,
         confidence_score,
         price_coverage_pct,
+        pricing_match_rate_pct,
         margin_pct: quote?.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)
@@ -579,12 +872,12 @@ export async function captureLearnedRates(
         // pricing for every future quote. Only measured lines teach.
         const pricingType = (item as { pricing_type?: string | null }).pricing_type
         if (pricingType && pricingType !== 'measured') return
-        const key = matchLineItemKey({ ...item, quantity: null }, catalogue)
-        if (!key || !item.unit) return
+        const match = matchLineItemKey({ ...item, quantity: null }, catalogue)
+        if (!match || !item.unit) return
 
         const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
           p_builder_id: quote.builder_id,
-          p_line_item_key: key,
+          p_line_item_key: match.key,
           p_rate: item.rate,
           p_unit: item.unit,
         })

@@ -1,0 +1,12 @@
+-- Rollback for 072_measured_pricing_fallback.sql
+-- Not auto-applied — see the .sql.txt convention established by migrations
+-- 056-071's own rollback companions.
+
+ALTER TABLE quote_line_items DROP CONSTRAINT IF EXISTS quote_line_items_pricing_source_check;
+
+ALTER TABLE quote_line_items
+  ADD CONSTRAINT quote_line_items_pricing_source_check
+    CHECK (pricing_source IN ('document', 'cost_rates', 'builder_rate', 'network_rate', 'ai_allowance', 'manual', 'unresolved'));
+
+ALTER TABLE quotes
+  DROP COLUMN IF EXISTS pricing_match_rate_pct;

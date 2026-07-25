@@ -10,6 +10,12 @@ import {
   DEFAULT_MARGIN_PCT,
   PRICE_BASIS_LABEL,
   CLIENT_PRICE_DISCLAIMER,
+  matchLineItemKey,
+  resolveCategoryFallbackRate,
+  isEligibleForAiMeasuredRate,
+  tokenize,
+  type CatalogueEntry,
+  type RateContext,
 } from './pricing.ts'
 
 // ─── applyMargin — the only function that ever produces a client-facing price ─
@@ -149,4 +155,174 @@ test('normalizeUnit: null passes through as null (no unit is a Gate 1 condition,
 
 test('DEFAULT_MARGIN_PCT is a sane, non-zero percentage', () => {
   assert.ok(DEFAULT_MARGIN_PCT > 0 && DEFAULT_MARGIN_PCT < 100)
+})
+
+// ─── matchLineItemKey — the measured-item fallback chain (migration 072) ────
+// Confirmed on a real quote: 19/24 unpriced items had a clean, verified
+// quantity + unit but no catalogue match — mostly branded/specific product
+// descriptions. These tests build fake CatalogueEntry fixtures via the real
+// tokenize() rather than hand-writing token sets, so the tests exercise the
+// same normalization (synonyms, singularisation) the real matcher uses.
+
+function entry(description: string, tradeCategoryId: number, unit: string): CatalogueEntry {
+  return { line_item_key: description.toLowerCase().replace(/\s+/g, '_'), trade_category_id: tradeCategoryId, description, unit, tokens: tokenize(description) }
+}
+
+test('matchLineItemKey: full token containment classifies as exact', () => {
+  const catalogue = [entry('floor waste', 11, 'each')]
+  // Brodware Winslow floor waste — the exact branded example from the task —
+  // contains BOTH of the catalogue entry's tokens (floor, waste) plus extra
+  // brand detail, which is exactly the "exact" case: everything the
+  // catalogue entry means is present in the item description.
+  const match = matchLineItemKey({ trade_category_id: 11, description: 'Brodware Winslow Polished Nickel floor waste', quantity: 10, unit: 'each' }, catalogue)
+  assert.ok(match)
+  assert.equal(match?.strength, 'exact')
+})
+
+test('matchLineItemKey: partial token overlap classifies as normalized', () => {
+  const catalogue = [entry('skylight roof flashing', 3, 'each')]
+  // VELUX Solar Powered Skylight — the other branded example from the task —
+  // only shares ONE of the catalogue entry's three tokens (skylight), not
+  // roof/flashing. Real signal, but a plausible match, not a confirmed one.
+  const match = matchLineItemKey({ trade_category_id: 3, description: 'VELUX Solar Powered Skylight', quantity: 2, unit: 'each' }, catalogue)
+  assert.ok(match)
+  assert.equal(match?.strength, 'normalized')
+})
+
+test('matchLineItemKey: token synonyms feed into the same exact/normalized classification (colourbond -> colorbond)', () => {
+  const catalogue = [entry('colorbond roofing', 3, 'm2')]
+  const match = matchLineItemKey({ trade_category_id: 3, description: 'Colourbond roofing installation', quantity: 40, unit: 'm2' }, catalogue)
+  assert.ok(match)
+  // 'roofing' token literally present in both -> full containment
+  assert.equal(match?.strength, 'exact')
+})
+
+test('matchLineItemKey: no match across a different trade category, even with identical wording', () => {
+  const catalogue = [entry('floor waste', 11, 'each')]
+  const match = matchLineItemKey({ trade_category_id: 3, description: 'floor waste', quantity: 1, unit: 'each' }, catalogue)
+  assert.equal(match, null)
+})
+
+test('matchLineItemKey: no match when units are incompatible', () => {
+  const catalogue = [entry('floor waste', 11, 'lm')]
+  const match = matchLineItemKey({ trade_category_id: 11, description: 'floor waste', quantity: 1, unit: 'each' }, catalogue)
+  assert.equal(match, null)
+})
+
+test('matchLineItemKey: no match on zero token overlap — normalization does not aggressively strip meaning', () => {
+  const catalogue = [entry('floor waste', 11, 'each')]
+  const match = matchLineItemKey({ trade_category_id: 11, description: 'Kitchen island stone benchtop', quantity: 1, unit: 'each' }, catalogue)
+  assert.equal(match, null)
+})
+
+// ─── resolveCategoryFallbackRate — tier 3, same-trade/unit average ──────────
+
+function fakeRateContext(platform: RateContext['platform']): RateContext {
+  return { learned: [], preferences: [], supplier: [], platform, network: [], catalogue: [], builderState: null }
+}
+
+test('resolveCategoryFallbackRate: averages national rates within the same trade + unit', () => {
+  const ctx = fakeRateContext([
+    { line_item_key: 'a', trade_category_id: 11, unit: 'each', rate: 100, state: null },
+    { line_item_key: 'b', trade_category_id: 11, unit: 'each', rate: 150, state: null },
+    { line_item_key: 'c', trade_category_id: 11, unit: 'each', rate: 200, state: null },
+  ])
+  const result = resolveCategoryFallbackRate(11, 'each', ctx)
+  assert.equal(result?.rate, 150)
+  assert.equal(result?.sampleCount, 3)
+})
+
+test('resolveCategoryFallbackRate: excludes other trades and incompatible units', () => {
+  const ctx = fakeRateContext([
+    { line_item_key: 'a', trade_category_id: 11, unit: 'each', rate: 100, state: null },
+    { line_item_key: 'b', trade_category_id: 3, unit: 'each', rate: 999, state: null }, // wrong trade
+    { line_item_key: 'c', trade_category_id: 11, unit: 'm2', rate: 999, state: null }, // wrong unit
+  ])
+  const result = resolveCategoryFallbackRate(11, 'each', ctx)
+  assert.equal(result?.rate, 100)
+  assert.equal(result?.sampleCount, 1)
+})
+
+test('resolveCategoryFallbackRate: state-specific rows are excluded — this is a NATIONAL average only', () => {
+  const ctx = fakeRateContext([
+    { line_item_key: 'a', trade_category_id: 11, unit: 'each', rate: 100, state: null },
+    { line_item_key: 'b', trade_category_id: 11, unit: 'each', rate: 500, state: 'NSW' },
+  ])
+  const result = resolveCategoryFallbackRate(11, 'each', ctx)
+  assert.equal(result?.rate, 100)
+  assert.equal(result?.sampleCount, 1)
+})
+
+test('resolveCategoryFallbackRate: no candidates at all returns null (falls through to the AI tier)', () => {
+  const ctx = fakeRateContext([{ line_item_key: 'a', trade_category_id: 3, unit: 'each', rate: 100, state: null }])
+  assert.equal(resolveCategoryFallbackRate(11, 'each', ctx), null)
+})
+
+test('resolveCategoryFallbackRate: null unit returns null — an unmeasured item never reaches this tier via this path', () => {
+  const ctx = fakeRateContext([{ line_item_key: 'a', trade_category_id: 11, unit: 'each', rate: 100, state: null }])
+  assert.equal(resolveCategoryFallbackRate(11, null, ctx), null)
+})
+
+// ─── isEligibleForAiMeasuredRate — tier 4 gating, kept independently testable
+// from the (unmockable, real-Claude) call itself ────────────────────────────
+
+test('isEligibleForAiMeasuredRate: eligible when unmatched with a real quantity and unit', () => {
+  assert.equal(isEligibleForAiMeasuredRate({ matched: false, unit: 'each', quantity: 5 }), true)
+})
+
+test('isEligibleForAiMeasuredRate: NOT eligible once already matched by an earlier tier', () => {
+  assert.equal(isEligibleForAiMeasuredRate({ matched: true, unit: 'each', quantity: 5 }), false)
+})
+
+test('isEligibleForAiMeasuredRate: NOT eligible with no unit — this is the AI Allowance case, a different code path entirely', () => {
+  assert.equal(isEligibleForAiMeasuredRate({ matched: false, unit: null, quantity: 5 }), false)
+})
+
+test('isEligibleForAiMeasuredRate: NOT eligible with a null quantity — never invents a quantity to price against', () => {
+  assert.equal(isEligibleForAiMeasuredRate({ matched: false, unit: 'each', quantity: null }), false)
+})
+
+test('isEligibleForAiMeasuredRate: NOT eligible with a zero or negative quantity', () => {
+  assert.equal(isEligibleForAiMeasuredRate({ matched: false, unit: 'each', quantity: 0 }), false)
+  assert.equal(isEligibleForAiMeasuredRate({ matched: false, unit: 'each', quantity: -3 }), false)
+})
+
+// ─── computeQuoteTotals: pricing_match_rate_pct — distinct from price_coverage_pct ──
+
+test('pricing_match_rate_pct: 100 when every included item came from a reliable source', () => {
+  const { pricing_match_rate_pct } = computeQuoteTotals([
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 200, confidence: 90, assumption_status: null, pricing_source: 'document' },
+  ])
+  assert.equal(pricing_match_rate_pct, 100)
+})
+
+test('pricing_match_rate_pct: a fully-priced quote can still have a LOW match rate — the exact case this metric exists to catch', () => {
+  const { price_coverage_pct, pricing_match_rate_pct } = computeQuoteTotals([
+    { total: 100, confidence: 60, assumption_status: null, pricing_source: 'ai_allowance' },
+    { total: 200, confidence: 55, assumption_status: null, pricing_source: 'category_rate' },
+    { total: 300, confidence: 50, assumption_status: null, pricing_source: 'ai_measured_rate' },
+  ])
+  assert.equal(price_coverage_pct, 100) // every item has a total
+  assert.equal(pricing_match_rate_pct, 0) // none of them are a confirmed rate match
+})
+
+test('pricing_match_rate_pct: excluded items are removed from both numerator and denominator', () => {
+  const { pricing_match_rate_pct } = computeQuoteTotals([
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: null, confidence: 50, assumption_status: 'excluded', pricing_source: 'ai_measured_rate' },
+  ])
+  assert.equal(pricing_match_rate_pct, 100)
+})
+
+test('pricing_match_rate_pct: 100 (not 0/NaN) when there are no included items', () => {
+  assert.equal(computeQuoteTotals([]).pricing_match_rate_pct, 100)
+})
+
+test('pricing_match_rate_pct: an item with no pricing_source at all (not yet priced) counts as unreliable, not reliable', () => {
+  const { pricing_match_rate_pct } = computeQuoteTotals([
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: null, confidence: null, assumption_status: null, pricing_source: null },
+  ])
+  assert.equal(pricing_match_rate_pct, 50)
 })

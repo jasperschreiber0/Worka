@@ -170,12 +170,13 @@ export async function runQualityAssurance(
 
     const { data: quote } = await supabase
       .from('quotes')
-      .select('confidence_score, document_contribution, price_coverage_pct')
+      .select('confidence_score, document_contribution, price_coverage_pct, pricing_match_rate_pct')
       .eq('id', quoteId)
       .single()
 
     const overallConfidence = quote?.confidence_score ?? null
     const priceCoveragePct = quote?.price_coverage_pct ?? null
+    const pricingMatchRatePct = quote?.pricing_match_rate_pct ?? null
 
     // ── Price coverage — a top risk, not a footnote, below 90% ──
     // ensureQuotePriced/recomputeQuoteTotals (lib/pricing.ts) already
@@ -185,6 +186,31 @@ export async function runQualityAssurance(
     if (priceCoveragePct !== null && priceCoveragePct < 90) {
       topRisks.push(`Only ${priceCoveragePct}% of line items have a price — the total reflects that partial coverage, not the full scope.`)
       recommendedActions.push('Review unpriced and allowance line items before treating this total as final.')
+    }
+
+    // ── Pricing match rate — a distinct signal from coverage (migration
+    // 072): coverage answers "does every line have a number," this answers
+    // "how many of those numbers came from an actual matched rate" rather
+    // than a category average, an AI estimate, or an allowance. A quote can
+    // have 100% coverage and a low match rate — that combination is exactly
+    // the case a builder most needs flagged, since it looks complete but
+    // rests mostly on judgment calls.
+    if (pricingMatchRatePct !== null && pricingMatchRatePct < 50) {
+      reviewItems.push(`Only ${pricingMatchRatePct}% of priced line items came from a confirmed rate match — the rest are category averages, AI estimates, or allowances. Worth a closer read before relying on individual line prices.`)
+    }
+
+    // Per-source-tier counts — the observability this migration asks for:
+    // how many items landed at each rung of the fallback chain, not just
+    // the two aggregate percentages above.
+    const { data: sourceRows } = await supabase
+      .from('quote_line_items')
+      .select('pricing_source, assumption_status')
+      .eq('quote_id', quoteId)
+    const pricingTierBreakdown: Record<string, number> = {}
+    for (const row of (sourceRows ?? []) as Array<{ pricing_source: string | null; assumption_status: string | null }>) {
+      if (row.assumption_status === 'excluded') continue
+      const key = row.pricing_source ?? 'not_yet_priced'
+      pricingTierBreakdown[key] = (pricingTierBreakdown[key] ?? 0) + 1
     }
 
     // ── Documents that contributed nothing ──
@@ -224,6 +250,8 @@ export async function runQualityAssurance(
       missing_trades: missingTrades,
       duplicate_descriptions: duplicateDescriptions.slice(0, 10),
       price_coverage_pct: priceCoveragePct,
+      pricing_match_rate_pct: pricingMatchRatePct,
+      pricing_tier_breakdown: pricingTierBreakdown,
     }
 
     await supabase

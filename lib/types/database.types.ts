@@ -125,6 +125,11 @@ export interface Quote {
   /** % of included line items with a non-null total — migration 071, computed
    *  by computeQuoteTotals alongside total_cost/confidence_score. */
   price_coverage_pct: number | null
+  /** % of included line items priced by a RELIABLE measured source — migration
+   *  072. Distinct from price_coverage_pct: answers "has reliable measured
+   *  pricing," not just "has a price" (an allowance or AI-estimated rate
+   *  counts toward the latter but not this). */
+  pricing_match_rate_pct: number | null
 }
 
 export interface DocumentContributionReport {
@@ -144,6 +149,12 @@ export interface QAReport {
   /** Migration 071 — mirrors quotes.price_coverage_pct, carried here so the
    *  estimate summary surfaces it alongside the other review signals. */
   price_coverage_pct: number | null
+  /** Migration 072 — mirrors quotes.pricing_match_rate_pct. */
+  pricing_match_rate_pct: number | null
+  /** Migration 072 — count of included line items per pricing_source, for
+   *  observability: how many were exact/normalized cost_rates matches vs.
+   *  category fallbacks vs. AI-estimated vs. still unresolved. */
+  pricing_tier_breakdown: Record<string, number>
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
@@ -185,7 +196,12 @@ export interface QuoteLineItem {
   original_ai_value: number | null
 }
 
-export type PricingSource = 'document' | 'cost_rates' | 'builder_rate' | 'network_rate' | 'ai_allowance' | 'manual' | 'unresolved'
+/** Migration 072 replaced the placeholder 'cost_rates' value (added in
+ *  migration 071 but never actually written by any code) with two more
+ *  precise values, and added category_rate/ai_measured_rate. */
+export type PricingSource =
+  | 'document' | 'cost_rates_exact' | 'cost_rates_normalized' | 'category_rate'
+  | 'builder_rate' | 'network_rate' | 'ai_measured_rate' | 'ai_allowance' | 'manual' | 'unresolved'
 
 export interface CostRate {
   id: string

@@ -259,7 +259,10 @@ export async function POST(
           if (priced.rate !== null) {
             await supabase
               .from('quote_line_items')
-              .update({ rate: priced.rate, total: priced.total })
+              .update({
+                rate: priced.rate, total: priced.total,
+                pricing_source: priced.pricing_source, pricing_basis: priced.pricing_basis,
+              })
               .eq('id', li.id)
           }
         }
