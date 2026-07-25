@@ -200,6 +200,8 @@ const ESTIMATE_GENERATION_TOOL = {
             manual_input_required: { type: 'boolean' },
             document_rate: { type: ['number', 'null'], description: 'ONLY set if a source document (a priced schedule, BOQ, or fixtures/finishes selection sheet) itself prints a unit COST for this exact item — e.g. a fittings/finishes schedule row with a supplier $ figure, or a category subtotal from such a schedule. Exclude margin and GST. This is the single most important field for PC allowance / provisional sum items and anything from a priced selection schedule — prefer it over leaving pricing_type items unpriced.' },
             document_total: { type: ['number', 'null'], description: 'ONLY set if a source document prints a line/category COST TOTAL for this item (e.g. a fittings schedule category subtotal like "Showers+Tapware+Waste $27,043"). Exclude margin and GST.' },
+            allowance_value: { type: ['number', 'null'], description: 'Set this — instead of manual_input_required — whenever you understand the scope well enough to propose a professional allowance figure, but cannot derive a measured quantity from the documents (e.g. "electrical fitout allowance", "excavation allowance pending site conditions"). This is a real, considered $ estimate of your own, not a document figure and not a measured quantity x rate — a professional estimator routinely uses allowances exactly like this rather than leaving scope unpriced. Only leave both allowance_value and quantity/unit null (with manual_input_required = true) when you genuinely cannot even estimate a reasonable range. When set, pricing_type must be pc_allowance or provisional_sum, confidence should be lower than a measured item (typically 40-65) to reflect the judgment call, and pricing_basis is required.' },
+            pricing_basis: { type: ['string', 'null'], description: 'Required whenever allowance_value is set (why this figure) or pricing_type is provisional_sum (why the amount is contingent). Leave null for measured or document-priced items.' },
           },
           required: ['trade_category_id', 'description', 'confidence', 'pricing_type', 'manual_input_required'],
         },
@@ -428,7 +430,7 @@ async function main() {
   // dev script's copy simply omitted it. Format matches production exactly:
   // `Trade {id} ({name}): included = ...`.
   const scopeBlock = scopeInserts.map((s) => `Trade ${s.trade_category_id} (${tradeCategoryName(s.trade_category_id)}): included=${JSON.stringify(s.included_scope)}, excluded=${JSON.stringify(s.excluded_scope)}, assumptions=${JSON.stringify(s.assumptions)}`).join('\n')
-  const stage6System = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the facts and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). IMPORTANT: if any of the underlying facts came from a priced document (a fittings/finishes/fixtures schedule, a BOQ, a supplier quote) that stated an actual dollar figure — a per-unit rate, a line total, or a category subtotal — set document_rate or document_total on that line item to that real figure instead of leaving it unpriced. This is the primary way PC allowance and provisional sum items should get a value; prefer using a real printed figure over manual_input_required whenever the facts contain one. Use the generate_estimate tool.'
+  const stage6System = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the facts and scope below — never invent a quantity or a material. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). IMPORTANT: if any of the underlying facts came from a priced document (a fittings/finishes/fixtures schedule, a BOQ, a supplier quote) that stated an actual dollar figure — a per-unit rate, a line total, or a category subtotal — set document_rate or document_total on that line item to that real figure instead of leaving it unpriced. When a quantity cannot be derived from anything provided, do NOT simply set manual_input_required = true and leave the line unpriced — a professional estimator does not leave scope silently uncosted. First ask: do I understand this scope well enough to propose a considered allowance? If yes, set allowance_value to your own $ estimate (with pricing_type pc_allowance or provisional_sum, lower confidence reflecting the judgment call, and pricing_basis explaining why), the same way an experienced estimator uses allowances, historical knowledge, and judgement rather than measuring everything. Only fall back to manual_input_required = true, with quantity/unit/allowance_value all null, when you genuinely cannot even estimate a reasonable range. Use the generate_estimate tool.'
   const stage6Content = [{ type: 'text', text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
   log('stage6_calling', { job_id: jobId })
   // Higher ceiling than Stage 1/2 and Stage 3 — this is the stage producing
@@ -453,6 +455,9 @@ async function main() {
     .filter((item) => typeof item.trade_category_id === 'number' && item.trade_category_id >= 1 && item.trade_category_id <= 13)
     .map((item) => {
       const docPrice = deriveDocPrice(item.document_rate, item.document_total, item.quantity ?? null)
+      // AI Allowance (migration 071) — mirrors production's index.ts exactly.
+      const allowanceValueRaw = item.allowance_value
+      const allowanceValue = typeof allowanceValueRaw === 'number' && isFinite(allowanceValueRaw) && allowanceValueRaw > 0 ? allowanceValueRaw : null
       const gateResult = applyValidationGates({
         description: String(item.description ?? ''),
         quantity: item.quantity ?? null,
@@ -461,10 +466,26 @@ async function main() {
         pricing_type: item.pricing_type ?? 'measured',
         has_document_price: docPrice.total !== null,
       })
-      return { ...item, ...gateResult, _docRate: docPrice.rate, _docTotal: docPrice.total }
+      const pricingSource = docPrice.total !== null
+        ? 'document'
+        : allowanceValue !== null
+          ? 'ai_allowance'
+          : gateResult.gate
+            ? 'unresolved'
+            : null
+      return {
+        ...item, ...gateResult,
+        _docRate: docPrice.rate, _docTotal: docPrice.total,
+        _pricingSource: pricingSource,
+        _pricingBasis: typeof item.pricing_basis === 'string' ? item.pricing_basis : null,
+        _originalAiValue: docPrice.total ?? allowanceValue ?? null,
+        _allowanceTotal: allowanceValue,
+      }
     })
   const docPricedCount = validated.filter((i) => i._docTotal !== null).length
+  const allowancePricedCount = validated.filter((i) => i._allowanceTotal !== null).length
   log('document_pricing_applied', { job_id: jobId, items_with_document_price: docPricedCount, items_total: validated.length })
+  log('ai_allowance_applied', { job_id: jobId, items_with_ai_allowance: allowancePricedCount, items_total: validated.length })
 
   // ── Quote ────────────────────────────────────────────────────────────
   const { data: quoteRow, error: quoteErr } = await supabase
@@ -485,9 +506,12 @@ async function main() {
       // schedule/BOQ) wins outright — never overwritten by the 5-tier
       // cost_rates lookup later (ensureQuotePriced only touches items whose
       // rate is still null, see lib/pricing.ts's own `unpriced` filter).
-      rate: item._docRate ?? null, total: item._docTotal ?? null,
+      // An AI Allowance's proposed total is the fallback (rate stays null —
+      // it's a considered lump total, not a unit rate x quantity).
+      rate: item._docRate ?? null, total: item._docTotal ?? item._allowanceTotal ?? null,
       confidence: item.confidence ?? 50, dimensions_string: item.dimensions_string ?? null,
       is_assumption: item.is_assumption ?? false, assumption_status: item.assumption_status ?? null,
+      pricing_source: item._pricingSource, pricing_basis: item._pricingBasis, original_ai_value: item._originalAiValue,
       // quote_line_items.source_ref is varchar(100) — Claude occasionally
       // writes a longer note here instead of a short drawing reference
       // ("A3.1"). Truncate rather than reject the whole insert over one
@@ -519,26 +543,29 @@ async function main() {
   const priced = await ensureQuotePriced(supabase, quoteId)
   log('pricing_done', { job_id: jobId, quote_id: quoteId, priced })
 
+  // price_coverage_pct is now computed and persisted by computeQuoteTotals
+  // itself (lib/pricing.ts, migration 071) — read the real column rather
+  // than re-deriving it here, so this script is exercising and reporting
+  // on the actual production code path, not a parallel calculation of it.
   const { data: finalQuote } = await supabase
     .from('quotes')
-    .select('id, total_cost, confidence_score, margin_pct')
+    .select('id, total_cost, confidence_score, margin_pct, price_coverage_pct')
     .eq('id', quoteId)
     .single()
 
-  // Coverage, not just a total — a dollar figure with no visible sense of
-  // how much of the scope it actually reflects is exactly what produced a
-  // silently-25x-too-low number on the first real run through this script
-  // (71% of line items unpriced, and the total looked like a normal
-  // number regardless). Query the real persisted state rather than
-  // trusting in-memory counts, since ensureQuotePriced ran since.
   const { data: allFinalItems } = await supabase
     .from('quote_line_items')
-    .select('total, assumption_status')
+    .select('total, assumption_status, pricing_source')
     .eq('quote_id', quoteId)
   const includedItems = (allFinalItems ?? []).filter((i) => i.assumption_status !== 'excluded')
   const pricedItems = includedItems.filter((i) => i.total !== null)
   const unpricedCount = includedItems.length - pricedItems.length
-  const coveragePct = includedItems.length > 0 ? Math.round((pricedItems.length / includedItems.length) * 100) : 0
+  const bySource = includedItems.reduce((acc, i) => {
+    const key = i.pricing_source ?? 'null'
+    acc[key] = (acc[key] ?? 0) + 1
+    return acc
+  }, {})
+  const coveragePct = finalQuote?.price_coverage_pct ?? null
 
   console.log(JSON.stringify({
     event: 'estimate_complete',
@@ -551,7 +578,8 @@ async function main() {
     priced_line_items: pricedItems.length,
     unpriced_line_items: unpricedCount,
     price_coverage_pct: coveragePct,
-    warning: coveragePct < 90
+    items_by_pricing_source: bySource,
+    warning: coveragePct !== null && coveragePct < 90
       ? `Only ${coveragePct}% of line items have a price — total_cost reflects that partial coverage, NOT the full project scope. Treat this total as a floor, not a real estimate, until unpriced/unresolved items are addressed.`
       : null,
   }, null, 2))

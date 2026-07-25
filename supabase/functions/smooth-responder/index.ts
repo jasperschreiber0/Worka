@@ -521,6 +521,8 @@ const ESTIMATE_GENERATION_TOOL = {
             manual_input_required: { type: 'boolean', description: 'True when the quantity genuinely cannot be derived from anything provided — never guess a number here.' },
             document_rate: { type: ['number', 'null'], description: 'Only set if the source document itself prints a unit COST rate for this line (a priced estimate/BOQ). Exclude margin and GST.' },
             document_total: { type: ['number', 'null'], description: 'Only set if the source document prints a line COST total for this line. Exclude margin and GST.' },
+            allowance_value: { type: ['number', 'null'], description: 'Set this — instead of manual_input_required — whenever you understand the scope well enough to propose a professional allowance figure, but cannot derive a measured quantity from the documents (e.g. "electrical fitout allowance", "excavation allowance pending site conditions"). This is a real, considered $ estimate of your own, not a document figure and not a measured quantity x rate — a professional estimator routinely uses allowances exactly like this rather than leaving scope unpriced. Only leave both allowance_value and quantity/unit null (with manual_input_required = true) when you genuinely cannot even estimate a reasonable range. When set, pricing_type must be pc_allowance or provisional_sum, confidence should be lower than a measured item (typically 40-65) to reflect the judgment call, and pricing_basis is required.' },
+            pricing_basis: { type: ['string', 'null'], description: 'Required whenever allowance_value is set (why this figure — e.g. "Estimated from comparable bathroom renovations; no supplier quote available") or pricing_type is provisional_sum (why the amount is contingent, e.g. "pending geotechnical report"). Leave null for measured or document-priced items — those are self-explanatory from the quantity/rate or the source document.' },
           },
           required: ['trade_category_id', 'description', 'confidence', 'pricing_type', 'manual_input_required'],
         },
@@ -2180,7 +2182,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .map((s: Record<string, unknown>) => `Trade ${s.trade_category_id} (${TRADE_CATEGORIES.find((t) => t.id === s.trade_category_id)?.name}): included = ${(s.included_scope as string[]).join('; ')}. excluded = ${(s.excluded_scope as string[]).join('; ')}.`)
       .join('\n')
 
-    const estimateSystemPrompt = `You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project facts and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Produce a complete takeoff across all in-scope trades (typically 80-250 line items for a full residential project — fewer for a small job, do not pad to hit a number). Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured (derived from a dimension/schedule), pc_allowance (prime cost item), or provisional_sum (scope TBD by others). If the source documents are themselves a priced estimate/BOQ, extract the printed unit rate and line total into document_rate/document_total as COST figures (exclude margin and GST) — otherwise leave them null so the platform's rate engine can price the line.`
+    const estimateSystemPrompt = `You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project facts and scope below — never invent a quantity or a material. Produce a complete takeoff across all in-scope trades (typically 80-250 line items for a full residential project — fewer for a small job, do not pad to hit a number). Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured (derived from a dimension/schedule), pc_allowance (prime cost item), or provisional_sum (scope TBD by others). If the source documents are themselves a priced estimate/BOQ, extract the printed unit rate and line total into document_rate/document_total as COST figures (exclude margin and GST) — otherwise leave them null so the platform's rate engine can price the line. When a quantity cannot be derived from anything provided, do NOT simply set manual_input_required = true and leave the line unpriced — a professional estimator does not leave scope silently uncosted. First ask: do I understand this scope well enough to propose a considered allowance? If yes, set allowance_value to your own $ estimate (with pricing_type pc_allowance or provisional_sum, lower confidence reflecting the judgment call, and pricing_basis explaining why), the same way an experienced estimator uses allowances, historical knowledge, and judgement rather than measuring everything. Only fall back to manual_input_required = true, with quantity/unit/allowance_value all null, when you genuinely cannot even estimate a reasonable range — that should be the exception, not the default outcome for anything without a clean dimension.`
 
     const estimateUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
 
@@ -2231,6 +2233,15 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .filter((item) => typeof item.trade_category_id === 'number' && item.trade_category_id >= 1 && item.trade_category_id <= 13)
       .map((item) => {
         const docPrice = deriveDocPrice(item.document_rate, item.document_total, (item.quantity as number) ?? null)
+        // AI Allowance (migration 071): a considered $ figure Claude proposes
+        // itself when it understands the scope but can't derive a measured
+        // quantity — the replacement for silently leaving the line unpriced.
+        // Exemption from Gate 1/2 already falls out of the existing
+        // pricing_type check below (pc_allowance/provisional_sum) — no gate
+        // logic change needed, only that Stage 6 is now instructed to reach
+        // for this instead of manual_input_required.
+        const allowanceValueRaw = item.allowance_value
+        const allowanceValue = typeof allowanceValueRaw === 'number' && isFinite(allowanceValueRaw) && allowanceValueRaw > 0 ? allowanceValueRaw : null
         const gateItem: GateableItem = {
           description: String(item.description ?? ''),
           quantity: (item.quantity as number) ?? null,
@@ -2244,7 +2255,27 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         if (gateResult.gate && gateResult.message) {
           assumptionsToInsert.push({ description: gateItem.description, gate: gateResult.gate, message: gateResult.message })
         }
-        return { ...item, ...gateResult, _docRate: docPrice.rate, _docTotal: docPrice.total }
+        // pricing_source traceability (migration 071): document wins over an
+        // AI allowance if both were somehow set (shouldn't normally happen —
+        // a document-priced item wouldn't also need an allowance); a gated
+        // item with neither is 'unresolved'; a clean measured item is left
+        // null here — its source (cost_rates/builder_rate/network_rate) is
+        // only known once lib/pricing.ts resolves a rate, later.
+        const pricingSource = docPrice.total !== null
+          ? 'document'
+          : allowanceValue !== null
+            ? 'ai_allowance'
+            : gateResult.gate
+              ? 'unresolved'
+              : null
+        return {
+          ...item, ...gateResult,
+          _docRate: docPrice.rate, _docTotal: docPrice.total,
+          _pricingSource: pricingSource,
+          _pricingBasis: typeof item.pricing_basis === 'string' ? item.pricing_basis : null,
+          _originalAiValue: docPrice.total ?? allowanceValue ?? null,
+          _allowanceTotal: allowanceValue,
+        }
       })
 
     // ── Stage 6/8 wiring: build the quote ───────────────────────────────────
@@ -2415,8 +2446,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         description: item.description,
         quantity: item.manual_input_required ? null : (item.quantity ?? null),
         unit: item.manual_input_required ? null : (item.unit ?? null),
+        // A document price wins if present; otherwise an AI Allowance's
+        // proposed figure becomes the total (rate stays null — an allowance
+        // is a considered lump total, not a unit rate x quantity relationship).
         rate: item._docRate ?? null,
-        total: item._docTotal ?? null,
+        total: item._docTotal ?? item._allowanceTotal ?? null,
         confidence: item.confidence ?? 50,
         dimensions_string: item.dimensions_string ?? null,
         is_assumption: item.is_assumption ?? false,
@@ -2424,6 +2458,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         pricing_type: item.pricing_type ?? 'measured',
         source_ref: item.source_ref ?? null,
         margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
+        // Migration 071
+        pricing_source: item._pricingSource,
+        pricing_basis: item._pricingBasis,
+        original_ai_value: item._originalAiValue,
       }))
 
     let unresolvedCount = 0

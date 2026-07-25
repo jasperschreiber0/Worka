@@ -1,0 +1,22 @@
+-- Rollback for 071_ai_allowance_pricing_source.sql
+-- Not auto-applied — see the .sql.txt convention established by migrations
+-- 056-070's own rollback companions.
+--
+-- pricing_source/original_ai_value are genuinely new — safe to drop, nothing
+-- outside this migration's own feature reads them yet. pricing_basis is NOT
+-- new (migration 014) — this restores its original enum CHECK constraint
+-- rather than dropping the column. Any free-text value written into it by
+-- this feature will violate that constraint on restore; since the column
+-- was confirmed dead before this migration, that's expected and fine — it
+-- has no rows that mattered before this feature started using it.
+
+ALTER TABLE quote_line_items
+  DROP COLUMN IF EXISTS pricing_source,
+  DROP COLUMN IF EXISTS original_ai_value;
+
+ALTER TABLE quote_line_items
+  ADD CONSTRAINT quote_line_items_pricing_basis_check
+    CHECK (pricing_basis IN ('measured', 'inferred', 'allowance'));
+
+ALTER TABLE quotes
+  DROP COLUMN IF EXISTS price_coverage_pct;

@@ -366,6 +366,13 @@ export async function priceLineItems<T extends PriceableItem>(
  * Quote-level totals from line items. Excluded items never count.
  * Confidence is the LOWEST included line item confidence — the weakest link
  * drives the score, one bad extraction cannot be hidden.
+ *
+ * price_coverage_pct: % of included items with a non-null total. Exists so
+ * total_cost is never presented without a visible signal of how much of the
+ * quote it actually reflects — a quote where most items are still
+ * unresolved/unpriced should never look identical to a fully-priced one just
+ * because both happen to render as a dollar figure. 100 when there are no
+ * included items (nothing to fall short of covering).
  */
 export function computeQuoteTotals(
   items: Array<{
@@ -373,14 +380,16 @@ export function computeQuoteTotals(
     confidence: number | null
     assumption_status: string | null
   }>
-): { total_cost: number; confidence_score: number } {
+): { total_cost: number; confidence_score: number; price_coverage_pct: number } {
   const included = items.filter((i) => i.assumption_status !== 'excluded')
   const total_cost = round2(included.reduce((sum, i) => sum + (i.total ?? 0), 0))
   const confidences = included
     .map((i) => i.confidence)
     .filter((c): c is number => c !== null)
   const confidence_score = confidences.length > 0 ? Math.min(...confidences) : 0
-  return { total_cost, confidence_score }
+  const pricedCount = included.filter((i) => i.total !== null).length
+  const price_coverage_pct = included.length > 0 ? round2((pricedCount / included.length) * 100) : 100
+  return { total_cost, confidence_score, price_coverage_pct }
 }
 
 /**
@@ -450,13 +459,14 @@ export async function ensureQuotePriced(
     // Merge priced values back for the totals computation
     const pricedById = new Map(priced.map((p, i) => [unpriced[i].id, p]))
     const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
-    const { total_cost, confidence_score } = computeQuoteTotals(finalItems)
+    const { total_cost, confidence_score, price_coverage_pct } = computeQuoteTotals(finalItems)
 
     await supabase
       .from('quotes')
       .update({
         total_cost,
         confidence_score,
+        price_coverage_pct,
         margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)
@@ -485,7 +495,7 @@ export async function recomputeQuoteTotals(
 
     if (!items) return
 
-    const { total_cost, confidence_score } = computeQuoteTotals(items)
+    const { total_cost, confidence_score, price_coverage_pct } = computeQuoteTotals(items)
 
     const { data: quote } = await supabase
       .from('quotes')
@@ -498,6 +508,7 @@ export async function recomputeQuoteTotals(
       .update({
         total_cost,
         confidence_score,
+        price_coverage_pct,
         margin_pct: quote?.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)

@@ -122,6 +122,9 @@ export interface Quote {
   /** Per-source-document facts_extracted/facts_used accounting for the engine
    *  run that produced this quote — migration 039, written by smooth-responder. */
   document_contribution: DocumentContributionReport | null
+  /** % of included line items with a non-null total — migration 071, computed
+   *  by computeQuoteTotals alongside total_cost/confidence_score. */
+  price_coverage_pct: number | null
 }
 
 export interface DocumentContributionReport {
@@ -138,6 +141,9 @@ export interface QAReport {
   recommended_actions: string[]
   missing_trades: number[]
   duplicate_descriptions: string[]
+  /** Migration 071 — mirrors quotes.price_coverage_pct, carried here so the
+   *  estimate summary surfaces it alongside the other review signals. */
+  price_coverage_pct: number | null
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
@@ -169,10 +175,17 @@ export interface QuoteLineItem {
   source_ref: string | null
   /** Per-line margin rate (0–1). PS items always 0. */
   margin_pct: number
-  /** Migration 014 */
-  pricing_basis: 'measured' | 'inferred' | 'allowance' | null
+  /** Migration 014, repurposed by migration 071 from a 3-value enum (never
+   *  used) to free text: why this line's price is what it is — required
+   *  when pricing_source is 'ai_allowance' or 'provisional_sum'. */
+  pricing_basis: string | null
   notes: string | null
+  /** Migration 071 */
+  pricing_source: PricingSource | null
+  original_ai_value: number | null
 }
+
+export type PricingSource = 'document' | 'cost_rates' | 'builder_rate' | 'network_rate' | 'ai_allowance' | 'manual' | 'unresolved'
 
 export interface CostRate {
   id: string

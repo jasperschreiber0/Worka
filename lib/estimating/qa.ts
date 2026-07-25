@@ -170,11 +170,22 @@ export async function runQualityAssurance(
 
     const { data: quote } = await supabase
       .from('quotes')
-      .select('confidence_score, document_contribution')
+      .select('confidence_score, document_contribution, price_coverage_pct')
       .eq('id', quoteId)
       .single()
 
     const overallConfidence = quote?.confidence_score ?? null
+    const priceCoveragePct = quote?.price_coverage_pct ?? null
+
+    // ── Price coverage — a top risk, not a footnote, below 90% ──
+    // ensureQuotePriced/recomputeQuoteTotals (lib/pricing.ts) already
+    // computed and persisted this by the time QA runs; surfacing it here
+    // puts it in front of the builder alongside the other review signals
+    // instead of only existing as a column nobody's shown.
+    if (priceCoveragePct !== null && priceCoveragePct < 90) {
+      topRisks.push(`Only ${priceCoveragePct}% of line items have a price — the total reflects that partial coverage, not the full scope.`)
+      recommendedActions.push('Review unpriced and allowance line items before treating this total as final.')
+    }
 
     // ── Documents that contributed nothing ──
     // The engine's contribution report (migration 039) records, per source
@@ -212,6 +223,7 @@ export async function runQualityAssurance(
       recommended_actions: recommendedActions.slice(0, 5),
       missing_trades: missingTrades,
       duplicate_descriptions: duplicateDescriptions.slice(0, 10),
+      price_coverage_pct: priceCoveragePct,
     }
 
     await supabase

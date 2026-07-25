@@ -90,6 +90,47 @@ test('computeQuoteTotals: no included items with a confidence value scores 0, no
   assert.equal(confidence_score, 0)
 })
 
+// ─── price_coverage_pct — migration 071. The signal that stops a partially
+// -priced quote's total_cost from looking identical to a fully-priced one ──
+
+test('price_coverage_pct: 100 when every included item has a price', () => {
+  const { price_coverage_pct } = computeQuoteTotals([
+    { total: 1000, confidence: 90, assumption_status: null },
+    { total: 2000, confidence: 80, assumption_status: null },
+  ])
+  assert.equal(price_coverage_pct, 100)
+})
+
+test('price_coverage_pct: reflects the real fraction priced, e.g. the 43/202 (21%) production incident', () => {
+  const items = [
+    ...Array(43).fill({ total: 500, confidence: 80, assumption_status: null }),
+    ...Array(159).fill({ total: null, confidence: 80, assumption_status: null }),
+  ]
+  const { price_coverage_pct } = computeQuoteTotals(items)
+  assert.equal(price_coverage_pct, 21.29) // 43/202 * 100, rounded
+})
+
+test('price_coverage_pct: excluded items are removed from BOTH the numerator and denominator', () => {
+  const { price_coverage_pct } = computeQuoteTotals([
+    { total: 1000, confidence: 90, assumption_status: null },
+    { total: null, confidence: 80, assumption_status: 'excluded' }, // excluded + unpriced — must not count against coverage
+  ])
+  assert.equal(price_coverage_pct, 100)
+})
+
+test('price_coverage_pct: 100 (not 0 or NaN) when there are no included items at all — nothing to fall short of covering', () => {
+  const { price_coverage_pct } = computeQuoteTotals([])
+  assert.equal(price_coverage_pct, 100)
+})
+
+test('price_coverage_pct: an all-unpriced quote scores 0, not null', () => {
+  const { price_coverage_pct } = computeQuoteTotals([
+    { total: null, confidence: 50, assumption_status: null },
+    { total: null, confidence: 50, assumption_status: null },
+  ])
+  assert.equal(price_coverage_pct, 0)
+})
+
 // ─── normalizeUnit — a wrong-unit rate match is a silent mispricing risk ────
 
 test('normalizeUnit: common Australian trade unit spellings collapse to one canonical form', () => {
