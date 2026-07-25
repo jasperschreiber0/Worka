@@ -61,13 +61,29 @@ const quoteId = args['quote-id']
 const money = (n) => `$${Math.round(n).toLocaleString('en-AU')}`
 
 async function main() {
-  const { data: items, error: itemsErr } = await supabase
+  // "Unresolved" = currently contributes $0 to the quote and isn't excluded
+  // — the same definition lib/estimating/readiness.ts's isSilentlyUnpriced
+  // uses, and the definition every "35 unresolved" figure earlier in this
+  // work referred to. Filtering on pricing_source = 'unresolved' (the
+  // literal string Stage 6 / lib/pricing.ts sometimes writes) undercounts:
+  // a real run found only 5 rows that way, because most $0 items simply
+  // have pricing_source left null rather than explicitly set to
+  // 'unresolved' — they're still exactly as unpriced and exactly as much
+  // in need of classification. total IS NULL is the one field that can't
+  // be missed either way.
+  // Filtering assumption_status !== 'excluded' client-side, not via a
+  // Postgrest .neq() — SQL's NULL semantics make `col <> 'excluded'`
+  // evaluate to NULL (i.e. excluded from the result set) for any row
+  // where assumption_status IS NULL, which is exactly the common case for
+  // a clean measured item that passed every gate but still failed pricing
+  // entirely. A DB-side .neq() would silently drop those rows.
+  const { data: allNullTotalItems, error: itemsErr } = await supabase
     .from('quote_line_items')
-    .select('id, trade_category_id, description, quantity, unit, pricing_type, assumption_status, pricing_source')
+    .select('id, trade_category_id, description, quantity, unit, pricing_type, assumption_status, pricing_source, total')
     .eq('quote_id', quoteId)
-    .eq('pricing_source', 'unresolved')
+    .is('total', null)
   if (itemsErr) throw new Error(`Could not load line items: ${itemsErr.message}`)
-  const unresolvedItems = items ?? []
+  const unresolvedItems = (allNullTotalItems ?? []).filter((i) => i.assumption_status !== 'excluded')
 
   const lineItemIds = unresolvedItems.map((i) => i.id)
   const { data: assumptionRows } = lineItemIds.length > 0
