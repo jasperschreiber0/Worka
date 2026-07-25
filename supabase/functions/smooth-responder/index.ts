@@ -44,9 +44,11 @@ import {
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
+  findMissingTrades, filterNewLineItems, lineItemKey, buildTradeRecoveryPrompt, buildTradeRecoveryReport,
   type BatchableFile, type FactRow, type AnthropicFailureClassification,
   type ScopeReasoningResult, type MergedScopeReasoningResult, type Stage3FailureHistory,
   type ConservativeAssumption, type BucketableFact, type ProjectModelSections,
+  type TradeRecoveryResult,
 } from './pipeline-logic.ts'
 import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
@@ -758,6 +760,90 @@ function deriveDocPrice(rate: unknown, total: unknown, quantity: number | null):
   if (derivedRate === null) derivedRate = derivedTotal
   if (derivedTotal === null) derivedTotal = derivedRate
   return { rate: derivedRate, total: derivedTotal }
+}
+
+// Shared by both the main Stage 6 generation pass and the targeted
+// completeness recovery pass below (runPipeline's Stage 6 section) — gate
+// application, doc-price derivation, and pricing_source/pricing_basis
+// classification must stay byte-identical between the two call sites, or a
+// recovered line item would carry different traceability semantics than one
+// generated in the normal pass.
+function validateStage6Items(
+  rawLineItems: unknown[],
+  conservativeAssumptions: ConservativeAssumption[],
+) {
+  const rawItems = (rawLineItems as Array<Record<string, unknown>>).map((item) => {
+    if (conservativeAssumptions.length === 0) return item
+    if (!conservativeAssumptionAppliesToTrade(conservativeAssumptions, (item.trade_category_id as number) ?? null)) return item
+    return { ...item, confidence: capConfidenceForBlockingTrade((item.confidence as number) ?? 100) }
+  })
+  const assumptionsToInsert: Array<{ description: string; gate: 1 | 2 | 3; message: string }> = []
+
+  const validated = rawItems
+    .filter((item) => typeof item.trade_category_id === 'number' && item.trade_category_id >= 1 && item.trade_category_id <= 13)
+    .map((item) => {
+      const docPrice = deriveDocPrice(item.document_rate, item.document_total, (item.quantity as number) ?? null)
+      const allowanceValueRaw = item.allowance_value
+      const allowanceValue = typeof allowanceValueRaw === 'number' && isFinite(allowanceValueRaw) && allowanceValueRaw > 0 ? allowanceValueRaw : null
+      const gateItem: GateableItem = {
+        description: String(item.description ?? ''),
+        quantity: (item.quantity as number) ?? null,
+        unit: (item.unit as string) ?? null,
+        dimensions_string: (item.dimensions_string as string) ?? null,
+        pricing_type: (item.pricing_type as string) ?? 'measured',
+        has_document_price: docPrice.total !== null,
+        manual_input_required: item.manual_input_required === true,
+      }
+      const gateResult = applyValidationGates(gateItem)
+      if (gateResult.gate && gateResult.message) {
+        assumptionsToInsert.push({ description: gateItem.description, gate: gateResult.gate, message: gateResult.message })
+      }
+      const pricingSource = docPrice.total !== null
+        ? 'document'
+        : allowanceValue !== null
+          ? 'ai_allowance'
+          : gateResult.gate
+            ? 'unresolved'
+            : null
+      return {
+        ...item, ...gateResult,
+        _docRate: docPrice.rate, _docTotal: docPrice.total,
+        _pricingSource: pricingSource,
+        _pricingBasis: typeof item.pricing_basis === 'string' ? item.pricing_basis : null,
+        _originalAiValue: docPrice.total ?? allowanceValue ?? null,
+        _allowanceTotal: allowanceValue,
+      }
+    })
+  return { validated, assumptionsToInsert }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildLineItemInsertRows(items: any[], quoteId: string) {
+  return items
+    .filter((item) => item.assumption_status !== 'excluded')
+    .map((item) => ({
+      quote_id: quoteId,
+      trade_category_id: item.trade_category_id,
+      description: item.description,
+      quantity: item.manual_input_required ? null : (item.quantity ?? null),
+      unit: item.manual_input_required ? null : (item.unit ?? null),
+      // A document price wins if present; otherwise an AI Allowance's
+      // proposed figure becomes the total (rate stays null — an allowance
+      // is a considered lump total, not a unit rate x quantity relationship).
+      rate: item._docRate ?? null,
+      total: item._docTotal ?? item._allowanceTotal ?? null,
+      confidence: item.confidence ?? 50,
+      dimensions_string: item.dimensions_string ?? null,
+      is_assumption: item.is_assumption ?? false,
+      assumption_status: item.assumption_status ?? null,
+      pricing_type: item.pricing_type ?? 'measured',
+      source_ref: item.source_ref ?? null,
+      margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
+      // Migration 071
+      pricing_source: item._pricingSource,
+      pricing_basis: item._pricingBasis,
+      original_ai_value: item._originalAiValue,
+    }))
 }
 
 // ─── Pipeline ─────────────────────────────────────────────────────────────────
@@ -2221,62 +2307,11 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // already reflect an unanswered blocking question (see
     // capConfidenceForBlockingTrade, pipeline-logic.ts). Confidence-only:
     // does not touch quantity, rate, or pricing_type — Stage 6 pricing
-    // itself is unchanged.
-    const rawItems = (estimateResult.line_items as Array<Record<string, unknown>>).map((item) => {
-      if (conservativeAssumptions.length === 0) return item
-      if (!conservativeAssumptionAppliesToTrade(conservativeAssumptions, (item.trade_category_id as number) ?? null)) return item
-      return { ...item, confidence: capConfidenceForBlockingTrade((item.confidence as number) ?? 100) }
-    })
-    const assumptionsToInsert: Array<{ description: string; gate: 1 | 2 | 3; message: string }> = []
-
-    const validated = rawItems
-      .filter((item) => typeof item.trade_category_id === 'number' && item.trade_category_id >= 1 && item.trade_category_id <= 13)
-      .map((item) => {
-        const docPrice = deriveDocPrice(item.document_rate, item.document_total, (item.quantity as number) ?? null)
-        // AI Allowance (migration 071): a considered $ figure Claude proposes
-        // itself when it understands the scope but can't derive a measured
-        // quantity — the replacement for silently leaving the line unpriced.
-        // Exemption from Gate 1/2 already falls out of the existing
-        // pricing_type check below (pc_allowance/provisional_sum) — no gate
-        // logic change needed, only that Stage 6 is now instructed to reach
-        // for this instead of manual_input_required.
-        const allowanceValueRaw = item.allowance_value
-        const allowanceValue = typeof allowanceValueRaw === 'number' && isFinite(allowanceValueRaw) && allowanceValueRaw > 0 ? allowanceValueRaw : null
-        const gateItem: GateableItem = {
-          description: String(item.description ?? ''),
-          quantity: (item.quantity as number) ?? null,
-          unit: (item.unit as string) ?? null,
-          dimensions_string: (item.dimensions_string as string) ?? null,
-          pricing_type: (item.pricing_type as string) ?? 'measured',
-          has_document_price: docPrice.total !== null,
-          manual_input_required: item.manual_input_required === true,
-        }
-        const gateResult = applyValidationGates(gateItem)
-        if (gateResult.gate && gateResult.message) {
-          assumptionsToInsert.push({ description: gateItem.description, gate: gateResult.gate, message: gateResult.message })
-        }
-        // pricing_source traceability (migration 071): document wins over an
-        // AI allowance if both were somehow set (shouldn't normally happen —
-        // a document-priced item wouldn't also need an allowance); a gated
-        // item with neither is 'unresolved'; a clean measured item is left
-        // null here — its source (cost_rates/builder_rate/network_rate) is
-        // only known once lib/pricing.ts resolves a rate, later.
-        const pricingSource = docPrice.total !== null
-          ? 'document'
-          : allowanceValue !== null
-            ? 'ai_allowance'
-            : gateResult.gate
-              ? 'unresolved'
-              : null
-        return {
-          ...item, ...gateResult,
-          _docRate: docPrice.rate, _docTotal: docPrice.total,
-          _pricingSource: pricingSource,
-          _pricingBasis: typeof item.pricing_basis === 'string' ? item.pricing_basis : null,
-          _originalAiValue: docPrice.total ?? allowanceValue ?? null,
-          _allowanceTotal: allowanceValue,
-        }
-      })
+    // itself is unchanged. AI Allowance / gate / pricing_source derivation
+    // now lives in the shared validateStage6Items (above runPipeline) so the
+    // targeted completeness recovery pass further down reuses the identical
+    // logic rather than a second, potentially-drifting copy of it.
+    const { validated, assumptionsToInsert } = validateStage6Items(estimateResult.line_items, conservativeAssumptions)
 
     // ── Stage 6/8 wiring: build the quote ───────────────────────────────────
     await setStage('building_quote')
@@ -2432,37 +2467,8 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       .eq('quote_id', quoteId)
     const existingKeys = new Set((existingLineItems ?? []).map((li: Record<string, unknown>) => `${li.trade_category_id}::${String(li.description).trim().toLowerCase()}`))
 
-    const toInsert = validated.filter((item) => {
-      if (item.assumption_status === 'excluded') return true // still recorded, filtered from insert below
-      const key = `${item.trade_category_id}::${String(item.description).trim().toLowerCase()}`
-      return !existingKeys.has(key)
-    })
-
-    const lineItemInserts = toInsert
-      .filter((item) => item.assumption_status !== 'excluded')
-      .map((item) => ({
-        quote_id: quoteId,
-        trade_category_id: item.trade_category_id,
-        description: item.description,
-        quantity: item.manual_input_required ? null : (item.quantity ?? null),
-        unit: item.manual_input_required ? null : (item.unit ?? null),
-        // A document price wins if present; otherwise an AI Allowance's
-        // proposed figure becomes the total (rate stays null — an allowance
-        // is a considered lump total, not a unit rate x quantity relationship).
-        rate: item._docRate ?? null,
-        total: item._docTotal ?? item._allowanceTotal ?? null,
-        confidence: item.confidence ?? 50,
-        dimensions_string: item.dimensions_string ?? null,
-        is_assumption: item.is_assumption ?? false,
-        assumption_status: item.assumption_status ?? null,
-        pricing_type: item.pricing_type ?? 'measured',
-        source_ref: item.source_ref ?? null,
-        margin_pct: item.pricing_type === 'provisional_sum' ? 0 : 0.15,
-        // Migration 071
-        pricing_source: item._pricingSource,
-        pricing_basis: item._pricingBasis,
-        original_ai_value: item._originalAiValue,
-      }))
+    const toInsert = filterNewLineItems(validated, existingKeys)
+    const lineItemInserts = buildLineItemInsertRows(toInsert, quoteId)
 
     let unresolvedCount = 0
     if (lineItemInserts.length > 0) {
@@ -2496,6 +2502,110 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       }
     }
 
+    // ── Stage 6 completeness recovery ───────────────────────────────────────
+    // Post-generation safeguard, not a redesign of Stage 6: Stage 3 can
+    // correctly scope a trade with real included_scope while the main
+    // generation call above still returns zero line items for it — a
+    // generation gap, confirmed on a real project (Colorbond roofing /
+    // sarking / flashings / gutters / skylights / solar PV scoped, never
+    // generated). Checked against quote_line_items AS THEY STAND after the
+    // main insert above — not against estimateResult.line_items alone —
+    // so a trade already covered by a PRIOR incremental upload's line items
+    // is correctly never flagged, even though this run's own Stage 6 call
+    // legitimately didn't need to regenerate it.
+    for (const key of lineItemInserts.map((li) => lineItemKey(li.trade_category_id, li.description))) {
+      existingKeys.add(key)
+    }
+    const { data: currentTradeRows } = await supabase
+      .from('quote_line_items')
+      .select('trade_category_id, assumption_status')
+      .eq('quote_id', quoteId)
+    const initialMissingTrades = findMissingTrades(
+      (scopeForEstimate ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null }>,
+      (currentTradeRows ?? []) as Array<{ trade_category_id: number; assumption_status: string | null }>,
+    )
+
+    const recoveryResults: TradeRecoveryResult[] = []
+    if (initialMissingTrades.length > 0) {
+      console.log(JSON.stringify({ event: 'stage6_completeness_gap_detected', job_id: jobId, quote_id: quoteId, missing_trades: initialMissingTrades }))
+    }
+    for (const tradeId of initialMissingTrades) {
+      // Leave any remaining trade genuinely missing (visible in the report)
+      // rather than risk starting a call with no room to finish it — a
+      // half-run recovery attempt is worse than none, since it would consume
+      // budget without a durable checkpoint the way Stage 3/6 have.
+      if (!hasWallClockBudget(60_000)) {
+        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_skipped', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, reason: 'insufficient wall-clock budget' }))
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        continue
+      }
+      const scopeRow = (scopeForEstimate ?? []).find((s: Record<string, unknown>) => s.trade_category_id === tradeId) as
+        | { trade_category_id: number; included_scope: string[]; excluded_scope: string[]; assumptions: string[] }
+        | undefined
+      if (!scopeRow) { recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 }); continue }
+      const tradeName = TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}`
+      const { system: recoverySystemPrompt, userText: recoveryUserText } = buildTradeRecoveryPrompt(tradeId, tradeName, scopeRow, factsBlock)
+      const recoveryUserContent = [{ type: 'text' as const, text: recoveryUserText }]
+
+      let recoveryResult: { line_items?: unknown[] } | null = null
+      try {
+        recoveryResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_recovery' }, recoverySystemPrompt, recoveryUserContent, ESTIMATE_GENERATION_TOOL, 4000)
+      } catch (err) {
+        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_failed', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, error: err instanceof Error ? err.message : String(err) }))
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        continue
+      }
+      // Defense in depth: discard any item that ignored the single-trade
+      // instruction rather than trusting the model to have fully complied.
+      const recoveredRawItems = ((recoveryResult?.line_items ?? []) as Array<Record<string, unknown>>)
+        .filter((item) => item.trade_category_id === tradeId)
+      if (recoveredRawItems.length === 0) {
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        continue
+      }
+
+      const { validated: recoveredValidated, assumptionsToInsert: recoveredAssumptionsToInsert } = validateStage6Items(recoveredRawItems, conservativeAssumptions)
+      const recoveredToInsert = filterNewLineItems(recoveredValidated, existingKeys)
+      const recoveredInserts = buildLineItemInsertRows(recoveredToInsert, quoteId)
+
+      if (recoveredInserts.length === 0) {
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        continue
+      }
+      const { data: insertedRecoveredRaw, error: recoveryInsertErr } = await supabase
+        .from('quote_line_items')
+        .upsert(recoveredInserts, { onConflict: 'quote_id,trade_category_id,description', ignoreDuplicates: true })
+        .select()
+      if (recoveryInsertErr) {
+        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_insert_failed', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, error: recoveryInsertErr.message }))
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0 })
+        continue
+      }
+      const insertedRecovered = insertedRecoveredRaw ?? []
+      for (const li of recoveredInserts) existingKeys.add(lineItemKey(li.trade_category_id, li.description))
+
+      const relevantRecoveredAssumptions = recoveredAssumptionsToInsert.filter((a) => recoveredToInsert.some((i) => String(i.description) === a.description))
+      if (relevantRecoveredAssumptions.length > 0) {
+        const recoveredAssumptionInserts = relevantRecoveredAssumptions.map((a) => {
+          const match = insertedRecovered.find((li: Record<string, unknown>) => li.description === a.description)
+          return { quote_id: quoteId, line_item_id: match?.id ?? null, description: a.message, gate: a.gate, resolution_type: null, resolved_at: null, resolved_by: null }
+        })
+        await supabase.from('assumptions').insert(recoveredAssumptionInserts)
+      }
+
+      console.log(JSON.stringify({ event: 'stage6_completeness_recovery_succeeded', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, items_generated: insertedRecovered.length }))
+      recoveryResults.push({ trade_category_id: tradeId, items_generated: insertedRecovered.length })
+    }
+
+    const totalRecoveredItems = recoveryResults.reduce((sum, r) => sum + r.items_generated, 0)
+    if (initialMissingTrades.length > 0) {
+      const tradeRecoveryReport = buildTradeRecoveryReport(initialMissingTrades, recoveryResults)
+      console.log(JSON.stringify({ event: 'stage6_completeness_recovery_report', job_id: jobId, quote_id: quoteId, ...tradeRecoveryReport }))
+      // Best-effort: the report describes the recovery pass, must never fail the estimate it describes.
+      const { error: reportErr } = await supabase.from('quotes').update({ trade_recovery_report: tradeRecoveryReport }).eq('id', quoteId)
+      if (reportErr) console.error('trade_recovery_report write failed:', reportErr.message)
+    }
+
     const { count: totalUnresolved } = await supabase
       .from('assumptions')
       .select('id', { count: 'exact', head: true })
@@ -2520,7 +2630,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         pipeline_stage: 'complete',
         quote_id: quoteId,
         intake_assumption_count: totalUnresolved ?? unresolvedCount,
-        line_item_count: lineItemInserts.length,
+        line_item_count: lineItemInserts.length + totalRecoveredItems,
         processing_time_ms: Date.now() - startedAt,
         failure_stage: null,
         failure_reason: null,
@@ -2548,7 +2658,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       stage: 'building_quote', completed_at: new Date().toISOString(),
       documents_count: null, facts_count: facts.length,
       scope_items_count: (scopeForEstimate ?? []).length,
-      quote_created: true, quote_id: quoteId, line_items_count: lineItemInserts.length,
+      quote_created: true, quote_id: quoteId, line_items_count: lineItemInserts.length + totalRecoveredItems,
     }))
   } catch (err) {
     console.error('estimating-engine error:', err)

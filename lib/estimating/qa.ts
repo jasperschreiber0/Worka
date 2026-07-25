@@ -192,7 +192,7 @@ export async function runQualityAssurance(
 
     const { data: quote } = await supabase
       .from('quotes')
-      .select('confidence_score, document_contribution, price_coverage_pct, pricing_match_rate_pct, allowance_pct')
+      .select('confidence_score, document_contribution, price_coverage_pct, pricing_match_rate_pct, allowance_pct, trade_recovery_report')
       .eq('id', quoteId)
       .single()
 
@@ -200,6 +200,24 @@ export async function runQualityAssurance(
     const priceCoveragePct = quote?.price_coverage_pct ?? null
     const pricingMatchRatePct = quote?.pricing_match_rate_pct ?? null
     const allowancePct = quote?.allowance_pct ?? null
+    // Migration 074 — smooth-responder's own before/after record of its
+    // Stage 6 completeness recovery pass, distinct from missing_trade_details
+    // below (which is always freshly re-derived against final state, so it
+    // naturally shows any trade recovery failed to fix — a useful
+    // cross-check, not a duplicate of this field).
+    const tradeRecovery = (quote?.trade_recovery_report ?? null) as QAReport['trade_recovery']
+    if (tradeRecovery && tradeRecovery.recovered_trades.length > 0) {
+      const names = tradeRecovery.recovered_trades
+        .map((r) => `${TRADE_CATEGORIES.find((t) => t.id === r.trade_category_id)?.name ?? `Trade ${r.trade_category_id}`} (${r.items_generated} item${r.items_generated === 1 ? '' : 's'})`)
+        .join(', ')
+      reviewItems.push(`Completeness recovery generated missing line items for: ${names} — these were scoped but not produced by the initial estimate pass.`)
+    }
+    if (tradeRecovery && tradeRecovery.remaining_missing_trades.length > 0) {
+      const names = tradeRecovery.remaining_missing_trades
+        .map((id) => TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`)
+        .join(', ')
+      topRisks.push(`Completeness recovery could not generate line items for: ${names} — still missing after a targeted retry.`)
+    }
 
     // ── Price coverage — a top risk, not a footnote, below 90% ──
     // ensureQuotePriced/recomputeQuoteTotals (lib/pricing.ts) already
@@ -299,6 +317,7 @@ export async function runQualityAssurance(
       allowance_pct: allowancePct,
       allowance_count: allowanceCount,
       allowance_value: allowanceValue,
+      trade_recovery: tradeRecovery,
     }
 
     await supabase

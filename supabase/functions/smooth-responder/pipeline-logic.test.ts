@@ -65,6 +65,11 @@ import {
   formatTradeViewsForPrompt,
   TRADE_VIEW_NAMES,
   TRADE_CATEGORY_TO_VIEWS,
+  findMissingTrades,
+  lineItemKey,
+  filterNewLineItems,
+  buildTradeRecoveryPrompt,
+  buildTradeRecoveryReport,
   type TradeViewName,
   type BatchableFile,
   type FactRow,
@@ -73,6 +78,7 @@ import {
   type CompletedDocumentJobRow,
   type ConservativeAssumption,
   type BucketableFact,
+  type TradeRecoveryResult,
 } from './pipeline-logic.ts'
 
 // ─── splitIntoBatches ───────────────────────────────────────────────────────
@@ -2012,6 +2018,142 @@ test('formatTradeViewsForPrompt: includes the project summary and only the reque
   assert.match(text, /CONCRETE VIEW/)
   assert.match(text, /strip footing/)
   assert.doesNotMatch(text, /benchtop/)
+})
+
+// ─── Stage 6 completeness recovery ─────────────────────────────────────────
+// Confirmed on a real project: Stage 3 scoped Colorbond roofing/sarking/
+// flashings/gutters/skylights/solar PV under a trade, and Stage 6 generated
+// ZERO line items for it — a generation gap, not a pricing or taxonomy
+// issue. These tests cover requirement 5's four cases: missing trade
+// detected, targeted regeneration receives correct scope, existing lines
+// are not duplicated, and a failed recovery remains visible.
+
+test('findMissingTrades: a scoped trade with zero line items is detected', () => {
+  const scope = [
+    { trade_category_id: 3, included_scope: ['Roof framing'] },
+    { trade_category_id: 4, included_scope: ['Colorbond roofing', 'sarking', 'flashings', 'gutters', 'skylights', 'solar PV preparation'] },
+  ]
+  const lineItems = [
+    { trade_category_id: 3, assumption_status: null },
+  ]
+  assert.deepEqual(findMissingTrades(scope, lineItems), [4])
+})
+
+test('findMissingTrades: a trade with no included scope is never flagged, even with no line items', () => {
+  const scope = [{ trade_category_id: 9, included_scope: [] }]
+  assert.deepEqual(findMissingTrades(scope, []), [])
+})
+
+test('findMissingTrades: a trade whose only line items are all excluded (Gate 3) still counts as missing', () => {
+  const scope = [{ trade_category_id: 4, included_scope: ['Colorbond roofing'] }]
+  const lineItems = [{ trade_category_id: 4, assumption_status: 'excluded' }]
+  assert.deepEqual(findMissingTrades(scope, lineItems), [4])
+})
+
+test('findMissingTrades: a trade already covered by a prior incremental upload\'s line items is not flagged', () => {
+  const scope = [{ trade_category_id: 4, included_scope: ['Colorbond roofing'] }]
+  const lineItems = [{ trade_category_id: 4, assumption_status: null }]
+  assert.deepEqual(findMissingTrades(scope, lineItems), [])
+})
+
+test('findMissingTrades: multiple genuinely missing trades are all reported, in scope order', () => {
+  const scope = [
+    { trade_category_id: 4, included_scope: ['Colorbond roofing'] },
+    { trade_category_id: 8, included_scope: ['Kitchen joinery'] },
+    { trade_category_id: 11, included_scope: [] },
+  ]
+  assert.deepEqual(findMissingTrades(scope, []), [4, 8])
+})
+
+test('lineItemKey: same trade + description (case/whitespace-insensitive) produces the same key', () => {
+  assert.equal(
+    lineItemKey(4, 'Colorbond roof sheeting'),
+    lineItemKey(4, '  colorbond roof sheeting  '.trim().toUpperCase().toLowerCase())
+  )
+  assert.notEqual(lineItemKey(4, 'Colorbond roof sheeting'), lineItemKey(3, 'Colorbond roof sheeting'))
+})
+
+test('filterNewLineItems: existing lines are not duplicated — a recovered item matching an existing key is dropped', () => {
+  const existingKeys = new Set([lineItemKey(4, 'Colorbond roof sheeting')])
+  const candidates = [
+    { trade_category_id: 4, description: 'Colorbond roof sheeting', assumption_status: null }, // duplicate — must be dropped
+    { trade_category_id: 4, description: 'Box gutters', assumption_status: null }, // genuinely new
+  ]
+  const result = filterNewLineItems(candidates, existingKeys)
+  assert.deepEqual(result.map((i) => i.description), ['Box gutters'])
+})
+
+test('filterNewLineItems: an excluded (Gate 3) item always passes through regardless of existingKeys', () => {
+  const existingKeys = new Set([lineItemKey(4, 'Invalid item')])
+  const candidates = [{ trade_category_id: 4, description: 'Invalid item', assumption_status: 'excluded' }]
+  const result = filterNewLineItems(candidates, existingKeys)
+  assert.equal(result.length, 1)
+})
+
+test('buildTradeRecoveryPrompt: targeted regeneration receives the specific trade, its Stage 3 scope, and project facts', () => {
+  const scope = {
+    trade_category_id: 4,
+    included_scope: ['Colorbond roofing', 'sarking', 'flashings', 'gutters', 'skylights', 'solar PV preparation'],
+    excluded_scope: ['Structural steel'],
+    assumptions: ['Standard AU residential roof pitch'],
+  }
+  const factsBlock = 'floor_area_m2: 210 (evidence: DA.A101 site data table)'
+  const { system, userText } = buildTradeRecoveryPrompt(4, 'External Cladding', scope, factsBlock)
+
+  // Specific trade
+  assert.match(system, /trade_category_id 4/)
+  assert.match(userText, /TRADE TO GENERATE: 4 \(External Cladding\)/)
+  // Stage 3 scope_items for that trade
+  assert.match(userText, /Colorbond roofing/)
+  assert.match(userText, /sarking/)
+  assert.match(userText, /flashings/)
+  assert.match(userText, /gutters/)
+  assert.match(userText, /skylights/)
+  assert.match(userText, /solar PV preparation/)
+  assert.match(userText, /Structural steel/)
+  assert.match(userText, /Standard AU residential roof pitch/)
+  // Relevant project facts already available
+  assert.match(userText, /floor_area_m2: 210/)
+  // Instruction to generate only missing/this trade's items
+  assert.match(system, /ONLY/)
+  assert.match(system, /do not generate items for any other trade/i)
+})
+
+test('buildTradeRecoveryPrompt: a trade with no excluded_scope/assumptions still produces a usable prompt', () => {
+  const scope = { trade_category_id: 7, included_scope: ['Skirting boards'] }
+  const { userText } = buildTradeRecoveryPrompt(7, 'Fit-out Carpentry', scope, 'facts here')
+  assert.match(userText, /Skirting boards/)
+  assert.doesNotMatch(userText, /undefined/)
+})
+
+test('buildTradeRecoveryReport: a successful recovery moves a trade from missing to recovered, not remaining', () => {
+  const results: TradeRecoveryResult[] = [{ trade_category_id: 4, items_generated: 5 }]
+  const report = buildTradeRecoveryReport([4], results)
+  assert.deepEqual(report.initial_missing_trades, [4])
+  assert.deepEqual(report.recovered_trades, [{ trade_category_id: 4, items_generated: 5 }])
+  assert.deepEqual(report.remaining_missing_trades, [])
+})
+
+test('buildTradeRecoveryReport: a failed recovery (zero items generated) remains visible in remaining_missing_trades, not silently dropped', () => {
+  const results: TradeRecoveryResult[] = [{ trade_category_id: 4, items_generated: 0 }]
+  const report = buildTradeRecoveryReport([4], results)
+  assert.deepEqual(report.recovered_trades, [])
+  assert.deepEqual(report.remaining_missing_trades, [4])
+})
+
+test('buildTradeRecoveryReport: mixed outcome across trades — recovered and remaining are reported independently', () => {
+  const results: TradeRecoveryResult[] = [
+    { trade_category_id: 4, items_generated: 5 },
+    { trade_category_id: 8, items_generated: 0 },
+  ]
+  const report = buildTradeRecoveryReport([4, 8], results)
+  assert.deepEqual(report.recovered_trades.map((r) => r.trade_category_id), [4])
+  assert.deepEqual(report.remaining_missing_trades, [8])
+})
+
+test('buildTradeRecoveryReport: no missing trades at all produces an empty, not null, report', () => {
+  const report = buildTradeRecoveryReport([], [])
+  assert.deepEqual(report, { initial_missing_trades: [], recovered_trades: [], remaining_missing_trades: [] })
 })
 
 test('formatTradeViewsForPrompt: a view with no matching facts is omitted entirely, not shown empty', () => {

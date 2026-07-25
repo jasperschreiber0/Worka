@@ -1,0 +1,2 @@
+-- Rollback for 074_trade_recovery_report.sql
+ALTER TABLE quotes DROP COLUMN IF EXISTS trade_recovery_report;

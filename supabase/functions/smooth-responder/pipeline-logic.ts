@@ -1916,3 +1916,127 @@ export function formatTradeViewsForPrompt(
   }
   return lines.join('\n')
 }
+
+// ─── Stage 6 completeness recovery ─────────────────────────────────────────
+//
+// Confirmed on a real project (16 Alfred St, Woonona): Stage 3 correctly
+// scoped Colorbond roofing/sarking/flashings/gutters/skylights/solar PV
+// under a trade, but Stage 6 generated ZERO line items for that trade —
+// nothing measured, nothing an allowance, nothing even flagged as an
+// assumption. A generation completeness gap, distinct from both the
+// pricing-fallback gap (migration 072, an item WITH a quantity that fails
+// rate matching) and the AI Allowance mechanism (migration 071, a quantity
+// that can't be measured but is priced as a considered judgment call) —
+// this is scope that was understood and then never generated at all.
+
+/** Minimal shape of a scope_items row needed to decide completeness — real column selects always carry more. */
+export interface ScopeItemForCompleteness {
+  trade_category_id: number
+  included_scope: string[] | null
+}
+
+/** Minimal shape of a quote_line_items row needed to decide completeness. */
+export interface LineItemForCompleteness {
+  trade_category_id: number
+  assumption_status?: string | null
+}
+
+/**
+ * A trade counts as covered once ANY non-excluded line item exists for it —
+ * an excluded (Gate 3, invalid quantity) item doesn't count, since it
+ * contributes nothing to the estimate. Only trades Stage 3 actually scoped
+ * (non-empty included_scope) are checked — a trade with no included scope
+ * was correctly never expected to produce line items.
+ */
+export function findMissingTrades(
+  scopeItems: ScopeItemForCompleteness[],
+  lineItems: LineItemForCompleteness[],
+): number[] {
+  const tradesWithItems = new Set(
+    lineItems.filter((i) => i.assumption_status !== 'excluded').map((i) => i.trade_category_id)
+  )
+  return scopeItems
+    .filter((s) => (s.included_scope?.length ?? 0) > 0 && !tradesWithItems.has(s.trade_category_id))
+    .map((s) => s.trade_category_id)
+}
+
+/** `trade_category_id::description` key — the same de-duplication identity the main Stage 6 insert path already uses (index.ts's `existingKeys`), extracted so the recovery path shares the exact same definition of "already exists." */
+export function lineItemKey(tradeCategoryId: number, description: string): string {
+  return `${tradeCategoryId}::${description.trim().toLowerCase()}`
+}
+
+/**
+ * Filters a batch of candidate line items down to ones genuinely new against
+ * `existingKeys` — an excluded (Gate 3) item always passes through, since it
+ * still needs to be recorded even though it contributes $0 (mirrors the main
+ * generation path's own `toInsert` filter). Used identically by the main
+ * Stage 6 insert and the targeted recovery insert, so "don't duplicate
+ * existing line items" has one implementation, not two that could drift.
+ */
+export function filterNewLineItems<T extends { trade_category_id: number; description: string; assumption_status?: string | null }>(
+  items: T[],
+  existingKeys: Set<string>,
+): T[] {
+  return items.filter((item) => {
+    if (item.assumption_status === 'excluded') return true
+    return !existingKeys.has(lineItemKey(item.trade_category_id, item.description))
+  })
+}
+
+/** Minimal shape of the scope_items row a recovery prompt is built from. */
+export interface TradeRecoveryScopeRow {
+  trade_category_id: number
+  included_scope: string[] | null
+  excluded_scope?: string[] | null
+  assumptions?: string[] | null
+}
+
+/**
+ * Builds the targeted, single-trade regeneration prompt — pure so the exact
+ * content (trade id, Stage 3 scope, project facts, "only this trade")
+ * reaching Claude is verifiable without mocking a Claude call. Never
+ * requests a full re-estimate: the system prompt explicitly restricts
+ * output to `trade_category_id`, and the caller (index.ts) additionally
+ * discards any returned item that ignores that instruction, defense in
+ * depth against the model not fully complying.
+ */
+export function buildTradeRecoveryPrompt(
+  tradeCategoryId: number,
+  tradeName: string,
+  scope: TradeRecoveryScopeRow,
+  factsBlock: string,
+): { system: string; userText: string } {
+  const system = `You are a senior Australian residential quantity surveyor. A prior estimate generation pass scoped the following trade as in-scope but produced NO line items for it — a generation gap, not a deliberate exclusion. Generate ONLY the missing line items for trade_category_id ${tradeCategoryId} (${tradeName}), using the same rules as a full takeoff: base every quantity on the project facts provided, never invent a quantity or material, use Australian units (m2, lm, m3, each, lot, weeks, hours), and propose a considered allowance_value (with pricing_basis) rather than manual_input_required whenever the scope is understood but not measurable. Every line item you return MUST have trade_category_id = ${tradeCategoryId} — do not generate items for any other trade.`
+  const userText = `PROJECT FACTS:\n${factsBlock}\n\nTRADE TO GENERATE: ${tradeCategoryId} (${tradeName})\nIncluded scope: ${(scope.included_scope ?? []).join('; ')}\nExcluded scope: ${(scope.excluded_scope ?? []).join('; ')}\nAssumptions: ${(scope.assumptions ?? []).join('; ')}\n\nGenerate the full line-item takeoff for ONLY this trade using the generate_estimate tool.`
+  return { system, userText }
+}
+
+/** One trade's recovery attempt outcome — `items_generated: 0` covers both "the model returned nothing usable" and "the call failed outright" identically, since a report reader only needs to know whether the gap closed. */
+export interface TradeRecoveryResult {
+  trade_category_id: number
+  items_generated: number
+}
+
+/** QA-visible summary of a completeness recovery pass — see requirement 4: initial missing trades, which ones recovered, and which are still missing after recovery was attempted. */
+export interface TradeRecoveryReport {
+  initial_missing_trades: number[]
+  recovered_trades: TradeRecoveryResult[]
+  remaining_missing_trades: number[]
+}
+
+/**
+ * A trade is only "recovered" once it actually produced at least one new
+ * line item — a failed call or an empty/all-duplicate response leaves it in
+ * `remaining_missing_trades`, visible rather than silently dropped.
+ */
+export function buildTradeRecoveryReport(
+  initialMissingTrades: number[],
+  recoveryResults: TradeRecoveryResult[],
+): TradeRecoveryReport {
+  const recoveredIds = new Set(recoveryResults.filter((r) => r.items_generated > 0).map((r) => r.trade_category_id))
+  return {
+    initial_missing_trades: initialMissingTrades,
+    recovered_trades: recoveryResults.filter((r) => r.items_generated > 0),
+    remaining_missing_trades: initialMissingTrades.filter((id) => !recoveredIds.has(id)),
+  }
+}

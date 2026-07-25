@@ -133,6 +133,17 @@ export interface Quote {
   /** % of total_cost (dollar-weighted) contributed by ai_allowance items —
    *  migration 073. Groundwork for allowance quality signals, not learning. */
   allowance_pct: number | null
+  /** Stage 6 completeness recovery outcome (before/after a targeted
+   *  regeneration for a scoped trade that produced zero line items) —
+   *  migration 074, written by smooth-responder. Null when no scoped trade
+   *  was ever found missing for this quote. */
+  trade_recovery_report: TradeRecoveryReport | null
+}
+
+export interface TradeRecoveryReport {
+  initial_missing_trades: number[]
+  recovered_trades: Array<{ trade_category_id: number; items_generated: number }>
+  remaining_missing_trades: number[]
 }
 
 export interface DocumentContributionReport {
@@ -168,6 +179,11 @@ export interface QAReport {
    *  lines, alongside the pct above. */
   allowance_count: number
   allowance_value: number
+  /** Migration 074 — mirrors quotes.trade_recovery_report: what Stage 6's
+   *  completeness recovery found and fixed for THIS quote's generation run.
+   *  Independent of, and a useful cross-check against, missing_trade_details
+   *  above (which reflects final current state, not the recovery attempt). */
+  trade_recovery: TradeRecoveryReport | null
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'
