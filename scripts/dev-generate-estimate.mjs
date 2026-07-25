@@ -54,6 +54,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { ensureQuotePriced } from '../lib/pricing.ts'
 import { applyValidationGates } from '../lib/estimating/gates.ts'
 import { tradeCategoryName } from '../lib/trade-taxonomy.ts'
+import { runQualityAssurance } from '../lib/estimating/qa.ts'
 
 // ─── CLI args ────────────────────────────────────────────────────────────
 const args = Object.fromEntries(
@@ -543,13 +544,25 @@ async function main() {
   const priced = await ensureQuotePriced(supabase, quoteId)
   log('pricing_done', { job_id: jobId, quote_id: quoteId, priced })
 
+  // ── QA — production wires this into every real path (intake completion,
+  // quote GET, assumption resolve, line-item patch) immediately after
+  // pricing; this dev script never called it, so the completeness
+  // safeguard (missing_trade_details) has never actually run against a
+  // real generated quote. Parity with production, not a new mechanism.
+  const qaReport = await runQualityAssurance(supabase, quoteId, jobId)
+  log('qa_done', {
+    job_id: jobId, quote_id: quoteId,
+    top_risks: qaReport?.top_risks?.length ?? 0,
+    missing_trades: qaReport?.missing_trade_details?.map((d) => d.trade_name) ?? [],
+  })
+
   // price_coverage_pct is now computed and persisted by computeQuoteTotals
   // itself (lib/pricing.ts, migration 071) — read the real column rather
   // than re-deriving it here, so this script is exercising and reporting
   // on the actual production code path, not a parallel calculation of it.
   const { data: finalQuote } = await supabase
     .from('quotes')
-    .select('id, total_cost, confidence_score, margin_pct, price_coverage_pct')
+    .select('id, total_cost, confidence_score, margin_pct, price_coverage_pct, pricing_match_rate_pct, allowance_pct')
     .eq('id', quoteId)
     .single()
 
@@ -578,6 +591,8 @@ async function main() {
     priced_line_items: pricedItems.length,
     unpriced_line_items: unpricedCount,
     price_coverage_pct: coveragePct,
+    pricing_match_rate_pct: finalQuote?.pricing_match_rate_pct ?? null,
+    allowance_pct: finalQuote?.allowance_pct ?? null,
     items_by_pricing_source: bySource,
     warning: coveragePct !== null && coveragePct < 90
       ? `Only ${coveragePct}% of line items have a price — total_cost reflects that partial coverage, NOT the full project scope. Treat this total as a floor, not a real estimate, until unpriced/unresolved items are addressed.`

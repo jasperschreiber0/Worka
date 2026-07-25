@@ -668,7 +668,7 @@ export function computeQuoteTotals(
     assumption_status: string | null
     pricing_source?: string | null
   }>
-): { total_cost: number; confidence_score: number; price_coverage_pct: number; pricing_match_rate_pct: number } {
+): { total_cost: number; confidence_score: number; price_coverage_pct: number; pricing_match_rate_pct: number; allowance_pct: number } {
   const included = items.filter((i) => i.assumption_status !== 'excluded')
   const total_cost = round2(included.reduce((sum, i) => sum + (i.total ?? 0), 0))
   const confidences = included
@@ -679,7 +679,18 @@ export function computeQuoteTotals(
   const price_coverage_pct = included.length > 0 ? round2((pricedCount / included.length) * 100) : 100
   const reliableCount = included.filter((i) => i.pricing_source && RELIABLE_PRICING_SOURCES.has(i.pricing_source)).length
   const pricing_match_rate_pct = included.length > 0 ? round2((reliableCount / included.length) * 100) : 100
-  return { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct }
+  // Dollar-weighted, not item-count-weighted — "72% of estimate VALUE",
+  // not "72% of line items." A quote dominated by a few large allowances
+  // (a pool, a lift, a structural engineer fee) needs this to be visible
+  // even when it's a small fraction of the item count. 0 (not 100) when
+  // total_cost is 0 — there's no value for allowances to have captured a
+  // share of, which is a neutral/good state here, unlike coverage/match-rate
+  // where "nothing to fall short of" is the good state.
+  const allowanceValue = included
+    .filter((i) => i.pricing_source === 'ai_allowance')
+    .reduce((sum, i) => sum + (i.total ?? 0), 0)
+  const allowance_pct = total_cost > 0 ? round2((allowanceValue / total_cost) * 100) : 0
+  return { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct }
 }
 
 /**
@@ -762,7 +773,7 @@ export async function ensureQuotePriced(
     // Merge priced values back for the totals computation
     const pricedById = new Map(priced.map((p, i) => [unpriced[i].id, p]))
     const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
-    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct } = computeQuoteTotals(finalItems)
+    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(finalItems)
 
     await supabase
       .from('quotes')
@@ -771,6 +782,7 @@ export async function ensureQuotePriced(
         confidence_score,
         price_coverage_pct,
         pricing_match_rate_pct,
+        allowance_pct,
         margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)
@@ -799,7 +811,7 @@ export async function recomputeQuoteTotals(
 
     if (!items) return
 
-    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct } = computeQuoteTotals(items)
+    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(items)
 
     const { data: quote } = await supabase
       .from('quotes')
@@ -814,6 +826,7 @@ export async function recomputeQuoteTotals(
         confidence_score,
         price_coverage_pct,
         pricing_match_rate_pct,
+        allowance_pct,
         margin_pct: quote?.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)

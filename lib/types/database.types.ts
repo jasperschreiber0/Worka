@@ -130,6 +130,9 @@ export interface Quote {
    *  pricing," not just "has a price" (an allowance or AI-estimated rate
    *  counts toward the latter but not this). */
   pricing_match_rate_pct: number | null
+  /** % of total_cost (dollar-weighted) contributed by ai_allowance items —
+   *  migration 073. Groundwork for allowance quality signals, not learning. */
+  allowance_pct: number | null
 }
 
 export interface DocumentContributionReport {
@@ -145,6 +148,10 @@ export interface QAReport {
   review_items: string[]
   recommended_actions: string[]
   missing_trades: number[]
+  /** Migration (this pass) — the actual expected scope text per missing
+   *  trade, not just its id/name, so "what was missed" doesn't require a
+   *  DB query to answer. */
+  missing_trade_details: Array<{ trade_category_id: number; trade_name: string; expected_scope: string[] }>
   duplicate_descriptions: string[]
   /** Migration 071 — mirrors quotes.price_coverage_pct, carried here so the
    *  estimate summary surfaces it alongside the other review signals. */
@@ -155,6 +162,12 @@ export interface QAReport {
    *  observability: how many were exact/normalized cost_rates matches vs.
    *  category fallbacks vs. AI-estimated vs. still unresolved. */
   pricing_tier_breakdown: Record<string, number>
+  /** Migration 073 — mirrors quotes.allowance_pct. */
+  allowance_pct: number | null
+  /** Migration 073 — item count and dollar value of ai_allowance-sourced
+   *  lines, alongside the pct above. */
+  allowance_count: number
+  allowance_value: number
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'

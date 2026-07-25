@@ -326,3 +326,76 @@ test('pricing_match_rate_pct: an item with no pricing_source at all (not yet pri
   ])
   assert.equal(pricing_match_rate_pct, 50)
 })
+
+// ─── pricing_source is metadata only — proves it can never move total_cost
+// or confidence_score, however it's populated. This is the regression test
+// for "audit pricing metadata, do not change totals": every pricing_source
+// value below is deliberately paired with the SAME total/confidence, and
+// total_cost/confidence_score must come out identical regardless of which
+// source label is attached — only pricing_match_rate_pct is allowed to move. ─
+
+test('pricing_source never influences total_cost or confidence_score — only pricing_match_rate_pct reads it', () => {
+  const baseItems = (source: string | null) => [
+    { total: 1000, confidence: 80, assumption_status: null, pricing_source: source },
+    { total: 2000, confidence: 60, assumption_status: null, pricing_source: source },
+  ]
+  const sources = ['document', 'cost_rates_exact', 'cost_rates_normalized', 'category_rate', 'builder_rate', 'network_rate', 'ai_measured_rate', 'ai_allowance', 'manual', 'unresolved', null]
+  const results = sources.map((s) => computeQuoteTotals(baseItems(s)))
+  for (const r of results) {
+    assert.equal(r.total_cost, 3000)
+    assert.equal(r.confidence_score, 60)
+  }
+  // pricing_match_rate_pct is the one field that's SUPPOSED to differ —
+  // reliable sources score 100, everything else (including null) scores 0.
+  assert.equal(results[0].pricing_match_rate_pct, 100) // document
+  assert.equal(results[7].pricing_match_rate_pct, 0)   // ai_allowance
+  assert.equal(results[10].pricing_match_rate_pct, 0)  // null
+})
+
+// ─── allowance_pct — dollar-weighted, distinct from price_coverage_pct and
+// pricing_match_rate_pct (both item-count-weighted) ──────────────────────
+
+test('allowance_pct: dollar-weighted, not item-count-weighted — a small number of large allowances can dominate by value', () => {
+  const { allowance_pct } = computeQuoteTotals([
+    { total: 900, confidence: 50, assumption_status: null, pricing_source: 'ai_allowance' }, // 1 allowance item
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 100, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+  ])
+  // 1/10 of items is an allowance, but 900/1800 = 50% of the DOLLARS are.
+  assert.equal(allowance_pct, 50)
+})
+
+test('allowance_pct: 0 when there are no allowance items at all', () => {
+  const { allowance_pct } = computeQuoteTotals([
+    { total: 1000, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+  ])
+  assert.equal(allowance_pct, 0)
+})
+
+test('allowance_pct: 100 when the entire priced value is allowances', () => {
+  const { allowance_pct } = computeQuoteTotals([
+    { total: 500, confidence: 45, assumption_status: null, pricing_source: 'ai_allowance' },
+    { total: 500, confidence: 45, assumption_status: null, pricing_source: 'ai_allowance' },
+  ])
+  assert.equal(allowance_pct, 100)
+})
+
+test('allowance_pct: excluded allowance items are removed from both numerator and denominator', () => {
+  const { allowance_pct } = computeQuoteTotals([
+    { total: 1000, confidence: 90, assumption_status: null, pricing_source: 'cost_rates_exact' },
+    { total: 5000, confidence: 45, assumption_status: 'excluded', pricing_source: 'ai_allowance' },
+  ])
+  assert.equal(allowance_pct, 0)
+})
+
+test('allowance_pct: 0 (not NaN) when total_cost is 0 — nothing for allowances to have captured a share of', () => {
+  assert.equal(computeQuoteTotals([]).allowance_pct, 0)
+  assert.equal(computeQuoteTotals([{ total: null, confidence: null, assumption_status: null, pricing_source: null }]).allowance_pct, 0)
+})

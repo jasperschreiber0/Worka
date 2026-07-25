@@ -1,0 +1,5 @@
+-- Rollback for 073_allowance_pct.sql
+-- Not auto-applied — see the .sql.txt convention established by migrations
+-- 056-072's own rollback companions.
+
+ALTER TABLE quotes DROP COLUMN IF EXISTS allowance_pct;

@@ -4,10 +4,15 @@
 // builder. Never throws — a QA failure must not block the quote being shown.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
-import type { QAReport } from '@/lib/types/database.types'
-import { pairSupersededFacts, type FactRow } from '@/supabase/functions/smooth-responder/pipeline-logic'
-import { isSilentlyUnpriced } from '@/lib/estimating/readiness'
+// Relative, not the '@/*' alias used elsewhere in this route/module —
+// needed so this file resolves identically under plain
+// `node --experimental-strip-types` (the dev scripts now call
+// runQualityAssurance directly, for parity with production) and under
+// Next.js/webpack. Same reasoning lib/pricing.ts's own imports document.
+import { TRADE_CATEGORIES } from '../trade-taxonomy.ts'
+import type { QAReport } from '../types/database.types.ts'
+import { pairSupersededFacts, type FactRow } from '../../supabase/functions/smooth-responder/pipeline-logic.ts'
+import { isSilentlyUnpriced } from './readiness.ts'
 
 const UNIT_SANITY_MAX: Record<string, number> = {
   m2: 2000,
@@ -50,8 +55,16 @@ export async function runQualityAssurance(
     const recommendedActions: string[] = []
 
     // ── Missing trades: scope reasoning said a trade is in scope, but no
-    // line items ever landed for it ──
+    // line items ever landed for it — the completeness safeguard. Confirmed
+    // on a real quote: External Cladding was scoped by Stage 3 (9 included
+    // items) but Stage 6 generated zero line items for it, with nothing
+    // downstream ever surfacing that gap because this check existed but was
+    // never exercised against real generated output. Every scoped trade must
+    // either produce line items or be explicitly explained here — never
+    // silently absent. Now carries the actual expected scope text, not just
+    // the trade name, so "what was missed" is answerable without a DB query.
     const missingTrades: number[] = []
+    const missingTradeDetails: Array<{ trade_category_id: number; trade_name: string; expected_scope: string[] }> = []
     const { data: scopeRows } = await supabase
       .from('scope_items')
       .select('trade_category_id, included_scope')
@@ -62,13 +75,22 @@ export async function runQualityAssurance(
       for (const row of scopeRows as Array<{ trade_category_id: number; included_scope: string[] }>) {
         if (row.included_scope?.length > 0 && !tradesWithItems.has(row.trade_category_id)) {
           missingTrades.push(row.trade_category_id)
+          missingTradeDetails.push({
+            trade_category_id: row.trade_category_id,
+            trade_name: TRADE_CATEGORIES.find((t) => t.id === row.trade_category_id)?.name ?? `Trade ${row.trade_category_id}`,
+            expected_scope: row.included_scope,
+          })
         }
       }
     }
-    if (missingTrades.length > 0) {
-      const names = missingTrades.map((id) => TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`)
-      topRisks.push(`${names.join(', ')} ${names.length > 1 ? 'were' : 'was'} identified as in-scope but has no priced line items.`)
-      recommendedActions.push(`Review ${names.join(', ')} — scope reasoning expected line items here.`)
+    if (missingTradeDetails.length > 0) {
+      for (const d of missingTradeDetails) {
+        const sample = d.expected_scope.slice(0, 3).join('; ')
+        const more = d.expected_scope.length > 3 ? ` (+${d.expected_scope.length - 3} more)` : ''
+        topRisks.push(`${d.trade_name} was identified as in-scope but has NO priced line items. Expected scope included: ${sample}${more}.`)
+      }
+      const names = missingTradeDetails.map((d) => d.trade_name)
+      recommendedActions.push(`Review ${names.join(', ')} — scope reasoning expected line items here and none were generated. This is a generation gap, not a missing-scope gap.`)
     }
 
     // ── Duplicate descriptions within the same trade ──
@@ -170,13 +192,14 @@ export async function runQualityAssurance(
 
     const { data: quote } = await supabase
       .from('quotes')
-      .select('confidence_score, document_contribution, price_coverage_pct, pricing_match_rate_pct')
+      .select('confidence_score, document_contribution, price_coverage_pct, pricing_match_rate_pct, allowance_pct')
       .eq('id', quoteId)
       .single()
 
     const overallConfidence = quote?.confidence_score ?? null
     const priceCoveragePct = quote?.price_coverage_pct ?? null
     const pricingMatchRatePct = quote?.pricing_match_rate_pct ?? null
+    const allowancePct = quote?.allowance_pct ?? null
 
     // ── Price coverage — a top risk, not a footnote, below 90% ──
     // ensureQuotePriced/recomputeQuoteTotals (lib/pricing.ts) already
@@ -204,13 +227,33 @@ export async function runQualityAssurance(
     // the two aggregate percentages above.
     const { data: sourceRows } = await supabase
       .from('quote_line_items')
-      .select('pricing_source, assumption_status')
+      .select('pricing_source, assumption_status, total')
       .eq('quote_id', quoteId)
     const pricingTierBreakdown: Record<string, number> = {}
-    for (const row of (sourceRows ?? []) as Array<{ pricing_source: string | null; assumption_status: string | null }>) {
+    let allowanceCount = 0
+    let allowanceValue = 0
+    for (const row of (sourceRows ?? []) as Array<{ pricing_source: string | null; assumption_status: string | null; total: number | null }>) {
       if (row.assumption_status === 'excluded') continue
       const key = row.pricing_source ?? 'not_yet_priced'
       pricingTierBreakdown[key] = (pricingTierBreakdown[key] ?? 0) + 1
+      if (row.pricing_source === 'ai_allowance') {
+        allowanceCount++
+        allowanceValue += row.total ?? 0
+      }
+    }
+    allowanceValue = Math.round(allowanceValue * 100) / 100
+
+    // ── Allowance dollar dominance — groundwork for allowance quality
+    // signals (not builder learning yet, see the pricing_source audit this
+    // migration is part of). Sits alongside price_coverage_pct/
+    // pricing_match_rate_pct: a quote can be fully covered and mostly
+    // rate-matched by ITEM COUNT while still being dominated, in dollars,
+    // by a handful of large allowances — confirmed on the real project this
+    // was built against, where Preliminaries (the largest trade by $) is
+    // almost entirely large ai_allowance figures (pool, lift, structural
+    // engineer, landscaping).
+    if (allowancePct !== null && allowancePct >= 50) {
+      reviewItems.push(`${allowancePct}% of this estimate's value comes from AI allowances (${allowanceCount} item${allowanceCount === 1 ? '' : 's'}, $${allowanceValue.toLocaleString('en-AU')}) rather than measured quantities or rate matches — treat the total as a considered estimate, not a firm price.`)
     }
 
     // ── Documents that contributed nothing ──
@@ -248,10 +291,14 @@ export async function runQualityAssurance(
       review_items: reviewItems.slice(0, 10),
       recommended_actions: recommendedActions.slice(0, 5),
       missing_trades: missingTrades,
+      missing_trade_details: missingTradeDetails,
       duplicate_descriptions: duplicateDescriptions.slice(0, 10),
       price_coverage_pct: priceCoveragePct,
       pricing_match_rate_pct: pricingMatchRatePct,
       pricing_tier_breakdown: pricingTierBreakdown,
+      allowance_pct: allowancePct,
+      allowance_count: allowanceCount,
+      allowance_value: allowanceValue,
     }
 
     await supabase

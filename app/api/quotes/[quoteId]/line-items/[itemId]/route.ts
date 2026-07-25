@@ -107,6 +107,13 @@ export async function PATCH(
             : round2(body.rate!),
           // A builder-entered price is a direct answer, not an inference.
           confidence: 100,
+          // Was previously unset here — the one pricing path (of document/
+          // cost_rates_exact/normalized/category_rate/ai_measured_rate/
+          // ai_allowance/manual/unresolved) that never wrote pricing_source
+          // at all. pricing_basis cleared: a builder's own number needs no
+          // AI-generated justification attached to it.
+          pricing_source: 'manual',
+          pricing_basis: null,
         }
 
     const { error: updateErr } = await supabase
