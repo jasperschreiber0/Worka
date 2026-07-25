@@ -288,8 +288,20 @@ async function main() {
     log('stage12_calling', { job_id: jobId, batch: batchIdx + 1, of: batches.length, document_count: batchDocs.length })
     const stage12 = await callTool(stage12System, stage12Content, DOCUMENT_INTELLIGENCE_TOOL)
 
+    // Dedupe by file_index, keep the first — project_documents.file_id is
+    // UNIQUE (one classification row per uploaded file), but Claude can
+    // return more than one "documents" entry for the same file_index (e.g.
+    // a multi-page/multi-sheet PDF it treats as several logical drawings).
+    // The simplified dev-mode schema doesn't ask it to dedupe that itself
+    // the way the real pipeline's is_duplicate/superseded fields do.
+    const seenFileIndexes = new Set()
     const docInserts = (stage12.documents ?? [])
       .filter((d) => typeof d.file_index === 'number' && batchDocs[d.file_index])
+      .filter((d) => {
+        if (seenFileIndexes.has(d.file_index)) return false
+        seenFileIndexes.add(d.file_index)
+        return true
+      })
       .map((d) => ({
         job_id: jobId, file_id: batchDocs[d.file_index].fileId,
         document_type: d.document_type ?? null, discipline: d.discipline ?? null,
