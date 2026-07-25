@@ -425,8 +425,21 @@ export async function ensureQuotePriced(
 
     // Batched upsert instead of one round trip per line item — quotes with
     // 20-40 unpriced lines previously issued that many sequential updates.
+    // Supabase's upsert is INSERT ... ON CONFLICT DO UPDATE under the hood —
+    // Postgres requires every NOT NULL column to be satisfied in the INSERT
+    // branch even though every one of these rows already exists and will
+    // hit the conflict path. Carrying quote_id/trade_category_id/description
+    // through (unchanged values, since these rows are never newly created
+    // here) is what makes the statement valid; omitting them (as before)
+    // failed the whole batch with "null value in column quote_id violates
+    // not-null constraint" — confirmed on a real ~195-line-item quote, never
+    // caught at the smaller scale this was originally written against.
     const rowsToUpdate = priced
-      .map((p, i) => ({ id: unpriced[i].id, rate: p.rate, total: p.total }))
+      .map((p, i) => ({
+        id: unpriced[i].id, quote_id: quoteId,
+        trade_category_id: unpriced[i].trade_category_id, description: unpriced[i].description,
+        rate: p.rate, total: p.total,
+      }))
       .filter((row) => row.rate !== null)
 
     if (rowsToUpdate.length > 0) {
