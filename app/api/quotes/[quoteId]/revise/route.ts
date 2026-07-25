@@ -3,6 +3,8 @@ import { createClient } from '@supabase/supabase-js'
 import { DEMO_QUOTE } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { recomputeQuoteTotals } from '@/lib/pricing'
+import { getUnresolvedConservativeAssumptions } from '@/lib/estimating/readiness'
+import { runInBackground } from '@/lib/run-background'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -48,6 +50,7 @@ export async function POST(
     return NextResponse.json({ error: 'Not configured' }, { status: 503 })
   }
 
+  const startedAt = Date.now()
   try {
     const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
 
@@ -83,13 +86,7 @@ export async function POST(
     // though the underlying uncertainty was never actually resolved. Only
     // unresolved rows are copied — a resolved one carries no risk to
     // preserve, and re-copying it would just be dead weight on the new quote.
-    const { data: unresolvedConservativeAssumptions, error: assumptionsErr } = await supabase
-      .from('assumptions')
-      .select('*')
-      .eq('quote_id', quoteId)
-      .is('gate', null)
-      .is('line_item_id', null)
-      .is('resolution_type', null)
+    const { data: unresolvedConservativeAssumptions, error: assumptionsErr } = await getUnresolvedConservativeAssumptions(supabase, quoteId, '*')
 
     if (assumptionsErr) {
       console.error('[quotes/revise] conservative assumption fetch failed:', assumptionsErr.message)
@@ -181,11 +178,25 @@ export async function POST(
     // Recalculated, not copied (qa_report was stripped from the insert
     // above) — the new quote gets its own accurate QA state, including a
     // fresh missing-trade check against its own (copied) line items, rather
-    // than trusting a snapshot computed for a different quote row. Same
-    // best-effort semantics as everywhere else this is called — never
-    // blocks the revision itself from succeeding.
-    const { runQualityAssurance } = await import('@/lib/estimating/qa')
-    await runQualityAssurance(supabase, newQuote.id, newQuote.job_id)
+    // than trusting a snapshot computed for a different quote row.
+    // Background, not awaited: QA is a review-time signal (Background tier
+    // — see CLAUDE.md's execution-tier documentation), never a send-time
+    // gate — send/confirm-send derive missingTrades/unresolved-assumptions
+    // fresh from scope_items/quote_line_items/assumptions directly, not
+    // from qa_report, so a request racing ahead of this write can never see
+    // a falsely-clear send gate. Response payload never included qa_report
+    // either, so nothing observable changes for the caller.
+    runInBackground('revise_quality_assurance', async () => {
+      const { runQualityAssurance } = await import('@/lib/estimating/qa')
+      await runQualityAssurance(supabase, newQuote.id, newQuote.job_id)
+    })
+
+    console.log(JSON.stringify({
+      event: 'quote_revise', quote_id: quoteId, new_quote_id: newQuote.id,
+      item_count: (existingItems ?? []).length,
+      copied_assumption_count: (unresolvedConservativeAssumptions ?? []).length,
+      duration_ms: Date.now() - startedAt,
+    }))
 
     const response: ReviseResponse = { new_quote_id: newQuote.id, version: newQuote.version }
     return NextResponse.json(response, { status: 201 })

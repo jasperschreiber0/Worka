@@ -25,6 +25,8 @@
 // Pure function — shared by the quote GET API (which derives it server-side)
 // and unit-tested without a database.
 
+import type { SupabaseClient } from '@supabase/supabase-js'
+
 export type QuoteReadiness = 'ready' | 'review_required' | 'blocked'
 
 // Below this extraction-confidence score the quote drops to review_required
@@ -177,6 +179,30 @@ export interface SendBlockingLineItem {
 
 export interface SendBlockingMissingTrade {
   trade_name: string
+}
+
+// ─── Shared conservative-assumption fetch ──────────────────────────────────
+// The exact `assumptions WHERE quote_id = ? AND gate IS NULL AND
+// line_item_id IS NULL AND resolution_type IS NULL` query was hand-written
+// identically at four call sites (quotes GET, send, confirm-send, revise) —
+// one shared function so the definition of "unresolved conservative
+// assumption" can't drift between the routes that read it and the routes
+// that enforce on it.
+export async function getUnresolvedConservativeAssumptions(
+  supabase: SupabaseClient,
+  quoteId: string,
+  // Callers that only need a count (send, confirm-send) use the cheap
+  // default; revise/route.ts passes '*' since it copies the full rows
+  // forward onto the new quote version.
+  columns: string = 'id'
+) {
+  return supabase
+    .from('assumptions')
+    .select(columns)
+    .eq('quote_id', quoteId)
+    .is('gate', null)
+    .is('line_item_id', null)
+    .is('resolution_type', null)
 }
 
 export function getSendBlockingReasons(input: {

@@ -11,7 +11,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 // Next.js/webpack. Same reasoning lib/pricing.ts's own imports document.
 import { TRADE_CATEGORIES } from '../trade-taxonomy.ts'
 import type { QAReport } from '../types/database.types.ts'
-import { pairSupersededFacts, type FactRow } from '../../supabase/functions/smooth-responder/pipeline-logic.ts'
+import { pairSupersededFacts, type FactRow, findMissingTrades } from '../../supabase/functions/smooth-responder/pipeline-logic.ts'
 import { isSilentlyUnpriced } from './readiness.ts'
 import { applyMargin, calculateClientPrice } from '../pricing.ts'
 
@@ -43,6 +43,7 @@ export async function runQualityAssurance(
   quoteId: string,
   jobId: string
 ): Promise<QAReport | null> {
+  const startedAt = Date.now()
   try {
     const { data: items } = await supabase
       .from('quote_line_items')
@@ -65,26 +66,30 @@ export async function runQualityAssurance(
     // either produce line items or be explicitly explained here — never
     // silently absent. Now carries the actual expected scope text, not just
     // the trade name, so "what was missed" is answerable without a DB query.
-    const missingTrades: number[] = []
-    const missingTradeDetails: Array<{ trade_category_id: number; trade_name: string; expected_scope: string[] }> = []
+    // findMissingTrades (supabase/functions/smooth-responder/pipeline-logic.ts)
+    // is the same pure function Stage 6's own completeness recovery uses —
+    // reused here rather than re-implementing the "scoped but zero
+    // non-excluded line items" check a second time, so QA's missing-trade
+    // signal and Stage 6's own gap detection can never disagree on what
+    // counts as missing. Only the expected-scope detail text below is
+    // qa.ts-specific enrichment.
     const { data: scopeRows } = await supabase
       .from('scope_items')
       .select('trade_category_id, included_scope')
       .eq('job_id', jobId)
 
-    if (scopeRows) {
-      const tradesWithItems = new Set(included.map((i) => i.trade_category_id))
-      for (const row of scopeRows as Array<{ trade_category_id: number; included_scope: string[] }>) {
-        if (row.included_scope?.length > 0 && !tradesWithItems.has(row.trade_category_id)) {
-          missingTrades.push(row.trade_category_id)
-          missingTradeDetails.push({
-            trade_category_id: row.trade_category_id,
-            trade_name: TRADE_CATEGORIES.find((t) => t.id === row.trade_category_id)?.name ?? `Trade ${row.trade_category_id}`,
-            expected_scope: row.included_scope,
-          })
-        }
+    const missingTrades = findMissingTrades(
+      (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null }>,
+      lineItems as Array<{ trade_category_id: number; assumption_status: string | null }>,
+    )
+    const missingTradeDetails: Array<{ trade_category_id: number; trade_name: string; expected_scope: string[] }> = missingTrades.map((tradeId) => {
+      const row = (scopeRows ?? []).find((r: { trade_category_id: number }) => r.trade_category_id === tradeId) as { included_scope: string[] } | undefined
+      return {
+        trade_category_id: tradeId,
+        trade_name: TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}`,
+        expected_scope: row?.included_scope ?? [],
       }
-    }
+    })
     if (missingTradeDetails.length > 0) {
       for (const d of missingTradeDetails) {
         const sample = d.expected_scope.slice(0, 3).join('; ')
@@ -361,6 +366,12 @@ export async function runQualityAssurance(
       .from('quotes')
       .update({ qa_report: report, overall_confidence: overallConfidence })
       .eq('id', quoteId)
+
+    console.log(JSON.stringify({
+      event: 'run_quality_assurance', quote_id: quoteId, job_id: jobId,
+      item_count: lineItems.length, missing_trade_count: missingTrades.length,
+      duration_ms: Date.now() - startedAt,
+    }))
 
     return report
   } catch (err) {

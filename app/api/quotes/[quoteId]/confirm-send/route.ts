@@ -5,8 +5,11 @@ import { requirePermission } from '@/lib/auth/role-guard'
 import { randomUUID } from 'crypto'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-import { getSendBlockingReasons } from '@/lib/estimating/readiness'
-import type { QAReport } from '@/lib/types/database.types'
+import { getSendBlockingReasons, getUnresolvedConservativeAssumptions } from '@/lib/estimating/readiness'
+import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
+// Relative, not the '@/*' alias — matches lib/estimating/qa.ts's own import
+// of this same module.
+import { findMissingTrades } from '../../../../../supabase/functions/smooth-responder/pipeline-logic.ts'
 
 // Quote job IDs for proof recording in demo mode
 const DEMO_QUOTE_JOB_MAP: Record<string, string> = {
@@ -120,7 +123,7 @@ export async function POST(
   // 1. Verify quote exists and belongs to this builder
   const { data: quoteRow, error: fetchErr } = await supabase
     .from('quotes')
-    .select('id, status, job_id, qa_report')
+    .select('id, status, job_id')
     .eq('id', quoteId)
     .eq('builder_id', sessionBuilderId)
     .single()
@@ -148,26 +151,38 @@ export async function POST(
   // Confidence Integrity Audit, P0-1/P0-2). This is the route that actually
   // dispatches the email — getting this check right here matters more than
   // anywhere else in the send flow.
+  //
+  // qa_report is deliberately not read for this check — a cached QA
+  // snapshot can be stale now that QA runs off the synchronous path in
+  // several places (see lib/run-background.ts). missingTrades is derived
+  // fresh here, same as the send-draft route.
   {
-    const [{ data: lineItems }, { data: openConservativeAssumptions }] = await Promise.all([
+    const sendGateStartedAt = Date.now()
+    const [{ data: lineItems }, { data: openConservativeAssumptions }, { data: scopeRows }] = await Promise.all([
       supabase
         .from('quote_line_items')
-        .select('description, total, is_assumption, assumption_status')
+        .select('description, total, is_assumption, assumption_status, trade_category_id')
         .eq('quote_id', quoteId),
+      getUnresolvedConservativeAssumptions(supabase, quoteId),
       supabase
-        .from('assumptions')
-        .select('id')
-        .eq('quote_id', quoteId)
-        .is('gate', null)
-        .is('line_item_id', null)
-        .is('resolution_type', null),
+        .from('scope_items')
+        .select('trade_category_id, included_scope')
+        .eq('job_id', quoteRow.job_id),
     ])
-    const qaReportForSend = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
+    const missingTrades = findMissingTrades(
+      (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null }>,
+      (lineItems ?? []) as Array<{ trade_category_id: number; assumption_status: string | null }>,
+    ).map((tradeId) => ({ trade_name: TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}` }))
     const blockingReasons = getSendBlockingReasons({
       lineItems: (lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>,
-      missingTrades: qaReportForSend?.missing_trade_details ?? [],
+      missingTrades,
       unresolvedConservativeAssumptionCount: (openConservativeAssumptions ?? []).length,
     })
+    console.log(JSON.stringify({
+      event: 'send_gate_validation', quote_id: quoteId, item_count: (lineItems ?? []).length,
+      trade_count: missingTrades.length, blocked: blockingReasons.length > 0,
+      duration_ms: Date.now() - sendGateStartedAt, route: 'confirm-send',
+    }))
     if (blockingReasons.length > 0) {
       return NextResponse.json({ error: `Cannot send: ${blockingReasons.join(' ')}` }, { status: 422 })
     }

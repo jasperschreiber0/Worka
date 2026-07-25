@@ -331,7 +331,12 @@ async function handleLiveActivation(
   // the atomic claim above, so a duplicate activation attempt can never
   // double-count the same quote's rates into the running averages.
   const { captureLearnedRates } = await import('@/lib/pricing')
+  const learnedRatesStartedAt = Date.now()
   await captureLearnedRates(supabase, quoteId)
+  console.log(JSON.stringify({
+    event: 'activate_capture_learned_rates', quote_id: quoteId, job_id: jobId,
+    duration_ms: Date.now() - learnedRatesStartedAt,
+  }))
 
   // The client pays cost + margin. quotes.total_cost is the builder's
   // internal cost basis (see CLAUDE.md's Margin rule) — every client-facing

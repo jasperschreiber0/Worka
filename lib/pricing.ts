@@ -747,6 +747,7 @@ export async function ensureQuotePriced(
   supabase: SupabaseClient,
   quoteId: string
 ): Promise<boolean> {
+  const startedAt = Date.now()
   try {
     const { data: quote } = await supabase
       .from('quotes')
@@ -830,6 +831,8 @@ export async function ensureQuotePriced(
       })
       .eq('id', quoteId)
 
+    console.log(JSON.stringify({ event: 'ensure_quote_priced', quote_id: quoteId, item_count: items.length, priced_count: rowsToUpdate.length, duration_ms: Date.now() - startedAt }))
+
     return true
   } catch (err) {
     console.error('ensureQuotePriced failed:', err)
@@ -878,6 +881,9 @@ export async function recomputeQuoteTotals(
   }
 }
 
+/** Bounded concurrency for captureLearnedRates below — see its own comment. */
+const LEARNED_RATE_BATCH_SIZE = 25
+
 /**
  * Tier 1 capture: when a quote is approved, fold its priced line items into
  * builder_learned_rates (running average keyed by line_item_key).
@@ -919,27 +925,42 @@ export async function captureLearnedRates(
     // migration 023) — safe to run concurrently since each RPC call is a
     // single atomic statement, unlike the old select-then-branch which could
     // lose an update between two concurrent quote approvals.
-    await Promise.all(
-      items.map(async (item) => {
-        if (item.rate === null || item.assumption_status === 'excluded') return
-        // PC allowances and provisional sums are placeholders by definition —
-        // a nominal PS figure entered to unblock a quote is not a market
-        // rate, and folding it into the learned average would poison Tier 1
-        // pricing for every future quote. Only measured lines teach.
-        const pricingType = (item as { pricing_type?: string | null }).pricing_type
-        if (pricingType && pricingType !== 'measured') return
-        const match = matchLineItemKey({ ...item, quantity: null }, catalogue)
-        if (!match || !item.unit) return
+    //
+    // Bounded concurrency: this used to be one unbounded Promise.all firing
+    // an RPC per measured line item — a quote with hundreds of lines (a
+    // large commercial job) would fan out hundreds of simultaneous
+    // connections to the same builder_id's learned-rate rows at once, all
+    // contending on the same upsert. Chunked into fixed-size batches
+    // (LEARNED_RATE_BATCH_SIZE = 25, within the reliability-refactor's
+    // approved 20-50 range) run sequentially, each batch itself still
+    // parallel — bounds peak concurrency without changing what gets
+    // learned or losing any item's contribution.
+    const eligibleItems = items.filter((item) => {
+      if (item.rate === null || item.assumption_status === 'excluded') return false
+      // PC allowances and provisional sums are placeholders by definition —
+      // a nominal PS figure entered to unblock a quote is not a market
+      // rate, and folding it into the learned average would poison Tier 1
+      // pricing for every future quote. Only measured lines teach.
+      const pricingType = (item as { pricing_type?: string | null }).pricing_type
+      return !pricingType || pricingType === 'measured'
+    })
+    for (let i = 0; i < eligibleItems.length; i += LEARNED_RATE_BATCH_SIZE) {
+      const batch = eligibleItems.slice(i, i + LEARNED_RATE_BATCH_SIZE)
+      await Promise.all(
+        batch.map(async (item) => {
+          const match = matchLineItemKey({ ...item, quantity: null }, catalogue)
+          if (!match || !item.unit) return
 
-        const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
-          p_builder_id: quote.builder_id,
-          p_line_item_key: match.key,
-          p_rate: item.rate,
-          p_unit: item.unit,
+          const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
+            p_builder_id: quote.builder_id,
+            p_line_item_key: match.key,
+            p_rate: item.rate,
+            p_unit: item.unit,
+          })
+          if (rpcError) console.error('upsert_learned_rate failed:', rpcError.message)
         })
-        if (rpcError) console.error('upsert_learned_rate failed:', rpcError.message)
-      })
-    )
+      )
+    }
   } catch (err) {
     console.error('captureLearnedRates failed:', err)
   }

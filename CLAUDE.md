@@ -901,6 +901,73 @@ the next free number before it ships, don't let a second file reuse a number alr
 
 ---
 
+## Execution tiers — Generation Critical / Background / Send Enforcement
+
+Every check the estimating pipeline performs sits in exactly one of three tiers. This is the
+organizing principle behind the reliability refactor described here and is meant to stay true as
+the pipeline grows — a new check should be placed in the right tier from the start rather than
+defaulting onto the synchronous request path because that was the easiest place to add it.
+
+**Generation Critical** — runs synchronously, on the estimating engine's own critical path, because
+the estimate cannot exist correctly without it:
+- Stage 1 Document Intelligence, Stage 2 Project Understanding, Stage 3 Scope Reasoning, Stage 6
+  Estimate Generation (`supabase/functions/smooth-responder`)
+- Validation Gates 1–3 (`lib/estimating/gates.ts` / the Deno copy in `smooth-responder`)
+- Stage 6's completeness recovery pass (`findMissingTrades` + the per-trade retry loop in
+  `smooth-responder/index.ts`) — bounded by both the existing wall-clock budget and, as of this
+  refactor, an explicit `MAX_TRADE_RECOVERY_ATTEMPTS_PER_RUN` ceiling (see "Bounded loops" below)
+
+**Background** — runs off the request/response critical path (fire-and-forget via
+`lib/run-background.ts`'s `runInBackground`, safe because Railway is a persistent Node.js process,
+not serverless — an un-awaited promise keeps running after the response is sent, no queue needed):
+- Stage 8 Quality Assurance (`lib/estimating/qa.ts` `runQualityAssurance`) — top risks, missing-trade
+  detail, duplicate descriptions, financial reconciliation, document contribution. Backgrounded at
+  intake completion, line-item PATCH, and quote revise. **Deliberately still synchronous at the
+  quote GET route's lazy-refresh-on-null-`qa_report` fallback** — that response contract has always
+  returned `qa_report` inline, and backgrounding it there would change visible behaviour for no
+  latency win (a builder opening a quote with no cached QA yet is exactly the case that fallback
+  exists for).
+- Tier-1 rate learning (`captureLearnedRates`, `lib/pricing.ts`) — folds an approved quote's rates
+  into `builder_learned_rates`, batched (see below), never blocks activation.
+- Project-understanding persistence (`persistProjectUnderstanding`, `lib/project-context.ts`)
+
+**Send Enforcement** — the one place a stale cached signal must never be trusted, because this is
+what actually authorizes an email to a client. `getSendBlockingReasons` (`lib/estimating/
+readiness.ts`), called identically by `send/route.ts`'s draft build and `confirm-send/route.ts`'s
+final guard:
+- Silently-unpriced line items — read directly off `quote_line_items` at request time
+- Missing scoped trades — derived **fresh** via `findMissingTrades` against a live `scope_items` +
+  `quote_line_items` fetch, never from `quotes.qa_report.missing_trade_details` (a Background-tier
+  value that can be stale or, now that QA runs asynchronously in more places, momentarily absent)
+- Unresolved conservative assumptions — read via the shared
+  `getUnresolvedConservativeAssumptions` helper (`lib/estimating/readiness.ts`), the same
+  `gate IS NULL AND line_item_id IS NULL AND resolution_type IS NULL` query previously
+  hand-written at four separate call sites (quote GET, send, confirm-send, revise)
+
+The rule this tier structure exists to enforce: **a send-blocking decision must never read a value
+a Background-tier job wrote** — it always re-derives from the same tables generation itself wrote
+to. This is what makes it safe for QA to run asynchronously without weakening what actually stops
+an email from going out.
+
+### Bounded loops
+
+Two loops in the pipeline scale with input size and had no explicit ceiling before this refactor:
+
+- **`captureLearnedRates`** (`lib/pricing.ts`) — used to fire one unbounded `Promise.all` with one
+  `upsert_learned_rate` RPC per measured line item. A large commercial quote (hundreds of lines)
+  meant hundreds of simultaneous connections contending on the same builder's learned-rate rows at
+  once. Now chunked into sequential batches of `LEARNED_RATE_BATCH_SIZE = 25` (each batch itself
+  still parallel) — bounds peak concurrency, changes nothing about what gets learned.
+- **Stage 6 completeness recovery** (`smooth-responder/index.ts`) — the existing wall-clock check
+  (`hasWallClockBudget`) bounds total *time* spent recovering missing trades, but nothing
+  previously bounded the *count* of recovery attempts (each one its own Anthropic call) within
+  whatever budget remained. `MAX_TRADE_RECOVERY_ATTEMPTS_PER_RUN = 5` adds an explicit ceiling on
+  top of — not instead of — the wall-clock guard. A trade skipped for hitting this ceiling reports
+  through the same `trade_recovery_report`/QA `remaining_missing_trades` path as any other
+  unrecovered trade, so it's still visible to the builder, not silently dropped.
+
+---
+
 ## Reasoning-First Estimating Engine
 
 This is the **one canonical pipeline** for turning uploaded documents (or a plain-English description) into an estimate. It replaced four independent, competing "document → quote" implementations that had accumulated in this codebase (two dead/unreachable, two live and inconsistent with each other — including a second, incompatible trade-category numbering sharing the same 1–13 integer space as the DB-locked one). There is now exactly one reasoning engine, one taxonomy, one gate specification.

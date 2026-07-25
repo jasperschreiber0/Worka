@@ -2530,7 +2530,21 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     if (initialMissingTrades.length > 0) {
       console.log(JSON.stringify({ event: 'stage6_completeness_gap_detected', job_id: jobId, quote_id: quoteId, missing_trades: initialMissingTrades }))
     }
+    // Explicit ceiling, on top of the existing wall-clock check below — the
+    // wall-clock guard bounds total TIME spent recovering, but nothing
+    // previously bounded the COUNT of recovery attempts within whatever
+    // budget remained, and each attempt is its own Anthropic call. The 13
+    // fixed trade categories already impose a loose ceiling; this is a
+    // tighter, explicit one on real spend per run. A trade skipped here for
+    // this reason (not wall-clock) still shows up in the QA report's
+    // remaining_missing_trades exactly like any other unrecovered trade.
+    const MAX_TRADE_RECOVERY_ATTEMPTS_PER_RUN = 5
     for (const tradeId of initialMissingTrades) {
+      if (recoveryResults.length >= MAX_TRADE_RECOVERY_ATTEMPTS_PER_RUN) {
+        console.log(JSON.stringify({ event: 'stage6_completeness_recovery_skipped', job_id: jobId, quote_id: quoteId, trade_category_id: tradeId, reason: 'max_trade_recovery_attempts_per_run reached' }))
+        recoveryResults.push({ trade_category_id: tradeId, items_generated: 0, failure_reason: `Recovery attempt ceiling (${MAX_TRADE_RECOVERY_ATTEMPTS_PER_RUN} per run) reached — this trade was not attempted this run`, retry_attempted: false })
+        continue
+      }
       // Leave any remaining trade genuinely missing (visible in the report)
       // rather than risk starting a call with no room to finish it — a
       // half-run recovery attempt is worse than none, since it would consume

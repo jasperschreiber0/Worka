@@ -3,8 +3,13 @@ import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { calculateClientPrice, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
-import { getSendBlockingReasons } from '@/lib/estimating/readiness'
-import type { QAReport } from '@/lib/types/database.types'
+import { getSendBlockingReasons, getUnresolvedConservativeAssumptions } from '@/lib/estimating/readiness'
+import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
+// Relative, not the '@/*' alias — matches lib/estimating/qa.ts's own import
+// of this same module (see that file's comment): keeps resolution identical
+// whether this file is reached via Next.js/webpack or a future node-based
+// test harness.
+import { findMissingTrades } from '../../../../../supabase/functions/smooth-responder/pipeline-logic.ts'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
 
@@ -127,28 +132,36 @@ export async function POST(
     }
     const { createClient } = await import('@supabase/supabase-js')
     const sb = createClient(sbUrl, sbKey, { auth: { persistSession: false } })
+    const sendGateStartedAt = Date.now()
 
-    const [{ data: quoteRow }, { data: lineItems }, { data: openConservativeAssumptions }] = await Promise.all([
-      sb.from('quotes')
-        .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at, qa_report')
-        .eq('id', quoteId).eq('builder_id', sessionBuilderId).single(),
+    const { data: quoteRow } = await sb.from('quotes')
+      .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
+      .eq('id', quoteId).eq('builder_id', sessionBuilderId).single()
+
+    if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
+
+    // qa_report is deliberately NOT selected/used here — send-time
+    // enforcement must never depend on a cached QA snapshot that could be
+    // stale (QA now runs off the synchronous path in several places, see
+    // lib/run-background.ts callers). missingTrades is instead derived
+    // fresh from scope_items + quote_line_items via findMissingTrades, the
+    // same pure function Stage 6 itself uses — one definition of "missing
+    // trade," no drift possible between what generation checked and what
+    // send-time re-checks.
+    const [{ data: lineItems }, { data: openConservativeAssumptions }, { data: scopeRows }] = await Promise.all([
       sb.from('quote_line_items')
         .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status, margin_pct')
         .eq('quote_id', quoteId),
       // Conservative assumptions: assumptions.gate IS NULL AND line_item_id
       // IS NULL is what distinguishes a non-blocking-estimation default
       // (project/trade-wide, from an unanswered "blocking" clarifying
-      // question) from a Gate 1-3 per-line assumption — same query shape
-      // quotes/[quoteId]/route.ts already runs for critical_assumptions.
-      sb.from('assumptions')
-        .select('id')
-        .eq('quote_id', quoteId)
-        .is('gate', null)
-        .is('line_item_id', null)
-        .is('resolution_type', null),
+      // question) from a Gate 1-3 per-line assumption. Shared query — see
+      // lib/estimating/readiness.ts getUnresolvedConservativeAssumptions.
+      getUnresolvedConservativeAssumptions(sb, quoteId),
+      sb.from('scope_items')
+        .select('trade_category_id, included_scope')
+        .eq('job_id', (quoteRow as { job_id: string }).job_id),
     ])
-
-    if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
 
     // This status guard used to live after this branch's `return` below,
     // making it dead code for every real quote — any status could generate
@@ -172,12 +185,20 @@ export async function POST(
     // using an unconfirmed default (Estimate Completeness & Confidence
     // Integrity Audit, P0-1/P0-2 — detection already existed for both; this
     // is what makes it actually refuse to send, not just display a warning).
-    const qaReportForDraft = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
+    const missingTrades = findMissingTrades(
+      (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null }>,
+      (lineItems ?? []) as Array<{ trade_category_id: number; assumption_status: string | null }>,
+    ).map((tradeId) => ({ trade_name: TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}` }))
     const blockingReasons = getSendBlockingReasons({
       lineItems: (lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>,
-      missingTrades: qaReportForDraft?.missing_trade_details ?? [],
+      missingTrades,
       unresolvedConservativeAssumptionCount: (openConservativeAssumptions ?? []).length,
     })
+    console.log(JSON.stringify({
+      event: 'send_gate_validation', quote_id: quoteId, item_count: (lineItems ?? []).length,
+      trade_count: missingTrades.length, blocked: blockingReasons.length > 0,
+      duration_ms: Date.now() - sendGateStartedAt,
+    }))
     if (blockingReasons.length > 0) {
       return NextResponse.json({ error: blockingReasons.join(' ') }, { status: 422 })
     }

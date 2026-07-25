@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { runInBackground } from '@/lib/run-background'
 
 // ─── PATCH /api/quotes/[quoteId]/line-items/[itemId] ─────────────────────────
 //
@@ -125,11 +126,18 @@ export async function PATCH(
       return NextResponse.json({ error: updateErr.message }, { status: 500 })
     }
 
-    // Keep the money and the "what to check" list truthful immediately.
+    // Totals must be correct before this response returns — the response
+    // itself doesn't include qa_report (confirmed: it never has), so QA can
+    // safely run in the background (Background tier — see CLAUDE.md's
+    // execution-tier documentation). The send gate never reads qa_report
+    // anyway (it derives its own signals fresh), so a request racing ahead
+    // of this background write can't see a stale-clear send gate either.
     const { recomputeQuoteTotals } = await import('@/lib/pricing')
     await recomputeQuoteTotals(supabase, quoteId)
-    const { runQualityAssurance } = await import('@/lib/estimating/qa')
-    await runQualityAssurance(supabase, quoteId, quoteRow.job_id)
+    runInBackground('line_item_patch_quality_assurance', async () => {
+      const { runQualityAssurance } = await import('@/lib/estimating/qa')
+      await runQualityAssurance(supabase, quoteId, quoteRow.job_id)
+    })
 
     return NextResponse.json({ updated: true, item_id: itemId, action: wantsExclude ? 'excluded' : 'priced' })
   } catch (err) {

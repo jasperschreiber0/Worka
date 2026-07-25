@@ -10,6 +10,7 @@ export const runtime = 'edge'
 
 import { NextRequest } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { runInBackground } from '@/lib/run-background'
 import { shouldGiveUp, documentPhaseProgress } from '@/supabase/functions/smooth-responder/pipeline-logic'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -894,19 +895,35 @@ export async function GET(
           }
 
           if (row.intake_status === 'extracted' && row.quote_id) {
+            const quoteId = row.quote_id
             // The reasoning engine only produces quantities — resolve rates
-            // through the 5-tier hierarchy, then run the Stage 8 QA pass.
-            // Idempotent, best-effort: neither failure blocks intake.
+            // through the 5-tier hierarchy before this SSE response
+            // completes, since pricing is needed for the quote's first
+            // render. Idempotent, best-effort: a failure never blocks intake.
             try {
               const { createClient } = await import('@supabase/supabase-js')
               const { ensureQuotePriced } = await import('@/lib/pricing')
+              const supabase = createClient(supabaseUrl!, supabaseKey!)
+              await ensureQuotePriced(supabase, quoteId)
+            } catch (pricingErr) {
+              console.error('Intake pricing error:', pricingErr)
+            }
+
+            // Stage 8 QA (top risks, missing trades, financial reconciliation)
+            // is a Background-tier check (see CLAUDE.md's execution-tier
+            // documentation) — never generation-critical and never a send-time
+            // gate (send/confirm-send derive their own blocking signals fresh,
+            // not from qa_report). Backgrounded so the SSE `complete` event
+            // fires as soon as pricing is done rather than waiting on QA's own
+            // several scoped queries; the quote GET route's existing
+            // lazy-refresh-on-null-qa_report fallback covers the case a
+            // builder opens the quote before this finishes.
+            runInBackground('intake_quality_assurance', async () => {
+              const { createClient } = await import('@supabase/supabase-js')
               const { runQualityAssurance } = await import('@/lib/estimating/qa')
               const supabase = createClient(supabaseUrl!, supabaseKey!)
-              await ensureQuotePriced(supabase, row.quote_id)
-              await runQualityAssurance(supabase, row.quote_id, job_id)
-            } catch (pricingErr) {
-              console.error('Intake pricing/QA error:', pricingErr)
-            }
+              await runQualityAssurance(supabase, quoteId, job_id)
+            })
 
             // Persist a project-understanding snapshot (confidence, open
             // question count) onto the job row right when intake completes
