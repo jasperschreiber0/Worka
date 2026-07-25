@@ -411,7 +411,12 @@ async function main() {
   // logs stop_reason/output_tokens on every call, so if this still comes
   // back empty the log will show whether it's genuinely a max_tokens cutoff
   // (stop_reason: 'max_tokens') or something else entirely.
-  const stage6 = await callTool(stage6System, stage6Content, ESTIMATE_GENERATION_TOOL, 32000)
+  // Confirmed on a real run (200 facts, 13 trades): 32000 still hit
+  // stop_reason 'max_tokens' with output_tokens:32000 exactly, zero usable
+  // line items recovered. Claude Sonnet 4.x supports up to 64000 output
+  // tokens without any beta header — try that ceiling before considering a
+  // per-trade-chunked Stage 6 (more invasive, not needed yet).
+  const stage6 = await callTool(stage6System, stage6Content, ESTIMATE_GENERATION_TOOL, 64000)
   const rawItems = stage6.line_items ?? []
   if (rawItems.length === 0) throw new Error('Stage 6 returned zero line items — stop here.')
 
