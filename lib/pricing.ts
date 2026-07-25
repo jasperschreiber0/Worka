@@ -424,7 +424,19 @@ export async function ensureQuotePriced(
       .eq('id', quote.builder_id)
       .single()
 
-    const unpriced = items.filter((i) => i.rate === null)
+    // "Needs pricing" means no TOTAL exists yet — not "no rate exists yet".
+    // Was `i.rate === null`, which predates any pricing mechanism that
+    // legitimately sets total without rate. An AI Allowance (migration 071)
+    // is exactly that: a considered lump-sum total with no meaningful unit
+    // rate, by design. The old filter swept every allowance item back into
+    // priceLineItems, which (having no unit, the norm for an allowance)
+    // returned total: null for it — silently wiping the real allowance
+    // figure out of the in-memory totals computation below (the DB row
+    // itself was untouched; only total_cost/price_coverage_pct were
+    // corrupted). Confirmed on a real run: 147/171 items actually had a
+    // persisted total, but price_coverage_pct read back as 18% (≈31/171)
+    // because 116 AI Allowance items got re-swept and nulled here.
+    const unpriced = items.filter((i) => i.total === null)
     const priced = await priceLineItems(
       supabase,
       quote.builder_id,
