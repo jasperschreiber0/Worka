@@ -249,42 +249,75 @@ async function main() {
   log('documents_loaded', { job_id: jobId, count: docs.length, files: docs.map((d) => d.filename) })
 
   // ── Stage 1+2: Document Intelligence + Project Understanding ───────────
-  // No batching, no 20MB budget, no MAX_BATCHES — every document in one
-  // call. If this genuinely exceeds Claude's request size limit for a
-  // given document set, split `--files` into two manual runs; that's a
-  // deliberate, visible manual step, not new orchestration code.
-  const stage12System = 'You are a senior Australian residential construction estimator analysing project documents. Extract only what you can point to direct evidence for — never invent a fact. Use the analyse_project_documents tool.'
-  const stage12Content = [
-    ...docs.map((d) => ({
-      type: 'document',
-      source: { type: 'base64', media_type: 'application/pdf', data: d.base64 },
-    })),
-    { type: 'text', text: `Documents are indexed 0-${docs.length - 1} in the order given (file_index). Use the analyse_project_documents tool.` },
-  ]
-  log('stage12_calling', { job_id: jobId, document_count: docs.length })
-  const stage12 = await callTool(stage12System, stage12Content, DOCUMENT_INTELLIGENCE_TOOL)
+  // Size-bounded batching only — no MAX_BATCHES cap, no wall-clock budget,
+  // no queue. A single Claude request has a hard ~32MB body limit; base64
+  // inflates raw bytes by ~33%, so we bin-pack documents into batches under
+  // a conservative 15MB-of-raw-bytes budget (comfortably under the cap once
+  // base64 + JSON overhead is added) and just call Stage 1/2 once per
+  // batch, sequentially, in this same process. No parallelism, no retry —
+  // if one batch's call fails, the whole script fails loudly, which is the
+  // point right now.
+  const MAX_RAW_BYTES_PER_BATCH = 15 * 1024 * 1024
+  const batches = []
+  let current = []
+  let currentBytes = 0
+  for (const d of docs) {
+    const bytes = Buffer.byteLength(d.base64, 'base64')
+    if (current.length > 0 && currentBytes + bytes > MAX_RAW_BYTES_PER_BATCH) {
+      batches.push(current)
+      current = []
+      currentBytes = 0
+    }
+    current.push(d)
+    currentBytes += bytes
+  }
+  if (current.length > 0) batches.push(current)
+  log('stage12_batches_planned', { job_id: jobId, batch_count: batches.length, batch_sizes: batches.map((b) => b.length) })
 
-  const docInserts = (stage12.documents ?? [])
-    .filter((d) => typeof d.file_index === 'number' && docs[d.file_index])
-    .map((d) => ({
-      job_id: jobId, file_id: docs[d.file_index].fileId,
-      document_type: d.document_type ?? null, discipline: d.discipline ?? null,
-      drawing_title: d.drawing_title ?? null, readability: d.readability ?? null,
-      notes: d.notes ?? null,
+  const stage12System = 'You are a senior Australian residential construction estimator analysing project documents. Extract only what you can point to direct evidence for — never invent a fact. Use the analyse_project_documents tool.'
+  const allDocInserts = []
+  const allFactInserts = []
+  for (const [batchIdx, batchDocs] of batches.entries()) {
+    const stage12Content = [
+      ...batchDocs.map((d) => ({
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: d.base64 },
+      })),
+      { type: 'text', text: `Documents are indexed 0-${batchDocs.length - 1} in the order given (file_index). Use the analyse_project_documents tool.` },
+    ]
+    log('stage12_calling', { job_id: jobId, batch: batchIdx + 1, of: batches.length, document_count: batchDocs.length })
+    const stage12 = await callTool(stage12System, stage12Content, DOCUMENT_INTELLIGENCE_TOOL)
+
+    const docInserts = (stage12.documents ?? [])
+      .filter((d) => typeof d.file_index === 'number' && batchDocs[d.file_index])
+      .map((d) => ({
+        job_id: jobId, file_id: batchDocs[d.file_index].fileId,
+        document_type: d.document_type ?? null, discipline: d.discipline ?? null,
+        drawing_title: d.drawing_title ?? null, readability: d.readability ?? null,
+        notes: d.notes ?? null,
+      }))
+    if (docInserts.length > 0) {
+      const { error } = await supabase.from('project_documents').insert(docInserts)
+      if (error) throw new Error(`Could not persist project_documents (batch ${batchIdx + 1}): ${error.message}`)
+    }
+    allDocInserts.push(...docInserts)
+
+    const factInserts = (stage12.facts ?? []).map((f) => ({
+      job_id: jobId, category: f.category, key: f.key, value: String(f.value),
+      page_reference: f.page_reference ?? null, evidence: f.evidence ?? null,
+      confidence: f.confidence ?? 70,
     }))
-  if (docInserts.length > 0) {
-    const { error } = await supabase.from('project_documents').insert(docInserts)
-    if (error) throw new Error(`Could not persist project_documents: ${error.message}`)
+    if (factInserts.length > 0) {
+      const { error: factErr } = await supabase.from('project_facts').insert(factInserts)
+      if (factErr) throw new Error(`Could not persist project_facts (batch ${batchIdx + 1}): ${factErr.message}`)
+    }
+    allFactInserts.push(...factInserts)
+    log('stage12_batch_done', { job_id: jobId, batch: batchIdx + 1, documents: docInserts.length, facts: factInserts.length })
   }
 
-  const factInserts = (stage12.facts ?? []).map((f) => ({
-    job_id: jobId, category: f.category, key: f.key, value: String(f.value),
-    page_reference: f.page_reference ?? null, evidence: f.evidence ?? null,
-    confidence: f.confidence ?? 70,
-  }))
+  const docInserts = allDocInserts
+  const factInserts = allFactInserts
   if (factInserts.length === 0) throw new Error('Stage 1/2 returned zero facts — nothing to reason about. Stop here and inspect the documents/prompt, not the pipeline.')
-  const { error: factErr } = await supabase.from('project_facts').insert(factInserts)
-  if (factErr) throw new Error(`Could not persist project_facts: ${factErr.message}`)
   log('stage12_done', { job_id: jobId, documents: docInserts.length, facts: factInserts.length })
 
   // ── Stage 3: Scope Reasoning — all 13 trades in one call, no chunking ──
