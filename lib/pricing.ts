@@ -711,7 +711,7 @@ export async function ensureQuotePriced(
       .select('id, builder_id, total_cost, margin_pct')
       .eq('id', quoteId)
       .single()
-    if (!quote || quote.total_cost !== null) return false
+    if (!quote) return false
 
     const { data: items } = await supabase
       .from('quote_line_items')
@@ -738,6 +738,7 @@ export async function ensureQuotePriced(
     // persisted total, but price_coverage_pct read back as 18% (≈31/171)
     // because 116 AI Allowance items got re-swept and nulled here.
     const unpriced = items.filter((i) => i.total === null)
+    if (unpriced.length === 0) return false
     const priced = await priceLineItems(
       supabase,
       quote.builder_id,
