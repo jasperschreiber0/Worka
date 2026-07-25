@@ -78,12 +78,21 @@ if (!args['job-id'] && !args.address) {
   console.error('Required: either --job-id=<uuid> (existing job) or --address="..." (creates a new job)')
   process.exit(1)
 }
-if (!args.files) {
-  console.error('Required: --files=/path/a.pdf,/path/b.pdf,...')
+// --skip-to=stage6 reuses facts/scope_items already persisted for --job-id
+// (from a prior run that got through Stage 1/2 + Stage 3 successfully) and
+// jumps straight to Stage 6 — no need to re-spend ~10 minutes of Claude
+// calls just to retry estimate generation alone.
+const skipToStage6 = args['skip-to'] === 'stage6'
+if (skipToStage6 && !args['job-id']) {
+  console.error('--skip-to=stage6 requires --job-id=<uuid> of a job that already has facts + scope_items persisted')
+  process.exit(1)
+}
+if (!skipToStage6 && !args.files) {
+  console.error('Required: --files=/path/a.pdf,/path/b.pdf,... (or --skip-to=stage6 with --job-id to reuse an existing run\'s facts/scope)')
   process.exit(1)
 }
 
-const filePaths = args.files.split(',').map((p) => p.trim()).filter(Boolean)
+const filePaths = args.files ? args.files.split(',').map((p) => p.trim()).filter(Boolean) : []
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
@@ -206,6 +215,17 @@ async function callTool(system, content, tool, maxTokens = 16000) {
     tools: [tool],
     tool_choice: { type: 'tool', name: tool.name },
   })
+  log('claude_call_complete', {
+    tool: tool.name, stop_reason: resp.stop_reason,
+    output_tokens: resp.usage?.output_tokens ?? null, input_tokens: resp.usage?.input_tokens ?? null,
+    max_tokens: maxTokens,
+  })
+  if (resp.stop_reason === 'max_tokens') {
+    log('claude_call_truncated_warning', {
+      tool: tool.name,
+      message: 'Response hit max_tokens before finishing — output below may be incomplete or unparseable. Re-run with a higher maxTokens for this call.',
+    })
+  }
   const toolUse = resp.content.find((b) => b.type === 'tool_use')
   if (!toolUse) throw new Error(`No tool_use block returned for ${tool.name} (stop_reason: ${resp.stop_reason})`)
   return toolUse.input
@@ -225,6 +245,30 @@ async function main() {
     jobId = job.id
   }
   log('job_ready', { job_id: jobId })
+
+  let factInserts
+  let scopeInserts
+  let factsBlock
+
+  if (skipToStage6) {
+    const { data: existingFacts, error: factsErr } = await supabase
+      .from('project_facts')
+      .select('category, key, value, evidence, confidence')
+      .eq('job_id', jobId)
+      .eq('superseded', false)
+    if (factsErr) throw new Error(`Could not load existing project_facts: ${factsErr.message}`)
+    const { data: existingScope, error: scopeErr } = await supabase
+      .from('scope_items')
+      .select('trade_category_id, included_scope, excluded_scope, assumptions, uncertainty_notes, confidence')
+      .eq('job_id', jobId)
+    if (scopeErr) throw new Error(`Could not load existing scope_items: ${scopeErr.message}`)
+    factInserts = existingFacts ?? []
+    scopeInserts = existingScope ?? []
+    if (factInserts.length === 0) throw new Error(`--skip-to=stage6 but job ${jobId} has no persisted project_facts — run without --skip-to first`)
+    if (scopeInserts.length === 0) throw new Error(`--skip-to=stage6 but job ${jobId} has no persisted scope_items — run without --skip-to first`)
+    factsBlock = factInserts.map((f) => `[${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%, evidence: ${f.evidence ?? 'n/a'})`).join('\n')
+    log('skipped_to_stage6', { job_id: jobId, facts: factInserts.length, trades: scopeInserts.length })
+  } else {
 
   // ── Load documents, create `files` rows (dev mode: bypasses Storage —
   // real production upload writes storage_path via /api/upload; here we
@@ -328,18 +372,18 @@ async function main() {
   }
 
   const docInserts = allDocInserts
-  const factInserts = allFactInserts
+  factInserts = allFactInserts
   if (factInserts.length === 0) throw new Error('Stage 1/2 returned zero facts — nothing to reason about. Stop here and inspect the documents/prompt, not the pipeline.')
   log('stage12_done', { job_id: jobId, documents: docInserts.length, facts: factInserts.length })
 
   // ── Stage 3: Scope Reasoning — all 13 trades in one call, no chunking ──
-  const factsBlock = factInserts.map((f) => `[${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%, evidence: ${f.evidence ?? 'n/a'})`).join('\n')
+  factsBlock = factInserts.map((f) => `[${f.category}] ${f.key}: ${f.value} (confidence ${f.confidence}%, evidence: ${f.evidence ?? 'n/a'})`).join('\n')
   const stage3System = 'You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, and assumptions. Use the reason_about_scope tool.'
   const stage3Content = [{ type: 'text', text: `PROJECT FACTS:\n${factsBlock}\n\nReason about every trade actually relevant to this project (trade_category_id 1-13). Use the reason_about_scope tool.` }]
   log('stage3_calling', { job_id: jobId, facts_in_prompt: factInserts.length })
   const stage3 = await callTool(stage3System, stage3Content, SCOPE_REASONING_TOOL)
 
-  const scopeInserts = (stage3.scope ?? [])
+  scopeInserts = (stage3.scope ?? [])
     .filter((s) => typeof s.trade_category_id === 'number')
     .map((s) => ({
       job_id: jobId, trade_category_id: s.trade_category_id,
@@ -348,16 +392,26 @@ async function main() {
       confidence: s.confidence ?? null,
     }))
   if (scopeInserts.length === 0) throw new Error('Stage 3 returned zero trades — stop here, do not proceed to estimating on nothing.')
-  const { error: scopeErr } = await supabase.from('scope_items').upsert(scopeInserts, { onConflict: 'job_id,trade_category_id' })
-  if (scopeErr) throw new Error(`Could not persist scope_items: ${scopeErr.message}`)
+  const { error: stage3PersistErr } = await supabase.from('scope_items').upsert(scopeInserts, { onConflict: 'job_id,trade_category_id' })
+  if (stage3PersistErr) throw new Error(`Could not persist scope_items: ${stage3PersistErr.message}`)
   log('stage3_done', { job_id: jobId, trades: scopeInserts.length })
+
+  } // end of !skipToStage6 block
 
   // ── Stage 6: Estimate Generation (quantities only, no rates yet) ───────
   const scopeBlock = scopeInserts.map((s) => `Trade ${s.trade_category_id}: included=${JSON.stringify(s.included_scope)}, excluded=${JSON.stringify(s.excluded_scope)}, assumptions=${JSON.stringify(s.assumptions)}`).join('\n')
   const stage6System = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the facts and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Use the generate_estimate tool.'
   const stage6Content = [{ type: 'text', text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
   log('stage6_calling', { job_id: jobId })
-  const stage6 = await callTool(stage6System, stage6Content, ESTIMATE_GENERATION_TOOL)
+  // Higher ceiling than Stage 1/2 and Stage 3 — this is the stage producing
+  // the most output (potentially 100+ line items across 13 trades), and
+  // 16000 (production's proven-safe value for its own, similarly-sized
+  // prompts) came back with zero items on a real 152-fact, 13-trade run
+  // here. Raised, not investigated further yet — claude_call_complete above
+  // logs stop_reason/output_tokens on every call, so if this still comes
+  // back empty the log will show whether it's genuinely a max_tokens cutoff
+  // (stop_reason: 'max_tokens') or something else entirely.
+  const stage6 = await callTool(stage6System, stage6Content, ESTIMATE_GENERATION_TOOL, 32000)
   const rawItems = stage6.line_items ?? []
   if (rawItems.length === 0) throw new Error('Stage 6 returned zero line items — stop here.')
 
