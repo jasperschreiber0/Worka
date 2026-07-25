@@ -59,7 +59,15 @@ async function main() {
 
   const { data: builderRow } = await supabase.from('builders').select('state').eq('id', quote.builder_id).single()
 
-  const priced = await priceLineItems(supabase, quote.builder_id, builderRow?.state ?? null, items)
+  // Only re-price items that genuinely have no total yet — mirrors the fix
+  // to ensureQuotePriced (lib/pricing.ts): re-running priceLineItems over
+  // EVERY item (including AI Allowance / document-priced ones, which
+  // legitimately have total set with rate left null) would send them
+  // through priceLineItems' "no unit -> total: null" early exit and wipe
+  // their real total right back out — this script had the same bug in an
+  // even more direct form (no filter at all).
+  const unpriced = items.filter((i) => i.total === null)
+  const priced = await priceLineItems(supabase, quote.builder_id, builderRow?.state ?? null, unpriced)
 
   const rowsToUpdate = priced
     .map((p) => ({
@@ -74,13 +82,19 @@ async function main() {
     if (error) throw new Error(`Line item repricing failed: ${error.message}`)
   }
 
-  const { total_cost, confidence_score } = computeQuoteTotals(priced)
-  await supabase.from('quotes').update({ total_cost, confidence_score, margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT }).eq('id', quoteId)
+  // Merge re-priced items back with the ones that already had a real total
+  // (allowance/document/previously-resolved) — same pattern ensureQuotePriced
+  // uses, so the totals computation sees every item's real value, not just
+  // the subset this script touched.
+  const pricedById = new Map(priced.map((p) => [p.id, p]))
+  const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
+  const { total_cost, confidence_score, price_coverage_pct } = computeQuoteTotals(finalItems)
+  await supabase.from('quotes').update({ total_cost, confidence_score, price_coverage_pct, margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT }).eq('id', quoteId)
 
   console.log(JSON.stringify({
     event: 'reprice_complete', quote_id: quoteId,
-    line_items_priced: rowsToUpdate.length, line_items_total: items.length,
-    total_cost, confidence_score,
+    line_items_repriced_this_run: rowsToUpdate.length, line_items_total: items.length,
+    total_cost, confidence_score, price_coverage_pct,
   }, null, 2))
 }
 
