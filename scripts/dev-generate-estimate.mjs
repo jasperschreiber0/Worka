@@ -53,6 +53,7 @@ import { createClient } from '@supabase/supabase-js'
 import Anthropic from '@anthropic-ai/sdk'
 import { ensureQuotePriced } from '../lib/pricing.ts'
 import { applyValidationGates } from '../lib/estimating/gates.ts'
+import { tradeCategoryName } from '../lib/trade-taxonomy.ts'
 
 // ─── CLI args ────────────────────────────────────────────────────────────
 const args = Object.fromEntries(
@@ -418,7 +419,15 @@ async function main() {
   } // end of !skipToStage6 block
 
   // ── Stage 6: Estimate Generation (quantities only, no rates yet) ───────
-  const scopeBlock = scopeInserts.map((s) => `Trade ${s.trade_category_id}: included=${JSON.stringify(s.included_scope)}, excluded=${JSON.stringify(s.excluded_scope)}, assumptions=${JSON.stringify(s.assumptions)}`).join('\n')
+  // Bug fix (nothing else changed in this stage): the trade NAME was never
+  // included here, only the bare numeric trade_category_id — Stage 6 had no
+  // way to know what "Trade 3" or "Trade 5" actually means and was
+  // observed misfiling real scope (framing, plasterboard) under wrong
+  // trades as a result. Production's real smooth-responder/index.ts
+  // (its own scopeBlock, ~line 2180) has always included the name; this
+  // dev script's copy simply omitted it. Format matches production exactly:
+  // `Trade {id} ({name}): included = ...`.
+  const scopeBlock = scopeInserts.map((s) => `Trade ${s.trade_category_id} (${tradeCategoryName(s.trade_category_id)}): included=${JSON.stringify(s.included_scope)}, excluded=${JSON.stringify(s.excluded_scope)}, assumptions=${JSON.stringify(s.assumptions)}`).join('\n')
   const stage6System = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the facts and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). IMPORTANT: if any of the underlying facts came from a priced document (a fittings/finishes/fixtures schedule, a BOQ, a supplier quote) that stated an actual dollar figure — a per-unit rate, a line total, or a category subtotal — set document_rate or document_total on that line item to that real figure instead of leaving it unpriced. This is the primary way PC allowance and provisional sum items should get a value; prefer using a real printed figure over manual_input_required whenever the facts contain one. Use the generate_estimate tool.'
   const stage6Content = [{ type: 'text', text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
   log('stage6_calling', { job_id: jobId })
