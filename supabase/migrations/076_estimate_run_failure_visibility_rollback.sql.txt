@@ -1,0 +1,113 @@
+-- ROLLBACK for 076_estimate_run_failure_visibility.sql — NOT auto-applied,
+-- kept as a .txt so it's never picked up by the migration runner.
+--
+-- Restores the migration-058 version of derive_estimate_run_projection
+-- (narrower failed condition requiring v_docs_processed = 0, generic-only
+-- failure_reason). Safe to roll back independently — read/write only
+-- against estimate_runs/estimate_run_events, which nothing in the
+-- application reads from yet to make a decision.
+
+CREATE OR REPLACE FUNCTION derive_estimate_run_projection(p_batch_id uuid)
+RETURNS estimate_run_projection AS $$
+DECLARE
+  v_batch          document_processing_batches%ROWTYPE;
+  v_docs_total     integer;
+  v_docs_processed integer;
+  v_docs_failed    integer;
+  v_blocking_open  integer;
+  v_lock_held      boolean;
+  v_status         text;
+  v_stall_reason   text;
+  v_failure_reason text;
+  v_last_progress  timestamptz;
+  v_latest_question_activity timestamptz;
+  v_quote_created_at timestamptz;
+  v_progress_since_stall timestamptz;
+  v_result         estimate_run_projection;
+BEGIN
+  SELECT * INTO v_batch FROM document_processing_batches WHERE id = p_batch_id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT count(*) FILTER (WHERE true),
+         count(*) FILTER (WHERE status = 'completed'),
+         count(*) FILTER (WHERE status = 'failed')
+    INTO v_docs_total, v_docs_processed, v_docs_failed
+    FROM document_processing_jobs
+    WHERE parent_job_id = p_batch_id;
+
+  SELECT count(*) INTO v_blocking_open
+    FROM clarifying_questions
+    WHERE job_id = v_batch.job_id AND blocking = true AND status = 'open';
+
+  SELECT EXISTS(SELECT 1 FROM job_intake_locks WHERE job_id = v_batch.job_id)
+    INTO v_lock_held;
+
+  v_stall_reason := v_batch.stall_reason;
+  v_failure_reason := NULL;
+
+  IF v_batch.quote_id IS NOT NULL AND EXISTS (
+       SELECT 1 FROM quotes WHERE id = v_batch.quote_id AND status <> 'draft'
+     ) THEN
+    v_status := 'complete';
+  ELSIF v_batch.status = 'failed' AND v_docs_processed = 0 THEN
+    v_status := 'failed';
+    v_failure_reason := 'all documents in this batch failed extraction';
+  ELSIF v_blocking_open > 0 THEN
+    v_status := 'awaiting_clarification';
+  ELSIF v_batch.quote_id IS NOT NULL THEN
+    v_status := 'generating_estimate';
+  ELSIF v_batch.scope_reasoning_completed_at IS NOT NULL THEN
+    v_status := 'generating_estimate';
+  ELSIF v_batch.classification_triggered THEN
+    v_status := 'reasoning';
+  ELSIF v_batch.status IN ('completed', 'completed_with_failures') THEN
+    v_status := 'classifying';
+  ELSE
+    v_status := 'extracting';
+  END IF;
+
+  v_last_progress := GREATEST(
+    v_batch.updated_at,
+    COALESCE((SELECT max(updated_at) FROM document_processing_jobs WHERE parent_job_id = p_batch_id), v_batch.updated_at)
+  );
+
+  SELECT max(GREATEST(created_at, COALESCE(answered_at, created_at)))
+    INTO v_latest_question_activity
+    FROM clarifying_questions
+    WHERE job_id = v_batch.job_id;
+
+  SELECT created_at INTO v_quote_created_at
+    FROM quotes WHERE id = v_batch.quote_id;
+
+  v_progress_since_stall := GREATEST(
+    v_last_progress,
+    COALESCE(v_batch.scope_reasoning_completed_at, v_last_progress),
+    COALESCE(v_latest_question_activity, v_last_progress),
+    COALESCE(v_quote_created_at, v_last_progress)
+  );
+
+  IF v_status NOT IN ('complete', 'failed')
+     AND v_stall_reason IS NOT NULL
+     AND v_batch.stalled_at IS NOT NULL
+     AND v_batch.stalled_at > v_progress_since_stall THEN
+    v_status := 'stalled';
+  END IF;
+
+  v_result.status := v_status;
+  v_result.quote_id := v_batch.quote_id;
+  v_result.documents_total := COALESCE(v_docs_total, 0);
+  v_result.documents_processed := COALESCE(v_docs_processed, 0);
+  v_result.documents_failed := COALESCE(v_docs_failed, 0);
+  v_result.blocking_questions_open := v_blocking_open;
+  v_result.lock_held := v_lock_held;
+  v_result.stall_reason := v_stall_reason;
+  v_result.failure_reason := v_failure_reason;
+  v_result.last_progress_at := v_last_progress;
+
+  RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+NOTIFY pgrst, 'reload schema';

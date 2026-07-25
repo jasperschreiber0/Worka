@@ -191,20 +191,22 @@ function log(event: string, fields: Record<string, unknown> = {}) {
 //   state), and the next tick's 3c sees 'processing' again — a genuine,
 //   non-converging oscillation, not a one-off.
 //
-// This is now a plausible, code-traced hypothesis, not a proven root cause
-// — confirming it needs live document_processing_jobs.attempts/status
-// history for the two specific affected files, which no session so far has
-// had DB access to pull. A real fix (e.g. reclaim_stale_document_jobs
-// respecting an already-'failed' files.intake_status as terminal and
-// excluding it from re-claiming, or find_batches_with_claimable_work
-// excluding a batch with any abandoned-and-failed file) is a distinct,
-// scoped piece of work — out of scope for the Stage 3 estimate-generation
-// fixes this pass was about. Re-enabling this blind risks reproducing the
-// exact "real, non-converging load run every minute indefinitely"
-// incident that caused the disable. Do not flip this to false until the
-// hypothesis above is confirmed against live data and a fix for it is
-// implemented and tested.
-const DOCUMENT_RECOVERY_DISABLED = true
+// RE-ENABLED (2026-07-25) — migration 075 implements exactly the fix this
+// comment proposed: reclaim_stale_document_jobs and
+// find_batches_with_claimable_work now both exclude any document_processing_
+// jobs row whose file already carries intake_status='failed' AND
+// failure_stage='ABANDONED'. That closes the race precisely: a file
+// find_and_fail_abandoned_files (step 3c, below) has just declared
+// terminal can no longer be reclaimed or re-triggered by steps 1/3, so
+// nothing calls recompute_file_intake_status for it again, so it can never
+// be flipped back to 'processing' and re-fail on the next tick. The
+// hypothesis this comment used to describe as unconfirmed is now the
+// mechanism the fix directly targets — re-disable immediately (set back to
+// true) if recovery_document_jobs_reclaimed/abandoned_files_marked_failed
+// in intake_recovery_runs still show the same file(s) cycling repeatedly
+// after this deploy; that would mean the oscillation has a second cause
+// beyond the one migration 075 closes.
+const DOCUMENT_RECOVERY_DISABLED = false
 // ACTUALLY RE-ENABLED NOW (2026-07-24) — the 2026-07-19 comment above
 // already documented every reason this was safe to flip back on (chunked
 // Stage 3 resumability via stage3_completed_trade_ids/planStage3Chunks,

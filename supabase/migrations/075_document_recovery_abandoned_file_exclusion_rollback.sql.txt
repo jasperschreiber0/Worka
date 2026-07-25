@@ -1,0 +1,55 @@
+-- ROLLBACK for 075_document_recovery_abandoned_file_exclusion.sql — NOT
+-- auto-applied, kept as a .txt so it's never picked up by the migration
+-- runner.
+--
+-- Restores the migration-036/037 versions of both functions (drops the
+-- abandoned-file exclusion). Safe to roll back independently of the
+-- DOCUMENT_RECOVERY_DISABLED flag in app/api/cron/intake-recovery/route.ts —
+-- if this migration is rolled back, also set that flag back to true, since
+-- the oscillation this migration closes will otherwise reproduce.
+
+CREATE OR REPLACE FUNCTION reclaim_stale_document_jobs(
+  p_stale_after interval DEFAULT interval '3 minutes',
+  p_parent_job_id uuid DEFAULT NULL
+)
+RETURNS TABLE(reclaimed_job_id uuid, reclaimed_parent_job_id uuid, new_status text) AS $$
+DECLARE
+  v_job record;
+  v_result record;
+BEGIN
+  FOR v_job IN
+    SELECT id, parent_job_id
+    FROM document_processing_jobs
+    WHERE status = 'running' AND locked_at IS NOT NULL AND locked_at < now() - p_stale_after
+      AND (p_parent_job_id IS NULL OR parent_job_id = p_parent_job_id)
+    ORDER BY locked_at
+    FOR UPDATE SKIP LOCKED
+  LOOP
+    SELECT r.new_status, r.should_trigger_classification
+    INTO v_result
+    FROM retry_or_fail_document_job(
+      v_job.id,
+      format('reclaimed: stale running job, no update since %s (worker invocation likely crashed or was killed)', p_stale_after),
+      3
+    ) r;
+
+    reclaimed_job_id := v_job.id;
+    reclaimed_parent_job_id := v_job.parent_job_id;
+    new_status := v_result.new_status;
+    RETURN NEXT;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION find_batches_with_claimable_work()
+RETURNS TABLE(parent_job_id uuid, job_id uuid, builder_id uuid, pending_count bigint) AS $$
+  SELECT b.id, b.job_id, b.builder_id, count(j.id)
+  FROM document_processing_batches b
+  JOIN document_processing_jobs j ON j.parent_job_id = b.id
+  WHERE b.status IN ('pending', 'running')
+    AND j.status = 'pending'
+    AND j.run_after <= now()
+  GROUP BY b.id, b.job_id, b.builder_id;
+$$ LANGUAGE sql STABLE;
+
+NOTIFY pgrst, 'reload schema';

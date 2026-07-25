@@ -167,6 +167,38 @@ function memoryKey(builderId: string | null): string {
   return `${day}:${builderId ?? 'global'}`
 }
 
+// ─── Spend threshold warnings (observability only — the hard limit/circuit
+// breaker itself is unchanged, enforced entirely inside record_ai_spend/
+// checkBudget below) ──────────────────────────────────────────────────────
+// record_ai_spend already returns the day's running totals and configured
+// limits on every call; nothing previously read that return value. Logging
+// a warning once spend crosses 50%/80% of either ceiling means an operator
+// finds out from a log line well before the breaker trips and every
+// builder loses AI functionality at once, instead of the trip itself being
+// the first signal. Deduped per (day, scope, threshold) via an in-memory
+// Set — resets on process restart, same acceptable weaker-but-never-silent
+// tradeoff this file already accepts for memoryDaily above — so a call
+// site that stays above 80% doesn't log on every single subsequent call.
+const WARN_THRESHOLDS = [50, 80] as const
+const warnedThresholds = new Set<string>()
+
+function warnIfThresholdCrossed(scope: 'builder' | 'global', scopeId: string, dayCents: number, limitCents: number): void {
+  if (!Number.isFinite(limitCents) || limitCents <= 0) return
+  const pct = (dayCents / limitCents) * 100
+  const day = new Date().toISOString().slice(0, 10)
+  for (const threshold of WARN_THRESHOLDS) {
+    if (pct < threshold) continue
+    const key = `${day}:${scope}:${scopeId}:${threshold}`
+    if (warnedThresholds.has(key)) continue
+    warnedThresholds.add(key)
+    console.warn(JSON.stringify({
+      event: 'ai_spend_threshold_crossed', scope, scope_id: scopeId,
+      threshold_pct: threshold, day_cents: dayCents, limit_cents: limitCents,
+      pct_of_limit: Math.round(pct * 10) / 10,
+    }))
+  }
+}
+
 // ─── Minimal structural interface for the Supabase client ────────────────────
 // Both @supabase/supabase-js (Next.js) and the esm.sh Deno build satisfy this;
 // typing it structurally keeps this module import-free of either SDK.
@@ -364,17 +396,33 @@ export async function guardedClaudeCall<T>(
             result: ctx.scopeKey ? (response as unknown as object) : null,
           }).eq('id', operationId)
         }
-        await ctx.supabase.rpc('record_ai_spend', {
+        const { data: spendRow } = await ctx.supabase.rpc('record_ai_spend', {
           p_builder_id: builderId, p_cost_cents: costCents,
         })
+        const spend = (spendRow as Array<{
+          builder_day_cents: number; global_day_cents: number
+          builder_limit_cents: number; global_limit_cents: number
+        }> | null)?.[0]
+        if (spend) {
+          if (builderId !== null) {
+            warnIfThresholdCrossed('builder', builderId, spend.builder_day_cents, spend.builder_limit_cents)
+          }
+          warnIfThresholdCrossed('global', 'global', spend.global_day_cents, spend.global_limit_cents)
+        }
       } catch (ledgerErr) {
         console.error('ai-gateway: ledger write failed (call succeeded, accounting incomplete):', ledgerErr)
       }
     } else {
+      const builderLimitCents = 1000
+      const globalLimitCents = 2500
       if (builderId !== null) {
-        memoryDaily.set(memoryKey(builderId), (memoryDaily.get(memoryKey(builderId)) ?? 0) + costCents)
+        const newBuilderTotal = (memoryDaily.get(memoryKey(builderId)) ?? 0) + costCents
+        memoryDaily.set(memoryKey(builderId), newBuilderTotal)
+        warnIfThresholdCrossed('builder', builderId, newBuilderTotal, builderLimitCents)
       }
-      memoryDaily.set(memoryKey(null), (memoryDaily.get(memoryKey(null)) ?? 0) + costCents)
+      const newGlobalTotal = (memoryDaily.get(memoryKey(null)) ?? 0) + costCents
+      memoryDaily.set(memoryKey(null), newGlobalTotal)
+      warnIfThresholdCrossed('global', 'global', newGlobalTotal, globalLimitCents)
     }
 
     return { response, reusedFromOperation: false }
