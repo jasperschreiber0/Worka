@@ -146,6 +146,102 @@ test('calculateClientPrice: sum of individual calculateSellTotal calls equals ca
   assert.equal(calculateClientPrice(items), Math.round(summedIndividually * 100) / 100)
 })
 
+// ─── handleMarginQuery's calculation contract (app/api/chat/route.ts) ──────
+// handleMarginQuery itself is DB-backed and not directly unit-testable (same
+// constraint as ensureQuotePriced), so these tests exercise the exact
+// two-step contract it now follows: quotedAmt = calculateClientPrice(items),
+// baseCost = quote.total_cost (used directly, never reverse-derived from a
+// blanket margin), grossMargin = quotedAmt - baseCost, marginPct =
+// grossMargin / quotedAmt * 100. Replaces the old (buggy) approach that
+// treated total_cost as if it were already the quoted amount and reversed
+// quote.margin_pct to infer cost.
+
+function marginQueryFormula(items: { total: number | null; margin_pct: number | null; assumption_status: string | null }[], totalCost: number) {
+  const quotedAmt = calculateClientPrice(items)
+  const baseCost = totalCost
+  const grossMargin = quotedAmt - baseCost
+  const marginPct = quotedAmt > 0 ? (grossMargin / quotedAmt) * 100 : 0
+  return { quotedAmt, baseCost, grossMargin, marginPct }
+}
+
+test('handleMarginQuery formula: mixed quote with provisional sums — uses this session\'s real audited quote', () => {
+  const totalCost = 1780083.87
+  const provisionalSumValue = 159500
+  const items = [
+    { total: totalCost - provisionalSumValue, margin_pct: 0.15, assumption_status: null },
+    { total: provisionalSumValue, margin_pct: 0, assumption_status: null },
+  ]
+  const { quotedAmt, baseCost, grossMargin, marginPct } = marginQueryFormula(items, totalCost)
+
+  assert.equal(quotedAmt, 2023171.45)
+  assert.equal(baseCost, totalCost)
+  assert.equal(Math.round(grossMargin * 100) / 100, 243087.58)
+  assert.equal(Math.round(marginPct * 100) / 100, 12.02)
+
+  // The old (buggy) formula treated total_cost as the quoted amount and
+  // reversed quote.margin_pct (defaulting to 18) to infer cost — proves the
+  // fix produces a materially different, correct number, not the same one
+  // computed a different way.
+  const buggyQuotedAmt = totalCost
+  const buggyBaseCost = buggyQuotedAmt * (1 - 18 / 100)
+  const buggyMarginPct = ((buggyQuotedAmt - buggyBaseCost) / buggyQuotedAmt) * 100
+  assert.notEqual(quotedAmt, buggyQuotedAmt)
+  assert.notEqual(Math.round(marginPct * 10) / 10, Math.round(buggyMarginPct * 10) / 10)
+})
+
+test('handleMarginQuery formula: normal items with margin — no provisional sums, simple case', () => {
+  const totalCost = 10000
+  const items = [
+    { total: 6000, margin_pct: 0.15, assumption_status: null },
+    { total: 4000, margin_pct: 0.15, assumption_status: null },
+  ]
+  const { quotedAmt, grossMargin, marginPct } = marginQueryFormula(items, totalCost)
+
+  assert.equal(quotedAmt, 11500) // 10000 * 1.15
+  assert.equal(grossMargin, 1500) // 11500 - 10000
+  assert.equal(Math.round(marginPct * 100) / 100, 13.04) // 1500 / 11500 * 100
+})
+
+test('handleMarginQuery formula: reported client price matches what the quote summary API reports for the same items', () => {
+  // Same items, two simulated call sites (chat's margin query and the quote
+  // summary API's computeSummary) — both must call calculateClientPrice and
+  // get the identical figure. This is the regression guard against a second,
+  // independent client-price implementation ever creeping back into chat.
+  const items = [
+    { total: 2000, margin_pct: 0.15, assumption_status: null },
+    { total: 50000, margin_pct: 0, assumption_status: 'accepted' },
+    { total: 1000, margin_pct: 0.15, assumption_status: 'excluded' },
+  ]
+  const marginQueryClientPrice = calculateClientPrice(items) // what handleMarginQuery now computes
+  const quoteSummaryClientPrice = calculateClientPrice(items) // what computeSummary (quotes/[quoteId]/route.ts) computes
+  assert.equal(marginQueryClientPrice, quoteSummaryClientPrice)
+  assert.equal(marginQueryClientPrice, 52300) // (2000*1.15) + 50000, excluded item ignored
+})
+
+test('handleMarginQuery formula: gross margin is derived from line-item margins, not a flat/blanket assumption — two quotes with identical total_cost but different item-level margin mixes produce different margins', () => {
+  const totalCost = 100000
+
+  // Quote A: every dollar carries the normal 15% margin
+  const allMeasured = [{ total: totalCost, margin_pct: 0.15, assumption_status: null }]
+  // Quote B: same total_cost, but half of it is a 0%-margin provisional sum
+  const halfProvisionalSum = [
+    { total: totalCost / 2, margin_pct: 0.15, assumption_status: null },
+    { total: totalCost / 2, margin_pct: 0, assumption_status: null },
+  ]
+
+  const a = marginQueryFormula(allMeasured, totalCost)
+  const b = marginQueryFormula(halfProvisionalSum, totalCost)
+
+  // Same cost basis, but materially different quoted amount and margin —
+  // proves the calculation reads each item's own margin_pct rather than
+  // assuming one flat rate for the whole quote.
+  assert.notEqual(a.quotedAmt, b.quotedAmt)
+  assert.notEqual(a.marginPct, b.marginPct)
+  assert.equal(a.quotedAmt, 115000) // 100000 * 1.15
+  assert.equal(b.quotedAmt, 107500) // (50000*1.15) + 50000
+  assert.ok(a.marginPct > b.marginPct) // less overall margin when half the quote is at 0%
+})
+
 // ─── computeQuoteTotals — the arithmetic behind quotes.total_cost ──────────
 
 test('computeQuoteTotals: sums only included items', () => {

@@ -16,6 +16,7 @@ import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { buildProjectContext, persistContext } from '@/lib/project-context'
+import { calculateClientPrice } from '@/lib/pricing'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
 import { gatewaySupabase } from '@/lib/ai-gateway-client'
@@ -1589,11 +1590,15 @@ async function handleMarginQuery(builderId: string): Promise<Partial<ChatRespons
       if (!latestByJob.has(q.job_id)) latestByJob.set(q.job_id, q)
     }
 
-    // Batch-fetch job details and approved variation totals in two parallel queries
+    // Batch-fetch job details, approved variation totals, and line items for
+    // every quote in three parallel queries. Line items are what make the
+    // client sell amount correct — see calculateClientPrice below.
     const jobIds = Array.from(latestByJob.keys())
-    const [{ data: jobsData }, { data: allVars }] = await Promise.all([
+    const quoteIds = Array.from(latestByJob.values()).map((q) => q.id)
+    const [{ data: jobsData }, { data: allVars }, { data: allLineItems }] = await Promise.all([
       sb.from('jobs').select('id, address, status, job_ref').in('id', jobIds),
       sb.from('variations').select('job_id, amount').in('job_id', jobIds).eq('status', 'approved'),
+      sb.from('quote_line_items').select('quote_id, total, margin_pct, assumption_status').in('quote_id', quoteIds),
     ])
 
     const jobMap = new Map(
@@ -1604,6 +1609,12 @@ async function handleMarginQuery(builderId: string): Promise<Partial<ChatRespons
     for (const v of (allVars ?? []) as Array<{ job_id: string; amount: number | null }>) {
       varsByJob.set(v.job_id, (varsByJob.get(v.job_id) ?? 0) + (v.amount ?? 0))
     }
+    const itemsByQuote = new Map<string, Array<{ total: number | null; margin_pct: number | null; assumption_status: string | null }>>()
+    for (const li of (allLineItems ?? []) as Array<{ quote_id: string; total: number | null; margin_pct: number | null; assumption_status: string | null }>) {
+      const arr = itemsByQuote.get(li.quote_id) ?? []
+      arr.push(li)
+      itemsByQuote.set(li.quote_id, arr)
+    }
 
     const marginJobs: MarginJob[] = []
     for (const [jobId, quote] of Array.from(latestByJob.entries())) {
@@ -1611,13 +1622,20 @@ async function handleMarginQuery(builderId: string): Promise<Partial<ChatRespons
       const j = jobMap.get(jobId)
       if (!j) continue
 
-      const quotedMarginPct = quote.margin_pct ?? 18
-      const quotedAmt = quote.total_cost
-      const baseCost = quotedAmt * (1 - quotedMarginPct / 100)
+      // Canonical: the client sell amount is the sum of each line item's own
+      // margin_pct-marked-up total (lib/pricing.ts calculateClientPrice) —
+      // never quote.total_cost treated as if it were already the quoted
+      // amount, and never a blanket quote.margin_pct reversed to infer cost.
+      // quote.total_cost IS the cost basis already; used directly, not
+      // reverse-derived. Gross margin = client_price - total_cost; margin
+      // percentage = that gross margin over client_price.
+      const quotedAmt = calculateClientPrice(itemsByQuote.get(quote.id) ?? [])
+      const baseCost = quote.total_cost
+      const quotedMarginPct = quotedAmt > 0 ? ((quotedAmt - baseCost) / quotedAmt) * 100 : 0
       const variationImpact = varsByJob.get(jobId) ?? 0
       const projectedCost = baseCost + variationImpact
       const marginAmt = quotedAmt - projectedCost
-      const marginPct = parseFloat(((marginAmt / quotedAmt) * 100).toFixed(1))
+      const marginPct = quotedAmt > 0 ? parseFloat(((marginAmt / quotedAmt) * 100).toFixed(1)) : 0
 
       marginJobs.push({
         id: j.id,
