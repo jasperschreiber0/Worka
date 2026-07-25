@@ -505,6 +505,48 @@ export function applyMargin(cost: number, marginPct: number): number {
   return round2(cost * (1 + marginPct / 100))
 }
 
+export interface SellPriceableItem {
+  total: number | null
+  /** quote_line_items.margin_pct — a 0-1 fraction (0.15 for a normal measured/
+   *  document/allowance line, 0 for a provisional sum, enforced by the
+   *  trg_ps_margin DB trigger, migration 012). Null defaults to 0 (never
+   *  invents a margin the row doesn't actually carry). */
+  margin_pct: number | null
+  assumption_status: string | null
+}
+
+/**
+ * Sell price for ONE line item — cost marked up by THIS item's own
+ * margin_pct, never a quote-level blanket rate. This is the financial
+ * source-of-truth calculation at the line level; applyMargin itself is
+ * unchanged (still a plain cost*(1+pct/100) primitive), this just supplies
+ * the correct, item-specific percentage instead of quote.margin_pct.
+ */
+export function calculateSellTotal(item: { total: number | null; margin_pct: number | null }): number | null {
+  if (item.total === null) return null
+  return applyMargin(item.total, (item.margin_pct ?? 0) * 100)
+}
+
+/**
+ * THE single canonical client price calculation. Every client-facing
+ * financial surface (quote summary API, PDF export, send-quote email draft,
+ * job activation / invoice contract value) must derive its total from this
+ * function — never from `applyMargin(quote.total_cost, quote.margin_pct)`,
+ * which blanket-applies one quote-level percentage to the whole cost basis
+ * and ignores each item's own margin_pct. That formula is what silently
+ * marked up provisional-sum items (margin_pct = 0 by design) by the full
+ * blanket rate, and let a quote's header total disagree with the sum of the
+ * same line items QuoteView displays beneath it — the financial correctness
+ * audit this function closes for the full incident writeup. Excluded items
+ * never contribute, matching computeQuoteTotals' own definition of
+ * "included."
+ */
+export function calculateClientPrice(items: SellPriceableItem[]): number {
+  const included = items.filter((i) => i.assumption_status !== 'excluded')
+  const sum = included.reduce((acc, i) => acc + (calculateSellTotal(i) ?? 0), 0)
+  return round2(sum)
+}
+
 export type MeasuredPricingSource = 'cost_rates_exact' | 'cost_rates_normalized' | 'builder_rate' | 'network_rate' | 'category_rate' | 'ai_measured_rate' | 'unresolved'
 
 export interface PricedItemResult {

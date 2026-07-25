@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
-import { applyMargin, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
+import { calculateSellTotal, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
@@ -101,10 +101,15 @@ function buildHtmlPage(quote: DemoQuote, items: DemoQuoteLineItem[]): string {
   const isDraft = quote.status !== 'sent' && quote.status !== 'approved'
   // This document is CLIENT-FACING: every amount is marked up by the
   // builder's margin. Raw cost rates never leave the builder's screen.
+  // Canonical: each item's OWN margin_pct, never quote.margin_pct — the
+  // blanket quote-level rate silently marked up provisional-sum items
+  // (margin_pct = 0 by design, migration 012's trg_ps_margin trigger) and
+  // disagreed with what QuoteView already showed the builder for the same
+  // line. See calculateSellTotal (lib/pricing.ts).
   const markedUpItems = items.map((item) => ({
     ...item,
-    rate: item.rate !== null ? applyMargin(item.rate, quote.margin_pct) : null,
-    total: item.total !== null ? applyMargin(item.total, quote.margin_pct) : null,
+    rate: item.rate !== null ? calculateSellTotal({ total: item.rate, margin_pct: item.margin_pct }) : null,
+    total: calculateSellTotal(item),
   }))
 
   const groups = groupByCategory(markedUpItems)
@@ -456,14 +461,14 @@ export async function GET(
         .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
         .eq('id', quoteId).eq('builder_id', builderId).single(),
       sb.from('quote_line_items')
-        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status')
+        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status, margin_pct')
         .eq('quote_id', quoteId),
     ])
 
     if (!quoteRow) return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
 
     type QuoteRow = { id: string; job_id: string; status: string; total_cost: number; margin_pct: number; confidence_score: number; version: number; created_at: string }
-    type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null }
+    type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null; margin_pct: number | null }
 
     const tq = quoteRow as QuoteRow
     const { data: jobRow } = await sb.from('jobs').select('address').eq('id', tq.job_id).single()
@@ -491,7 +496,10 @@ export async function GET(
       confidence: 100,
       pricing_type: 'measured' as const,
       source_ref: null,
-      margin_pct: 0.15,
+      // Real per-item value — was hardcoded to 0.15 for every row, which
+      // silently ignored provisional sums' 0% margin. See send/route.ts's
+      // identical fix and calculateSellTotal (lib/pricing.ts).
+      margin_pct: li.margin_pct ?? 0.15,
       labour_cost: null,
       material_cost: null,
       subcontract_cost: null,

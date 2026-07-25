@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
-import { applyMargin } from '@/lib/pricing'
+import { calculateSellTotal, calculateClientPrice } from '@/lib/pricing'
 import SendQuoteModal from './SendQuoteModal'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -287,10 +287,11 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) 
     setSaving(false)
   }
 
-  // item.margin_pct is stored as a 0-1 fraction (migration 012); applyMargin
-  // expects a 0-100 percent — convert rather than reimplementing the markup
-  // formula inline, so this and the quote-level summary never drift apart.
-  const sellTotal = item.total !== null ? Math.round(applyMargin(item.total, item.margin_pct * 100)) : null
+  // The one canonical sell-price calculation (lib/pricing.ts) — the same
+  // function the quote summary API, PDF export, and invoice schedule now all
+  // call too, so this row and the header total can no longer drift apart.
+  const sellTotalExact = calculateSellTotal(item)
+  const sellTotal = sellTotalExact !== null ? Math.round(sellTotalExact) : null
 
   return (
     <div
@@ -1126,6 +1127,23 @@ function QuoteViewInner({
       }
       const json = await res.json() as QuoteApiResponse
       setData(json)
+      // Financial reconciliation invariant: the sum of what every line item
+      // row below displays must equal the header total above it — both are
+      // now computed by the same canonical calculateClientPrice (lib/
+      // pricing.ts), so a mismatch here means something bypassed it, not a
+      // rounding quirk. Dev-visible only (console), never blocks rendering —
+      // the QA report's own FINANCIAL_RECONCILIATION_FAILED check is the
+      // builder-facing enforcement before a quote can be sent.
+      if (process.env.NODE_ENV !== 'production') {
+        const allLineItems = json.line_items_by_category.flatMap((g) => g.items)
+        const recomputedClientPrice = calculateClientPrice(allLineItems)
+        const drift = Math.abs(recomputedClientPrice - json.summary.client_price)
+        if (drift > 1) {
+          console.warn(
+            `[QuoteView] financial reconciliation mismatch: sum of line item sell totals ($${recomputedClientPrice}) does not match summary.client_price ($${json.summary.client_price}), drift=$${drift.toFixed(2)}`
+          )
+        }
+      }
       // Expand all categories by default — but only on first load, so a
       // refetch after a fix doesn't blow away the builder's collapse state.
       if (firstLoadRef.current) {

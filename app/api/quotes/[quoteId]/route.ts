@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
-import { applyMargin, ensureQuotePriced, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
+import { calculateClientPrice, ensureQuotePriced, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
 import { deriveQuoteReadiness, isSilentlyUnpriced, type QuoteReadiness } from '@/lib/estimating/readiness'
 import type { QAReport } from '@/lib/types/database.types'
 
@@ -142,7 +142,11 @@ function computeSummary(
   return {
     total_cost: quote.total_cost,
     margin_pct: quote.margin_pct,
-    client_price: applyMargin(quote.total_cost, quote.margin_pct),
+    // Canonical: sum of each item's own margin_pct-marked-up total, never
+    // total_cost * quote.margin_pct — see calculateClientPrice's own doc
+    // comment (lib/pricing.ts) for why that blanket formula disagreed with
+    // what this same response's line items display.
+    client_price: calculateClientPrice(items),
     price_basis: PRICE_BASIS_LABEL,
     price_disclaimer: CLIENT_PRICE_DISCLAIMER,
     confidence_score: quote.confidence_score,

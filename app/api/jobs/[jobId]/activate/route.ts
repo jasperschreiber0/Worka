@@ -10,7 +10,7 @@ import {
 } from '@/lib/activation-demo'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
-import { applyMargin, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
+import { applyMargin, calculateClientPrice, DEFAULT_MARGIN_PCT } from '@/lib/pricing'
 import { randomUUID } from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -340,6 +340,14 @@ async function handleLiveActivation(
   // total_cost (as this used to) meant every activated job invoiced the
   // client at cost, silently forfeiting the builder's entire margin.
   //
+  // Canonical: sum of each line item's OWN margin_pct-marked-up total, never
+  // total_cost * quote.margin_pct — that blanket formula ignores provisional
+  // sums' 0% margin and disagreed with the client_price the builder actually
+  // reviewed in QuoteView before approving this quote. See calculateClientPrice
+  // (lib/pricing.ts) for the full reasoning. Invoice schedules must match the
+  // approved quote exactly, so this must be the same calculation, not a
+  // second, independently-derived one.
+  //
   // GST: this value is GST-EXCLUSIVE, matching every other client-facing
   // figure in the app (see lib/pricing.ts's PRICE_BASIS_LABEL/
   // CLIENT_PRICE_DISCLAIMER for the product decision this reflects). If
@@ -347,7 +355,11 @@ async function handleLiveActivation(
   // without also surfacing that disclaimer, that surface needs the same
   // labeling QuoteView/PDF export/send-quote already carry — do not assume
   // it's implied.
-  const clientContractValue = applyMargin(quote.total_cost, quote.margin_pct ?? DEFAULT_MARGIN_PCT)
+  const { data: activationLineItems } = await supabase
+    .from('quote_line_items')
+    .select('total, margin_pct, assumption_status')
+    .eq('quote_id', quoteId)
+  const clientContractValue = calculateClientPrice(activationLineItems ?? [])
 
   // 5. Generate and insert milestones
   const milestones = generateMilestones(jobId, quote.total_cost)

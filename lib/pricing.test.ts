@@ -14,6 +14,8 @@ import {
   resolveCategoryFallbackRate,
   isEligibleForAiMeasuredRate,
   tokenize,
+  calculateSellTotal,
+  calculateClientPrice,
   type CatalogueEntry,
   type RateContext,
 } from './pricing.ts'
@@ -59,6 +61,89 @@ test('PRICE_BASIS_LABEL and CLIENT_PRICE_DISCLAIMER are defined and state the pr
   assert.match(PRICE_BASIS_LABEL, /excl/i)
   assert.match(CLIENT_PRICE_DISCLAIMER, /exclude/i)
   assert.match(CLIENT_PRICE_DISCLAIMER, /gst/i)
+})
+
+// ─── calculateSellTotal / calculateClientPrice — the single financial
+// authority every client-facing surface (quote summary API, PDF export,
+// send-quote email, job activation / invoice schedule) must derive its
+// totals from. Replaces the old per-surface `applyMargin(quote.total_cost,
+// quote.margin_pct)` pattern, which ignored each item's own margin_pct and
+// let a quote's header total disagree with the sum of its own line items —
+// see the financial correctness audit these functions close.
+
+test('calculateSellTotal: normal item — cost $100, margin 15% (0.15 fraction), sell $115', () => {
+  assert.equal(calculateSellTotal({ total: 100, margin_pct: 0.15 }), 115)
+})
+
+test('calculateSellTotal: provisional sum — cost $100,000, margin 0%, sell $100,000 unchanged', () => {
+  assert.equal(calculateSellTotal({ total: 100000, margin_pct: 0 }), 100000)
+})
+
+test('calculateSellTotal: null total returns null — never invents a sell price for an unpriced item', () => {
+  assert.equal(calculateSellTotal({ total: null, margin_pct: 0.15 }), null)
+})
+
+test('calculateSellTotal: null margin_pct defaults to 0% — never invents a markup a row does not carry', () => {
+  assert.equal(calculateSellTotal({ total: 500, margin_pct: null }), 500)
+})
+
+test('calculateSellTotal: rounds to 2 decimal places, same as applyMargin', () => {
+  assert.equal(calculateSellTotal({ total: 333.33, margin_pct: 0.15 }), 383.33)
+})
+
+test('calculateClientPrice: mixed quote — normal items + a provisional sum sum correctly', () => {
+  const items = [
+    { total: 100, margin_pct: 0.15, assumption_status: null },      // 115
+    { total: 200, margin_pct: 0.15, assumption_status: null },      // 230
+    { total: 100000, margin_pct: 0, assumption_status: 'accepted' }, // 100000, PS at 0%
+  ]
+  assert.equal(calculateClientPrice(items), 100345)
+})
+
+test('calculateClientPrice: excluded items are never counted — regression guard for the exclusion rule', () => {
+  const items = [
+    { total: 100, margin_pct: 0.15, assumption_status: null },     // 115, included
+    { total: 100000, margin_pct: 0.15, assumption_status: 'excluded' }, // must NOT contribute
+  ]
+  assert.equal(calculateClientPrice(items), 115)
+})
+
+test('calculateClientPrice: matches applyMargin(total_cost, blanket_pct) ONLY when every item shares the same margin and none are excluded — the one case the two formulas coincidentally agree', () => {
+  const items = [
+    { total: 1000, margin_pct: 0.18, assumption_status: null },
+    { total: 2000, margin_pct: 0.18, assumption_status: null },
+  ]
+  const canonical = calculateClientPrice(items)
+  const blanket = applyMargin(1000 + 2000, 18)
+  assert.equal(canonical, blanket)
+})
+
+test('calculateClientPrice: diverges from the blanket formula once a provisional sum is present — this is the exact bug the canonical function fixes', () => {
+  const totalCost = 1780083.87
+  const provisionalSumValue = 159500
+  const items = [
+    { total: totalCost - provisionalSumValue, margin_pct: 0.15, assumption_status: null },
+    { total: provisionalSumValue, margin_pct: 0, assumption_status: null },
+  ]
+  const canonical = calculateClientPrice(items)
+  const blanket = applyMargin(totalCost, DEFAULT_MARGIN_PCT)
+  // These must NOT be equal — proves the canonical calculation is doing
+  // something materially different from the old blanket formula, not just
+  // re-deriving the same number a different way.
+  assert.notEqual(canonical, blanket)
+  assert.equal(canonical, 2023171.45)
+})
+
+test('calculateClientPrice: sum of individual calculateSellTotal calls equals calculateClientPrice — the reconciliation invariant QuoteView/QA now both check', () => {
+  const items = [
+    { total: 500, margin_pct: 0.15, assumption_status: null },
+    { total: 750, margin_pct: 0.15, assumption_status: null },
+    { total: 50000, margin_pct: 0, assumption_status: null },
+    { total: 999, margin_pct: 0.15, assumption_status: 'excluded' },
+  ]
+  const included = items.filter((i) => i.assumption_status !== 'excluded')
+  const summedIndividually = included.reduce((sum, i) => sum + (calculateSellTotal(i) ?? 0), 0)
+  assert.equal(calculateClientPrice(items), Math.round(summedIndividually * 100) / 100)
 })
 
 // ─── computeQuoteTotals — the arithmetic behind quotes.total_cost ──────────

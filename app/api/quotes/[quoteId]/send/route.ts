@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
-import { applyMargin, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
+import { calculateClientPrice, PRICE_BASIS_LABEL, CLIENT_PRICE_DISCLAIMER } from '@/lib/pricing'
 import { isSilentlyUnpriced } from '@/lib/estimating/readiness'
 
 // ─── Request body ─────────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ export async function POST(
         .select('id, job_id, status, total_cost, margin_pct, confidence_score, version, created_at')
         .eq('id', quoteId).eq('builder_id', sessionBuilderId).single(),
       sb.from('quote_line_items')
-        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status')
+        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status, margin_pct')
         .eq('quote_id', quoteId),
     ])
 
@@ -168,7 +168,7 @@ export async function POST(
     }
 
     type QuoteRow = { id: string; job_id: string; status: string; total_cost: number; margin_pct: number; confidence_score: number; version: number; created_at: string }
-    type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null }
+    type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null; margin_pct: number | null }
     type JobRow = { address: string; client_id: string | null }
     type ClientRow = { name: string; email: string | null }
     type BuilderRow = { business_name: string | null; contact_name: string | null }
@@ -210,7 +210,12 @@ export async function POST(
       confidence: 100,
       pricing_type: 'measured' as const,
       source_ref: null,
-      margin_pct: 0.15,
+      // Real per-item value — was hardcoded to 0.15 for every row, which
+      // silently ignored provisional sums' 0% margin (migration 012's
+      // trg_ps_margin trigger). Defaults to 0.15 only for a pre-migration-012
+      // row that genuinely has no value, matching quotes/[quoteId]/route.ts's
+      // own fallback.
+      margin_pct: li.margin_pct ?? 0.15,
       labour_cost: null,
       material_cost: null,
       subcontract_cost: null,
@@ -218,8 +223,9 @@ export async function POST(
     }))
 
     const activeItemsDb = items.filter((i) => i.assumption_status !== 'excluded' && i.total !== null)
-    // The client is quoted cost + margin — raw cost never leaves the builder
-    const clientPriceDb = applyMargin(quote.total_cost, quote.margin_pct)
+    // Canonical: sum of each item's own margin_pct-marked-up total — never
+    // total_cost * quote.margin_pct. See calculateClientPrice (lib/pricing.ts).
+    const clientPriceDb = calculateClientPrice(items)
     const emailBodyDb = buildEmailBody({
       clientName: resolvedClientName, address: quote.job_address,
       totalCost: clientPriceDb, lineCount: activeItemsDb.length,
@@ -260,8 +266,9 @@ export async function POST(
   const builderName = 'Dave Nguyen'
   const businessName = 'Nguyen Building Co.'
 
-  // The client is quoted cost + margin — raw cost never leaves the builder
-  const clientPrice = applyMargin(quote.total_cost, quote.margin_pct)
+  // Canonical: sum of each item's own margin_pct-marked-up total — never
+  // total_cost * quote.margin_pct. See calculateClientPrice (lib/pricing.ts).
+  const clientPrice = calculateClientPrice(items)
 
   const emailBody = buildEmailBody({
     clientName,
