@@ -20,6 +20,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { priceLineItems, computeQuoteTotals, DEFAULT_MARGIN_PCT } from '../lib/pricing.ts'
+import { runQualityAssurance } from '../lib/estimating/qa.ts'
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((a) => {
@@ -45,7 +46,7 @@ const quoteId = args['quote-id']
 async function main() {
   const { data: quote, error: quoteErr } = await supabase
     .from('quotes')
-    .select('id, builder_id, margin_pct')
+    .select('id, builder_id, margin_pct, job_id')
     .eq('id', quoteId)
     .single()
   if (quoteErr || !quote) throw new Error(`Quote not found: ${quoteErr?.message ?? quoteId}`)
@@ -104,10 +105,19 @@ async function main() {
   const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(finalItems)
   await supabase.from('quotes').update({ total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct, margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT }).eq('id', quoteId)
 
+  // Production always pairs pricing with QA (every real path calls both
+  // together) — this script previously only did the pricing half, so the
+  // completeness safeguard (missing_trade_details) has never actually run
+  // against this quote's real generated output.
+  const qaReport = await runQualityAssurance(supabase, quoteId, quote.job_id)
+
   console.log(JSON.stringify({
     event: 'reprice_complete', quote_id: quoteId,
     line_items_repriced_this_run: rowsToUpdate.length, line_items_total: items.length,
     total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct,
+    qa_top_risks: qaReport?.top_risks ?? [],
+    qa_missing_trade_details: qaReport?.missing_trade_details ?? [],
+    qa_review_items: qaReport?.review_items ?? [],
   }, null, 2))
 }
 
