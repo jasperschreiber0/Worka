@@ -1,0 +1,37 @@
+name: Ops - run enforce_estimate_deadlines() for real (one-shot fix)
+
+# One-shot production fix, NOT a recurring job: calls the real, already-deployed
+# enforce_estimate_deadlines() SQL function (see supabase/migrations/078_estimate_sla_deadline_and_builder_status.sql,
+# fixed in commit fd465ea) directly against production via SUPABASE_DB_URL, with
+# a real COMMIT (unlike ops-diagnose.yml, which always rolls back).
+#
+# Why this exists: GET /api/cron/intake-recovery's Step 0 calls this exact RPC
+# every minute via pg_cron and is reporting success (ran:true, deadlines_enforced:31)
+# on every tick, but estimate_run_events shows zero 'deadline_enforced' rows
+# written in the last hour, and the real backlog matching the enforcement
+# predicate is only 2 rows (not 31) — meaning the deployed app's calls are not
+# actually committing anything against this database. Suspected root cause:
+# Railway's NEXT_PUBLIC_SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY may point at a
+# different Supabase project than SUPABASE_DB_URL — needs verification via the
+# Railway dashboard, which is outside what this session can access.
+#
+# enforce_estimate_deadlines() is safe to run for real: it is idempotent
+# (FOR UPDATE SKIP LOCKED, only ever writes builder_status/needs_review_reason
+# where they are currently NULL) and additive-only — this is exactly what
+# production is already supposed to be doing automatically every minute.
+# Delete this workflow once the underlying Railway misconfiguration is fixed
+# and the real cron path is confirmed to be enforcing deadlines on its own.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run enforce_estimate_deadlines() for real
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -c "SELECT * FROM enforce_estimate_deadlines();"
