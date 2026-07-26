@@ -38,15 +38,20 @@ jobs:
           ROLLBACK;
           SQL
 
-      - name: Print masked SUPABASE_DB_URL host (project ref identification)
+      - name: Print masked SUPABASE_DB_URL identity (host + username, never password)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           python3 -c "
           import os, re
           url = os.environ['SUPABASE_DB_URL']
-          m = re.search(r'@([^:/]+)', url)
-          host = m.group(1) if m else '(unparseable)'
-          db = re.search(r'/([a-zA-Z0-9_]+)(\?|$)', url)
-          print('SUPABASE_DB_URL host:', host)
+          m = re.match(r'postgres(?:ql)?://([^:]+):[^@]+@([^:/]+):?(\d+)?/([^?]+)', url)
+          if m:
+              user, host, port, db = m.group(1), m.group(2), m.group(3), m.group(4)
+              print('SUPABASE_DB_URL user:', user)
+              print('SUPABASE_DB_URL host:', host)
+              print('SUPABASE_DB_URL port:', port)
+              print('SUPABASE_DB_URL database:', db)
+          else:
+              print('SUPABASE_DB_URL: could not parse')
           "
