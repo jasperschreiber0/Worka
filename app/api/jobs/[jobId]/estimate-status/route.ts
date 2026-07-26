@@ -92,11 +92,15 @@ export async function GET(
 
     const { data: run, error } = await sb
       .from('estimate_runs')
+      // A single string LITERAL, not built via `+` concatenation — supabase-js's
+      // .select() overloads pattern-match on a literal string type to infer the
+      // real row shape; concatenation widens it to plain `string`, which falls
+      // back to GenericStringError and breaks every `run.<column>` access below
+      // (confirmed: this is what broke every Railway build since this route was
+      // added — same root cause already fixed once in this codebase, see
+      // getUnresolvedConservativeAssumptions in lib/estimating/readiness.ts).
       .select(
-        'builder_status, needs_review_reason, needs_review_reason_code, quote_id, ' +
-        'started_at, deadline_at, completed_at, coverage_documents_uploaded, ' +
-        'coverage_documents_analyzed, coverage_percentage, confidence_level, ' +
-        'contributing_documents, missing_documents'
+        'builder_status, needs_review_reason, needs_review_reason_code, quote_id, started_at, deadline_at, completed_at, coverage_documents_uploaded, coverage_documents_analyzed, coverage_percentage, confidence_level, contributing_documents, missing_documents'
       )
       .eq('job_id', jobId)
       .order('started_at', { ascending: false })
