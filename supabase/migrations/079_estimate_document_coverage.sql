@@ -298,6 +298,14 @@ DECLARE
   v_reason text;
   v_reason_code text;
   v_coverage estimate_document_coverage;
+  -- A composite-typed variable (v_coverage) cannot appear in the same
+  -- multi-target `SELECT ... INTO a, b, c, composite_var` list as plain
+  -- scalar targets — PL/pgSQL rejects that with "is not a scalar variable"
+  -- (confirmed live: this is exactly what made the first deploy of this
+  -- migration fail outright, so nothing in this file had actually taken
+  -- effect despite being pushed). Capture the whole compute_builder_status
+  -- row into a record instead, then assign fields individually below.
+  v_cbs record;
 BEGIN
   SELECT * INTO v_batch FROM document_processing_batches WHERE id = p_batch_id;
   IF NOT FOUND THEN
@@ -309,9 +317,11 @@ BEGIN
   SELECT status INTO v_prev_status FROM estimate_runs WHERE batch_id = p_batch_id;
 
   IF v_proj.status IN ('complete', 'failed') THEN
-    SELECT cbs.builder_status, cbs.reason, cbs.reason_code, cbs.coverage
-      INTO v_builder_status, v_reason, v_reason_code, v_coverage
-      FROM compute_builder_status(p_batch_id) cbs;
+    SELECT * INTO v_cbs FROM compute_builder_status(p_batch_id) cbs;
+    v_builder_status := v_cbs.builder_status;
+    v_reason := v_cbs.reason;
+    v_reason_code := v_cbs.reason_code;
+    v_coverage := v_cbs.coverage;
   END IF;
 
   INSERT INTO estimate_runs AS er (
@@ -383,6 +393,9 @@ DECLARE
   v_reason text;
   v_reason_code text;
   v_coverage estimate_document_coverage;
+  -- See reconcile_estimate_run's matching comment — a composite-typed
+  -- variable can't sit in a multi-target scalar INTO list.
+  v_cbs record;
 BEGIN
   FOR r IN
     SELECT er.id, er.job_id, er.batch_id, er.status
@@ -391,9 +404,11 @@ BEGIN
       AND er.builder_status IS NULL
     FOR UPDATE SKIP LOCKED
   LOOP
-    SELECT cbs.builder_status, cbs.reason, cbs.reason_code, cbs.coverage
-      INTO v_status, v_reason, v_reason_code, v_coverage
-      FROM compute_builder_status(r.batch_id) cbs;
+    SELECT * INTO v_cbs FROM compute_builder_status(r.batch_id) cbs;
+    v_status := v_cbs.builder_status;
+    v_reason := v_cbs.reason;
+    v_reason_code := v_cbs.reason_code;
+    v_coverage := v_cbs.coverage;
     v_reason := format('15-minute processing window exceeded (was in stage: %s). %s', r.status, v_reason);
 
     UPDATE estimate_runs
