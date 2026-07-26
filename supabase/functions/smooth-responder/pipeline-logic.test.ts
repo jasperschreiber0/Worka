@@ -1028,6 +1028,59 @@ test('withTimeoutAndRetry: a repeated application_timeout is NOT retried — the
   assert.equal(failures[0].retryable, false)
 })
 
+test('withTimeoutAndRetry: deadlineAt blocks a retry that would not fit, even for a classification-retryable failure', async () => {
+  // A 500 is retryable by classification alone, but with a deadline only
+  // ~10ms away and a 100ms timeoutMs, a second attempt could never
+  // plausibly complete in time — the exact scenario that let a solo
+  // document's classification call burn ~2x its 220s timeout inside a 340s
+  // invocation budget in production.
+  let calls = 0
+  const failures: Array<{ retryable: boolean; skippedForBudget: boolean }> = []
+  const deadlineAt = Date.now() + 10
+  await assert.rejects(
+    withTimeoutAndRetry(
+      async () => { calls++; throw { status: 500 } },
+      {
+        timeoutMs: 100,
+        maxRetries: 2,
+        deadlineAt,
+        onAttemptFailed: (info) => failures.push({ retryable: info.retryable, skippedForBudget: info.skippedForBudget }),
+      },
+    ),
+  )
+  assert.equal(calls, 1, 'must not attempt a retry that cannot fit before deadlineAt')
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].retryable, false)
+  assert.equal(failures[0].skippedForBudget, true, 'distinguishes "ran out of budget" from a genuinely non-retryable classification')
+})
+
+test('withTimeoutAndRetry: deadlineAt with ample room still retries normally', async () => {
+  let calls = 0
+  const result = await withTimeoutAndRetry(
+    async () => {
+      calls++
+      if (calls < 2) throw { status: 500 }
+      return 'ok'
+    },
+    { timeoutMs: 50, maxRetries: 2, deadlineAt: Date.now() + 60_000 },
+  )
+  assert.equal(result, 'ok')
+  assert.equal(calls, 2)
+})
+
+test('withTimeoutAndRetry: a non-retryable classification is unaffected by deadlineAt (skippedForBudget stays false)', async () => {
+  const failures: Array<{ retryable: boolean; skippedForBudget: boolean }> = []
+  await assert.rejects(
+    withTimeoutAndRetry(
+      async () => { throw { status: 400 } },
+      { maxRetries: 2, deadlineAt: Date.now() + 60_000, onAttemptFailed: (info) => failures.push({ retryable: info.retryable, skippedForBudget: info.skippedForBudget }) },
+    ),
+  )
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].retryable, false)
+  assert.equal(failures[0].skippedForBudget, false, 'a 400 is non-retryable regardless of budget, not "skipped for budget"')
+})
+
 // ─── documentPhaseProgress ─────────────────────────────────────────────────
 
 test('documentPhaseProgress: starts at 5% with nothing processed', () => {

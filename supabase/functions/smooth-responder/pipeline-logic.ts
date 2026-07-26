@@ -1333,12 +1333,40 @@ export interface TimedRetryOptions {
   timeoutMs?: number
   maxRetries?: number
   label?: string
+  // Optional absolute deadline (Date.now()-comparable ms) for the CALLER's
+  // own invocation budget — e.g. smooth-responder's WALL_CLOCK_SAFETY_MS
+  // window, not this function's own timeoutMs. Root cause this closes: a
+  // classification-eligible-for-retry failure (rate_limited/overloaded/
+  // network_interruption) on a solo document's 220s attempt used to always
+  // get a full second 220s attempt regardless of how much of the caller's
+  // OWN wall-clock budget was left — a single call could burn up to 2x its
+  // timeoutMs (~440s) inside a 340s invocation ceiling, silently starving
+  // every later stage even though every individual `hasWallClockBudget`
+  // check the caller made before STARTING the call had passed. When set,
+  // a retry is only attempted if there's still enough of the caller's
+  // budget left to plausibly complete another full attempt
+  // (`Date.now() + timeoutMs <= deadlineAt`); otherwise this stops exactly
+  // like a non-retryable classification would, so the caller's own
+  // wall-clock guard (not a second, silent one hidden in here) is what
+  // decides whether the pipeline waits for a later invocation instead.
+  // Omitted (the default) preserves the exact prior behaviour for every
+  // caller that doesn't pass it (every Next.js route, and any
+  // smooth-responder call site that hasn't opted in).
+  deadlineAt?: number
   onAttemptFailed?: (info: {
     attempt: number
     durationMs: number
     retryable: boolean
     classification: AnthropicFailureClassification
     error: unknown
+    // True when this attempt's failure WAS classified retryable but was not
+    // retried anyway because deadlineAt ruled out fitting another attempt —
+    // distinct from `retryable: false`, which also covers a genuinely
+    // non-retryable classification. Lets a caller's logging tell "this is a
+    // deterministic failure" apart from "this would have retried, but we
+    // ran out of wall-clock room" — the two situations this task's bounded-
+    // stall handling needs to tell apart.
+    skippedForBudget: boolean
   }) => void
 }
 
@@ -1348,18 +1376,20 @@ export interface TimedRetryOptions {
  * to actually cut the in-flight request, not just abandon it locally while
  * it keeps running server-side) and retries only failures classified as
  * transient (see isRetryableClassification) with exponential backoff (1s,
- * 2s, 4s, ...) up to maxRetries times. Always rethrows the last error once
- * retries are exhausted, with `.classification` attached (see
- * `withClassification` below) so callers can make a further-retry/halt/
- * split decision without reclassifying — callers are responsible for their
- * own graceful-failure/DB-update handling on that rethrow, exactly as they
- * already handle any other exception from the call they're wrapping.
+ * 2s, 4s, ...) up to maxRetries times — and, when `deadlineAt` is set, only
+ * if another full attempt could plausibly still fit inside the caller's own
+ * remaining budget. Always rethrows the last error once retries are
+ * exhausted, with `.classification` attached (see `withClassification`
+ * below) so callers can make a further-retry/halt/split decision without
+ * reclassifying — callers are responsible for their own graceful-failure/
+ * DB-update handling on that rethrow, exactly as they already handle any
+ * other exception from the call they're wrapping.
  */
 export async function withTimeoutAndRetry<T>(
   call: (signal: AbortSignal) => Promise<T>,
   options: TimedRetryOptions = {},
 ): Promise<T> {
-  const { timeoutMs = 60_000, maxRetries = 1, label = 'api_call', onAttemptFailed } = options
+  const { timeoutMs = 60_000, maxRetries = 1, label = 'api_call', deadlineAt, onAttemptFailed } = options
   let lastErr: unknown
   let lastClassification: AnthropicFailureClassification = 'unknown'
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
@@ -1376,8 +1406,11 @@ export async function withTimeoutAndRetry<T>(
       const durationMs = Date.now() - startedAt
       const classification = classifyAnthropicError(err, durationMs, timeoutMs)
       lastClassification = classification
-      const canRetry = attempt <= maxRetries && isRetryableClassification(classification)
-      onAttemptFailed?.({ attempt, durationMs, retryable: canRetry, classification, error: err })
+      const retryableByClassification = attempt <= maxRetries && isRetryableClassification(classification)
+      const hasBudgetForAnotherAttempt = deadlineAt === undefined || Date.now() + timeoutMs <= deadlineAt
+      const canRetry = retryableByClassification && hasBudgetForAnotherAttempt
+      const skippedForBudget = retryableByClassification && !hasBudgetForAnotherAttempt
+      onAttemptFailed?.({ attempt, durationMs, retryable: canRetry, classification, error: err, skippedForBudget })
       if (!canRetry) throw withClassification(err, classification)
       await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** (attempt - 1)))
     }

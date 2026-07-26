@@ -574,6 +574,17 @@ interface StageGatewayCtx {
   // call sites (project-model comparison, not the live pipeline) — those
   // stay ungated, same scope as before this migration.
   parentJobId?: string | null
+  // Optional: this invocation's own WALL_CLOCK_SAFETY_MS deadline
+  // (startedAt + WALL_CLOCK_SAFETY_MS), threaded into withTimeoutAndRetry's
+  // deadlineAt so a retryable failure doesn't get a second full-length
+  // attempt when there isn't remotely enough of the invocation's own
+  // budget left for it to matter — see withTimeoutAndRetry's own comment
+  // for the incident this closes (a solo classification call burning up to
+  // 2x its 220s timeout inside a 340s ceiling). Only set at the Stage 1/2
+  // classification call site; every other call site is unaffected (Stage
+  // 3/6 already reserve their own headroom before starting, and the
+  // shadow-run sites have no wall-clock ceiling to speak of).
+  invocationDeadlineAt?: number
 }
 
 // Defense-in-depth ceiling (migration 077): total Anthropic call attempts
@@ -716,6 +727,7 @@ async function callTool(
       timeoutMs,
       maxRetries: 1,
       label: tool.name,
+      deadlineAt: gw.invocationDeadlineAt,
       onAttemptFailed: (info) => {
         // TEMPORARY DIAGNOSTIC LOGGING — capture the Anthropic SDK error's
         // own structured fields (status + parsed error body), not just
@@ -729,6 +741,7 @@ async function callTool(
         console.log(JSON.stringify({
           event: 'claude_call_attempt_failed', tool: tool.name, attempt: info.attempt,
           duration_ms: info.durationMs, retryable: info.retryable,
+          skipped_for_budget: info.skippedForBudget,
           classification: info.classification,
           anthropic_status: err?.status ?? null,
           anthropic_error_body: err?.error ?? null,
@@ -1050,6 +1063,28 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   // and the slower staleness-based recovery path.
   const WALL_CLOCK_SAFETY_MS = 340_000 // 60s margin under the real ~400s ceiling
   const hasWallClockBudget = (neededMs: number) => (Date.now() - startedAt) + neededMs <= WALL_CLOCK_SAFETY_MS
+
+  // ── Bounded handling for a batch that keeps stalling ────────────────────
+  // document_processing_batches.stall_count (migration 053) already tracks
+  // every wall-clock bail for this batch (any stage — it's one running
+  // total, not broken out per stage), but nothing previously CAPPED it: a
+  // batch whose classification call genuinely cannot fit inside one
+  // invocation's budget (a slow/oversized single document, or a
+  // consistently overloaded/rate-limited upstream) would stall, get
+  // reclaimed by the recovery cron, stall again, forever — a distinct
+  // failure mode from a transient provider error (which the existing
+  // Anthropic failure classification + retry redesign already bounds via
+  // files.ai_failure_count). MAX_CLASSIFICATION_STALL_COUNT draws that
+  // line for classification specifically: once a batch has already
+  // stalled this many times for any reason, this invocation does not even
+  // attempt another classification call — it falls through with whatever
+  // facts already exist (Stage 3 still runs on those, same as any other
+  // wall-clock deferral) and leaves the 15-minute estimate SLA
+  // (enforce_estimate_deadlines, migration 078) as the authoritative
+  // backstop that finalizes the job to NEEDS_REVIEW once its deadline
+  // passes — a deterministic, repeatedly-stalling batch reaches that
+  // builder-facing outcome instead of being retried indefinitely.
+  const MAX_CLASSIFICATION_STALL_COUNT = 3
   // Was: log-only, silent `return` — no terminal state, no persisted reason.
   // That made a wall-clock exit indistinguishable from a healthy in-progress
   // run to everything downstream (the SSE poller, the recovery cron, a human
@@ -1522,7 +1557,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
           // plus supporting documents (confirmed via the stop_reason=max_tokens
           // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
           // 16000 for this same model/API rather than guessing at another cap.
-          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
+          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
         } catch (err) {
           // A batch's Claude call failing (a transient API error, a
           // truncated/malformed response) is a genuinely catchable,
@@ -1689,7 +1724,28 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         return { ok: true, factsFound: (docResult.facts ?? []).length, documentsClassified: (docResult.documents ?? []).length }
       }
 
-      for (let batchIdx = 0; batchIdx < fileBatches.length; batchIdx++) {
+      // Checked once per invocation, before attempting any classification
+      // batch — see MAX_CLASSIFICATION_STALL_COUNT above. A batch with no
+      // parentJobId (the legacy no-batch path) has no document_processing_
+      // batches row to check and is left unaffected, same as before.
+      let classificationStallCapReached = false
+      if (parentJobId) {
+        const { data: batchRow } = await supabase
+          .from('document_processing_batches')
+          .select('stall_count')
+          .eq('id', parentJobId)
+          .single()
+        const currentStallCount = batchRow?.stall_count ?? 0
+        classificationStallCapReached = currentStallCount >= MAX_CLASSIFICATION_STALL_COUNT
+        if (classificationStallCapReached) {
+          console.log(JSON.stringify({
+            event: 'classification_stall_cap_reached_skipping', parent_job_id: parentJobId, job_id: jobId,
+            stall_count: currentStallCount, max_stall_count: MAX_CLASSIFICATION_STALL_COUNT,
+          }))
+        }
+      }
+
+      for (let batchIdx = 0; !classificationStallCapReached && batchIdx < fileBatches.length; batchIdx++) {
         const batchFiles = fileBatches[batchIdx]
           .map((bf) => blockById.get(bf.fileId))
           .filter((f): f is LoadedFile => Boolean(f))
