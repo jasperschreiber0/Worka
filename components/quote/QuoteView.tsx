@@ -911,6 +911,121 @@ function WhatWorkaRead({ contribution }: { contribution: DocumentContributionPay
   )
 }
 
+// ─── Estimate coverage / confidence banner ────────────────────────────────────
+//
+// "A builder must never see a normal-looking estimate without knowing the
+// level of document coverage behind it." Backed by estimate_runs.builder_status
+// (migrations 078-079) via GET /api/jobs/[jobId]/estimate-status — the SAME
+// three-tier outcome the 15-minute SLA watchdog finalizes runs into. Rendered
+// as the very first thing in the quote body, above the summary card, so it
+// can't be missed the way the QA panel further down can be.
+
+export interface CoverageDocument {
+  file_id: string
+  filename: string
+  document_type?: string | null
+  status?: 'failed' | 'pending'
+}
+
+export interface EstimateStatusPayload {
+  has_run: boolean
+  builder_status: 'ESTIMATE_READY' | 'ESTIMATE_READY_WITH_WARNINGS' | 'NEEDS_REVIEW' | null
+  needs_review_reason: string | null
+  needs_review_reason_code: string | null
+  coverage: {
+    documents_uploaded: number
+    documents_analyzed: number
+    documents_failed_or_pending: number
+    coverage_percentage: number
+    confidence_level: 'high' | 'medium' | 'low'
+    contributing_documents: CoverageDocument[]
+    missing_documents: CoverageDocument[]
+  } | null
+}
+
+const COVERAGE_BANNER_STYLE: Record<'ready' | 'warning' | 'review', { border: string; bg: string; text: string; headline: string }> = {
+  ready: {
+    border: '1px solid rgba(76,175,80,0.3)',
+    bg: 'rgba(76,175,80,0.08)',
+    text: 'var(--status-green)',
+    headline: 'Estimate generated from complete project documentation.',
+  },
+  warning: {
+    border: '1px solid rgba(255,152,0,0.3)',
+    bg: 'rgba(255,152,0,0.08)',
+    text: 'var(--status-amber)',
+    headline: 'Estimate generated with partial documentation. Review missing items before sending.',
+  },
+  review: {
+    border: '1px solid rgba(244,67,54,0.3)',
+    bg: 'rgba(244,67,54,0.08)',
+    text: 'var(--status-red)',
+    headline: 'Estimate requires review. Important project documents were not available for analysis.',
+  },
+}
+
+function EstimateCoverageBanner({ status }: { status: EstimateStatusPayload }) {
+  if (!status.has_run || !status.builder_status || !status.coverage) return null
+
+  const tier = status.builder_status === 'ESTIMATE_READY'
+    ? 'ready'
+    : status.builder_status === 'ESTIMATE_READY_WITH_WARNINGS'
+    ? 'warning'
+    : 'review'
+  const style = COVERAGE_BANNER_STYLE[tier]
+  const { documents_analyzed, documents_uploaded, coverage_percentage, contributing_documents, missing_documents } = status.coverage
+
+  // A fully-covered, fully-ready estimate doesn't need its own document
+  // checklist repeated here — WhatWorkaRead (per-document fact usage)
+  // already covers that level of detail once everything went well. The
+  // banner only expands into a checklist when there's something to flag.
+  const showChecklist = tier !== 'ready' && (contributing_documents.length > 0 || missing_documents.length > 0)
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: style.border }}>
+      <div className="px-4 py-3" style={{ backgroundColor: style.bg }}>
+        <p className="text-[13px] font-semibold" style={{ color: style.text }}>{style.headline}</p>
+        <p className="text-[12px] mt-1" style={{ color: style.text }}>
+          Document coverage: {documents_analyzed} of {documents_uploaded} document{documents_uploaded === 1 ? '' : 's'} analysed ({coverage_percentage}%)
+        </p>
+      </div>
+      {showChecklist && (
+        <div className="px-4 py-3 space-y-2" style={{ backgroundColor: 'var(--bg-surface)', borderTop: `1px solid ${style.border.split(' ').pop()}` }}>
+          {contributing_documents.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--text-tertiary)' }}>Included</p>
+              <ul className="space-y-0.5">
+                {contributing_documents.map((d) => (
+                  <li key={d.file_id} className="text-[12px] flex items-center gap-1.5" style={{ color: 'var(--text-secondary)' }}>
+                    <span style={{ color: 'var(--status-green)' }} aria-hidden="true">✓</span> {d.filename}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {missing_documents.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--text-tertiary)' }}>Not analysed</p>
+              <ul className="space-y-0.5">
+                {missing_documents.map((d) => (
+                  <li key={d.file_id} className="text-[12px] flex items-center gap-1.5" style={{ color: style.text }}>
+                    <span aria-hidden="true">⚠</span> {d.filename}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+      {status.needs_review_reason && tier !== 'ready' && (
+        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
+          <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{status.needs_review_reason}</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── "Check before sending" — the QA report, finally on screen ───────────────
 
 function CheckBeforeSending({ report }: { report: QAReportPayload }) {
@@ -1046,6 +1161,7 @@ function QuoteViewInner({
   const [mounted, setMounted] = useState(false)
   const [sendModalOpen, setSendModalOpen] = useState(false)
   const [sentAt, setSentAt] = useState<string | null>(null)
+  const [estimateStatus, setEstimateStatus] = useState<EstimateStatusPayload | null>(null)
 
   // Set of expanded category IDs — all start expanded
   const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
@@ -1161,6 +1277,24 @@ function QuoteViewInner({
   useEffect(() => {
     loadQuote()
   }, [loadQuote])
+
+  // Coverage/confidence banner data — fetched independently of the quote
+  // itself once we know the job_id, so a failure here never blocks the
+  // quote from rendering (best-effort, same posture as the QA lazy-run
+  // above). Not re-fetched on every loadQuote() call (a line-item PATCH
+  // doesn't change document coverage), only once per quote.
+  useEffect(() => {
+    const jobId = data?.quote.job_id
+    if (!jobId) return
+    let cancelled = false
+    fetch(`/api/jobs/${jobId}/estimate-status`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: EstimateStatusPayload | null) => {
+        if (!cancelled && json) setEstimateStatus(json)
+      })
+      .catch(() => { /* best-effort — the quote itself still renders fine */ })
+    return () => { cancelled = true }
+  }, [data?.quote.job_id])
 
   // Line-item fix actions — the builder's way through the unpriced gate.
   const patchLineItem = useCallback(async (itemId: string, body: { rate?: number; excluded?: boolean }): Promise<boolean> => {
@@ -1377,6 +1511,10 @@ function QuoteViewInner({
           {/* Quote data */}
           {!isLoading && !error && data && (
             <div className="pt-4 pb-2">
+              {/* Document coverage / confidence — must be the first thing a
+                  builder sees, not buried below the numbers. */}
+              {estimateStatus && <EstimateCoverageBanner status={estimateStatus} />}
+
               {/* Summary card */}
               <SummaryCard summary={data.summary} />
 

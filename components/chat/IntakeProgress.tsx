@@ -36,6 +36,25 @@ interface ClarificationState {
   questions: ClarifyingQuestion[]
 }
 
+// Mirrors app/api/jobs/[jobId]/estimate-status's response shape — see that
+// route and migrations 078-079. This is what turns a bare "Processing
+// timed out — please try again" into "2 of 7 documents analysed (29%) —
+// needs review" (or "ready with warnings", when partial documentation was
+// still enough to produce a usable estimate).
+interface EstimateStatus {
+  has_run: boolean
+  builder_status: 'ESTIMATE_READY' | 'ESTIMATE_READY_WITH_WARNINGS' | 'NEEDS_REVIEW' | null
+  needs_review_reason: string | null
+  quote_id: string | null
+  coverage: {
+    documents_uploaded: number
+    documents_analyzed: number
+    coverage_percentage: number
+    contributing_documents: Array<{ file_id: string; filename: string }>
+    missing_documents: Array<{ file_id: string; filename: string; status?: string }>
+  } | null
+}
+
 // Per-document extraction checklist — each document now gets its own
 // document-worker Edge Function invocation (its own isolated CPU budget)
 // instead of sharing one invocation's budget with every other document in
@@ -137,6 +156,11 @@ export default function IntakeProgress({
   // happening. This flag is the explicit "your answer was received, work
   // has resumed" signal that doesn't depend on the stage actually changing.
   const [justResumed, setJustResumed] = useState(false)
+  // Coverage/confidence outcome for the terminal error/timeout screen — see
+  // EstimateStatus's own comment below. Best-effort: fetched only once the
+  // run has actually ended (hasError), never blocks or slows down the
+  // existing progress/error flow if it fails to load.
+  const [estimateStatus, setEstimateStatus] = useState<EstimateStatus | null>(null)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const prevStageRef = useRef<string | null>(null)
@@ -398,6 +422,24 @@ export default function IntakeProgress({
     }
   }, [fileId, jobId, builderId, onComplete, onError, resumeKey, reconnectKey])
 
+  // Once the run ends in error/timeout, check whether the 15-minute SLA
+  // watchdog (or a natural completion) already reached a real outcome for
+  // this job — a "Processing timed out" the SSE connection saw can still
+  // resolve into a real ESTIMATE_READY_WITH_WARNINGS/NEEDS_REVIEW verdict
+  // server-side. Best-effort: a failed/empty fetch just leaves the existing
+  // generic error message in place, nothing regresses.
+  useEffect(() => {
+    if (!hasError) return
+    let cancelled = false
+    fetch(`/api/jobs/${jobId}/estimate-status`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: EstimateStatus | null) => {
+        if (!cancelled && json?.has_run && json.builder_status) setEstimateStatus(json)
+      })
+      .catch(() => { /* best-effort */ })
+    return () => { cancelled = true }
+  }, [hasError, jobId])
+
   // ── Clarifying questions state (Stage 4/5) ─────────────────────────────────
   if (clarification) {
     return (
@@ -414,6 +456,66 @@ export default function IntakeProgress({
 
   // ── Error state ────────────────────────────────────────────────────────────
   if (hasError) {
+    // A real outcome exists server-side (the SLA watchdog or a natural
+    // completion already decided ESTIMATE_READY_WITH_WARNINGS or
+    // NEEDS_REVIEW) — replace the generic "Processing failed, retry these
+    // files" message with the specific, coverage-aware one. This is the
+    // direct fix for the exact case that motivated it: a builder whose
+    // upload made real progress (some documents genuinely analysed) should
+    // never see a flat failure screen that looks identical to "nothing
+    // happened".
+    if (estimateStatus?.builder_status && estimateStatus.coverage) {
+      const isWarning = estimateStatus.builder_status === 'ESTIMATE_READY_WITH_WARNINGS'
+      const { documents_analyzed, documents_uploaded, coverage_percentage, contributing_documents, missing_documents } = estimateStatus.coverage
+      const color = isWarning ? '#ffb020' : '#f44336'
+      const bg = isWarning ? 'rgba(255,152,0,0.08)' : 'rgba(244,67,54,0.08)'
+      const border = isWarning ? 'rgba(255,152,0,0.3)' : 'rgba(244,67,54,0.3)'
+      return (
+        <div className="rounded-xl px-4 py-5 space-y-3" style={{ border: `1px solid ${border}`, backgroundColor: bg }}>
+          <p className="text-sm font-semibold" style={{ color }}>
+            {isWarning ? 'Estimate generated with warnings' : 'Needs review'}
+          </p>
+          <p className="text-sm" style={{ color }}>
+            {documents_analyzed}/{documents_uploaded} documents analysed ({coverage_percentage}%).
+            {isWarning
+              ? ' A draft estimate was created from what WorkA could read — review the missing items below before sending.'
+              : ' Insufficient document coverage to produce a reliable estimate.'}
+          </p>
+          {missing_documents.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color }}>Missing</p>
+              <ul className="text-sm space-y-0.5" style={{ color }}>
+                {missing_documents.map((d) => <li key={d.file_id}>⚠ {d.filename}</li>)}
+              </ul>
+            </div>
+          )}
+          {contributing_documents.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-1 text-[#777777]">Included</p>
+              <ul className="text-sm space-y-0.5 text-[#aaaaaa]">
+                {contributing_documents.map((d) => <li key={d.file_id}>✓ {d.filename}</li>)}
+              </ul>
+            </div>
+          )}
+          {isWarning && estimateStatus.quote_id && (
+            <p className="text-[12px]" style={{ color }}>
+              A draft estimate is available — open it from the job panel to review and complete missing items.
+            </p>
+          )}
+          {missing_documents.length > 0 && onRetryFiles && (
+            <button
+              type="button"
+              onClick={() => onRetryFiles(missing_documents.map((d) => d.filename))}
+              className="text-sm font-semibold hover:underline"
+              style={{ color: '#ff6b2b' }}
+            >
+              Retry {missing_documents.length === 1 ? 'this file' : `these ${missing_documents.length} files`} only →
+            </button>
+          )}
+        </div>
+      )
+    }
+
     const missedFiles = [...errorSkippedFiles, ...errorFailedFiles]
     const totalFiles = 1 + (additionalFileIds?.length ?? 0)
     const processedCount = Math.max(0, totalFiles - missedFiles.length)
