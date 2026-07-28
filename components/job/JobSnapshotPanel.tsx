@@ -9,6 +9,7 @@ import ProofTab from '@/components/job/tabs/ProofTab'
 import Timeline from '@/components/dashboard/Timeline'
 import AIInsightCard from '@/components/dashboard/AIInsightCard'
 import ClarifyingQuestionsPanel from '@/components/chat/ClarifyingQuestionsPanel'
+import VariationCard from '@/components/chat/VariationCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -164,6 +165,8 @@ export default function JobSnapshotPanel({
   // the live upload SSE session) hit the exact same dead-end error.
   const [clarifyRetryStatus, setClarifyRetryStatus] = useState<string | null>(null)
   const [archiving, setArchiving] = useState(false)
+  const [openVariationId, setOpenVariationId] = useState<string | null>(null)
+  const [variationActionError, setVariationActionError] = useState<string | null>(null)
 
   // Fetch aggregate pulse once for the no-job empty state
   useEffect(() => {
@@ -280,6 +283,26 @@ export default function JobSnapshotPanel({
       setArchiving(false)
     }
   }, [job, onClose])
+
+  const handleVariationResolve = useCallback(
+    async (variationId: string, action: 'approved' | 'rejected') => {
+      setVariationActionError(null)
+      try {
+        const res = await fetch(`/api/variations/${variationId}/resolve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error ?? `Couldn't ${action === 'approved' ? 'approve' : 'reject'} variation`)
+        setOpenVariationId(null)
+        if (job) await fetchSnapshot(job.id)
+      } catch (err) {
+        setVariationActionError(err instanceof Error ? err.message : 'Something went wrong — try again.')
+      }
+    },
+    [job, fetchSnapshot]
+  )
 
   const handleActivated = useCallback(
     (result: ActivationResult) => {
@@ -855,14 +878,20 @@ export default function JobSnapshotPanel({
               <SectionGroup label="Pending">
                 <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
                   {pendingVariations.map((v, idx) => (
-                    <div
+                    <button
                       key={v.id}
+                      type="button"
+                      onClick={() => setOpenVariationId(v.id)}
                       style={{
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
+                        width: '100%',
+                        textAlign: 'left',
                         padding: '8px 12px',
                         borderTop: idx === 0 ? 'none' : '0.5px solid var(--bg-border)',
+                        background: 'transparent',
+                        cursor: 'pointer',
                       }}
                     >
                       <div style={{ minWidth: 0, flex: 1 }}>
@@ -872,7 +901,7 @@ export default function JobSnapshotPanel({
                         </span>
                       </div>
                       <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', marginLeft: 8, flexShrink: 0 }}>{formatAUD(v.amount)}</span>
-                    </div>
+                    </button>
                   ))}
                   {overdueInvoices.map((inv, idx) => (
                     <div
@@ -1032,6 +1061,43 @@ export default function JobSnapshotPanel({
           builderId="00000000-0000-0000-0000-000000000001"
         />
       )}
+
+      {/* ── VARIATION APPROVE/REJECT MODAL ───────────────────────────────────── */}
+      {openVariationId && job && (() => {
+        const v = pendingVariations.find((pv) => pv.id === openVariationId)
+        if (!v) return null
+        return (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+            style={{ background: 'rgba(0,0,0,0.5)' }}
+            onClick={() => { setOpenVariationId(null); setVariationActionError(null) }}
+          >
+            <div onClick={(e) => e.stopPropagation()}>
+              <VariationCard
+                variation={{
+                  id: v.id,
+                  title: v.title,
+                  description: '',
+                  amount: v.amount,
+                  status: v.status,
+                  job_address: job.address,
+                  created_display: new Date(v.created_at).toLocaleDateString('en-AU'),
+                  job_id: job.id,
+                  variation_ref: v.variation_ref,
+                  labour_cost: v.labour_cost,
+                  materials_cost: v.materials_cost,
+                  submitted_by: v.submitted_by,
+                }}
+                onApprove={(id) => void handleVariationResolve(id, 'approved')}
+                onReject={(id) => void handleVariationResolve(id, 'rejected')}
+              />
+              {variationActionError && (
+                <p style={{ fontSize: 12, color: 'var(--status-red)', marginTop: 8 }}>{variationActionError}</p>
+              )}
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

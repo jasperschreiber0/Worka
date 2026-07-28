@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import JobSnapshotPanel, { type ActiveJob } from '@/components/job/JobSnapshotPanel'
 import UploadPanel, { type UploadPanelJob } from '@/components/chat/UploadPanel'
 import QuoteView from '@/components/quote/QuoteView'
+import AddVariationDrawer from '@/components/variations/AddVariationDrawer'
 
 interface JobWorkspaceViewProps {
   jobId: string
@@ -24,6 +25,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
   const [refreshKey, setRefreshKey] = useState(0)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [viewingQuoteId, setViewingQuoteId] = useState<string | null>(null)
+  const [variationDrawerOpen, setVariationDrawerOpen] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
 
   useEffect(() => {
@@ -103,10 +105,15 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-8">
-      <button className="text-sm mb-4 flex items-center gap-1" style={{ color: 'var(--text-secondary)' }} onClick={() => router.push('/jobs')}>
-        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
-        Jobs
-      </button>
+      <div className="flex items-center justify-between mb-4">
+        <button className="text-sm flex items-center gap-1" style={{ color: 'var(--text-secondary)' }} onClick={() => router.push('/jobs')}>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
+          Jobs
+        </button>
+        {job && (
+          <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => setVariationDrawerOpen(true)}>+ Raise variation</button>
+        )}
+      </div>
 
       {toast && (
         <div
@@ -141,6 +148,19 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
           job={job as UploadPanelJob}
           builderId={builderId}
           onIntakeComplete={handleIntakeComplete}
+        />
+      )}
+
+      {job && (
+        <AddVariationDrawer
+          open={variationDrawerOpen}
+          jobId={job.id}
+          onClose={() => setVariationDrawerOpen(false)}
+          onCreated={() => {
+            setVariationDrawerOpen(false)
+            setRefreshKey((k) => k + 1)
+            setToast({ tone: 'info', message: 'Variation raised — approve or reject it from the pending list below.' })
+          }}
         />
       )}
 
