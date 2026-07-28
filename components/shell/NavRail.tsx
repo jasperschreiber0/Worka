@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import NotificationsBell from './NotificationsBell'
 
 interface NavItemDef {
   href: string
@@ -103,10 +104,13 @@ export default function NavRail() {
       style={{ background: 'var(--bg-shell)', borderRight: '0.5px solid var(--bg-border)' }}
       aria-label="Primary"
     >
-      <Link href="/jobs" className="flex items-center gap-2 px-3 pb-4 mb-1">
-        <span className="w-6 h-6 rounded-[4px] flex items-center justify-center text-xs font-bold" style={{ background: 'var(--orange-primary)', color: '#fff' }}>W</span>
-        <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>WorkA</span>
-      </Link>
+      <div className="flex items-center justify-between px-3 pb-4 mb-1">
+        <Link href="/jobs" className="flex items-center gap-2">
+          <span className="w-6 h-6 rounded-[4px] flex items-center justify-center text-xs font-bold" style={{ background: 'var(--orange-primary)', color: '#fff' }}>W</span>
+          <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>WorkA</span>
+        </Link>
+        <NotificationsBell />
+      </div>
 
       <Link
         href="/jobs?new=1"

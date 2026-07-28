@@ -17,6 +17,7 @@
 import { createHash, randomUUID } from 'crypto'
 import { createClient } from '@supabase/supabase-js'
 import { demoActivationState, formatDisplayTime, type DemoProofEvent } from '@/lib/activation-demo'
+import { createNotification, titleForProofEvent } from '@/lib/notifications'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -242,6 +243,7 @@ export async function recordProofEvent(input: RecordProofEventInput): Promise<Pr
         console.error('[proof] Failed to insert proof event:', error)
         return null
       }
+      notifyForProofEvent(input)
       return event
     }
 
@@ -260,9 +262,29 @@ export async function recordProofEvent(input: RecordProofEventInput): Promise<Pr
 
     log.push(event)
     demoProofLog.set(input.jobId, log)
+    notifyForProofEvent(input)
     return event
   } catch (err) {
     console.error('[proof] recordProofEvent error:', err)
     return null
   }
+}
+
+/**
+ * Fire-and-forget: a notification-feed row is a UI convenience, not part of
+ * the audit trail itself, so it must never slow down or fail the proof write
+ * it's derived from.
+ */
+function notifyForProofEvent(input: RecordProofEventInput): void {
+  const title = titleForProofEvent(input.eventType)
+  if (!title) return
+  void createNotification({
+    builderId: input.builderId,
+    jobId: input.jobId,
+    type: input.eventType,
+    title,
+    body: input.description,
+    entityType: 'job',
+    entityId: input.jobId,
+  })
 }

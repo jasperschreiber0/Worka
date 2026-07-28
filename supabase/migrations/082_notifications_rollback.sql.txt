@@ -1,0 +1,7 @@
+-- Rollback for 082_notifications.sql
+
+DROP INDEX IF EXISTS notifications_builder_unread_idx;
+DROP POLICY IF EXISTS "notifications_own_builder" ON notifications;
+DROP TABLE IF EXISTS notifications;
+
+NOTIFY pgrst, 'reload schema';

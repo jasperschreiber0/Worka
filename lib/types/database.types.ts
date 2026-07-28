@@ -78,6 +78,19 @@ export interface Supplier {
   created_at: string
 }
 
+export interface Notification {
+  id: string
+  builder_id: string
+  job_id: string | null
+  type: string
+  title: string
+  body: string | null
+  entity_type: string | null
+  entity_id: string | null
+  read: boolean
+  created_at: string
+}
+
 export interface Client {
   id: string
   builder_id: string
@@ -697,6 +710,11 @@ export interface Database {
         Row: Supplier
         Insert: Omit<Supplier, 'id' | 'created_at'> & Partial<Pick<Supplier, 'id' | 'created_at'>>
         Update: Partial<Omit<Supplier, 'id'>>
+      }
+      notifications: {
+        Row: Notification
+        Insert: Omit<Notification, 'id' | 'created_at' | 'read'> & Partial<Pick<Notification, 'id' | 'created_at' | 'read'>>
+        Update: Partial<Omit<Notification, 'id'>>
       }
       network_rate_aggregates: {
         Row: NetworkRateAggregate
