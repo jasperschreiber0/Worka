@@ -1,0 +1,39 @@
+name: Ops - run a dev script
+
+# Temporary, on-demand runner for scripts/dev-*.mjs tools against production.
+# Restricted to the scripts/ directory by construction (the workflow only
+# ever invokes `node scripts/<name>`, never an arbitrary shell string).
+# Delete once the current task is done.
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: 'Filename under scripts/ to run (e.g. dev-reprice-quote.mjs)'
+        required: true
+        type: string
+      args:
+        description: 'Arguments to pass to the script (e.g. --quote-id=...)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci --omit=dev
+      - name: Run dev script
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SCRIPT: ${{ inputs.script }}
+          SCRIPT_ARGS: ${{ inputs.args }}
+        run: node --experimental-strip-types "scripts/$SCRIPT" $SCRIPT_ARGS
