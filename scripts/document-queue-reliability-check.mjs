@@ -293,6 +293,51 @@ async function main() {
       log('scenario_passed', { scenario: 'corrupted_document_does_not_block_siblings', batch_id: batchRow.id })
     }
 
+    // ── Scenario 6: derive_estimate_run_projection reports 'complete' as
+    //    soon as Stage 6 has produced a quote — regardless of an open
+    //    blocking clarifying question or the quote still sitting in 'draft'
+    //    (migration 080). Root cause this guards against: smooth-responder
+    //    always proceeds past a blocking clarifying question with a
+    //    disclosed conservative assumption (Stage 6 never actually waits on
+    //    one), and every freshly generated quote starts in 'draft' — but
+    //    derive_estimate_run_projection previously required BOTH
+    //    blocking_open = 0 AND quote.status <> 'draft' before reporting
+    //    'complete', which no real freshly-generated estimate could ever
+    //    satisfy. Confirmed live: a real project's estimate_runs row stayed
+    //    at 'awaiting_clarification' with builder_status permanently NULL
+    //    despite Stage 6 having already produced a fully priced quote. ─────
+    {
+      const jobId = crypto.randomUUID()
+      createdJobIds.push(jobId)
+      const [file] = await makeJobAndFiles(supabase, jobId, ['scope.pdf'])
+      const { batchRow } = await makeBatch(supabase, jobId, file.id, [file.id])
+
+      const { data: quoteRow, error: quoteErr } = await supabase
+        .from('quotes')
+        .insert({ job_id: jobId, builder_id: BUILDER_ID, status: 'draft' })
+        .select()
+        .single()
+      if (quoteErr || !quoteRow) throw new Error(`quote insert failed: ${quoteErr?.message ?? 'no row returned'}`)
+
+      await supabase.from('document_processing_batches').update({ quote_id: quoteRow.id }).eq('id', batchRow.id)
+
+      const { error: cqErr } = await supabase.from('clarifying_questions').insert({
+        job_id: jobId,
+        question: 'Is asbestos testing completed for the existing tiles?',
+        reason: 'Pre-1990s renovations may disturb asbestos-containing materials.',
+        blocking: true,
+        status: 'open',
+      })
+      if (cqErr) throw new Error(`clarifying_questions insert failed: ${cqErr.message}`)
+
+      const { data: proj, error: projErr } = await supabase.rpc('derive_estimate_run_projection', { p_batch_id: batchRow.id })
+      if (projErr) throw new Error(`derive_estimate_run_projection failed: ${projErr.message}`)
+      const status = Array.isArray(proj) ? proj[0]?.status : proj?.status
+      assert(status === 'complete', `a batch with a quote should project 'complete' even with an open blocking question and a draft quote, got '${status}'`)
+      results.scenarios.complete_status_ignores_blocking_question_and_draft_quote = true
+      log('scenario_passed', { scenario: 'complete_status_ignores_blocking_question_and_draft_quote', batch_id: batchRow.id })
+    }
+
     results.passed = true
     log('queue_check_passed', results)
   } catch (err) {
