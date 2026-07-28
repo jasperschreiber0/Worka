@@ -234,8 +234,21 @@ export async function GET(
     }
 
     // Backfill: quotes created before pricing ran (or where the intake poller
-    // dropped) still have no rates — price them on first view
-    if (quoteRow.total_cost === null) {
+    // dropped) still have no rates — price them on first view. Previously
+    // gated on `quoteRow.total_cost === null`, which only ever caught a quote
+    // that had NEVER been priced at all — a quote already priced once but
+    // whose Stage 6 completeness-recovery pass (smooth-responder/index.ts)
+    // later added MORE line items across a separate, recovery-cron-triggered
+    // invocation (a normal, documented outcome of that resumable design, not
+    // a failure) kept total_cost non-null forever, so the newly-added items
+    // stayed permanently unpriced and total_cost silently drifted from the
+    // true line-item sum — confirmed live on a real project (52 -> 234 line
+    // items across invocations; total_cost never moved off its first-pass
+    // value). ensureQuotePriced is itself cheap and idempotent when there is
+    // nothing left to price (two lightweight fetches, no writes), so calling
+    // it unconditionally here is the backfill this comment already promised,
+    // not a new cost.
+    {
       const wasPriced = await ensureQuotePriced(supabase, quoteId)
       if (wasPriced) {
         const { data: repriced } = await supabase
