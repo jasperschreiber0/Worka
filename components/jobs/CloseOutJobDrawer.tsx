@@ -8,11 +8,25 @@ interface TradeRow {
   estimated_cost: number
 }
 
+export interface KnowledgeUpdate {
+  trade_name: string
+  unit: string
+  previous_rate: number
+  new_rate: number
+  variance_pct: number
+}
+
+export interface CloseOutResult {
+  demo: boolean
+  already_reconciled: boolean
+  knowledge_updates: KnowledgeUpdate[]
+}
+
 interface CloseOutJobDrawerProps {
   open: boolean
   jobId: string
   onClose: () => void
-  onClosed: () => void
+  onClosed: (result: CloseOutResult) => void
 }
 
 function formatAud(amount: number): string {
@@ -89,7 +103,11 @@ export default function CloseOutJobDrawer({ open, jobId, onClose, onClosed }: Cl
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? "Couldn't close out this job — try again")
-      onClosed()
+      onClosed({
+        demo: data.demo === true,
+        already_reconciled: data.already_reconciled === true,
+        knowledge_updates: data.knowledge_updates ?? [],
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't close out this job — try again")
     } finally {

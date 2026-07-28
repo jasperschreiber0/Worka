@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { CostReconciliationEntry } from '@/lib/types/estimation.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
-import { applyActualCostLearning } from '@/lib/pricing'
+import { applyActualCostLearning, type ActualCostLearningSummary } from '@/lib/pricing'
 
 interface ReconcilePayload {
   job_id: string
@@ -45,6 +45,51 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     )
 
+    // ── FIX 1 (security, critical): verify job_id actually belongs to the
+    // authenticated builder BEFORE touching project_memory/cost_reconciliation/
+    // builder_learned_rates. Without this, builder A could submit builder B's
+    // job_id and, since project_memory.job_id is unique, silently hijack B's
+    // project_memory row (upsert onConflict:'job_id' would overwrite its
+    // builder_id) and attribute reconciliation entries to the wrong builder.
+    // Mirrors the exact ownership-check pattern already used by
+    // GET /api/jobs/[jobId] — a 404, not a 403, so the response doesn't even
+    // confirm whether the job exists under a different builder.
+    const { data: jobRow, error: jobErr } = await supabase
+      .from('jobs')
+      .select('id, builder_id')
+      .eq('id', job_id)
+      .eq('builder_id', builder_id)
+      .single()
+
+    if (jobErr || !jobRow) {
+      return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    }
+
+    // ── FIX 3 (idempotency): a job already closed out must not be reconciled
+    // or learned from a second time — double-click, a refresh, or a second
+    // browser tab must not double-count actual-cost learning weight or
+    // duplicate cost_reconciliation rows. project_memory.job_id is unique,
+    // so a prior successful reconciliation is detectable by its status alone.
+    const { data: existingMemory } = await supabase
+      .from('project_memory')
+      .select('id, status')
+      .eq('job_id', job_id)
+      .maybeSingle()
+
+    if (existingMemory?.status === 'completed') {
+      const { data: existingEntries } = await supabase
+        .from('cost_reconciliation')
+        .select('trade_category_id, estimated_cost, actual_cost')
+        .eq('project_memory_id', existingMemory.id)
+
+      return NextResponse.json({
+        ok: true,
+        already_reconciled: true,
+        message: 'This job was already closed out — no changes made.',
+        entries: existingEntries ?? [],
+      })
+    }
+
     // Upsert project_memory record to completed status
     const { data: memoryRow } = await supabase
       .from('project_memory')
@@ -59,6 +104,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }, { onConflict: 'job_id' })
       .select()
       .single()
+
+    let knowledgeUpdates: ActualCostLearningSummary[] = []
 
     if (memoryRow) {
       // Insert reconciliation rows
@@ -95,7 +142,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       // only ever learns from the quoted rate, never what the job actually cost.
       // Best-effort, never blocks the reconciliation response.
       if (quote_id) {
-        await applyActualCostLearning(
+        knowledgeUpdates = await applyActualCostLearning(
           supabase,
           quote_id,
           entries.map((e) => ({
@@ -136,7 +183,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    return NextResponse.json({ ok: true, message: 'Actual costs recorded. Estimation memory updated.' })
+    return NextResponse.json({ ok: true, message: 'Actual costs recorded. Estimation memory updated.', knowledge_updates: knowledgeUpdates })
   } catch (err) {
     console.error('[estimation/reconcile]', err)
     return NextResponse.json({ error: 'Reconciliation failed' }, { status: 500 })

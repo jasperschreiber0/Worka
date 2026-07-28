@@ -1,0 +1,15 @@
+-- Rollback for 084_pricing_intelligence_hardening.sql
+
+ALTER TABLE labour_rate_benchmarks
+  DROP CONSTRAINT IF EXISTS labour_rate_benchmarks_trade_category_id_unit_region_key;
+ALTER TABLE labour_rate_benchmarks
+  ADD CONSTRAINT labour_rate_benchmarks_trade_category_id_unit_region_key
+  UNIQUE (trade_category_id, unit, region);
+
+ALTER TABLE market_material_prices
+  DROP CONSTRAINT IF EXISTS market_material_prices_line_item_key_region_key;
+ALTER TABLE market_material_prices
+  ADD CONSTRAINT market_material_prices_line_item_key_region_key
+  UNIQUE (line_item_key, region);
+
+NOTIFY pgrst, 'reload schema';

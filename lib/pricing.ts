@@ -279,42 +279,55 @@ export interface RateContext {
   builderState: string | null
 }
 
-async function loadRateContext(
-  supabase: SupabaseClient,
-  builderId: string,
-  builderState: string | null
-): Promise<RateContext> {
-  const stateFilter = builderState ? `state.is.null,state.eq.${builderState}` : 'state.is.null'
-  const regionFilter = builderState ? `region.is.null,region.eq.${builderState}` : 'region.is.null'
+interface PlatformCatalogueRow {
+  line_item_key: string
+  trade_category_id: number
+  description: string
+  unit: string
+  state: string | null
+}
 
-  const [learnedRes, prefRes, supplierRes, platformRes, networkRes, retailRes, labourRes] = await Promise.all([
-    supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count').eq('builder_id', builderId),
-    supabase.from('builder_rate_preferences').select('line_item_key, rate, unit').eq('builder_id', builderId),
-    supabase.from('builder_supplier_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
-    supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state').or(stateFilter),
-    supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50').or(stateFilter),
-    supabase.from('market_material_prices').select('line_item_key, trade_category_id, brand, product_name, unit, unit_price, source, captured_at, region').or(regionFilter),
-    supabase.from('labour_rate_benchmarks').select('trade_category_id, unit, labour_rate, region').or(regionFilter),
+interface RetailCatalogueRow {
+  line_item_key: string
+  trade_category_id: number
+  brand: string | null
+  product_name: string
+  unit: string
+}
+
+/**
+ * THE single shared catalogue-loading path — every place in this file that
+ * needs to fuzzy-match a description to a line_item_key (pricing resolution,
+ * quote-approval learning, actual-cost learning) must call this, not build
+ * its own query. Before this existed, captureLearnedRates()/
+ * applyActualCostLearning() queried cost_rates only, while priceLineItems()
+ * (via loadRateContext) queried cost_rates + market_material_prices — a real,
+ * confirmed defect: the same description could resolve to a DIFFERENT
+ * line_item_key at pricing time than at learning time, corrupting the
+ * learned average under the wrong key. Fixed by making this the one place
+ * the catalogue is assembled, called from all three sites below.
+ */
+async function loadPricingCatalogue(supabase: SupabaseClient): Promise<CatalogueEntry[]> {
+  const [platformRes, retailRes] = await Promise.all([
+    supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, state').is('state', null),
+    supabase.from('market_material_prices').select('line_item_key, trade_category_id, brand, product_name, unit'),
   ])
 
-  const platform = (platformRes.data ?? []) as Array<StateRateRow & { description: string }>
-  const retail = (retailRes.data ?? []) as Array<MaterialPriceRow & { brand: string | null; product_name: string }>
+  const platform = (platformRes.data ?? []) as PlatformCatalogueRow[]
+  const retail = (retailRes.data ?? []) as RetailCatalogueRow[]
 
-  // The matching catalogue is built from national default rows (state IS
-  // NULL) PLUS every retail material entry — a brand/product-specific entry
-  // naturally outscores a generic cost_rates entry when a description names
-  // the product (more of the entry's own tokens matched), by the SAME
-  // token-overlap scoring matchLineItemKey already does. No matcher change.
-  const catalogue: CatalogueEntry[] = [
-    ...platform
-      .filter((row) => row.state === null)
-      .map((row) => ({
-        line_item_key: row.line_item_key,
-        trade_category_id: row.trade_category_id,
-        description: row.description,
-        unit: row.unit,
-        tokens: tokenize(row.description),
-      })),
+  // A brand/product-specific retail entry naturally outscores a generic
+  // cost_rates entry when a description names the product (more of the
+  // entry's own tokens matched), by the SAME token-overlap scoring
+  // matchLineItemKey already does. No matcher change needed.
+  return [
+    ...platform.map((row) => ({
+      line_item_key: row.line_item_key,
+      trade_category_id: row.trade_category_id,
+      description: row.description,
+      unit: row.unit,
+      tokens: tokenize(row.description),
+    })),
     ...retail.map((row) => ({
       line_item_key: row.line_item_key,
       trade_category_id: row.trade_category_id,
@@ -323,6 +336,29 @@ async function loadRateContext(
       tokens: tokenize([row.brand, row.product_name].filter(Boolean).join(' ')),
     })),
   ]
+}
+
+async function loadRateContext(
+  supabase: SupabaseClient,
+  builderId: string,
+  builderState: string | null
+): Promise<RateContext> {
+  const stateFilter = builderState ? `state.is.null,state.eq.${builderState}` : 'state.is.null'
+  const regionFilter = builderState ? `region.is.null,region.eq.${builderState}` : 'region.is.null'
+
+  const [learnedRes, prefRes, supplierRes, platformRes, networkRes, retailRes, labourRes, catalogue] = await Promise.all([
+    supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count').eq('builder_id', builderId),
+    supabase.from('builder_rate_preferences').select('line_item_key, rate, unit').eq('builder_id', builderId),
+    supabase.from('builder_supplier_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
+    supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state').or(stateFilter),
+    supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50').or(stateFilter),
+    supabase.from('market_material_prices').select('line_item_key, trade_category_id, brand, product_name, unit, unit_price, source, captured_at, region').or(regionFilter),
+    supabase.from('labour_rate_benchmarks').select('trade_category_id, unit, labour_rate, region').or(regionFilter),
+    loadPricingCatalogue(supabase),
+  ])
+
+  const platform = (platformRes.data ?? []) as Array<StateRateRow & { description: string }>
+  const retail = (retailRes.data ?? []) as Array<MaterialPriceRow & { brand: string | null; product_name: string }>
 
   return {
     learned: (learnedRes.data ?? []) as RateRow[],
@@ -995,19 +1031,11 @@ export async function captureLearnedRates(
       .eq('quote_id', quoteId)
     if (!items) return
 
-    // Re-use the platform catalogue to key each line item
-    const { data: catalogueRows } = await supabase
-      .from('cost_rates')
-      .select('line_item_key, trade_category_id, description, unit')
-      .is('state', null)
-
-    const catalogue: CatalogueEntry[] = (catalogueRows ?? []).map((row) => ({
-      line_item_key: row.line_item_key,
-      trade_category_id: row.trade_category_id,
-      description: row.description,
-      unit: row.unit,
-      tokens: tokenize(row.description),
-    }))
+    // The SAME shared catalogue priceLineItems() matched this quote's items
+    // against — using a narrower cost_rates-only catalogue here (as this used
+    // to) let a retail-matched item (e.g. a specific branded product) learn
+    // under a different, more generic key than it was actually priced under.
+    const catalogue = await loadPricingCatalogue(supabase)
 
     // Atomic per-item upsert (running average computed inside the DB, see
     // migration 023) — safe to run concurrently since each RPC call is a
@@ -1086,37 +1114,47 @@ const MAX_PLAUSIBLE_VARIANCE_RATIO = 3.0
  * assumption an experienced estimator makes when told "framing ran 12% over"
  * without a full re-measure. Best-effort: never throws.
  */
+/** A builder-facing summary of what actually changed as a result of a close-
+ *  out, so the UI can show something concrete ("cladding knowledge updated")
+ *  instead of only a generic success message. One entry per trade whose
+ *  variance was large enough to be worth mentioning (see
+ *  MEANINGFUL_VARIANCE_PCT) — never emitted for a negligible difference. */
+export interface ActualCostLearningSummary {
+  trade_category_id: number
+  trade_name: string
+  unit: string
+  previous_rate: number
+  new_rate: number
+  variance_pct: number
+}
+
+/** Below this variance, a trade's close-out isn't worth surfacing to the
+ *  builder as a "knowledge update" — noise, not signal. */
+const MEANINGFUL_VARIANCE_PCT = 5
+
 export async function applyActualCostLearning(
   supabase: SupabaseClient,
   quoteId: string,
   tradeVariances: Array<{ trade_category_id: number; estimated_cost: number; actual_cost: number | null }>
-): Promise<void> {
+): Promise<ActualCostLearningSummary[]> {
+  const summary: ActualCostLearningSummary[] = []
   try {
     const { data: quote } = await supabase
       .from('quotes')
       .select('builder_id')
       .eq('id', quoteId)
       .single()
-    if (!quote) return
+    if (!quote) return summary
 
     const { data: items } = await supabase
       .from('quote_line_items')
       .select('trade_category_id, description, unit, rate, assumption_status, pricing_type')
       .eq('quote_id', quoteId)
-    if (!items) return
+    if (!items) return summary
 
-    const { data: catalogueRows } = await supabase
-      .from('cost_rates')
-      .select('line_item_key, trade_category_id, description, unit')
-      .is('state', null)
-
-    const catalogue: CatalogueEntry[] = (catalogueRows ?? []).map((row) => ({
-      line_item_key: row.line_item_key,
-      trade_category_id: row.trade_category_id,
-      description: row.description,
-      unit: row.unit,
-      tokens: tokenize(row.description),
-    }))
+    // The SAME shared catalogue priceLineItems() used — see the identical
+    // note on captureLearnedRates above.
+    const catalogue = await loadPricingCatalogue(supabase)
 
     for (const variance of tradeVariances) {
       if (variance.actual_cost === null || variance.estimated_cost <= 0) continue
@@ -1133,10 +1171,13 @@ export async function applyActualCostLearning(
         return !pricingType || pricingType === 'measured'
       })
 
+      let representative: { unit: string; previousRate: number } | null = null
+
       await Promise.all(
         tradeItems.map(async (item) => {
           const match = matchLineItemKey({ ...item, quantity: null }, catalogue)
           if (!match || !item.unit) return
+          if (!representative) representative = { unit: item.unit, previousRate: item.rate as number }
 
           const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
             p_builder_id: quote.builder_id,
@@ -1149,8 +1190,22 @@ export async function applyActualCostLearning(
           if (rpcError) console.error('upsert_learned_rate (actual_cost) failed:', rpcError.message)
         })
       )
+
+      const variancePct = Math.round((ratio - 1) * 1000) / 10
+      if (representative && Math.abs(variancePct) >= MEANINGFUL_VARIANCE_PCT) {
+        const rep: { unit: string; previousRate: number } = representative
+        summary.push({
+          trade_category_id: variance.trade_category_id,
+          trade_name: tradeCategoryName(variance.trade_category_id),
+          unit: rep.unit,
+          previous_rate: rep.previousRate,
+          new_rate: round2(rep.previousRate * ratio),
+          variance_pct: variancePct,
+        })
+      }
     }
   } catch (err) {
     console.error('applyActualCostLearning failed:', err)
   }
+  return summary
 }

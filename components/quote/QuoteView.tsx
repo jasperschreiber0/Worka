@@ -357,12 +357,12 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) 
           </span>
         )}
         {!isExcluded && pricingSourceLabel(item.pricing_source) && (
-          <span
-            className="text-[11px] block mt-0.5"
-            style={{ color: 'var(--text-tertiary)' }}
-            title={item.pricing_basis ?? undefined}
-          >
+          // Visible text, not a hover title — a tooltip never reaches a
+          // builder on a phone, and "where did this number come from" is
+          // exactly the question a touch-only user still needs answered.
+          <span className="text-[11px] block mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
             {pricingSourceLabel(item.pricing_source)}
+            {item.pricing_basis ? ` — ${item.pricing_basis}` : ''}
           </span>
         )}
         {/* Unpriced fix actions — the builder's way through the send gate */}

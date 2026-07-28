@@ -6,7 +6,31 @@ import JobSnapshotPanel, { type ActiveJob } from '@/components/job/JobSnapshotPa
 import UploadPanel, { type UploadPanelJob } from '@/components/chat/UploadPanel'
 import QuoteView from '@/components/quote/QuoteView'
 import AddVariationDrawer from '@/components/variations/AddVariationDrawer'
-import CloseOutJobDrawer from '@/components/jobs/CloseOutJobDrawer'
+import CloseOutJobDrawer, { type CloseOutResult } from '@/components/jobs/CloseOutJobDrawer'
+
+function formatAud(amount: number): string {
+  return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
+}
+
+// FIX 5 (demo honesty) + FIX 6 (trust): builds the close-out toast copy from
+// what actually happened server-side, rather than a single fixed message —
+// demo mode never persists a real learning update, an already-completed job
+// makes no changes at all, and a genuine update should say what changed
+// (only when the variance was large enough to be worth saying, see
+// MEANINGFUL_VARIANCE_PCT server-side).
+function closeOutMessage(result: CloseOutResult): string {
+  if (result.demo) {
+    return 'Demo mode preview — learning is simulated. Nothing is saved in demo mode.'
+  }
+  if (result.already_reconciled) {
+    return 'This job was already closed out — no changes made.'
+  }
+  const update = result.knowledge_updates[0]
+  if (update) {
+    return `WorkA updated its ${update.trade_name.toLowerCase()} knowledge: previous estimate ${formatAud(update.previous_rate)}/${update.unit} → actual job cost ${formatAud(update.new_rate)}/${update.unit}. Future ${update.trade_name.toLowerCase()} estimates will improve.`
+  }
+  return 'Job closed out — thanks for the update.'
+}
 
 interface JobWorkspaceViewProps {
   jobId: string
@@ -183,11 +207,11 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
           open={closeOutOpen}
           jobId={job.id}
           onClose={() => setCloseOutOpen(false)}
-          onClosed={() => {
+          onClosed={(result) => {
             setCloseOutOpen(false)
             setRefreshKey((k) => k + 1)
             refetchJob()
-            setToast({ tone: 'info', message: 'Job closed out — WorkA will use these actual costs on future estimates.' })
+            setToast({ tone: 'info', message: closeOutMessage(result) })
           }}
         />
       )}
