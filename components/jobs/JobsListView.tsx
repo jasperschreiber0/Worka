@@ -67,17 +67,15 @@ export default function JobsListView() {
   }, [searchParams, router])
 
   function openJob(job: JobListItem) {
-    router.push(`/chat?job=${job.id}&address=${encodeURIComponent(job.address)}&status=${job.status}`)
+    router.push(`/jobs/${job.id}`)
   }
 
   function handleCreated(job: { id: string; address: string; status: string }) {
     setDrawerOpen(false)
     setJobs((prev) => [job, ...(prev ?? [])])
-    // The redesigned flow opens straight into the upload step next — until
-    // that dedicated panel exists (interaction spec §04), land on the job's
-    // snapshot, which already surfaces an Upload Drawings call-to-action for
-    // an empty job.
-    openJob(job)
+    // Matches the reference workflow: New Job -> straight into upload, no
+    // extra click to find the button on the job's own page.
+    router.push(`/jobs/${job.id}?upload=1`)
   }
 
   const grouped = STATUS_ORDER

@@ -47,7 +47,7 @@ export default function VariationsListView() {
   useEffect(() => { load() }, [load])
 
   function openVariation(v: VariationItem) {
-    router.push(`/chat?job=${v.job_id}&address=${encodeURIComponent(v.job_address ?? 'View job')}`)
+    router.push(`/jobs/${v.job_id}`)
   }
 
   return (

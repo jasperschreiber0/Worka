@@ -1,6 +1,52 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { getDemoJobList } from '@/lib/job-snapshot-demo'
+
+// ─── GET /api/jobs/[jobId] ────────────────────────────────────────────────────
+// Minimal job identity (id/address/status/client_name) — just enough for the
+// Job Workspace page to bootstrap ActiveJob before JobSnapshotPanel fetches
+// its own full snapshot. Deliberately thin; the snapshot route is still the
+// single source of truth for everything else on the page.
+export async function GET(
+  _request: NextRequest,
+  { params }: { params: { jobId: string } }
+): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  if (isDemoMode()) {
+    const job = getDemoJobList().find((j) => j.id === params.jobId)
+    if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    return NextResponse.json({ job })
+  }
+
+  const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!sbUrl || !sbKey) {
+    return NextResponse.json({ error: 'Not available' }, { status: 400 })
+  }
+
+  try {
+    const sb = createClient(sbUrl, sbKey, { auth: { autoRefreshToken: false, persistSession: false } })
+    const { data, error } = await sb
+      .from('jobs')
+      .select('id, address, status')
+      .eq('id', params.jobId)
+      .eq('builder_id', builderId)
+      .single()
+
+    if (error || !data) {
+      return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+    }
+    return NextResponse.json({ job: data })
+  } catch (err) {
+    console.error('[/api/jobs/[jobId]] GET error:', err)
+    return NextResponse.json({ error: 'Failed to load job' }, { status: 500 })
+  }
+}
 
 // ─── DELETE /api/jobs/[jobId] ────────────────────────────────────────────────
 // Soft delete, not a real DELETE FROM — mirrors PATCH/DELETE
