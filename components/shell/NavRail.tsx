@@ -114,7 +114,7 @@ export default function NavRail() {
 
       <Link
         href="/jobs?new=1"
-        className="btn-primary flex items-center justify-center gap-2 mx-1 mb-4 py-2 text-sm"
+        className="btn-primary flex items-center justify-center gap-2 mx-1 mb-2 py-2 text-sm"
         aria-label="Create a new job"
       >
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -122,6 +122,16 @@ export default function NavRail() {
         </svg>
         New Job
       </Link>
+
+      <button
+        type="button"
+        onClick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))}
+        className="flex items-center justify-between mx-1 mb-4 px-3 py-1.5 rounded-[6px] text-sm"
+        style={{ background: 'var(--bg-elevated)', color: 'var(--text-tertiary)', border: '0.5px solid var(--bg-border)' }}
+      >
+        <span>Search…</span>
+        <span className="text-[11px] font-medium">⌘K</span>
+      </button>
 
       <div className="flex flex-col gap-0.5 flex-1">
         {NAV_ITEMS.map((item) => (

@@ -1,6 +1,7 @@
 'use client'
 
 import NavRail, { MobileTabBar } from './NavRail'
+import CommandPalette from './CommandPalette'
 
 interface AppShellProps {
   children?: React.ReactNode
@@ -25,6 +26,7 @@ export default function AppShell({ children, bare = false }: AppShellProps) {
         )}
       </div>
       <MobileTabBar />
+      <CommandPalette />
     </div>
   )
 }
