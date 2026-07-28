@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
+import AppShell from '@/components/shell/AppShell'
 
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -64,16 +65,16 @@ function EmailSettingsContent() {
   const showDemoBanner = !bannerDismissed && connected === 'demo'
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--bg-shell)' }}>
+    <AppShell>
       {/* ── Header ────────────────────────────────────────────────────── */}
       <header style={{ background: 'var(--bg-surface)', borderBottom: '1px solid var(--bg-border)' }}>
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
           <Link
-            href="/"
+            href="/settings"
             className="flex items-center justify-center w-8 h-8 rounded-[6px] transition-colors"
             style={{ color: 'var(--text-secondary)' }}
-            title="Back"
-            aria-label="Back"
+            title="Back to settings"
+            aria-label="Back to settings"
           >
             <svg
               className="w-4 h-4"
@@ -336,7 +337,7 @@ function EmailSettingsContent() {
           </p>
         </div>
       </main>
-    </div>
+    </AppShell>
   )
 }
 

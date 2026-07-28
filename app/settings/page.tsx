@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
+import AppShell from '@/components/shell/AppShell'
 
 export const metadata: Metadata = {
   title: 'WorkA — Settings',
@@ -30,23 +31,7 @@ const SETTINGS_SECTIONS = [
 
 export default function SettingsPage() {
   return (
-    <div className="min-h-screen" style={{ background: 'var(--bg-shell)' }}>
-      <header style={{ background: 'var(--bg-surface)', borderBottom: '1px solid var(--bg-border)' }}>
-        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
-          <Link
-            href="/chat"
-            className="flex items-center justify-center w-8 h-8 rounded-[6px] transition-colors"
-            style={{ color: 'var(--text-secondary)' }}
-            title="Back to chat"
-            aria-label="Back to chat"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-        </div>
-      </header>
-
+    <AppShell>
       <main className="max-w-2xl mx-auto px-4 py-8">
         <div className="mb-6">
           <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Settings</h1>
@@ -78,6 +63,6 @@ export default function SettingsPage() {
           ))}
         </div>
       </main>
-    </div>
+    </AppShell>
   )
 }

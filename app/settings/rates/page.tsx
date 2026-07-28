@@ -2,6 +2,7 @@
 import React from 'react'
 import { useState, useRef, useCallback, useEffect } from 'react'
 import Link from 'next/link'
+import AppShell from '@/components/shell/AppShell'
 
 const DEMO_BUILDER_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -315,7 +316,7 @@ export default function RatesPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--bg-shell)' }}>
+    <AppShell>
       {/* Header */}
       <header style={{ background: 'var(--bg-surface)', borderBottom: '1px solid var(--bg-border)' }}>
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center gap-3">
@@ -643,6 +644,6 @@ export default function RatesPage() {
           </section>
         )}
       </main>
-    </div>
+    </AppShell>
   )
 }
