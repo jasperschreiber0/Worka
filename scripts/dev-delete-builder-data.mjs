@@ -94,6 +94,17 @@ async function main() {
   if (commErr) throw new Error(`Failed to delete communication_history: ${commErr.message}`)
   log('communication_history_deleted', { job_count: jobIds.length })
 
+  // project_facts.source_document_id -> project_documents(id) has NO cascade
+  // action, and files -> project_documents IS cascade — so deleting `files`
+  // before project_facts trips a foreign-key violation on that restrict
+  // (confirmed live: "update or delete on table project_documents violates
+  // foreign key constraint project_facts_source_document_id_fkey"). Delete
+  // project_facts (by job_id, which does cascade from jobs, but not yet
+  // since jobs haven't been deleted) explicitly first.
+  const { error: factsErr } = await supabase.from('project_facts').delete().in('job_id', jobIds)
+  if (factsErr) throw new Error(`Failed to delete project_facts: ${factsErr.message}`)
+  log('project_facts_deleted', { job_count: jobIds.length })
+
   const { error: filesDelErr } = await supabase.from('files').delete().in('job_id', jobIds)
   if (filesDelErr) throw new Error(`Failed to delete files: ${filesDelErr.message}`)
   log('files_deleted', { count: fileRows?.length ?? 0 })
