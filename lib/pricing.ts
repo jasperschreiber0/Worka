@@ -56,7 +56,7 @@ export const DEFAULT_MARGIN_PCT = 18
 export const PRICE_BASIS_LABEL = 'excl. GST'
 export const CLIENT_PRICE_DISCLAIMER = 'All prices are in AUD and exclude GST.'
 
-export type RateSource = 'learned' | 'preference' | 'supplier' | 'platform' | 'network'
+export type RateSource = 'learned' | 'preference' | 'supplier' | 'retail_baseline' | 'platform' | 'network'
 
 export interface PriceableItem {
   trade_category_id: number
@@ -75,6 +75,13 @@ export interface ResolvedRate {
   unit: string
   source: RateSource
   line_item_key: string
+  /** Only set when source === 'retail_baseline' — the material/labour split
+   *  that composed `rate`, so callers can populate quote_line_items'
+   *  existing material_cost/labour_cost columns instead of only a blended
+   *  total. */
+  materialRate?: number
+  materialSource?: string
+  labourRate?: number
 }
 
 // ─── Unit normalisation ───────────────────────────────────────────────────────
@@ -243,10 +250,29 @@ interface NetworkRateRow {
   rate_p50: number | null
 }
 
+interface MaterialPriceRow {
+  line_item_key: string
+  trade_category_id: number
+  unit: string
+  unit_price: number
+  source: string
+  captured_at: string
+  region: string | null
+}
+
+interface LabourBenchmarkRow {
+  trade_category_id: number
+  unit: string
+  labour_rate: number
+  region: string | null
+}
+
 export interface RateContext {
   learned: RateRow[]
   preferences: RateRow[]
   supplier: RateRow[]
+  retailMaterial: MaterialPriceRow[]
+  labourBenchmarks: LabourBenchmarkRow[]
   platform: StateRateRow[]
   network: NetworkRateRow[]
   catalogue: CatalogueEntry[]
@@ -259,32 +285,51 @@ async function loadRateContext(
   builderState: string | null
 ): Promise<RateContext> {
   const stateFilter = builderState ? `state.is.null,state.eq.${builderState}` : 'state.is.null'
+  const regionFilter = builderState ? `region.is.null,region.eq.${builderState}` : 'region.is.null'
 
-  const [learnedRes, prefRes, supplierRes, platformRes, networkRes] = await Promise.all([
+  const [learnedRes, prefRes, supplierRes, platformRes, networkRes, retailRes, labourRes] = await Promise.all([
     supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count').eq('builder_id', builderId),
     supabase.from('builder_rate_preferences').select('line_item_key, rate, unit').eq('builder_id', builderId),
     supabase.from('builder_supplier_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
     supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state').or(stateFilter),
     supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50').or(stateFilter),
+    supabase.from('market_material_prices').select('line_item_key, trade_category_id, brand, product_name, unit, unit_price, source, captured_at, region').or(regionFilter),
+    supabase.from('labour_rate_benchmarks').select('trade_category_id, unit, labour_rate, region').or(regionFilter),
   ])
 
   const platform = (platformRes.data ?? []) as Array<StateRateRow & { description: string }>
+  const retail = (retailRes.data ?? []) as Array<MaterialPriceRow & { brand: string | null; product_name: string }>
 
-  // The matching catalogue is built from national default rows (state IS NULL)
-  const catalogue: CatalogueEntry[] = platform
-    .filter((row) => row.state === null)
-    .map((row) => ({
+  // The matching catalogue is built from national default rows (state IS
+  // NULL) PLUS every retail material entry — a brand/product-specific entry
+  // naturally outscores a generic cost_rates entry when a description names
+  // the product (more of the entry's own tokens matched), by the SAME
+  // token-overlap scoring matchLineItemKey already does. No matcher change.
+  const catalogue: CatalogueEntry[] = [
+    ...platform
+      .filter((row) => row.state === null)
+      .map((row) => ({
+        line_item_key: row.line_item_key,
+        trade_category_id: row.trade_category_id,
+        description: row.description,
+        unit: row.unit,
+        tokens: tokenize(row.description),
+      })),
+    ...retail.map((row) => ({
       line_item_key: row.line_item_key,
       trade_category_id: row.trade_category_id,
-      description: row.description,
+      description: [row.brand, row.product_name].filter(Boolean).join(' '),
       unit: row.unit,
-      tokens: tokenize(row.description),
-    }))
+      tokens: tokenize([row.brand, row.product_name].filter(Boolean).join(' ')),
+    })),
+  ]
 
   return {
     learned: (learnedRes.data ?? []) as RateRow[],
     preferences: (prefRes.data ?? []) as RateRow[],
     supplier: (supplierRes.data ?? []) as RateRow[],
+    retailMaterial: retail,
+    labourBenchmarks: (labourRes.data ?? []) as LabourBenchmarkRow[],
     platform,
     network: (networkRes.data ?? []) as NetworkRateRow[],
     catalogue,
@@ -317,6 +362,32 @@ export function resolveRateForKey(
   if (supplierRates.length > 0) {
     const cheapest = supplierRates.reduce((a, b) => (b.rate < a.rate ? b : a))
     return { rate: cheapest.rate, unit: cheapest.unit, source: 'supplier', line_item_key: key }
+  }
+
+  // Tier 3.5: retail/material baseline — a real material price is never
+  // treated as an installed rate on its own. Only resolves when BOTH a
+  // matching retail material price AND a labour benchmark for that trade
+  // exist; otherwise falls through to Tier 4 exactly as before this tier
+  // existed. See migration 083 / the pricing-intelligence design doc.
+  const retail = ctx.retailMaterial.find((r) => r.line_item_key === key && unitMatches(r.unit))
+  if (retail) {
+    const labourCandidates = ctx.labourBenchmarks.filter(
+      (l) => l.trade_category_id === retail.trade_category_id && unitMatches(l.unit)
+    )
+    const labour =
+      labourCandidates.find((l) => l.region !== null && l.region === ctx.builderState) ??
+      labourCandidates.find((l) => l.region === null)
+    if (labour) {
+      return {
+        rate: round2(retail.unit_price + labour.labour_rate),
+        unit: retail.unit,
+        source: 'retail_baseline',
+        line_item_key: key,
+        materialRate: retail.unit_price,
+        materialSource: retail.source,
+        labourRate: labour.labour_rate,
+      }
+    }
   }
 
   // Tier 4: platform defaults — state-specific first, national fallback
@@ -547,7 +618,7 @@ export function calculateClientPrice(items: SellPriceableItem[]): number {
   return round2(sum)
 }
 
-export type MeasuredPricingSource = 'cost_rates_exact' | 'cost_rates_normalized' | 'builder_rate' | 'network_rate' | 'category_rate' | 'ai_measured_rate' | 'unresolved'
+export type MeasuredPricingSource = 'cost_rates_exact' | 'cost_rates_normalized' | 'builder_rate' | 'network_rate' | 'category_rate' | 'ai_measured_rate' | 'retail_baseline' | 'unresolved'
 
 export interface PricedItemResult {
   rate: number | null
@@ -555,10 +626,16 @@ export interface PricedItemResult {
   pricing_source: MeasuredPricingSource | null
   pricing_basis: string | null
   confidence: number | null
+  /** Only ever set when pricing_source === 'retail_baseline' — populates
+   *  quote_line_items' existing material_cost/labour_cost columns, which no
+   *  other pricing_source writes to. */
+  material_cost?: number | null
+  labour_cost?: number | null
 }
 
 const RATE_SOURCE_TO_PRICING_SOURCE: Record<RateSource, MeasuredPricingSource> = {
   learned: 'builder_rate', preference: 'builder_rate', supplier: 'builder_rate',
+  retail_baseline: 'retail_baseline',
   platform: 'cost_rates_exact', // overridden to cost_rates_normalized below when the match was partial
   network: 'network_rate',
 }
@@ -600,14 +677,14 @@ export async function priceLineItems<T extends PriceableItem>(
     // No unit means the quantity cannot be safely priced — the builder must
     // resolve the assumption first (never invent quantities)
     if (!item.unit) {
-      return { item, rate: null as number | null, total: null as number | null, pricing_source: null as MeasuredPricingSource | null, pricing_basis: null as string | null, matched: false }
+      return { item, rate: null as number | null, total: null as number | null, pricing_source: null as MeasuredPricingSource | null, pricing_basis: null as string | null, material_cost: null as number | null, labour_cost: null as number | null, matched: false }
     }
 
     const match = matchLineItemKey(item, ctx.catalogue)
     const resolved = match ? resolveRateForKey(match.key, normalizeUnit(item.unit), ctx) : null
 
     if (!resolved) {
-      return { item, rate: null, total: null, pricing_source: null, pricing_basis: null, matched: false }
+      return { item, rate: null, total: null, pricing_source: null, pricing_basis: null, material_cost: null, labour_cost: null, matched: false }
     }
 
     const pricingSource: MeasuredPricingSource =
@@ -617,7 +694,14 @@ export async function priceLineItems<T extends PriceableItem>(
 
     const rate = resolved.rate
     const total = item.quantity !== null && item.quantity > 0 ? round2(item.quantity * rate) : null
-    return { item, rate, total, pricing_source: pricingSource, pricing_basis: null, matched: true }
+    const pricingBasis = resolved.source === 'retail_baseline'
+      ? `Material $${resolved.materialRate?.toFixed(2)}/${resolved.unit} (${resolved.materialSource}) + trade labour benchmark $${resolved.labourRate?.toFixed(2)}/${resolved.unit}.`
+      : null
+    const materialCost = resolved.source === 'retail_baseline' && item.quantity !== null && item.quantity > 0 && resolved.materialRate !== undefined
+      ? round2(item.quantity * resolved.materialRate) : null
+    const labourCost = resolved.source === 'retail_baseline' && item.quantity !== null && item.quantity > 0 && resolved.labourRate !== undefined
+      ? round2(item.quantity * resolved.labourRate) : null
+    return { item, rate, total, pricing_source: pricingSource, pricing_basis: pricingBasis, material_cost: materialCost, labour_cost: labourCost, matched: true }
   })
 
   // Tier 3b: category fallback — same trade, same unit, no item-specific
@@ -673,6 +757,7 @@ export async function priceLineItems<T extends PriceableItem>(
     const aiConfidence = (r as { _aiConfidence?: number | null })._aiConfidence ?? null
     const tierConfidence = r.pricing_source === 'ai_measured_rate' ? aiConfidence
       : r.pricing_source === 'category_rate' ? 55
+      : r.pricing_source === 'retail_baseline' ? 50
       : r.pricing_source === 'cost_rates_normalized' ? 70
       : r.pricing_source === 'cost_rates_exact' ? 90
       : null
@@ -680,6 +765,8 @@ export async function priceLineItems<T extends PriceableItem>(
       ...r.item,
       rate: r.rate, total: r.total,
       pricing_source: r.pricing_source, pricing_basis: r.pricing_basis,
+      material_cost: (r as { material_cost?: number | null }).material_cost ?? null,
+      labour_cost: (r as { labour_cost?: number | null }).labour_cost ?? null,
       confidence: withMinConfidence(r.item, tierConfidence),
     }
   })
@@ -806,6 +893,7 @@ export async function ensureQuotePriced(
         trade_category_id: unpriced[i].trade_category_id, description: unpriced[i].description,
         rate: p.rate, total: p.total,
         pricing_source: p.pricing_source, pricing_basis: p.pricing_basis, confidence: p.confidence,
+        material_cost: p.material_cost ?? null, labour_cost: p.labour_cost ?? null,
       }))
       .filter((row) => row.rate !== null)
 
@@ -963,5 +1051,106 @@ export async function captureLearnedRates(
     }
   } catch (err) {
     console.error('captureLearnedRates failed:', err)
+  }
+}
+
+/**
+ * Weight to apply when an actual-cost sample folds into builder_learned_rates
+ * — ground truth from a completed job should move the running average faster
+ * than a quoted-but-unverified sale price (see upsert_learned_rate, migration
+ * 083, and the pricing-intelligence design's Tier 1 fix).
+ */
+const ACTUAL_COST_LEARNING_WEIGHT = 2
+
+/** Reject an implausible per-trade variance ratio rather than poison every
+ *  learned rate in that trade from what's almost certainly a data-entry
+ *  error (e.g. a builder typing $5,000 when they meant $50,000). */
+const MIN_PLAUSIBLE_VARIANCE_RATIO = 0.3
+const MAX_PLAUSIBLE_VARIANCE_RATIO = 3.0
+
+/**
+ * Phase 1 of the pricing-intelligence design: when a builder closes out a
+ * job (POST /api/estimation/reconcile), fold the ACTUAL cost per trade back
+ * into Tier 1 (builder_learned_rates) — the gap the investigation confirmed:
+ * captureLearnedRates only ever learns from the quoted/sold rate, never from
+ * what a job actually cost.
+ *
+ * The close-out workflow is deliberately trade-level only (a builder will
+ * not do a 30-minute per-line-item accounting exercise), so there is no
+ * actual cost for any individual line item — only a per-trade total. This
+ * applies the trade's overall variance ratio (actual / estimated)
+ * proportionally to every already-priced measured line item in that trade,
+ * which is a defensible approximation, not exact per-SKU ground truth: it
+ * assumes the ESTIMATE's internal cost distribution across items in a trade
+ * was roughly right even when the total wasn't, which is the same
+ * assumption an experienced estimator makes when told "framing ran 12% over"
+ * without a full re-measure. Best-effort: never throws.
+ */
+export async function applyActualCostLearning(
+  supabase: SupabaseClient,
+  quoteId: string,
+  tradeVariances: Array<{ trade_category_id: number; estimated_cost: number; actual_cost: number | null }>
+): Promise<void> {
+  try {
+    const { data: quote } = await supabase
+      .from('quotes')
+      .select('builder_id')
+      .eq('id', quoteId)
+      .single()
+    if (!quote) return
+
+    const { data: items } = await supabase
+      .from('quote_line_items')
+      .select('trade_category_id, description, unit, rate, assumption_status, pricing_type')
+      .eq('quote_id', quoteId)
+    if (!items) return
+
+    const { data: catalogueRows } = await supabase
+      .from('cost_rates')
+      .select('line_item_key, trade_category_id, description, unit')
+      .is('state', null)
+
+    const catalogue: CatalogueEntry[] = (catalogueRows ?? []).map((row) => ({
+      line_item_key: row.line_item_key,
+      trade_category_id: row.trade_category_id,
+      description: row.description,
+      unit: row.unit,
+      tokens: tokenize(row.description),
+    }))
+
+    for (const variance of tradeVariances) {
+      if (variance.actual_cost === null || variance.estimated_cost <= 0) continue
+      const ratio = variance.actual_cost / variance.estimated_cost
+      if (ratio < MIN_PLAUSIBLE_VARIANCE_RATIO || ratio > MAX_PLAUSIBLE_VARIANCE_RATIO) {
+        console.error(`applyActualCostLearning: implausible variance ratio ${ratio} for trade ${variance.trade_category_id}, skipping`)
+        continue
+      }
+
+      const tradeItems = items.filter((item) => {
+        if (item.trade_category_id !== variance.trade_category_id) return false
+        if (item.rate === null || item.assumption_status === 'excluded') return false
+        const pricingType = (item as { pricing_type?: string | null }).pricing_type
+        return !pricingType || pricingType === 'measured'
+      })
+
+      await Promise.all(
+        tradeItems.map(async (item) => {
+          const match = matchLineItemKey({ ...item, quantity: null }, catalogue)
+          if (!match || !item.unit) return
+
+          const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
+            p_builder_id: quote.builder_id,
+            p_line_item_key: match.key,
+            p_rate: round2(item.rate * ratio),
+            p_unit: item.unit,
+            p_weight: ACTUAL_COST_LEARNING_WEIGHT,
+            p_learned_from: 'actual_cost',
+          })
+          if (rpcError) console.error('upsert_learned_rate (actual_cost) failed:', rpcError.message)
+        })
+      )
+    }
+  } catch (err) {
+    console.error('applyActualCostLearning failed:', err)
   }
 }

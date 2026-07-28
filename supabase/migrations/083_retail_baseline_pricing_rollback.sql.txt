@@ -1,0 +1,45 @@
+-- Rollback for 083_retail_baseline_pricing.sql
+
+CREATE OR REPLACE FUNCTION upsert_learned_rate(
+  p_builder_id uuid,
+  p_line_item_key text,
+  p_rate numeric,
+  p_unit text
+) RETURNS void AS $$
+BEGIN
+  INSERT INTO builder_learned_rates (builder_id, line_item_key, rate, unit, sample_count, updated_at)
+  VALUES (p_builder_id, p_line_item_key, p_rate, p_unit, 1, now())
+  ON CONFLICT (builder_id, line_item_key) DO UPDATE SET
+    rate = ROUND(
+      ((builder_learned_rates.rate * builder_learned_rates.sample_count) + p_rate)
+      / (builder_learned_rates.sample_count + 1),
+      2
+    ),
+    sample_count = builder_learned_rates.sample_count + 1,
+    unit = p_unit,
+    updated_at = now();
+END;
+$$ LANGUAGE plpgsql;
+
+ALTER TABLE cost_reconciliation DROP COLUMN IF EXISTS supplier_id;
+ALTER TABLE builder_learned_rates DROP COLUMN IF EXISTS learned_from;
+
+ALTER TABLE quote_line_items DROP CONSTRAINT IF EXISTS quote_line_items_pricing_source_check;
+ALTER TABLE quote_line_items
+  ADD CONSTRAINT quote_line_items_pricing_source_check
+    CHECK (pricing_source IN (
+      'document', 'cost_rates', 'cost_rates_exact', 'cost_rates_normalized',
+      'builder_rate', 'network_rate', 'category_rate', 'ai_measured_rate',
+      'ai_allowance', 'manual', 'unresolved'
+    ));
+
+DROP INDEX IF EXISTS labour_rate_benchmarks_trade_idx;
+DROP POLICY IF EXISTS "labour_rate_benchmarks_public_read" ON labour_rate_benchmarks;
+DROP TABLE IF EXISTS labour_rate_benchmarks;
+
+DROP INDEX IF EXISTS market_material_prices_key_idx;
+DROP INDEX IF EXISTS market_material_prices_trade_idx;
+DROP POLICY IF EXISTS "market_material_prices_public_read" ON market_material_prices;
+DROP TABLE IF EXISTS market_material_prices;
+
+NOTIFY pgrst, 'reload schema';

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { CostReconciliationEntry } from '@/lib/types/estimation.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { applyActualCostLearning } from '@/lib/pricing'
 
 interface ReconcilePayload {
   job_id: string
@@ -74,6 +75,35 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
       if (reconciliationInserts.length > 0) {
         await supabase.from('cost_reconciliation').insert(reconciliationInserts)
+      }
+
+      // Close-out this job — the trigger the pricing-intelligence design
+      // identified as missing: jobs.status never reached 'complete' anywhere
+      // in the codebase before this route existed to set it. Forward-only —
+      // skipping ahead from any earlier status to the chain's own end state
+      // (short of 'archived') is intended, same reasoning as the DELETE
+      // route's archive-from-any-status behaviour.
+      await supabase
+        .from('jobs')
+        .update({ status: 'complete' })
+        .eq('id', job_id)
+        .eq('builder_id', builder_id)
+        .neq('status', 'archived')
+
+      // Fold the ACTUAL cost per trade back into Tier 1 (builder_learned_rates)
+      // — fixes the Tier 1 gap the investigation confirmed: captureLearnedRates
+      // only ever learns from the quoted rate, never what the job actually cost.
+      // Best-effort, never blocks the reconciliation response.
+      if (quote_id) {
+        await applyActualCostLearning(
+          supabase,
+          quote_id,
+          entries.map((e) => ({
+            trade_category_id: e.trade_category_id,
+            estimated_cost: e.estimated_cost,
+            actual_cost: e.actual_cost,
+          }))
+        )
       }
 
       // Update builder profile accuracy metrics

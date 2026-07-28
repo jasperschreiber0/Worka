@@ -6,6 +6,7 @@ import JobSnapshotPanel, { type ActiveJob } from '@/components/job/JobSnapshotPa
 import UploadPanel, { type UploadPanelJob } from '@/components/chat/UploadPanel'
 import QuoteView from '@/components/quote/QuoteView'
 import AddVariationDrawer from '@/components/variations/AddVariationDrawer'
+import CloseOutJobDrawer from '@/components/jobs/CloseOutJobDrawer'
 
 interface JobWorkspaceViewProps {
   jobId: string
@@ -26,6 +27,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
   const [uploadOpen, setUploadOpen] = useState(false)
   const [viewingQuoteId, setViewingQuoteId] = useState<string | null>(null)
   const [variationDrawerOpen, setVariationDrawerOpen] = useState(false)
+  const [closeOutOpen, setCloseOutOpen] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
 
   useEffect(() => {
@@ -49,6 +51,13 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
         if (!cancelled) setNotFound(true)
       })
     return () => { cancelled = true }
+  }, [jobId])
+
+  const refetchJob = useCallback(() => {
+    fetch(`/api/jobs/${jobId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (data?.job) setJob(data.job) })
+      .catch(() => {})
   }, [jobId])
 
   useEffect(() => {
@@ -111,7 +120,12 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
           Jobs
         </button>
         {job && (
-          <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => setVariationDrawerOpen(true)}>+ Raise variation</button>
+          <div className="flex items-center gap-2">
+            <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => setVariationDrawerOpen(true)}>+ Raise variation</button>
+            {job.status === 'active' && (
+              <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => setCloseOutOpen(true)}>Close out job</button>
+            )}
+          </div>
         )}
       </div>
 
@@ -160,6 +174,20 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
             setVariationDrawerOpen(false)
             setRefreshKey((k) => k + 1)
             setToast({ tone: 'info', message: 'Variation raised — approve or reject it from the pending list below.' })
+          }}
+        />
+      )}
+
+      {job && (
+        <CloseOutJobDrawer
+          open={closeOutOpen}
+          jobId={job.id}
+          onClose={() => setCloseOutOpen(false)}
+          onClosed={() => {
+            setCloseOutOpen(false)
+            setRefreshKey((k) => k + 1)
+            refetchJob()
+            setToast({ tone: 'info', message: 'Job closed out — WorkA will use these actual costs on future estimates.' })
           }}
         />
       )}

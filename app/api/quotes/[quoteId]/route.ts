@@ -310,6 +310,8 @@ export async function GET(
         material_cost,
         subcontract_cost,
         plant_cost,
+        pricing_source,
+        pricing_basis,
         trade_categories (
           id,
           name
@@ -382,6 +384,8 @@ export async function GET(
         material_cost: ((row as Record<string, unknown>).material_cost ?? null) as number | null,
         subcontract_cost: ((row as Record<string, unknown>).subcontract_cost ?? null) as number | null,
         plant_cost: ((row as Record<string, unknown>).plant_cost ?? null) as number | null,
+        pricing_source: ((row as Record<string, unknown>).pricing_source ?? null) as string | null,
+        pricing_basis: ((row as Record<string, unknown>).pricing_basis ?? null) as string | null,
       }
     })
 

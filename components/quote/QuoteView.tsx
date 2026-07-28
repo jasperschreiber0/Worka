@@ -99,6 +99,28 @@ function formatTotal(total: number | null): string {
   return formatCurrency(total)
 }
 
+// Human-readable label for pricing_source — the "where did this rate come
+// from" the pricing-intelligence investigation confirmed was computed and
+// stored (quote_line_items.pricing_source/pricing_basis) but never actually
+// shown to the builder anywhere. This is display only; no new computation.
+const PRICING_SOURCE_LABELS: Record<string, string> = {
+  document: 'From your documents',
+  cost_rates_exact: 'Platform rate',
+  cost_rates_normalized: 'Platform rate (approx. match)',
+  builder_rate: 'Your rate',
+  network_rate: 'Network rate',
+  category_rate: 'Category average',
+  ai_measured_rate: 'AI estimate',
+  retail_baseline: 'Retail baseline + labour benchmark',
+  ai_allowance: 'AI allowance',
+  manual: 'Manually priced',
+}
+
+function pricingSourceLabel(source: string | null | undefined): string | null {
+  if (!source) return null
+  return PRICING_SOURCE_LABELS[source] ?? null
+}
+
 // ─── Confidence indicator ─────────────────────────────────────────────────────
 
 interface ConfidenceIndicatorProps {
@@ -332,6 +354,15 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) 
         {item.source_ref && !isExcluded && (
           <span className="text-[11px] block mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
             {item.source_ref}
+          </span>
+        )}
+        {!isExcluded && pricingSourceLabel(item.pricing_source) && (
+          <span
+            className="text-[11px] block mt-0.5"
+            style={{ color: 'var(--text-tertiary)' }}
+            title={item.pricing_basis ?? undefined}
+          >
+            {pricingSourceLabel(item.pricing_source)}
           </span>
         )}
         {/* Unpriced fix actions — the builder's way through the send gate */}

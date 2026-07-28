@@ -26,6 +26,8 @@ export interface DemoQuoteLineItem {
     material_cost: number | null
     subcontract_cost: number | null
     plant_cost: number | null
+    pricing_source?: string | null
+    pricing_basis?: string | null
 }
 
 export interface DemoQuote {
