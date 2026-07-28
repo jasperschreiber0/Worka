@@ -61,6 +61,21 @@ export interface Worker {
   status: WorkerStatus
   invite_token: string | null
   created_at: string
+  hourly_rate?: number | null
+  default_markup_pct?: number | null
+  available?: boolean
+}
+
+export interface Supplier {
+  id: string
+  builder_id: string
+  name: string
+  preferred_trade_category_id: number | null
+  contact_name: string | null
+  contact_phone: string | null
+  contact_email: string | null
+  pricing_agreement_notes: string | null
+  created_at: string
 }
 
 export interface Client {
@@ -283,6 +298,7 @@ export interface BuilderSupplierRate {
   rate: number
   unit: string
   imported_at: string
+  supplier_id?: string | null
 }
 
 export interface NetworkRateAggregate {
@@ -676,6 +692,11 @@ export interface Database {
         Row: BuilderSupplierRate
         Insert: Omit<BuilderSupplierRate, 'id' | 'imported_at'> & Partial<Pick<BuilderSupplierRate, 'id' | 'imported_at'>>
         Update: Partial<Omit<BuilderSupplierRate, 'id'>>
+      }
+      suppliers: {
+        Row: Supplier
+        Insert: Omit<Supplier, 'id' | 'created_at'> & Partial<Pick<Supplier, 'id' | 'created_at'>>
+        Update: Partial<Omit<Supplier, 'id'>>
       }
       network_rate_aggregates: {
         Row: NetworkRateAggregate

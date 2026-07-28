@@ -1,0 +1,14 @@
+-- Rollback for 081_team_and_suppliers_crm_fields.sql
+
+ALTER TABLE builder_supplier_rates DROP COLUMN IF EXISTS supplier_id;
+
+DROP INDEX IF EXISTS suppliers_builder_idx;
+DROP POLICY IF EXISTS "suppliers_own_builder" ON suppliers;
+DROP TABLE IF EXISTS suppliers;
+
+ALTER TABLE workers
+  DROP COLUMN IF EXISTS hourly_rate,
+  DROP COLUMN IF EXISTS default_markup_pct,
+  DROP COLUMN IF EXISTS available;
+
+NOTIFY pgrst, 'reload schema';

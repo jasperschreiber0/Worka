@@ -1,5 +1,6 @@
 import { Suspense } from 'react'
 import ChatShell from './ChatShell'
+import AppShell from '@/components/shell/AppShell'
 import { getSessionUser } from '@/lib/auth/get-session'
 
 export const metadata = {
@@ -13,10 +14,10 @@ export default async function ChatPage() {
   const user = await getSessionUser()
 
   return (
-    <main className="h-screen overflow-hidden">
-      <Suspense fallback={<div className="h-screen" style={{ backgroundColor: 'var(--bg-shell)' }} />}>
+    <AppShell bare>
+      <Suspense fallback={<div className="h-full" style={{ backgroundColor: 'var(--bg-shell)' }} />}>
         <ChatShell builderId={user.id} userName={user.full_name} userInitials={user.initials} isDemo={user.is_demo} />
       </Suspense>
-    </main>
+    </AppShell>
   )
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDemoJobList } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { createJob } from '@/lib/jobs'
 
 // ─── GET /api/jobs ────────────────────────────────────────────────────────────
 
@@ -41,5 +42,43 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   } catch (err) {
     console.error('[/api/jobs] error:', err)
     return NextResponse.json({ error: 'Failed to load jobs' }, { status: 500 })
+  }
+}
+
+// ─── POST /api/jobs ───────────────────────────────────────────────────────────
+// The New Job panel's direct create path — calls the same createJob() the
+// chat `new_job` intent already uses (lib/jobs.ts), including its duplicate-
+// address detection. builder_id always derives from the session.
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const builderId = await getAuthenticatedBuilderId()
+  if (!builderId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  let body: { address?: string; client_name?: string; budget_hint?: string; scope_notes?: string; force_create?: boolean }
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  }
+
+  const address = body.address?.trim()
+  if (!address) {
+    return NextResponse.json({ error: 'Address is required' }, { status: 400 })
+  }
+
+  try {
+    const result = await createJob({
+      builder_id: builderId,
+      address,
+      client_name: body.client_name,
+      budget_hint: body.budget_hint,
+      scope_notes: body.scope_notes,
+      force_create: body.force_create,
+    })
+    return NextResponse.json(result, { status: result.is_duplicate ? 200 : 201 })
+  } catch (err) {
+    console.error('[/api/jobs] create failed:', err)
+    return NextResponse.json({ error: 'Failed to create job' }, { status: 500 })
   }
 }

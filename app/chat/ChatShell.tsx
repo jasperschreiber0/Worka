@@ -115,6 +115,20 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
       }, 500)
       return () => clearTimeout(t)
     }
+
+    // Any other job id (i.e. a real job, not one of the four hardcoded demo
+    // seeds above) opens the snapshot panel directly from query params the
+    // Jobs list page already has on hand (id/address/status) — no chat
+    // message, no classifier round-trip, just the panel.
+    if (jobId) {
+      const address = searchParams.get('address')
+      if (address) {
+        consumedRef.current = true
+        setActiveJob({ id: jobId, address, status: searchParams.get('status') ?? 'quoting' })
+        setPanelVisible(true)
+        router.replace('/chat')
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -209,7 +223,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
   return (
     <div
       ref={dragContainerRef}
-      className="h-screen flex overflow-hidden relative"
+      className="h-full flex overflow-hidden relative"
       style={{ backgroundColor: 'var(--bg-shell)' }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
