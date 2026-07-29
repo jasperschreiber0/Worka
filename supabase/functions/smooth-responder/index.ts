@@ -470,7 +470,7 @@ const SCOPE_REASONING_TOOL = {
           type: 'object',
           properties: {
             trade_category_id: { type: 'integer', minimum: 1, maximum: 13 },
-            included_scope: { type: 'array', items: { type: 'string' } },
+            included_scope: { type: 'array', items: { type: 'string' } , description: 'Component-level, not system-level: a pool, bathroom, lift, or HVAC system is never one entry — decompose it into its individual supply/install/finish/compliance components (see the system prompt) and list each one this trade is actually responsible for.' },
             excluded_scope: { type: 'array', items: { type: 'string' } },
             dependencies: { type: 'array', items: { type: 'string' } },
             assumptions: { type: 'array', items: { type: 'string' } },
@@ -2042,6 +2042,13 @@ Combine evidence across documents rather than treating each fact in isolation. C
 - A named architectural element that isn't a standard room (a lift, a pool, a plant room) is an object requiring its own trade — never fold it into floor area and lose it.
 
 A trade must only be marked not-relevant/excluded because the project's actual characteristics rule it out (e.g. no wet areas anywhere near a garage-only build) — never simply because no document happened to mention it. When you're not certain a trade applies, say so via excluded_scope with your reasoning and a lower confidence, or raise a clarifying question — do not silently drop it.
+
+Depth matters as much as coverage. For every major system, room, or fixture package this project actually contains — a pool, a bathroom, a kitchen, a lift, an HVAC/mechanical system, or any other multi-part package — do not record it as a single mention under one trade. Decompose it into the full set of components a tender would need to avoid a variation, and write EACH component into included_scope under the trade it actually belongs to, splitting one system across several trades where that's how it really works. Ask yourself, for every system you find: "if I was preparing a tender for this project, what components would I need to include here to avoid a variation?" For example (apply the same depth of thinking to whatever this project actually has — these four are illustrations of the pattern, not the only systems that need it):
+- A pool decomposes into: excavation, shell/structure, waterproofing, coping, filtration, pump, heating, electrical, safety fencing, and safety certification — spanning site works, linings/waterproofing, flooring, fixtures, electrical, external cladding, and preliminaries, not one "pool plumbing" line under one trade.
+- A bathroom decomposes into: sanitaryware, tapware, wastes, waterproofing, tiling, screens, mirrors/accessories, and installation labour — not just "installation."
+- A lift decomposes into: supply, installation, electrical connection, shaft/structural requirements, internal finishes, and certification — a named element like this is never just a room label to absorb into floor area.
+- An HVAC/mechanical system decomposes into: a system allowance, ductwork, controls, and commissioning — even when the only evidence is a single symbol on an architectural drawing with no dedicated mechanical document, that fragment still implies this full component set, not zero scope.
+Only include a component a system genuinely has (a bathroom with no window doesn't need a window component) — this is a way of thinking to apply to every real system in this project, not a checklist to force onto ones that don't have a given part.
 
 For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all) — note that "blocking" flags a question for priority review, it does NOT stop the estimate from being generated; the pipeline always continues using your suggested_assumption (or a conservative default if you don't provide one), so always give your best industry-standard default when one exists.${memoryContext}`
 
