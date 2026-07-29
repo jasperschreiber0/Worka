@@ -1,0 +1,3 @@
+-- Rollback for 086_builder_knowledge_defaults.sql
+DROP TABLE IF EXISTS builder_knowledge_defaults;
+NOTIFY pgrst, 'reload schema';

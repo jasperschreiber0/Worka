@@ -15,6 +15,8 @@ import { pairSupersededFacts, type FactRow, findMissingTrades } from '../../supa
 import { isSilentlyUnpriced, getUnresolvedConservativeAssumptions } from './readiness.ts'
 import { applyMargin, calculateClientPrice } from '../pricing.ts'
 import { evaluateConstructionSanity, evaluateConstructionCoverage, type ConstructionSanityFinding } from './construction-sanity.ts'
+import { applyBuilderKnowledgeDefaults } from './builder-knowledge.ts'
+import { recomputeQuoteTotals } from '../pricing.ts'
 
 const UNIT_SANITY_MAX: Record<string, number> = {
   m2: 2000,
@@ -46,6 +48,20 @@ export async function runQualityAssurance(
 ): Promise<QAReport | null> {
   const startedAt = Date.now()
   try {
+    // ── Builder Knowledge Defaults — applied BEFORE the rest of QA reads
+    // line items, so missing-trade/coverage/construction-sanity checks all
+    // see the same, already-topped-up scope rather than flagging something
+    // this step just added. Deterministic, sourced, never LLM-generated —
+    // see lib/estimating/builder-knowledge.ts's own header for why this is
+    // a table lookup, not a prompt instruction. recomputeQuoteTotals is the
+    // existing, documented function for "call this after any line-item
+    // mutation" (lib/pricing.ts) — reused as-is, not modified, so this adds
+    // new scope without touching rate resolution at all.
+    const appliedDefaults = await applyBuilderKnowledgeDefaults(supabase, quoteId, jobId)
+    if (appliedDefaults.length > 0) {
+      await recomputeQuoteTotals(supabase, quoteId)
+    }
+
     const { data: items } = await supabase
       .from('quote_line_items')
       .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, is_assumption, assumption_status, margin_pct')
@@ -471,6 +487,7 @@ export async function runQualityAssurance(
         missing_trade_names: coverage.missing_trade_ids.map((id) => TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`),
         detected_characteristics: coverage.detected_characteristics,
       },
+      builder_knowledge_defaults_applied: appliedDefaults,
     }
 
     await supabase

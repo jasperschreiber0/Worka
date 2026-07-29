@@ -240,6 +240,15 @@ export interface QAReport {
     missing_trade_names: string[]
     detected_characteristics: string[]
   }
+  /** Migration 086 — deterministic, sourced statutory/compliance defaults
+   *  this run applied (empty if the quote already had them, or none
+   *  applied). See lib/estimating/builder-knowledge.ts. */
+  builder_knowledge_defaults_applied: Array<{
+    description: string
+    citation: string
+    allowance_value: number
+    trade_category_id: number
+  }>
 }
 
 export interface ConstructionSanityFinding {

@@ -328,7 +328,12 @@ export interface TradeCoverageResult {
   findings: ConstructionSanityFinding[]
 }
 
-function detectCharacteristics(ctx: ConstructionSanityContext): ProjectCharacteristic[] {
+/** Exported for lib/estimating/builder-knowledge.ts, which reuses this same
+ *  keyword detection rather than re-deriving project characteristics a
+ *  second way — one definition of "what characteristics does this project
+ *  have," shared by the coverage diagnostic and the builder-knowledge
+ *  default matcher. */
+export function detectCharacteristics(ctx: ConstructionSanityContext): ProjectCharacteristic[] {
   const text = [
     ...ctx.lineItems.map((i) => i.description.toLowerCase()),
     scopeText(ctx),
