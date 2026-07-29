@@ -39,6 +39,16 @@ export interface ConstructionSanityScopeItem {
 export interface ConstructionSanityContext {
   lineItems: ConstructionSanityLineItem[]
   scopeItems: ConstructionSanityScopeItem[]
+  /** Optional — raw project_facts text (e.g. every active fact's `value`),
+   *  used ONLY by the coverage diagnostic's characteristic detection below.
+   *  Forensic validation of this diagnostic found that line-item/scope text
+   *  alone under-detects: a narrow, incomplete Stage 3 output is exactly
+   *  the case LEAST likely to also restate "extension"/"second storey" in
+   *  its own generated line items, so characteristic detection needs the
+   *  project's own facts as a source too, not just what was (or wasn't)
+   *  generated from them. Never read by any per-item construction-sanity
+   *  rule — this stays pricing/rule-agnostic everywhere else. */
+  projectFactsText?: string
   /** Optional — only used by the coverage diagnostic's "high-value project,
    *  too few trades" check below. Never read by any per-item rule; this
    *  module stays pricing-agnostic everywhere else, matching the estimator
@@ -322,6 +332,7 @@ function detectCharacteristics(ctx: ConstructionSanityContext): ProjectCharacter
   const text = [
     ...ctx.lineItems.map((i) => i.description.toLowerCase()),
     scopeText(ctx),
+    (ctx.projectFactsText ?? '').toLowerCase(),
   ].join(' ')
   return (Object.keys(CHARACTERISTIC_KEYWORDS) as ProjectCharacteristic[])
     .filter((c) => CHARACTERISTIC_KEYWORDS[c].some((k) => text.includes(k)))

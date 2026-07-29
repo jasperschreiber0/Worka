@@ -1178,25 +1178,41 @@ function ConstructionSanityChecklist({ findings }: { findings: ConstructionSanit
 // data exists (not just when something looks wrong) — the point is
 // transparency about what was checked, not only what failed.
 
-function ConstructionCoverageSummary({ coverage }: { coverage: NonNullable<QAReportPayload['construction_coverage']> }) {
+function scopeConfidenceLabel(score: number | null | undefined): { label: 'High' | 'Medium' | 'Low'; color: string } | null {
+  if (score === null || score === undefined) return null
+  if (score >= 80) return { label: 'High', color: 'var(--status-green)' }
+  if (score >= 60) return { label: 'Medium', color: 'var(--status-amber)' }
+  return { label: 'Low', color: 'var(--status-red)' }
+}
+
+function ConstructionCoverageSummary({ coverage, scopeConfidence }: {
+  coverage: NonNullable<QAReportPayload['construction_coverage']>
+  scopeConfidence?: number | null
+}) {
   const hasGap = coverage.missing_trade_ids.length > 0 || coverage.detected_trade_count < coverage.expected_trade_count
+  const confidence = scopeConfidenceLabel(scopeConfidence)
   return (
     <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }}>
       <div className="px-4 py-2.5 flex items-center justify-between" style={{ backgroundColor: 'var(--bg-elevated)' }}>
-        <span className="text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>Construction coverage</span>
+        <span className="text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>Construction Coverage</span>
         <span className="text-[12px] font-semibold" style={{ color: hasGap ? 'var(--status-amber)' : 'var(--status-green)' }}>
           {coverage.detected_trade_count} of {coverage.expected_trade_count} expected trade{coverage.expected_trade_count === 1 ? '' : 's'} detected
         </span>
       </div>
-      {coverage.missing_trade_names.length > 0 && (
-        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)' }}>
-          <span className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
-            Missing: {coverage.missing_trade_names.join(', ')}
-          </span>
+      <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)' }}>
+        <span className="text-[12px] font-medium" style={{ color: 'var(--text-tertiary)' }}>Missing Major Systems: </span>
+        <span className="text-[12px]" style={{ color: coverage.missing_trade_names.length > 0 ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+          {coverage.missing_trade_names.length > 0 ? coverage.missing_trade_names.join(', ') : 'None detected'}
+        </span>
+      </div>
+      {confidence && (
+        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
+          <span className="text-[12px] font-medium" style={{ color: 'var(--text-tertiary)' }}>Scope Confidence: </span>
+          <span className="text-[12px] font-semibold" style={{ color: confidence.color }}>{confidence.label}</span>
         </div>
       )}
       {coverage.detected_characteristics.length > 0 && (
-        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)', borderTop: coverage.missing_trade_names.length > 0 ? '1px solid var(--bg-border)' : undefined }}>
+        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)', borderTop: '1px solid var(--bg-border)' }}>
           <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
             Detected project characteristics: {coverage.detected_characteristics.join(', ').replace(/_/g, ' ')}
           </span>
@@ -1208,7 +1224,7 @@ function ConstructionCoverageSummary({ coverage }: { coverage: NonNullable<QARep
 
 // ─── "Check before sending" — the QA report, finally on screen ───────────────
 
-function CheckBeforeSending({ report }: { report: QAReportPayload }) {
+function CheckBeforeSending({ report, scopeConfidence }: { report: QAReportPayload; scopeConfidence?: number | null }) {
   const sanityFindings = report.construction_sanity_findings ?? []
   // The exact condensed strings qa.ts folded into top_risks/review_items for
   // each construction-sanity finding — filtered back out here so the
@@ -1220,7 +1236,7 @@ function CheckBeforeSending({ report }: { report: QAReportPayload }) {
 
   return (
     <>
-      {report.construction_coverage && <ConstructionCoverageSummary coverage={report.construction_coverage} />}
+      {report.construction_coverage && <ConstructionCoverageSummary coverage={report.construction_coverage} scopeConfidence={scopeConfidence} />}
       <ConstructionSanityChecklist findings={sanityFindings} />
       {hasGenericContent && (
         <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
@@ -1716,7 +1732,7 @@ function QuoteViewInner({
               )}
 
               {/* What should I check? — QA output, shown before the numbers */}
-              {data.qa_report && <CheckBeforeSending report={data.qa_report} />}
+              {data.qa_report && <CheckBeforeSending report={data.qa_report} scopeConfidence={data.summary.scope_confidence} />}
 
               {/* Did WorkA actually use my documents? */}
               {data.document_contribution && <WhatWorkaRead contribution={data.document_contribution} />}

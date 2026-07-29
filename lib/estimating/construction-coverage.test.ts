@@ -84,6 +84,22 @@ test('a genuinely small project (no characteristics, low value) never fires the 
   assert.equal(result.findings.length, 0)
 })
 
+test('characteristics detected from project_facts text even when no line item restates them', () => {
+  // The exact gap forensic validation found: a narrow scope whose own
+  // generated line items never happen to say "extension"/"second storey"
+  // must still be checked against what the project's own facts establish.
+  const result = evaluateConstructionCoverage({
+    lineItems: [
+      item({ trade_category_id: 12, description: 'GPOs, downlights and switches', quantity: 20, unit: 'each' }),
+      item({ trade_category_id: 11, description: 'Bathroom fixtures', quantity: 3, unit: 'each' }),
+    ],
+    scopeItems: [],
+    projectFactsText: 'Alterations and Additions second storey addition existing double storey dwelling',
+  })
+  assert.ok(result.detected_characteristics.includes('second_storey'))
+  assert.ok(result.findings.find((f) => f.id === 'coverage_structural_trades_absent'))
+})
+
 test('expected/detected counts are reported even when nothing is wrong', () => {
   const result = evaluateConstructionCoverage({
     lineItems: [

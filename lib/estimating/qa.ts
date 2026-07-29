@@ -249,6 +249,21 @@ export async function runQualityAssurance(
     // See lib/estimating/construction-sanity.ts's own header comment for the
     // production incident (a ~$132k estimate against an independently
     // estimated ~$2.3M) this closes.
+    // Characteristic detection needs the project's OWN facts as a source,
+    // not just what Stage 3/6 happened to generate from them — a narrow,
+    // incomplete scope is exactly the case least likely to also restate
+    // "extension"/"second storey" in its own line-item text (confirmed by
+    // forensic validation: a reconstructed narrow scope evaded this check
+    // entirely until this fetch was added). Cheap: values only, active
+    // facts only, capped — this is a keyword source, not a full read.
+    const { data: factRows } = await supabase
+      .from('project_facts')
+      .select('value')
+      .eq('job_id', jobId)
+      .eq('superseded', false)
+      .limit(300)
+    const projectFactsText = (factRows ?? []).map((f: { value: string | null }) => f.value ?? '').join(' ')
+
     const coverage = evaluateConstructionCoverage({
       lineItems: lineItems.map((i) => ({
         trade_category_id: i.trade_category_id,
@@ -259,6 +274,7 @@ export async function runQualityAssurance(
       })),
       scopeItems: (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null; dependencies: string[] | null; assumptions: string[] | null }>,
       totalCost: quote?.total_cost ?? null,
+      projectFactsText,
     })
     for (const finding of coverage.findings) {
       const line = `${finding.what_noticed} ${finding.builder_action}`
