@@ -61,7 +61,7 @@ startxref
 
   const { error: jobErr } = await supabase.from('jobs').insert({
     id: jobId, builder_id: BUILDER_ID, address: 'Debug diagnostic job — safe to delete',
-    status: 'quoting', client_name: 'Debug', client_email: 'debug@example.com',
+    status: 'quoting', job_type: 'renovation', notes: 'Temporary diagnostic job, safe to delete',
   })
   if (jobErr) throw new Error(`job insert failed: ${jobErr.message}`)
 
