@@ -14,7 +14,7 @@ import type { QAReport } from '../types/database.types.ts'
 import { pairSupersededFacts, type FactRow, findMissingTrades } from '../../supabase/functions/smooth-responder/pipeline-logic.ts'
 import { isSilentlyUnpriced, getUnresolvedConservativeAssumptions } from './readiness.ts'
 import { applyMargin, calculateClientPrice } from '../pricing.ts'
-import { evaluateConstructionSanity, type ConstructionSanityFinding } from './construction-sanity.ts'
+import { evaluateConstructionSanity, evaluateConstructionCoverage, type ConstructionSanityFinding } from './construction-sanity.ts'
 
 const UNIT_SANITY_MAX: Record<string, number> = {
   m2: 2000,
@@ -240,6 +240,34 @@ export async function runQualityAssurance(
     const priceCoveragePct = quote?.price_coverage_pct ?? null
     const pricingMatchRatePct = quote?.pricing_match_rate_pct ?? null
     const allowancePct = quote?.allowance_pct ?? null
+
+    // ── Construction coverage diagnostic — "why is this estimate so much
+    // lower than expected," answered before pricing is even discussed.
+    // Deterministic, no new AI call: compares the trades this quote actually
+    // touches against what its own evidenced characteristics (extension,
+    // second storey, major renovation, demolition) imply should be present.
+    // See lib/estimating/construction-sanity.ts's own header comment for the
+    // production incident (a ~$132k estimate against an independently
+    // estimated ~$2.3M) this closes.
+    const coverage = evaluateConstructionCoverage({
+      lineItems: lineItems.map((i) => ({
+        trade_category_id: i.trade_category_id,
+        description: i.description,
+        quantity: i.quantity,
+        unit: i.unit,
+        assumption_status: i.assumption_status,
+      })),
+      scopeItems: (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null; dependencies: string[] | null; assumptions: string[] | null }>,
+      totalCost: quote?.total_cost ?? null,
+    })
+    for (const finding of coverage.findings) {
+      const line = `${finding.what_noticed} ${finding.builder_action}`
+      if (finding.severity === 'red') topRisks.push(line)
+      else reviewItems.push(line)
+    }
+    if (coverage.findings.length > 0) {
+      recommendedActions.push('Review construction coverage before treating this total as complete — trade categories may be missing entirely, not just under-quantified.')
+    }
     // Migration 074 — smooth-responder's own before/after record of its
     // Stage 6 completeness recovery pass, distinct from missing_trade_details
     // below (which is always freshly re-derived against final state, so it
@@ -420,6 +448,13 @@ export async function runQualityAssurance(
       allowance_value: allowanceValue,
       trade_recovery: tradeRecovery,
       construction_sanity_findings: constructionSanityFindings,
+      construction_coverage: {
+        expected_trade_count: coverage.expected_trade_count,
+        detected_trade_count: coverage.detected_trade_count,
+        missing_trade_ids: coverage.missing_trade_ids,
+        missing_trade_names: coverage.missing_trade_ids.map((id) => TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`),
+        detected_characteristics: coverage.detected_characteristics,
+      },
     }
 
     await supabase
@@ -436,6 +471,8 @@ export async function runQualityAssurance(
       event: 'run_quality_assurance', quote_id: quoteId, job_id: jobId,
       item_count: lineItems.length, missing_trade_count: missingTrades.length,
       construction_sanity_finding_count: constructionSanityFindings.length,
+      expected_trade_count: coverage.expected_trade_count, detected_trade_count: coverage.detected_trade_count,
+      missing_trade_ids: coverage.missing_trade_ids, detected_characteristics: coverage.detected_characteristics,
       scope_confidence: scopeConfidence, overall_estimate_confidence: overallEstimateConfidence,
       duration_ms: Date.now() - startedAt,
     }))

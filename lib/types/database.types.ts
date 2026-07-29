@@ -229,6 +229,17 @@ export interface QAReport {
    *  kitchen/bathroom completeness, extension/structural dependency). Empty
    *  array when no rule fired, never null once QA has run. */
   construction_sanity_findings: ConstructionSanityFinding[]
+  /** Migration (this pass) — "why is this estimate lower than expected,"
+   *  answered before pricing: how many trade categories this quote's own
+   *  characteristics imply vs. how many actually have line items. See
+   *  lib/estimating/construction-sanity.ts evaluateConstructionCoverage. */
+  construction_coverage: {
+    expected_trade_count: number
+    detected_trade_count: number
+    missing_trade_ids: number[]
+    missing_trade_names: string[]
+    detected_characteristics: string[]
+  }
 }
 
 export interface ConstructionSanityFinding {

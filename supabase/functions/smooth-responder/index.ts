@@ -465,7 +465,7 @@ const SCOPE_REASONING_TOOL = {
     properties: {
       scope: {
         type: 'array',
-        description: 'Only include trades that are actually relevant to this project.',
+        description: 'Every trade in this call\'s list that the project\'s characteristics imply — including structural/framing/roofing/envelope work inferred from an extension, second storey, or major renovation, even with no direct document mention — must appear here, either with real included_scope or an explicit excluded_scope stating why it genuinely does not apply. Do not omit a trade merely because no document happened to mention it by name.',
         items: {
           type: 'object',
           properties: {
@@ -2021,7 +2021,29 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         reason: 'scope_reasoning_completed_at already set for this batch — reusing persisted scope_items instead of re-running Stage 3',
       }))
     } else {
-      const scopeSystemPrompt = `You are a senior Australian residential construction estimator. Reason about scope like an experienced estimator would — combine evidence across documents rather than treating each fact in isolation. For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all) — note that "blocking" flags a question for priority review, it does NOT stop the estimate from being generated; the pipeline always continues using your suggested_assumption (or a conservative default if you don't provide one), so always give your best industry-standard default when one exists.${memoryContext}`
+      // Rewritten after a production estimate reached ~$132k against an
+      // independently-estimated ~$2.3M for the same project — traced to
+      // this prompt's old wording ("only include trades that are actually
+      // relevant") giving the model permission to silently omit any trade
+      // it had no DIRECT document mention for, with nothing forcing it to
+      // check a trade's relevance against the project's own characteristics
+      // (an extension/second storey/major renovation/demolition implies
+      // structural, framing, roofing and envelope work whether or not any
+      // document happens to say so in words). The fix is not a new stage —
+      // it's this prompt actually doing the decomposition-and-inference job
+      // a senior estimator does by habit, not just transcribing documents.
+      const scopeSystemPrompt = `You are a senior Australian residential construction estimator decomposing this project into its full construction scope, trade by trade — not just transcribing what documents state, but reasoning the way an experienced estimator does.
+
+For the trades in THIS call, work through the standard construction decomposition: demolition, site preparation, excavation/earthworks, structure, framing, roofing, external envelope, windows/doors, waterproofing, plumbing, electrical, HVAC/mechanical, insulation, plasterboard/linings, joinery, kitchens, bathrooms, flooring, painting, external works, compliance requirements, and provisional allowances — to the extent each applies to the trades you were given.
+
+Combine evidence across documents rather than treating each fact in isolation. Critically, INFER required construction activities from the project's own characteristics even when no document states them explicitly:
+- An extension, a second storey, or a major renovation always implies structural work, framing, roofing, and external envelope work for the new/altered areas — even if no document uses those exact words.
+- Demolition of anything the building still needs (a staircase, a garage, a laundry) always implies a replacement is in scope — a demolition line with no corresponding new-work line is incomplete reasoning, not a genuine exclusion.
+- A named architectural element that isn't a standard room (a lift, a pool, a plant room) is an object requiring its own trade — never fold it into floor area and lose it.
+
+A trade must only be marked not-relevant/excluded because the project's actual characteristics rule it out (e.g. no wet areas anywhere near a garage-only build) — never simply because no document happened to mention it. When you're not certain a trade applies, say so via excluded_scope with your reasoning and a lower confidence, or raise a clarifying question — do not silently drop it.
+
+For each relevant trade, state what is included, what is excluded, dependencies, and assumptions. Only raise a clarifying question when missing information would materially change scope or quantities for a trade — most small gaps should NOT be questions, they get handled later as per-line assumptions. Keep total questions minimal and only mark "blocking" when the estimate genuinely cannot proceed responsibly without an answer (e.g. a double-storey addition with no structural drawings at all) — note that "blocking" flags a question for priority review, it does NOT stop the estimate from being generated; the pipeline always continues using your suggested_assumption (or a conservative default if you don't provide one), so always give your best industry-standard default when one exists.${memoryContext}`
 
       // Stage 3 reliability: identity of THIS batch's Stage 3 input,
       // independent of whether it ends up chunked into 1 or several calls

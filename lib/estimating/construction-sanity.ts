@@ -17,6 +17,8 @@
 // Pure functions, no DB access — called once by runQualityAssurance (qa.ts)
 // with data it already fetched, same integration pattern as findMissingTrades.
 
+import { TRADE_CATEGORIES } from '../trade-taxonomy.ts'
+
 export type ConstructionSanitySeverity = 'red' | 'amber'
 
 export interface ConstructionSanityLineItem {
@@ -37,6 +39,12 @@ export interface ConstructionSanityScopeItem {
 export interface ConstructionSanityContext {
   lineItems: ConstructionSanityLineItem[]
   scopeItems: ConstructionSanityScopeItem[]
+  /** Optional — only used by the coverage diagnostic's "high-value project,
+   *  too few trades" check below. Never read by any per-item rule; this
+   *  module stays pricing-agnostic everywhere else, matching the estimator
+   *  QA design principle that construction-sanity reasons about scope
+   *  completeness, not price. */
+  totalCost?: number | null
 }
 
 export interface ConstructionSanityFinding {
@@ -251,4 +259,135 @@ export function evaluateConstructionSanity(ctx: ConstructionSanityContext): Cons
     }
   }
   return findings.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'red' ? -1 : 1))
+}
+
+// ─── Construction coverage diagnostic ───────────────────────────────────────
+// Root-cause fix for a production estimate that reached ~$132k against an
+// independently-estimated ~$2.3M for the same project: Stage 3's own prompt
+// (supabase/functions/smooth-responder/index.ts) was rewritten to stop
+// silently omitting trades it had no direct document mention for — but a
+// second, independent line of defense belongs here, downstream, on the
+// scope Stage 3 actually produced: does the TRADE COVERAGE itself look
+// plausible for a project with these characteristics, regardless of why
+// a trade might be missing. This is deliberately a cheap, deterministic,
+// keyword-driven check — no new AI call, no new engine, extending the same
+// rule registry above.
+//
+// Detection is characteristic-gated, not a flat trade-count minimum: a
+// genuinely small bathroom-only renovation legitimately touches only 5-6
+// trades and that is correct, not a defect. The checks below only fire when
+// the project's OWN evidenced characteristics (extension, second storey,
+// major renovation, new build, demolition) imply structural/envelope work
+// that then turns out to be entirely absent.
+
+export type ProjectCharacteristic = 'extension' | 'second_storey' | 'major_renovation' | 'new_build' | 'demolition'
+
+const CHARACTERISTIC_KEYWORDS: Record<ProjectCharacteristic, string[]> = {
+  extension: ['extension'],
+  second_storey: ['second storey', 'second-storey', 'first floor addition', 'upper floor addition', 'new upper floor'],
+  major_renovation: ['major renovation', 'alterations and additions', 'alteration and addition'],
+  new_build: ['new build', 'new dwelling', 'new home', 'knockdown rebuild'],
+  demolition: ['demolit'],
+}
+
+// The three trades a senior estimator would never expect to see entirely
+// absent from a project characterized as an extension, second storey, major
+// renovation, or new build — structure, roofing, and the external envelope
+// tying it together.
+const STRUCTURAL_TRADE_IDS = [2, 3, 4] // Framing, Roofing, External Cladding
+
+// Below this many distinct trade categories represented, a project already
+// evidenced as an extension/second-storey/major-renovation/new-build is
+// unusually narrow — the exact shape of the $132k failure (an
+// electrical-only or interior-only scope for what's actually a structural
+// project). Deliberately conservative (13 trades exist; 6 is well under
+// half) to avoid false positives on projects this genuinely doesn't apply
+// to — the structural-trio check above is the higher-confidence signal.
+const NARROW_COVERAGE_THRESHOLD = 6
+
+// A project this large producing a suspiciously narrow trade spread is
+// worth a second look even absent an explicit extension/reno keyword —
+// deliberately a high bar so this never fires on an ordinary mid-size job.
+const HIGH_VALUE_THRESHOLD = 500_000
+
+export interface TradeCoverageResult {
+  expected_trade_count: number
+  detected_trade_count: number
+  missing_trade_ids: number[]
+  detected_characteristics: ProjectCharacteristic[]
+  findings: ConstructionSanityFinding[]
+}
+
+function detectCharacteristics(ctx: ConstructionSanityContext): ProjectCharacteristic[] {
+  const text = [
+    ...ctx.lineItems.map((i) => i.description.toLowerCase()),
+    scopeText(ctx),
+  ].join(' ')
+  return (Object.keys(CHARACTERISTIC_KEYWORDS) as ProjectCharacteristic[])
+    .filter((c) => CHARACTERISTIC_KEYWORDS[c].some((k) => text.includes(k)))
+}
+
+function tradeName(id: number): string {
+  return TRADE_CATEGORIES.find((t) => t.id === id)?.name ?? `Trade ${id}`
+}
+
+/**
+ * The "expected N, detected N, missing N" answer to "why is this estimate
+ * so much lower than expected" — cheap, deterministic, no pricing involved.
+ * Called once per QA run, alongside evaluateConstructionSanity.
+ */
+export function evaluateConstructionCoverage(ctx: ConstructionSanityContext): TradeCoverageResult {
+  const items = included(ctx)
+  const detectedTradeIds = Array.from(new Set(items.map((i) => i.trade_category_id))).sort((a, b) => a - b)
+  const characteristics = detectCharacteristics(ctx)
+  const findings: ConstructionSanityFinding[] = []
+
+  const impliesStructure = characteristics.some((c) => c === 'extension' || c === 'second_storey' || c === 'major_renovation' || c === 'new_build')
+  const missingStructural = STRUCTURAL_TRADE_IDS.filter((id) => !detectedTradeIds.includes(id))
+
+  if (impliesStructure && missingStructural.length === STRUCTURAL_TRADE_IDS.length) {
+    const names = STRUCTURAL_TRADE_IDS.map(tradeName).join(', ')
+    findings.push({
+      id: 'coverage_structural_trades_absent',
+      severity: 'red',
+      summary: 'No structural, roofing or envelope scope at all',
+      what_noticed: `This project is characterized as ${characteristics.filter((c) => c !== 'demolition').join('/')}, but ${names} have zero line items between them.`,
+      why_it_matters: 'An extension, second storey, or major renovation always involves structural, framing, roofing and envelope work — its complete absence means the estimate is very likely missing the bulk of the physical construction, not just a few line items.',
+      builder_action: 'Review Stage 3 scope reasoning for these three trades before treating this total as meaningful.',
+    })
+  }
+
+  if (characteristics.includes('demolition') && !detectedTradeIds.includes(1)) {
+    findings.push({
+      id: 'coverage_demolition_without_site_works',
+      severity: 'amber',
+      summary: 'Demolition mentioned but no Site Works scope',
+      what_noticed: 'Demolition is referenced in this project\'s facts or scope, but Site Works & Concrete has no line items at all.',
+      why_it_matters: 'Demolition is almost always followed by site preparation and new footings/slab work — its complete absence from Site Works is worth confirming, not assuming.',
+      builder_action: 'Confirm whether site works/new footings genuinely fall outside this quote, or whether they were missed.',
+    })
+  }
+
+  const isNarrowForCharacteristics = characteristics.length > 0 && detectedTradeIds.length < NARROW_COVERAGE_THRESHOLD
+  const isNarrowForValue = (ctx.totalCost ?? 0) >= HIGH_VALUE_THRESHOLD && detectedTradeIds.length < NARROW_COVERAGE_THRESHOLD
+  if ((isNarrowForCharacteristics || isNarrowForValue) && findings.every((f) => f.id !== 'coverage_structural_trades_absent')) {
+    findings.push({
+      id: 'coverage_unusually_narrow',
+      severity: 'amber',
+      summary: `Only ${detectedTradeIds.length} of 13 trade categories represented`,
+      what_noticed: isNarrowForValue && !isNarrowForCharacteristics
+        ? `This is a high-value project but only ${detectedTradeIds.length} of the 13 trade categories have any line items.`
+        : `This project is characterized as ${characteristics.join('/')}, but only ${detectedTradeIds.length} of the 13 trade categories have any line items.`,
+      why_it_matters: 'A project of this description usually spans most of the standard trade categories — a narrow spread like this is the same shape of gap that has previously produced estimates far below a realistic total.',
+      builder_action: 'Review which trades were never scoped at all — not just whether the scoped trades look priced correctly.',
+    })
+  }
+
+  return {
+    expected_trade_count: impliesStructure ? Math.max(NARROW_COVERAGE_THRESHOLD, detectedTradeIds.length) : detectedTradeIds.length,
+    detected_trade_count: detectedTradeIds.length,
+    missing_trade_ids: impliesStructure ? missingStructural : [],
+    detected_characteristics: characteristics,
+    findings,
+  }
 }

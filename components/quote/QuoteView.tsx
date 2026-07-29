@@ -78,6 +78,14 @@ interface QAReportPayload {
   recommended_actions: string[]
   /** Construction-reasoning findings — see lib/estimating/construction-sanity.ts. Optional for older cached responses. */
   construction_sanity_findings?: ConstructionSanityFindingPayload[]
+  /** "Why is this estimate lower than expected" — trade coverage vs. what this project's own characteristics imply. Optional for older cached responses. */
+  construction_coverage?: {
+    expected_trade_count: number
+    detected_trade_count: number
+    missing_trade_ids: number[]
+    missing_trade_names: string[]
+    detected_characteristics: string[]
+  }
 }
 
 interface DocumentContributionPayload {
@@ -1165,6 +1173,39 @@ function ConstructionSanityChecklist({ findings }: { findings: ConstructionSanit
   )
 }
 
+// ─── Construction coverage summary — "why is this estimate lower than
+// expected," visible before any price is discussed. Always shown when the
+// data exists (not just when something looks wrong) — the point is
+// transparency about what was checked, not only what failed.
+
+function ConstructionCoverageSummary({ coverage }: { coverage: NonNullable<QAReportPayload['construction_coverage']> }) {
+  const hasGap = coverage.missing_trade_ids.length > 0 || coverage.detected_trade_count < coverage.expected_trade_count
+  return (
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }}>
+      <div className="px-4 py-2.5 flex items-center justify-between" style={{ backgroundColor: 'var(--bg-elevated)' }}>
+        <span className="text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>Construction coverage</span>
+        <span className="text-[12px] font-semibold" style={{ color: hasGap ? 'var(--status-amber)' : 'var(--status-green)' }}>
+          {coverage.detected_trade_count} of {coverage.expected_trade_count} expected trade{coverage.expected_trade_count === 1 ? '' : 's'} detected
+        </span>
+      </div>
+      {coverage.missing_trade_names.length > 0 && (
+        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)' }}>
+          <span className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+            Missing: {coverage.missing_trade_names.join(', ')}
+          </span>
+        </div>
+      )}
+      {coverage.detected_characteristics.length > 0 && (
+        <div className="px-4 py-2" style={{ backgroundColor: 'var(--bg-surface)', borderTop: coverage.missing_trade_names.length > 0 ? '1px solid var(--bg-border)' : undefined }}>
+          <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+            Detected project characteristics: {coverage.detected_characteristics.join(', ').replace(/_/g, ' ')}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── "Check before sending" — the QA report, finally on screen ───────────────
 
 function CheckBeforeSending({ report }: { report: QAReportPayload }) {
@@ -1179,6 +1220,7 @@ function CheckBeforeSending({ report }: { report: QAReportPayload }) {
 
   return (
     <>
+      {report.construction_coverage && <ConstructionCoverageSummary coverage={report.construction_coverage} />}
       <ConstructionSanityChecklist findings={sanityFindings} />
       {hasGenericContent && (
         <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
