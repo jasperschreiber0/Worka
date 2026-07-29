@@ -197,6 +197,42 @@ test('findings are sorted red before amber', () => {
   assert.ok(firstRedIndex < firstAmberIndex)
 })
 
+test('lump decomposition overlap: flags a lump alongside its own decomposed siblings', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 13, description: 'Landscaping and driveway', quantity: 1, unit: 'lot' }),
+      item({ trade_category_id: 13, description: 'Landscaping — planting and turf', quantity: 1, unit: 'lot' }),
+      item({ trade_category_id: 1, description: 'Driveway construction — 2-car space', quantity: 36, unit: 'm2' }),
+    ],
+    scopeItems: [],
+  })
+  const finding = findings.find((f) => f.id === 'lump_decomposition_overlap')
+  assert.ok(finding, 'expected lump_decomposition_overlap finding')
+  assert.equal(finding?.severity, 'red')
+})
+
+test('lump decomposition overlap: does not false-positive on unrelated items sharing a word', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 1, description: 'Piers and footings — waffle pod slab edge beams', quantity: 1, unit: 'lot' }),
+      item({ trade_category_id: 1, description: 'Excavation for new footings, piers and pool', quantity: 180, unit: 'm3' }),
+    ],
+    scopeItems: [],
+  })
+  assert.equal(findings.find((f) => f.id === 'lump_decomposition_overlap'), undefined)
+})
+
+test('lump decomposition overlap: no finding when nothing else in the quote overlaps', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 13, description: 'Permits and certifier fees', quantity: 1, unit: 'lot' }),
+      item({ trade_category_id: 13, description: 'Structural engineering fees', quantity: 1, unit: 'lot' }),
+    ],
+    scopeItems: [],
+  })
+  assert.equal(findings.find((f) => f.id === 'lump_decomposition_overlap'), undefined)
+})
+
 test('a rule that throws does not take down evaluation of the others', () => {
   // quantity as a non-number would break naive arithmetic if a rule didn't
   // guard for it — confirms evaluateConstructionSanity's per-rule try/catch

@@ -245,12 +245,66 @@ const extensionStructuralDependency: ConstructionSanityRule = {
   },
 }
 
+// A lump ("lot"-unit) item whose own description joins two scope nouns with
+// "and" (e.g. "Landscaping and driveway") is a double-counting risk once
+// OTHER items in the quote separately, individually cover one of those same
+// nouns — exactly the incident this rule generalizes from: a system-
+// decomposition pass correctly broke "Landscaping and driveway" into its
+// components (paving, planting, irrigation, driveway, crossover...) without
+// removing or reducing the original lump, so both existed at once. This
+// does not decide whether it's a genuine duplicate (that call still needs a
+// human, since "Excavation for footings, piers and pool" coexisting with a
+// separate "Pool shell" line is NOT a duplicate — different subcontracts)
+// — it only flags the pattern for review, cheaply and deterministically,
+// no new engine.
+const lumpDecompositionOverlap: ConstructionSanityRule = {
+  id: 'lump_decomposition_overlap',
+  check(ctx) {
+    const items = included(ctx)
+    for (const item of items) {
+      if (item.unit !== 'lot') continue
+      const desc = item.description.toLowerCase()
+      const match = desc.match(/^([a-z ]+?) and ([a-z]+)\b/)
+      if (!match) continue
+      const [, partA, nounB] = match
+      const nounA = partA.trim().split(' ').pop()
+      if (!nounA || nounA.length < 4 || nounB.length < 4) continue
+      // Deliberately conservative: requires an OTHER item's description to
+      // START WITH the noun (a genuine sibling, e.g. "Landscaping — X" next
+      // to "Landscaping and driveway"), not merely mention it anywhere —
+      // "includes" would false-positive constantly (e.g. "Excavation for
+      // footings, piers and pool" sharing the word "piers" with the
+      // unrelated "Piers and footings" item). This trades some missed
+      // duplicates (the pool-plumbing/pump-room incident this rule was
+      // written after used sibling names that don't share a prefix, so it
+      // wouldn't have caught that one) for not crying wolf on legitimate,
+      // separately-scoped items — the right tradeoff for a red/blocking
+      // finding.
+      const others = items.filter((i) => i !== item)
+      const coversA = others.some((i) => i.description.toLowerCase().startsWith(nounA))
+      const coversB = others.some((i) => i.description.toLowerCase().startsWith(nounB))
+      if (coversA && coversB) {
+        return {
+          id: 'lump_decomposition_overlap',
+          severity: 'red',
+          summary: 'Possible double-counted lump allowance',
+          what_noticed: `"${item.description}" is a single lump item, but other line items separately cover both "${nounA}" and "${nounB}" — the two concepts this lump's own name joins.`,
+          why_it_matters: 'When a system gets decomposed into its individual components, the original lump allowance must be removed or reduced to match — otherwise the same scope is priced twice.',
+          builder_action: `Confirm whether "${item.description}" should be removed (fully superseded by the itemized lines) or reduced to cover only scope the itemized lines don't.`,
+        }
+      }
+    }
+    return null
+  },
+}
+
 const CONSTRUCTION_SANITY_RULES: ConstructionSanityRule[] = [
   paintVsCladdingArea,
   framingVsFootprint,
   kitchenCompleteness,
   bathroomCompleteness,
   extensionStructuralDependency,
+  lumpDecompositionOverlap,
 ]
 
 /**
