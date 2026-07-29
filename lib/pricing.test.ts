@@ -18,6 +18,7 @@ import {
   calculateClientPrice,
   extractSelectionPrice,
   matchDocumentSelection,
+  assignDocumentSelections,
   type DocumentSelectionFact,
   type CatalogueEntry,
   type RateContext,
@@ -640,4 +641,45 @@ test('matchDocumentSelection: ignores a fact with no usable price', () => {
 
 test('matchDocumentSelection: null when no facts are supplied', () => {
   assert.equal(matchDocumentSelection({ description: 'Toto Neorest smart toilet suite — ensuite' }, []), null)
+})
+
+// Regression test for a real bug found during a production validation run:
+// a category-subtotal fact whose value repeats generic bathroom vocabulary
+// ("5 bathrooms", "floor", "basin") independently matched THREE unrelated
+// line items against the SAME fact when matched per item — each claiming
+// the full $27,043 confirmed total, quadrupling one real figure into four.
+// assignDocumentSelections must give the fact to its single best-matching
+// item only.
+test('assignDocumentSelections: a single fact is claimed by at most one item, even when several items share generic vocabulary with it', () => {
+  const tapwareFact = fact({
+    fact_id: 'fact-tapware-1', key: 'tapware_category_subtotal',
+    value: 'Showers+Tapware+Waste-Basin/Floor category subtotal (5 bathrooms), Brodware Winslow series, $27,043',
+  })
+  const items = [
+    { description: 'Tapware and sanitaryware supply — 5 bathrooms (Brodware Winslow series, per FF&A schedule)' },
+    { description: 'Shower screens — 5 bathrooms' },
+    { description: 'Wet area floor and wall tiling — 5 bathrooms' },
+    { description: 'Floor and basin wastes — 5 bathrooms' },
+  ]
+  const assignment = assignDocumentSelections(items, [tapwareFact])
+  assert.equal(assignment.size, 1, 'exactly one item should win the fact')
+  const [winningIndex, match] = Array.from(assignment.entries())[0]
+  assert.equal(items[winningIndex].description, 'Tapware and sanitaryware supply — 5 bathrooms (Brodware Winslow series, per FF&A schedule)')
+  assert.equal(match.price, 27043)
+})
+
+test('assignDocumentSelections: two distinct facts each go to their own best-matching item', () => {
+  const toiletFact = fact({ fact_id: 'fact-toto-1', key: 'toilet_suite', value: 'Toto Neorest smart toilet suite, ensuite, $8,500' })
+  const tapwareFact = fact({
+    fact_id: 'fact-tapware-1', key: 'tapware_category_subtotal',
+    value: 'Showers+Tapware+Waste-Basin/Floor category subtotal (5 bathrooms), Brodware Winslow series, $27,043',
+  })
+  const items = [
+    { description: 'Toto Neorest smart toilet suite — ensuite' },
+    { description: 'Tapware and sanitaryware supply — 5 bathrooms (Brodware Winslow series, per FF&A schedule)' },
+  ]
+  const assignment = assignDocumentSelections(items, [toiletFact, tapwareFact])
+  assert.equal(assignment.size, 2)
+  assert.equal(assignment.get(0)?.price, 8500)
+  assert.equal(assignment.get(1)?.price, 27043)
 })

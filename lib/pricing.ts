@@ -754,6 +754,7 @@ export function extractSelectionPrice(value: string): ExtractedSelectionPrice | 
 export interface DocumentSelectionMatch {
   fact: DocumentSelectionFact
   price: number
+  score: number
 }
 
 // Requires at least 2 shared meaningful tokens between the line item's own
@@ -764,6 +765,20 @@ export interface DocumentSelectionMatch {
 // more shared tokens (a closer textual match), not by price or recency.
 const MIN_SELECTION_MATCH_TOKENS = 2
 
+/**
+ * Best-matching document selection for ONE item, considered in isolation.
+ * Confirmed on a real project during validation to be insufficient on its
+ * own: a shared category subtotal fact whose value repeats generic words
+ * ("5 bathrooms", "floor", "basin") that legitimately also appear in OTHER,
+ * unrelated line items in the same bathroom scope (shower screens, wet-area
+ * tiling) let three different items all independently "win" a match against
+ * the SAME fact — each charging the full confirmed total, quadrupling one
+ * real $27,043 figure into four. Calling this per-item, independently, is
+ * therefore never safe on its own; always go through assignDocumentSelections
+ * below, which enforces one fact -> at most one item globally. Exported
+ * (and still used that way in tests) purely as the per-pair scoring
+ * primitive, not as something priceLineItems calls directly any more.
+ */
 export function matchDocumentSelection(
   item: { description: string },
   facts: DocumentSelectionFact[]
@@ -784,10 +799,40 @@ export function matchDocumentSelection(
     if (overlap < MIN_SELECTION_MATCH_TOKENS) continue
     if (overlap > bestOverlap) {
       bestOverlap = overlap
-      best = { fact, price: priced.price }
+      best = { fact, price: priced.price, score: overlap }
     }
   }
   return best
+}
+
+/**
+ * Assigns document selections to line items GLOBALLY, one-to-one — the fix
+ * for the double/triple-counting failure mode described above. Every
+ * (item, matching fact) candidate pair is scored via matchDocumentSelection,
+ * then claimed greedily by descending score: the single best-matching item
+ * for a given fact wins it, and that fact is then unavailable to every other
+ * item, however well it might otherwise have scored. A real confirmed price
+ * can only ever be spent once. Returns a Map from the item's index in the
+ * input array to its winning match.
+ */
+export function assignDocumentSelections<T extends { description: string }>(
+  items: T[],
+  facts: DocumentSelectionFact[]
+): Map<number, DocumentSelectionMatch> {
+  const candidates: Array<{ itemIndex: number; match: DocumentSelectionMatch }> = []
+  items.forEach((item, itemIndex) => {
+    const match = matchDocumentSelection(item, facts)
+    if (match) candidates.push({ itemIndex, match })
+  })
+  candidates.sort((a, b) => b.match.score - a.match.score)
+  const claimedFacts = new Set<string>()
+  const assignment = new Map<number, DocumentSelectionMatch>()
+  for (const c of candidates) {
+    if (claimedFacts.has(c.match.fact.fact_id)) continue
+    claimedFacts.add(c.match.fact.fact_id)
+    assignment.set(c.itemIndex, c.match)
+  }
+  return assignment
 }
 
 function documentSelectionBasis(match: DocumentSelectionMatch): string {
@@ -864,10 +909,18 @@ export async function priceLineItems<T extends PriceableItem>(
   // (the same reasoning Stage 6 already applies to a document-priced BOQ
   // line or an AI Allowance lump sum). Only items WITHOUT a match fall
   // through to Tier 1-3 below.
-  const afterDocumentSelection = items.map((item) => {
-    if (documentSelections.length === 0) return { item, docMatch: null as DocumentSelectionMatch | null }
-    return { item, docMatch: matchDocumentSelection(item, documentSelections) }
-  })
+  //
+  // Assigned GLOBALLY (assignDocumentSelections), not per item — confirmed
+  // during production validation to be necessary, not defensive: a single
+  // category-subtotal fact whose value repeats generic bathroom vocabulary
+  // ("5 bathrooms", "floor", "basin") independently "matched" three
+  // unrelated line items (shower screens, wet-area tiling, floor/basin
+  // wastes) against the SAME tapware fact when matched per item, each
+  // claiming the full confirmed total — one real $27,043 figure counted up
+  // to four times. Global one-to-one assignment means a confirmed price can
+  // only ever be spent once, on its single best-matching item.
+  const documentAssignment = documentSelections.length > 0 ? assignDocumentSelections(items, documentSelections) : new Map<number, DocumentSelectionMatch>()
+  const afterDocumentSelection = items.map((item, index) => ({ item, docMatch: documentAssignment.get(index) ?? null }))
 
   // Tier 1-3: exact / normalized cost_rates + the existing 5-tier hierarchy
   // (learned/preference/supplier/platform/network), run synchronously first
