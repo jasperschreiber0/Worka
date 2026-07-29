@@ -223,6 +223,21 @@ export interface QAReport {
    *  Independent of, and a useful cross-check against, missing_trade_details
    *  above (which reflects final current state, not the recovery attempt). */
   trade_recovery: TradeRecoveryReport | null
+  /** Migration 085 — construction-reasoning findings from
+   *  lib/estimating/construction-sanity.ts: cross-item consistency and
+   *  scope-completeness checks (paint vs. wall area, framing vs. footprint,
+   *  kitchen/bathroom completeness, extension/structural dependency). Empty
+   *  array when no rule fired, never null once QA has run. */
+  construction_sanity_findings: ConstructionSanityFinding[]
+}
+
+export interface ConstructionSanityFinding {
+  id: string
+  severity: 'red' | 'amber'
+  summary: string
+  what_noticed: string
+  why_it_matters: string
+  builder_action: string
 }
 
 export type PricingType = 'measured' | 'pc_allowance' | 'provisional_sum'

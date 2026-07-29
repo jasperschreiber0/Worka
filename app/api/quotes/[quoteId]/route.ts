@@ -43,6 +43,12 @@ interface QuoteSummary {
   price_basis: string
   price_disclaimer: string
   confidence_score: number
+  /** "How reliable is this PRICE" — quotes.confidence_score, renamed for display only. Alias of confidence_score. */
+  pricing_confidence: number
+  /** "Is the SCOPE complete and internally consistent" — independent of pricing. Null until QA has run. See lib/estimating/qa.ts. */
+  scope_confidence: number | null
+  /** MIN(pricing_confidence, scope_confidence) — the weakest of the two. Null until QA has run. */
+  overall_estimate_confidence: number | null
   unresolved_count: number
   assumption_count: number
   /** Included items with no total that nothing else surfaces — each adds $0. */
@@ -120,7 +126,9 @@ function computeSummary(
   quote: DemoQuote,
   items: DemoQuoteLineItem[],
   qaReport: QAReport | null,
-  criticalAssumptions: CriticalAssumption[] = []
+  criticalAssumptions: CriticalAssumption[] = [],
+  scopeConfidence: number | null = null,
+  overallEstimateConfidence: number | null = null
 ): QuoteSummary {
   const unresolved_count = items.filter(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
@@ -151,6 +159,9 @@ function computeSummary(
     price_basis: PRICE_BASIS_LABEL,
     price_disclaimer: CLIENT_PRICE_DISCLAIMER,
     confidence_score: quote.confidence_score,
+    pricing_confidence: quote.confidence_score,
+    scope_confidence: scopeConfidence,
+    overall_estimate_confidence: overallEstimateConfidence,
     unresolved_count,
     assumption_count,
     unpriced_count,
@@ -217,6 +228,8 @@ export async function GET(
         created_at,
         qa_report,
         overall_confidence,
+        scope_confidence,
+        overall_estimate_confidence,
         document_contribution,
         jobs (
           address
@@ -395,10 +408,22 @@ export async function GET(
     // qa_report is never structurally absent from the review screen. Cheap
     // (a few scoped queries, no AI call) and idempotent.
     let qaReport = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
+    let scopeConfidence = (quoteRow as { scope_confidence?: number | null }).scope_confidence ?? null
+    let overallEstimateConfidence = (quoteRow as { overall_estimate_confidence?: number | null }).overall_estimate_confidence ?? null
     if (!qaReport) {
       try {
         const { runQualityAssurance } = await import('@/lib/estimating/qa')
         qaReport = await runQualityAssurance(supabase, quoteId, quoteRow.job_id)
+        // runQualityAssurance writes scope_confidence/overall_estimate_confidence
+        // straight to the quotes row — re-read them fresh rather than
+        // duplicating that computation here.
+        const { data: freshConfidence } = await supabase
+          .from('quotes')
+          .select('scope_confidence, overall_estimate_confidence')
+          .eq('id', quoteId)
+          .single()
+        scopeConfidence = freshConfidence?.scope_confidence ?? null
+        overallEstimateConfidence = freshConfidence?.overall_estimate_confidence ?? null
       } catch (qaErr) {
         console.error('[quotes:get] lazy QA run failed:', qaErr)
       }
@@ -432,7 +457,7 @@ export async function GET(
     }))
 
     const line_items_by_category = groupByCategory(items)
-    const summary = computeSummary(quote, items, qaReport, criticalAssumptions)
+    const summary = computeSummary(quote, items, qaReport, criticalAssumptions, scopeConfidence, overallEstimateConfidence)
 
     const response: QuoteResponse = {
       quote,

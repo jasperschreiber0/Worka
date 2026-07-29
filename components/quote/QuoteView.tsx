@@ -46,6 +46,12 @@ interface QuoteSummary {
   /** "excl. GST" — from the API; see lib/pricing.ts PRICE_BASIS_LABEL. Optional for older cached responses. */
   price_basis?: string
   confidence_score: number
+  /** "How reliable is this PRICE" — alias of confidence_score, for display next to scope_confidence. Optional for older cached responses. */
+  pricing_confidence?: number
+  /** "Is the SCOPE complete and internally consistent" — independent of pricing. Null until QA has run. */
+  scope_confidence?: number | null
+  /** MIN(pricing_confidence, scope_confidence). Null until QA has run. */
+  overall_estimate_confidence?: number | null
   unresolved_count: number
   assumption_count: number
   unpriced_count: number
@@ -57,10 +63,21 @@ interface QuoteSummary {
   critical_assumptions?: CriticalAssumption[]
 }
 
+interface ConstructionSanityFindingPayload {
+  id: string
+  severity: 'red' | 'amber'
+  summary: string
+  what_noticed: string
+  why_it_matters: string
+  builder_action: string
+}
+
 interface QAReportPayload {
   top_risks: string[]
   review_items: string[]
   recommended_actions: string[]
+  /** Construction-reasoning findings — see lib/estimating/construction-sanity.ts. Optional for older cached responses. */
+  construction_sanity_findings?: ConstructionSanityFindingPayload[]
 }
 
 interface DocumentContributionPayload {
@@ -207,6 +224,48 @@ function OverallConfidenceBadge({ score }: { score: number }) {
       <span className="w-2 h-2 rounded-full" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
       {score}%
     </span>
+  )
+}
+
+// ─── Confidence split — pricing vs. scope ──────────────────────────────────────
+// "How reliable is this PRICE" (confidence_score, unchanged) answers a
+// different question from "how reliable is this ESTIMATE overall" — a quote
+// can have perfectly-priced line items while missing a whole trade or
+// containing an internally-impossible quantity. Same colour thresholds as
+// OverallConfidenceBadge (>=80 green, >=60 amber, else red) so a builder
+// reads the two consistently, just labelled to show what each one means.
+
+function confidenceColor(score: number): string {
+  if (score >= 80) return 'var(--status-green)'
+  if (score >= 60) return 'var(--status-amber)'
+  return 'var(--status-red)'
+}
+
+function LabeledConfidenceBadge({ label, score }: { label: string; score: number }) {
+  const color = confidenceColor(score)
+  return (
+    <span className="flex items-center gap-1.5" title={`${label}: ${score}%`}>
+      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} aria-hidden="true" />
+      <span className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>{label}</span>
+      <span className="text-[12px] font-semibold" style={{ color }}>{score}%</span>
+    </span>
+  )
+}
+
+function ConfidenceSplit({ pricingConfidence, scopeConfidence, overallConfidence }: {
+  pricingConfidence: number
+  scopeConfidence: number | null | undefined
+  overallConfidence: number | null | undefined
+}) {
+  if (scopeConfidence === null || scopeConfidence === undefined) return null
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)' }}>
+      <LabeledConfidenceBadge label="Pricing confidence" score={pricingConfidence} />
+      <LabeledConfidenceBadge label="Scope confidence" score={scopeConfidence} />
+      {overallConfidence !== null && overallConfidence !== undefined && (
+        <LabeledConfidenceBadge label="Overall estimate confidence" score={overallConfidence} />
+      )}
+    </div>
   )
 }
 
@@ -740,6 +799,11 @@ function SummaryCard({ summary }: SummaryCardProps) {
             <span className="text-[11px] hidden sm:inline" style={{ color: 'var(--text-tertiary)' }}>{confidenceLabel}</span>
           </div>
         </div>
+        <ConfidenceSplit
+          pricingConfidence={summary.confidence_score}
+          scopeConfidence={summary.scope_confidence}
+          overallConfidence={summary.overall_estimate_confidence}
+        />
         {/* Readiness banner — the one answer to "can I send this?" */}
         {summary.readiness === 'blocked' && (
           <div className="px-4 py-2.5" style={{ backgroundColor: 'rgba(244,67,54,0.08)' }}>
@@ -1057,37 +1121,92 @@ function EstimateCoverageBanner({ status }: { status: EstimateStatusPayload }) {
   )
 }
 
-// ─── "Check before sending" — the QA report, finally on screen ───────────────
+// ─── Construction sanity checklist — "Before sending this quote, N things
+// to check", each with What WorkA noticed / Why it matters / Your action.
+// lib/estimating/qa.ts also folds a condensed one-line version of each of
+// these findings into report.top_risks/review_items (so they still drive
+// the readiness/blocked-vs-review_required state via the existing
+// send-gate plumbing) — CheckBeforeSending below filters those exact lines
+// back out of the generic lists so nothing renders twice.
 
-function CheckBeforeSending({ report }: { report: QAReportPayload }) {
-  const hasContent = report.top_risks.length > 0 || report.review_items.length > 0
-  if (!hasContent) return null
-
+function ConstructionSanityChecklist({ findings }: { findings: ConstructionSanityFindingPayload[] }) {
+  if (findings.length === 0) return null
   return (
-    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
-      <div className="px-4 py-2" style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderBottom: '1px solid rgba(255,152,0,0.2)' }}>
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>
-          Check before sending
+    <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }}>
+      <div className="px-4 py-2.5" style={{ backgroundColor: 'var(--bg-elevated)', borderBottom: '1px solid var(--bg-border)' }}>
+        <h3 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          Before sending this quote — {findings.length} thing{findings.length === 1 ? '' : 's'} to check
         </h3>
-        <p className="text-[11px] mt-0.5" style={{ color: 'var(--status-amber)' }}>
-          WorkA reviewed this estimate — these are the things only you can confirm.
-        </p>
       </div>
       <div style={{ backgroundColor: 'var(--bg-surface)' }}>
-        {report.top_risks.map((risk, i) => (
-          <div key={`risk-${i}`} className="flex items-start gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
-            <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
-            <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{risk}</span>
-          </div>
-        ))}
-        {report.review_items.map((item, i) => (
-          <div key={`review-${i}`} className="flex items-start gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
-            <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: 'var(--status-amber)' }} aria-hidden="true" />
-            <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{item}</span>
+        {findings.map((f) => (
+          <div key={f.id} className="px-4 py-3" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+            <p className="text-[13px] font-semibold flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
+              <span aria-hidden="true">{f.severity === 'red' ? '🔴' : '🟡'}</span> {f.summary}
+            </p>
+            <dl className="mt-1.5 space-y-1">
+              <div className="text-[12px]">
+                <dt className="inline font-medium" style={{ color: 'var(--text-tertiary)' }}>What WorkA noticed: </dt>
+                <dd className="inline" style={{ color: 'var(--text-secondary)' }}>{f.what_noticed}</dd>
+              </div>
+              <div className="text-[12px]">
+                <dt className="inline font-medium" style={{ color: 'var(--text-tertiary)' }}>Why it matters: </dt>
+                <dd className="inline" style={{ color: 'var(--text-secondary)' }}>{f.why_it_matters}</dd>
+              </div>
+              <div className="text-[12px]">
+                <dt className="inline font-medium" style={{ color: 'var(--text-tertiary)' }}>Your action: </dt>
+                <dd className="inline" style={{ color: 'var(--text-secondary)' }}>{f.builder_action}</dd>
+              </div>
+            </dl>
           </div>
         ))}
       </div>
     </div>
+  )
+}
+
+// ─── "Check before sending" — the QA report, finally on screen ───────────────
+
+function CheckBeforeSending({ report }: { report: QAReportPayload }) {
+  const sanityFindings = report.construction_sanity_findings ?? []
+  // The exact condensed strings qa.ts folded into top_risks/review_items for
+  // each construction-sanity finding — filtered back out here so the
+  // structured checklist above is the only place they render.
+  const sanityLines = new Set(sanityFindings.map((f) => `${f.what_noticed} ${f.builder_action}`))
+  const topRisks = report.top_risks.filter((r) => !sanityLines.has(r))
+  const reviewItems = report.review_items.filter((r) => !sanityLines.has(r))
+  const hasGenericContent = topRisks.length > 0 || reviewItems.length > 0
+
+  return (
+    <>
+      <ConstructionSanityChecklist findings={sanityFindings} />
+      {hasGenericContent && (
+        <div className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,152,0,0.3)' }}>
+          <div className="px-4 py-2" style={{ backgroundColor: 'rgba(255,152,0,0.08)', borderBottom: '1px solid rgba(255,152,0,0.2)' }}>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--status-amber)' }}>
+              Check before sending
+            </h3>
+            <p className="text-[11px] mt-0.5" style={{ color: 'var(--status-amber)' }}>
+              WorkA reviewed this estimate — these are the things only you can confirm.
+            </p>
+          </div>
+          <div style={{ backgroundColor: 'var(--bg-surface)' }}>
+            {topRisks.map((risk, i) => (
+              <div key={`risk-${i}`} className="flex items-start gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+                <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: 'var(--status-red)' }} aria-hidden="true" />
+                <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{risk}</span>
+              </div>
+            ))}
+            {reviewItems.map((item, i) => (
+              <div key={`review-${i}`} className="flex items-start gap-2 px-4 py-2" style={{ borderBottom: '1px solid var(--bg-border)' }}>
+                <span className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: 'var(--status-amber)' }} aria-hidden="true" />
+                <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>{item}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

@@ -12,8 +12,9 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { TRADE_CATEGORIES } from '../trade-taxonomy.ts'
 import type { QAReport } from '../types/database.types.ts'
 import { pairSupersededFacts, type FactRow, findMissingTrades } from '../../supabase/functions/smooth-responder/pipeline-logic.ts'
-import { isSilentlyUnpriced } from './readiness.ts'
+import { isSilentlyUnpriced, getUnresolvedConservativeAssumptions } from './readiness.ts'
 import { applyMargin, calculateClientPrice } from '../pricing.ts'
+import { evaluateConstructionSanity, type ConstructionSanityFinding } from './construction-sanity.ts'
 
 const UNIT_SANITY_MAX: Record<string, number> = {
   m2: 2000,
@@ -75,7 +76,7 @@ export async function runQualityAssurance(
     // qa.ts-specific enrichment.
     const { data: scopeRows } = await supabase
       .from('scope_items')
-      .select('trade_category_id, included_scope')
+      .select('trade_category_id, included_scope, dependencies, assumptions')
       .eq('job_id', jobId)
 
     const missingTrades = findMissingTrades(
@@ -98,6 +99,38 @@ export async function runQualityAssurance(
       }
       const names = missingTradeDetails.map((d) => d.trade_name)
       recommendedActions.push(`Review ${names.join(', ')} — scope reasoning expected line items here and none were generated. This is a generation gap, not a missing-scope gap.`)
+    }
+
+    // ── Construction sanity — cross-item consistency and scope-completeness
+    // checks (lib/estimating/construction-sanity.ts). Distinct from every
+    // other check in this file: everything else here is per-item or a
+    // simple aggregate; this is the only place that reasons ACROSS line
+    // items (paint area vs. cladding area, framing vs. footprint) or against
+    // Stage 3's own scope text (kitchen/bathroom completeness, extension →
+    // structural dependency). Findings are folded into the same top_risks/
+    // review_items arrays by severity (red → top_risks, amber →
+    // review_items) so the existing send-gate/readiness plumbing keeps
+    // working unchanged, and are ALSO kept structured on the report
+    // (construction_sanity_findings) so QuoteView can render the full
+    // What WorkA noticed / Why it matters / Your action breakdown rather
+    // than just the summary line.
+    const constructionSanityFindings: ConstructionSanityFinding[] = evaluateConstructionSanity({
+      lineItems: lineItems.map((i) => ({
+        trade_category_id: i.trade_category_id,
+        description: i.description,
+        quantity: i.quantity,
+        unit: i.unit,
+        assumption_status: i.assumption_status,
+      })),
+      scopeItems: (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null; dependencies: string[] | null; assumptions: string[] | null }>,
+    })
+    for (const finding of constructionSanityFindings) {
+      const line = `${finding.what_noticed} ${finding.builder_action}`
+      if (finding.severity === 'red') topRisks.push(line)
+      else reviewItems.push(line)
+    }
+    if (constructionSanityFindings.length > 0) {
+      recommendedActions.push('Review the construction sanity findings below before treating this scope as complete.')
     }
 
     // ── Duplicate descriptions within the same trade ──
@@ -328,8 +361,10 @@ export async function runQualityAssurance(
       excluded?: string[]
       failed?: string[]
     } | null
+    let silentDocumentCount = 0
     if (contribution) {
       const silentDocs = (contribution.documents ?? []).filter((d) => d.facts_used === 0)
+      silentDocumentCount = silentDocs.length
       for (const d of silentDocs.slice(0, 5)) {
         topRisks.push(`Nothing usable could be read from "${d.name}" — whatever it covers is NOT in this estimate. Check that document's scope by hand.`)
       }
@@ -346,6 +381,30 @@ export async function runQualityAssurance(
       recommendedActions.push('No material risks detected — this estimate is ready for review.')
     }
 
+    // ── Scope confidence — "is the scope right", independent of "is the
+    // price right" (quotes.confidence_score, computed by computeQuoteTotals
+    // in lib/pricing.ts). Weakest-link (subtractive penalties from 100), the
+    // same philosophy computeQuoteTotals already uses for pricing confidence
+    // — one real problem must not be diluted by averaging it against
+    // unrelated good signals. Penalty weights are a first-pass calibration,
+    // documented as such (migration 085) — meant to be tuned once real
+    // project outcomes exist to check them against, not treated as exact.
+    const { data: unresolvedConservativeRows } = await getUnresolvedConservativeAssumptions(supabase, quoteId)
+    const unresolvedConservativeCount = unresolvedConservativeRows?.length ?? 0
+    const redFindingCount = constructionSanityFindings.filter((f) => f.severity === 'red').length
+    const amberFindingCount = constructionSanityFindings.filter((f) => f.severity === 'amber').length
+    const scopeConfidence = Math.max(0, Math.min(100,
+      100
+      - 15 * Math.min(missingTrades.length, 4)
+      - 10 * Math.min(unresolvedConservativeCount, 4)
+      - 8 * Math.min(redFindingCount, 4)
+      - 4 * Math.min(amberFindingCount, 4)
+      - 10 * Math.min(silentDocumentCount, 3)
+    ))
+    const overallEstimateConfidence = overallConfidence !== null
+      ? Math.min(overallConfidence, scopeConfidence)
+      : scopeConfidence
+
     const report: QAReport = {
       top_risks: topRisks.slice(0, 5),
       review_items: reviewItems.slice(0, 10),
@@ -360,16 +419,24 @@ export async function runQualityAssurance(
       allowance_count: allowanceCount,
       allowance_value: allowanceValue,
       trade_recovery: tradeRecovery,
+      construction_sanity_findings: constructionSanityFindings,
     }
 
     await supabase
       .from('quotes')
-      .update({ qa_report: report, overall_confidence: overallConfidence })
+      .update({
+        qa_report: report,
+        overall_confidence: overallConfidence,
+        scope_confidence: scopeConfidence,
+        overall_estimate_confidence: overallEstimateConfidence,
+      })
       .eq('id', quoteId)
 
     console.log(JSON.stringify({
       event: 'run_quality_assurance', quote_id: quoteId, job_id: jobId,
       item_count: lineItems.length, missing_trade_count: missingTrades.length,
+      construction_sanity_finding_count: constructionSanityFindings.length,
+      scope_confidence: scopeConfidence, overall_estimate_confidence: overallEstimateConfidence,
       duration_ms: Date.now() - startedAt,
     }))
 

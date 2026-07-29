@@ -1,0 +1,7 @@
+-- Rollback for 085_estimate_qa_confidence_split.sql
+
+ALTER TABLE quotes
+  DROP COLUMN IF EXISTS overall_estimate_confidence,
+  DROP COLUMN IF EXISTS scope_confidence;
+
+NOTIFY pgrst, 'reload schema';
