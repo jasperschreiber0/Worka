@@ -302,8 +302,17 @@ export interface QuoteLineItem {
 /** Migration 072 replaced the placeholder 'cost_rates' value (added in
  *  migration 071 but never actually written by any code) with two more
  *  precise values, and added category_rate/ai_measured_rate. */
+/** Migration TBD (pricing production hardening) added 'document_selection' —
+ *  a builder's own document-confirmed named-product/schedule price, Tier 0
+ *  of the pricing hierarchy, outranking every value below it. Distinct from
+ *  'document', which is reserved for a source document that is itself a
+ *  priced contractor BOQ/quote (document_rate/document_total on the Stage 6
+ *  extraction) — 'document_selection' covers a client selections/FF&E
+ *  schedule's confirmed figure instead, recovered from an already-extracted
+ *  project_facts.value string (see lib/pricing.ts's extractSelectionPrice/
+ *  matchDocumentSelection). */
 export type PricingSource =
-  | 'document' | 'cost_rates_exact' | 'cost_rates_normalized' | 'category_rate'
+  | 'document_selection' | 'document' | 'cost_rates_exact' | 'cost_rates_normalized' | 'category_rate'
   | 'builder_rate' | 'network_rate' | 'ai_measured_rate' | 'ai_allowance' | 'manual' | 'unresolved'
 
 export interface CostRate {
@@ -317,6 +326,15 @@ export interface CostRate {
   state: AustralianState | null
   is_default: boolean
   created_at: string
+  /** Migration 087 — provenance columns for future rate-library additions
+   *  (e.g. the pool/lift/HVAC/windows/skylights/solar-PV/technology/
+   *  professional-fees coverage identified in the pricing coverage audit).
+   *  Nullable — not backfilled with invented values for existing seed rows
+   *  beyond `source`, which is set to a plain, honest 'platform_seed_2025'
+   *  label rather than left null. */
+  source: string | null
+  confidence: number | null
+  applicability: string | null
 }
 
 export interface BuilderLearnedRate {

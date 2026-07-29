@@ -700,7 +700,101 @@ export function calculateClientPrice(items: SellPriceableItem[]): number {
   return round2(sum)
 }
 
-export type MeasuredPricingSource = 'cost_rates_exact' | 'cost_rates_normalized' | 'builder_rate' | 'network_rate' | 'category_rate' | 'ai_measured_rate' | 'retail_baseline' | 'unresolved'
+export type MeasuredPricingSource = 'document_selection' | 'cost_rates_exact' | 'cost_rates_normalized' | 'builder_rate' | 'network_rate' | 'category_rate' | 'ai_measured_rate' | 'retail_baseline' | 'unresolved'
+
+// ─── Document-confirmed selection pricing (Tier 0 — outranks every other
+// tier below) ───────────────────────────────────────────────────────────────
+//
+// Stage 1/2 already extracts named products from FF&E/materials/finishes
+// schedules as project_facts (category 'fixtures' | 'materials'), encoding
+// the product's price (or "$0.00 / not yet priced") directly into the
+// fact's free-text `value` — there is no structured price column, by
+// design (see the docSystemPrompt comment this mirrors). This is the one
+// place that free text is parsed back into a number, purely so a builder's
+// own confirmed selection can outrank a generic catalogue/AI guess for the
+// SAME physical item — never used to invent a price, only to recover one
+// that's already been extracted and confirmed.
+
+export interface DocumentSelectionFact {
+  fact_id: string
+  category: string
+  key: string
+  value: string
+  confidence: number | null
+  source_document_id: string | null
+  created_at: string | null
+}
+
+export interface ExtractedSelectionPrice {
+  price: number
+  raw: string
+}
+
+// A selection schedule explicitly marking a row "$0.00" or "not yet priced"
+// is evidence the item is design-intent-only (see the Stage 1/2 prompt this
+// mirrors) — that is NOT evidence the item costs nothing, and must never be
+// read as a confirmed zero price.
+const NOT_YET_PRICED_PATTERN = /\$\s?0(\.00)?\b|\bnot yet priced\b|\btbc\b|\bt\.b\.c\b/i
+
+/** Recovers a confirmed AUD figure from a project_facts.value free-text
+ *  string (e.g. `"Toto Neorest smart toilet suite, ensuite, $8,500"`), or
+ *  null if the value contains no usable price — including the explicit
+ *  "not yet priced" case above, which must fall through to the normal
+ *  pricing chain exactly like any other unpriced item. */
+export function extractSelectionPrice(value: string): ExtractedSelectionPrice | null {
+  if (!value) return null
+  if (NOT_YET_PRICED_PATTERN.test(value)) return null
+  const match = value.match(/\$\s?([\d,]+(?:\.\d{1,2})?)/)
+  if (!match) return null
+  const price = Number(match[1].replace(/,/g, ''))
+  if (!isFinite(price) || price <= 0) return null
+  return { price, raw: match[0] }
+}
+
+export interface DocumentSelectionMatch {
+  fact: DocumentSelectionFact
+  price: number
+}
+
+// Requires at least 2 shared meaningful tokens between the line item's own
+// description and the fact's key+value — a deliberately conservative bar
+// (matchLineItemKey's catalogue matching accepts a single strong token) so a
+// short, generic line item description can't accidentally claim a highly
+// specific named-product fact's price. Ties broken by whichever fact has
+// more shared tokens (a closer textual match), not by price or recency.
+const MIN_SELECTION_MATCH_TOKENS = 2
+
+export function matchDocumentSelection(
+  item: { description: string },
+  facts: DocumentSelectionFact[]
+): DocumentSelectionMatch | null {
+  const itemTokens = tokenize(item.description)
+  if (itemTokens.size === 0) return null
+  let best: DocumentSelectionMatch | null = null
+  let bestOverlap = 0
+  for (const fact of facts) {
+    if (fact.category !== 'fixtures' && fact.category !== 'materials') continue
+    const priced = extractSelectionPrice(fact.value)
+    if (!priced) continue
+    const factTokens = tokenize(`${fact.key} ${fact.value}`)
+    let overlap = 0
+    for (const t of Array.from(itemTokens)) {
+      if (factTokens.has(t)) overlap++
+    }
+    if (overlap < MIN_SELECTION_MATCH_TOKENS) continue
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap
+      best = { fact, price: priced.price }
+    }
+  }
+  return best
+}
+
+function documentSelectionBasis(match: DocumentSelectionMatch): string {
+  const dateStr = match.fact.created_at ? new Date(match.fact.created_at).toISOString().slice(0, 10) : 'unknown date'
+  const sourceStr = match.fact.source_document_id ? `source document ${match.fact.source_document_id}` : 'source document unrecorded'
+  return `Document-confirmed selection: "${match.fact.value}" (fact ${match.fact.fact_id}, ${sourceStr}, confidence ${match.fact.confidence ?? 'n/a'}%, extracted ${dateStr}).`
+}
 
 export interface PricedItemResult {
   rate: number | null
@@ -725,18 +819,31 @@ const RATE_SOURCE_TO_PRICING_SOURCE: Record<RateSource, MeasuredPricingSource> =
 /**
  * Price a batch of extracted line items via the measured-item fallback
  * chain (migration 072):
+ *   document-confirmed selection (Tier 0, migration TBD) ->
  *   exact cost_rates match -> normalized cost_rates match ->
  *   same-trade/unit category average -> AI measured-rate estimate ->
  *   unresolved
  * Returns each item with rate/total AND its pricing_source/pricing_basis/
  * confidence filled in — never throws, never invents a quantity (only ever
  * proposes a $/unit RATE for a quantity that already exists).
+ *
+ * documentSelections (optional, default none — existing callers are
+ * unaffected until they opt in): already-fetched project_facts rows
+ * (category 'fixtures'/'materials') for this job. A matching fact's price
+ * ALWAYS wins over every tier below, including an existing catalogue exact
+ * match — a builder's own confirmed selection outranks a generic rate for
+ * the same physical item, never the other way round. The matched price is
+ * treated as an already-resolved TOTAL for the line item as scoped (a
+ * schedule's printed figure is a category/item total, not a $/unit rate to
+ * multiply by quantity again) — rate is left null, mirroring how Stage 6
+ * already treats a document-priced BOQ line and an AI Allowance lump sum.
  */
 export async function priceLineItems<T extends PriceableItem>(
   supabase: SupabaseClient,
   builderId: string,
   builderState: string | null,
-  items: T[]
+  items: T[],
+  documentSelections: DocumentSelectionFact[] = []
 ): Promise<Array<Omit<T, 'confidence'> & PricedItemResult>> {
   let ctx: RateContext
   try {
@@ -752,10 +859,29 @@ export async function priceLineItems<T extends PriceableItem>(
     return Math.min(item.confidence, tierConfidence)
   }
 
+  // Tier 0: document-confirmed selection — checked first, before any unit
+  // check, since a schedule's confirmed total already stands on its own
+  // (the same reasoning Stage 6 already applies to a document-priced BOQ
+  // line or an AI Allowance lump sum). Only items WITHOUT a match fall
+  // through to Tier 1-3 below.
+  const afterDocumentSelection = items.map((item) => {
+    if (documentSelections.length === 0) return { item, docMatch: null as DocumentSelectionMatch | null }
+    return { item, docMatch: matchDocumentSelection(item, documentSelections) }
+  })
+
   // Tier 1-3: exact / normalized cost_rates + the existing 5-tier hierarchy
   // (learned/preference/supplier/platform/network), run synchronously first
   // since these are cheap DB lookups with no external call.
-  const afterCatalogue = items.map((item) => {
+  const afterCatalogue = afterDocumentSelection.map(({ item, docMatch }) => {
+    if (docMatch) {
+      return {
+        item, rate: null as number | null, total: docMatch.price,
+        pricing_source: 'document_selection' as MeasuredPricingSource,
+        pricing_basis: documentSelectionBasis(docMatch),
+        material_cost: null as number | null, labour_cost: null as number | null,
+        matched: true, _docConfidence: docMatch.fact.confidence,
+      }
+    }
     // No unit means the quantity cannot be safely priced — the builder must
     // resolve the assumption first (never invent quantities)
     if (!item.unit) {
@@ -837,7 +963,9 @@ export async function priceLineItems<T extends PriceableItem>(
 
   return final.map((r) => {
     const aiConfidence = (r as { _aiConfidence?: number | null })._aiConfidence ?? null
-    const tierConfidence = r.pricing_source === 'ai_measured_rate' ? aiConfidence
+    const docConfidence = (r as { _docConfidence?: number | null })._docConfidence ?? null
+    const tierConfidence = r.pricing_source === 'document_selection' ? (docConfidence ?? 85)
+      : r.pricing_source === 'ai_measured_rate' ? aiConfidence
       : r.pricing_source === 'category_rate' ? 55
       : r.pricing_source === 'retail_baseline' ? 50
       : r.pricing_source === 'cost_rates_normalized' ? 70
@@ -870,7 +998,7 @@ export async function priceLineItems<T extends PriceableItem>(
 // the distinction pricing_match_rate_pct exists to draw (migration 072).
 // ai_measured_rate, category_rate, ai_allowance, and manual are all
 // legitimate ways to get a price, but none of them are a confirmed rate.
-const RELIABLE_PRICING_SOURCES = new Set(['cost_rates_exact', 'cost_rates_normalized', 'document', 'builder_rate', 'network_rate'])
+const RELIABLE_PRICING_SOURCES = new Set(['document_selection', 'cost_rates_exact', 'cost_rates_normalized', 'document', 'builder_rate', 'network_rate'])
 
 export function computeQuoteTotals(
   items: Array<{
@@ -920,7 +1048,7 @@ export async function ensureQuotePriced(
   try {
     const { data: quote } = await supabase
       .from('quotes')
-      .select('id, builder_id, total_cost, margin_pct')
+      .select('id, job_id, builder_id, total_cost, margin_pct')
       .eq('id', quoteId)
       .single()
     if (!quote) return false
@@ -951,11 +1079,34 @@ export async function ensureQuotePriced(
     // because 116 AI Allowance items got re-swept and nulled here.
     const unpriced = items.filter((i) => i.total === null)
     if (unpriced.length === 0) return false
+
+    // Document-confirmed selections (Tier 0) — a builder's own already-
+    // extracted, confirmed product/schedule price always outranks a generic
+    // catalogue/AI rate for the same physical item. Best-effort: a failed
+    // fetch here must never block normal pricing, so it silently falls back
+    // to an empty list (identical to today's behaviour) rather than throwing.
+    let documentSelections: DocumentSelectionFact[] = []
+    try {
+      const { data: factRows } = await supabase
+        .from('project_facts')
+        .select('id, category, key, value, confidence, source_document_id, created_at')
+        .eq('job_id', quote.job_id)
+        .eq('superseded', false)
+        .in('category', ['fixtures', 'materials'])
+      documentSelections = (factRows ?? []).map((f: { id: string; category: string; key: string; value: string; confidence: number | null; source_document_id: string | null; created_at: string | null }) => ({
+        fact_id: f.id, category: f.category, key: f.key, value: f.value,
+        confidence: f.confidence, source_document_id: f.source_document_id, created_at: f.created_at,
+      }))
+    } catch (err) {
+      console.error('ensureQuotePriced: failed to fetch document selections (continuing without them)', err)
+    }
+
     const priced = await priceLineItems(
       supabase,
       quote.builder_id,
       builderRow?.state ?? null,
-      unpriced
+      unpriced,
+      documentSelections
     )
 
     // Batched upsert instead of one round trip per line item — quotes with

@@ -18,6 +18,7 @@
 // with data it already fetched, same integration pattern as findMissingTrades.
 
 import { TRADE_CATEGORIES } from '../trade-taxonomy.ts'
+import { matchDocumentSelection, type DocumentSelectionFact } from '../pricing.ts'
 
 export type ConstructionSanitySeverity = 'red' | 'amber'
 
@@ -27,6 +28,14 @@ export interface ConstructionSanityLineItem {
   quantity: number | null
   unit: string | null
   assumption_status: string | null
+  /** Optional — only read by the pricing-observability rules below
+   *  (documentPriceOverridden, highValueAiAllowance, tradeHasNoMarketRateCoverage).
+   *  Every other rule in this file stays pricing-agnostic, per the module
+   *  comment above; these three are a deliberate, narrow exception since
+   *  "was known evidence discarded in favour of a guess" is a construction-
+   *  estimate-integrity question, not a rate-value question. */
+  pricing_source?: string | null
+  total?: number | null
 }
 
 export interface ConstructionSanityScopeItem {
@@ -55,6 +64,14 @@ export interface ConstructionSanityContext {
    *  QA design principle that construction-sanity reasons about scope
    *  completeness, not price. */
   totalCost?: number | null
+  /** Optional — already-fetched project_facts (category 'fixtures'/
+   *  'materials') for this job, ONLY read by documentPriceOverridden below.
+   *  Lets that one rule ask "does a confirmed selection exist that this
+   *  item should have used instead of whatever it actually resolved to" —
+   *  the exact same matching lib/pricing.ts itself uses to award Tier 0
+   *  priority, run again here so a mismatch is independently observable in
+   *  QA rather than only inferred from a missing pricing_source value. */
+  documentSelections?: DocumentSelectionFact[]
 }
 
 export interface ConstructionSanityFinding {
@@ -298,6 +315,96 @@ const lumpDecompositionOverlap: ConstructionSanityRule = {
   },
 }
 
+const NON_MARKET_PRICING_SOURCES = new Set<string | null>(['ai_measured_rate', 'ai_allowance', 'category_rate', 'unresolved', null])
+
+// RULE (pricing production hardening): a matching document-confirmed
+// selection exists (the same match lib/pricing.ts's Tier 0 uses), but the
+// item's actual pricing_source is something else. This should be rare by
+// construction — priceLineItems already gives Tier 0 first refusal — so a
+// finding here means either the item was priced before documentSelections
+// existed for this job, or the match threshold missed a real selection.
+// Either way it's exactly the "known evidence, discarded" case this whole
+// pass exists to close, so it's RED, not AMBER.
+const documentPriceOverridden: ConstructionSanityRule = {
+  id: 'document_price_overridden',
+  check(ctx) {
+    if (!ctx.documentSelections || ctx.documentSelections.length === 0) return null
+    for (const item of included(ctx)) {
+      if (item.pricing_source === 'document_selection') continue
+      const match = matchDocumentSelection(item, ctx.documentSelections)
+      if (!match) continue
+      return {
+        id: 'document_price_overridden',
+        severity: 'red',
+        summary: 'Known document price was not used',
+        what_noticed: `"${item.description}" priced via ${item.pricing_source ?? 'an unresolved fallback'}, but a matching confirmed selection exists in the source documents: "${match.fact.value}".`,
+        why_it_matters: 'A generic catalogue or AI-guessed rate should never override a price the builder\'s own documents already confirm for the same product.',
+        builder_action: `Re-price this line from the confirmed document value ($${match.price.toLocaleString('en-AU')}) instead of the current rate.`,
+      }
+    }
+    return null
+  },
+}
+
+const HIGH_VALUE_AI_THRESHOLD = 25_000
+
+// RULE: a high-value item priced entirely by an ungrounded AI guess is a
+// materially different risk than a $200 AI-priced item — flagged separately
+// from the coverage diagnostic below because this is about ONE line's own
+// value, not a whole trade's coverage.
+const highValueAiAllowance: ConstructionSanityRule = {
+  id: 'high_value_ai_allowance',
+  check(ctx) {
+    const item = included(ctx).find(
+      (i) => (i.pricing_source === 'ai_measured_rate' || i.pricing_source === 'ai_allowance') && (i.total ?? 0) > HIGH_VALUE_AI_THRESHOLD
+    )
+    if (!item) return null
+    return {
+      id: 'high_value_ai_allowance',
+      severity: 'amber',
+      summary: 'High-value item priced by AI guess',
+      what_noticed: `"${item.description}" ($${Math.round(item.total ?? 0).toLocaleString('en-AU')}) is priced entirely from an AI estimate, not a market rate or document price.`,
+      why_it_matters: 'A single ungrounded guess on a line this large has an outsized effect on the whole estimate\'s reliability.',
+      builder_action: 'Get a real supplier/subcontractor quote for this item before sending the estimate.',
+    }
+  },
+}
+
+// RULE: an entire trade's included scope is priced ONLY via non-market
+// sources (AI guess, category-average fallback, or left unresolved) — a
+// signal that the rate library has no dedicated coverage for that trade's
+// scope at all, distinct from a single mispriced line.
+const tradeHasNoMarketRateCoverage: ConstructionSanityRule = {
+  id: 'trade_has_no_market_rate_coverage',
+  check(ctx) {
+    const items = included(ctx)
+    const byTrade = new Map<number, ConstructionSanityLineItem[]>()
+    for (const item of items) {
+      if (!byTrade.has(item.trade_category_id)) byTrade.set(item.trade_category_id, [])
+      byTrade.get(item.trade_category_id)!.push(item)
+    }
+    const affected: string[] = []
+    for (const [tradeId, tradeItems] of Array.from(byTrade.entries())) {
+      const priced = tradeItems.filter((i) => i.total !== null && i.total !== undefined)
+      if (priced.length === 0) continue
+      const allNonMarket = priced.every((i) => NON_MARKET_PRICING_SOURCES.has(i.pricing_source ?? null))
+      if (allNonMarket) {
+        const tradeName = TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}`
+        affected.push(tradeName)
+      }
+    }
+    if (affected.length === 0) return null
+    return {
+      id: 'trade_has_no_market_rate_coverage',
+      severity: 'amber',
+      summary: 'Trades with no market rate coverage',
+      what_noticed: `${affected.join(', ')} ${affected.length === 1 ? 'has' : 'have'} no line item priced from a real market rate, builder rate, or document selection — every priced item in ${affected.length === 1 ? 'this trade' : 'these trades'} rests on an AI guess or category-average fallback.`,
+      why_it_matters: 'A whole trade with no dedicated rate-library coverage is a systemic gap, not an isolated mispriced line — every future project in this trade will have the same problem until coverage is added.',
+      builder_action: 'Get real quotes for this scope and consider adding a dedicated rate to the platform\'s cost rate library.',
+    }
+  },
+}
+
 const CONSTRUCTION_SANITY_RULES: ConstructionSanityRule[] = [
   paintVsCladdingArea,
   framingVsFootprint,
@@ -305,6 +412,9 @@ const CONSTRUCTION_SANITY_RULES: ConstructionSanityRule[] = [
   bathroomCompleteness,
   extensionStructuralDependency,
   lumpDecompositionOverlap,
+  documentPriceOverridden,
+  highValueAiAllowance,
+  tradeHasNoMarketRateCoverage,
 ]
 
 /**

@@ -1,0 +1,6 @@
+-- Rollback for 087_cost_rates_provenance.sql
+ALTER TABLE cost_rates
+  DROP COLUMN IF EXISTS source,
+  DROP COLUMN IF EXISTS confidence,
+  DROP COLUMN IF EXISTS applicability;
+NOTIFY pgrst, 'reload schema';

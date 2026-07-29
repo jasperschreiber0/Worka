@@ -39,6 +39,7 @@ interface QALineItem {
   is_assumption: boolean | null
   assumption_status: string | null
   margin_pct: number | null
+  pricing_source: string | null
 }
 
 export async function runQualityAssurance(
@@ -64,7 +65,7 @@ export async function runQualityAssurance(
 
     const { data: items } = await supabase
       .from('quote_line_items')
-      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, is_assumption, assumption_status, margin_pct')
+      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, is_assumption, assumption_status, margin_pct, pricing_source')
       .eq('quote_id', quoteId)
 
     const lineItems = (items ?? []) as QALineItem[]
@@ -130,6 +131,28 @@ export async function runQualityAssurance(
     // (construction_sanity_findings) so QuoteView can render the full
     // What WorkA noticed / Why it matters / Your action breakdown rather
     // than just the summary line.
+    // Document-confirmed selections for this job (category 'fixtures'/
+    // 'materials') — the same rows lib/pricing.ts's Tier 0 already matched
+    // against at pricing time, re-fetched here so documentPriceOverridden
+    // can independently confirm nothing was priced through a lower tier
+    // despite a matching confirmed selection existing. Best-effort: a failed
+    // fetch must never break the rest of QA.
+    let documentSelections: Array<{ fact_id: string; category: string; key: string; value: string; confidence: number | null; source_document_id: string | null; created_at: string | null }> = []
+    try {
+      const { data: selectionFacts } = await supabase
+        .from('project_facts')
+        .select('id, category, key, value, confidence, source_document_id, created_at')
+        .eq('job_id', jobId)
+        .eq('superseded', false)
+        .in('category', ['fixtures', 'materials'])
+      documentSelections = (selectionFacts ?? []).map((f: { id: string; category: string; key: string; value: string; confidence: number | null; source_document_id: string | null; created_at: string | null }) => ({
+        fact_id: f.id, category: f.category, key: f.key, value: f.value,
+        confidence: f.confidence, source_document_id: f.source_document_id, created_at: f.created_at,
+      }))
+    } catch (err) {
+      console.error('runQualityAssurance: failed to fetch document selections (continuing without them)', err)
+    }
+
     const constructionSanityFindings: ConstructionSanityFinding[] = evaluateConstructionSanity({
       lineItems: lineItems.map((i) => ({
         trade_category_id: i.trade_category_id,
@@ -137,8 +160,11 @@ export async function runQualityAssurance(
         quantity: i.quantity,
         unit: i.unit,
         assumption_status: i.assumption_status,
+        pricing_source: i.pricing_source,
+        total: i.total,
       })),
       scopeItems: (scopeRows ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null; dependencies: string[] | null; assumptions: string[] | null }>,
+      documentSelections,
     })
     for (const finding of constructionSanityFindings) {
       const line = `${finding.what_noticed} ${finding.builder_action}`

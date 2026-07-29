@@ -233,6 +233,100 @@ test('lump decomposition overlap: no finding when nothing else in the quote over
   assert.equal(findings.find((f) => f.id === 'lump_decomposition_overlap'), undefined)
 })
 
+test('document price overridden: flags an item priced via a lower tier despite a matching confirmed selection', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 8, description: 'Toto Neorest smart toilet suite — ensuite', quantity: 1, unit: 'each', pricing_source: 'ai_measured_rate', total: 650 }),
+    ],
+    scopeItems: [],
+    documentSelections: [
+      { fact_id: 'f1', category: 'fixtures', key: 'toilet', value: 'Toto Neorest smart toilet suite, ensuite, $8,500', confidence: 90, source_document_id: 'doc1', created_at: '2026-07-01T00:00:00Z' },
+    ],
+  })
+  const finding = findings.find((f) => f.id === 'document_price_overridden')
+  assert.ok(finding, 'expected document_price_overridden finding')
+  assert.equal(finding?.severity, 'red')
+})
+
+test('document price overridden: no finding when the item already used the document selection', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 8, description: 'Toto Neorest smart toilet suite — ensuite', quantity: 1, unit: 'each', pricing_source: 'document_selection', total: 8500 }),
+    ],
+    scopeItems: [],
+    documentSelections: [
+      { fact_id: 'f1', category: 'fixtures', key: 'toilet', value: 'Toto Neorest smart toilet suite, ensuite, $8,500', confidence: 90, source_document_id: 'doc1', created_at: '2026-07-01T00:00:00Z' },
+    ],
+  })
+  assert.equal(findings.find((f) => f.id === 'document_price_overridden'), undefined)
+})
+
+test('document price overridden: no finding when no document selections were supplied', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 8, description: 'Toto Neorest smart toilet suite — ensuite', quantity: 1, unit: 'each', pricing_source: 'ai_measured_rate', total: 650 }),
+    ],
+    scopeItems: [],
+  })
+  assert.equal(findings.find((f) => f.id === 'document_price_overridden'), undefined)
+})
+
+test('high value AI allowance: flags an item over the threshold priced by AI', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 7, description: 'Residential lift — supply and installation', quantity: 1, unit: 'each', pricing_source: 'ai_measured_rate', total: 78000 }),
+    ],
+    scopeItems: [],
+  })
+  const finding = findings.find((f) => f.id === 'high_value_ai_allowance')
+  assert.ok(finding, 'expected high_value_ai_allowance finding')
+  assert.equal(finding?.severity, 'amber')
+})
+
+test('high value AI allowance: no finding under the threshold', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 7, description: 'Residential lift — supply and installation', quantity: 1, unit: 'each', pricing_source: 'ai_measured_rate', total: 12000 }),
+    ],
+    scopeItems: [],
+  })
+  assert.equal(findings.find((f) => f.id === 'high_value_ai_allowance'), undefined)
+})
+
+test('high value AI allowance: no finding when priced from a market rate instead', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 7, description: 'Residential lift — supply and installation', quantity: 1, unit: 'each', pricing_source: 'cost_rates_exact', total: 78000 }),
+    ],
+    scopeItems: [],
+  })
+  assert.equal(findings.find((f) => f.id === 'high_value_ai_allowance'), undefined)
+})
+
+test('trade has no market rate coverage: flags a trade entirely priced via AI/category/unresolved', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 7, description: 'Residential lift — supply and installation', quantity: 1, unit: 'each', pricing_source: 'ai_measured_rate', total: 78000 }),
+      item({ trade_category_id: 7, description: 'Lift shaft internal finishes', quantity: 1, unit: 'lot', pricing_source: 'category_rate', total: 4500 }),
+    ],
+    scopeItems: [],
+  })
+  const finding = findings.find((f) => f.id === 'trade_has_no_market_rate_coverage')
+  assert.ok(finding, 'expected trade_has_no_market_rate_coverage finding')
+  assert.equal(finding?.severity, 'amber')
+})
+
+test('trade has no market rate coverage: no finding when at least one item in the trade has real coverage', () => {
+  const findings = evaluateConstructionSanity({
+    lineItems: [
+      item({ trade_category_id: 7, description: 'Residential lift — supply and installation', quantity: 1, unit: 'each', pricing_source: 'ai_measured_rate', total: 78000 }),
+      item({ trade_category_id: 7, description: 'External doors', quantity: 13, unit: 'each', pricing_source: 'cost_rates_exact', total: 6006 }),
+    ],
+    scopeItems: [],
+  })
+  assert.equal(findings.find((f) => f.id === 'trade_has_no_market_rate_coverage'), undefined)
+})
+
 test('a rule that throws does not take down evaluation of the others', () => {
   // quantity as a non-number would break naive arithmetic if a rule didn't
   // guard for it — confirms evaluateConstructionSanity's per-rule try/catch

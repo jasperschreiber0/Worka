@@ -16,6 +16,9 @@ import {
   tokenize,
   calculateSellTotal,
   calculateClientPrice,
+  extractSelectionPrice,
+  matchDocumentSelection,
+  type DocumentSelectionFact,
   type CatalogueEntry,
   type RateContext,
 } from './pricing.ts'
@@ -579,4 +582,62 @@ test('allowance_pct: excluded allowance items are removed from both numerator an
 test('allowance_pct: 0 (not NaN) when total_cost is 0 — nothing for allowances to have captured a share of', () => {
   assert.equal(computeQuoteTotals([]).allowance_pct, 0)
   assert.equal(computeQuoteTotals([{ total: null, confidence: null, assumption_status: null, pricing_source: null }]).allowance_pct, 0)
+})
+
+// ─── Document-confirmed selection pricing (Tier 0) ─────────────────────────
+
+test('extractSelectionPrice: recovers a confirmed dollar figure from free text', () => {
+  const result = extractSelectionPrice('Toto Neorest smart toilet suite, ensuite, $8,500')
+  assert.equal(result?.price, 8500)
+})
+
+test('extractSelectionPrice: "$0.00" is treated as not-yet-priced, not a confirmed zero', () => {
+  assert.equal(extractSelectionPrice('Generic pendant light, dining, $0.00'), null)
+})
+
+test('extractSelectionPrice: "not yet priced" text is treated the same as $0.00', () => {
+  assert.equal(extractSelectionPrice('Feature tile, powder room, not yet priced'), null)
+})
+
+test('extractSelectionPrice: null when the value has no dollar figure at all', () => {
+  assert.equal(extractSelectionPrice('Brodware Winslow tapware series'), null)
+})
+
+function fact(overrides: Partial<DocumentSelectionFact> = {}): DocumentSelectionFact {
+  return {
+    fact_id: 'f1', category: 'fixtures', key: 'toilet',
+    value: 'Toto Neorest smart toilet suite, ensuite, $8,500',
+    confidence: 90, source_document_id: 'doc1', created_at: '2026-07-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+test('matchDocumentSelection: matches a line item to a confirmed fact by shared description tokens', () => {
+  const match = matchDocumentSelection({ description: 'Toto Neorest smart toilet suite — ensuite' }, [fact()])
+  assert.equal(match?.price, 8500)
+})
+
+test('matchDocumentSelection: no match below the minimum shared-token bar', () => {
+  const match = matchDocumentSelection({ description: 'Toilet' }, [fact()])
+  assert.equal(match, null)
+})
+
+test('matchDocumentSelection: ignores facts outside fixtures/materials categories', () => {
+  const match = matchDocumentSelection(
+    { description: 'Toto Neorest smart toilet suite — ensuite' },
+    [fact({ category: 'rooms' })]
+  )
+  assert.equal(match, null)
+})
+
+test('matchDocumentSelection: ignores a fact with no usable price', () => {
+  const match = matchDocumentSelection(
+    { description: 'Toto Neorest smart toilet suite — ensuite' },
+    [fact({ value: 'Toto Neorest smart toilet suite, ensuite, not yet priced' })]
+  )
+  assert.equal(match, null)
+})
+
+test('matchDocumentSelection: null when no facts are supplied', () => {
+  assert.equal(matchDocumentSelection({ description: 'Toto Neorest smart toilet suite — ensuite' }, []), null)
 })
