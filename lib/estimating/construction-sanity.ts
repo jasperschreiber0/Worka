@@ -18,7 +18,7 @@
 // with data it already fetched, same integration pattern as findMissingTrades.
 
 import { TRADE_CATEGORIES } from '../trade-taxonomy.ts'
-import { matchDocumentSelection, type DocumentSelectionFact } from '../pricing.ts'
+import { assignDocumentSelections, type DocumentSelectionFact } from '../pricing.ts'
 
 export type ConstructionSanitySeverity = 'red' | 'amber'
 
@@ -329,9 +329,20 @@ const documentPriceOverridden: ConstructionSanityRule = {
   id: 'document_price_overridden',
   check(ctx) {
     if (!ctx.documentSelections || ctx.documentSelections.length === 0) return null
-    for (const item of included(ctx)) {
+    // Uses the SAME one-to-one global assignment lib/pricing.ts's Tier 0
+    // actually uses (assignDocumentSelections), not a per-item lookup —
+    // a per-item matchDocumentSelection call here would independently
+    // "find" a match for an item whose only candidate fact was already
+    // correctly claimed by a different, better-matching item (the exact
+    // failure mode a real production validation run found and fixed in
+    // pricing.ts itself), producing a false RED finding on an item that
+    // was never entitled to that price in the first place.
+    const items = included(ctx)
+    const assignment = assignDocumentSelections(items, ctx.documentSelections)
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
       if (item.pricing_source === 'document_selection') continue
-      const match = matchDocumentSelection(item, ctx.documentSelections)
+      const match = assignment.get(i)
       if (!match) continue
       return {
         id: 'document_price_overridden',
