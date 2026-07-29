@@ -82,6 +82,14 @@ export interface ResolvedRate {
   materialRate?: number
   materialSource?: string
   labourRate?: number
+  /** When the resolved row was itself last set/imported/computed (builder_
+   *  learned_rates.updated_at, builder_rate_preferences.set_at,
+   *  builder_supplier_rates.imported_at, cost_rates.created_at,
+   *  network_rate_aggregates.updated_at). Null for retail_baseline (already
+   *  carries its own captured_at via materialSource's row) and category_rate
+   *  (an in-memory average, no single source row). Observability only — a
+   *  calibration-priority signal for the builder, never used to pick a tier. */
+  rateDate?: string | null
 }
 
 // ─── Unit normalisation ───────────────────────────────────────────────────────
@@ -237,6 +245,11 @@ interface RateRow {
   rate: number
   unit: string
   sample_count?: number | null
+  /** Tier's own timestamp column (builder_learned_rates.updated_at,
+   *  builder_rate_preferences.set_at, builder_supplier_rates.imported_at) —
+   *  carried through to ResolvedRate.rateDate purely for observability
+   *  (pricing_basis' "last updated" line below), never used in matching. */
+  rate_date?: string | null
 }
 
 interface StateRateRow extends RateRow {
@@ -248,6 +261,7 @@ interface NetworkRateRow {
   line_item_key: string
   state: string | null
   rate_p50: number | null
+  updated_at?: string | null
 }
 
 interface MaterialPriceRow {
@@ -347,27 +361,39 @@ async function loadRateContext(
   const regionFilter = builderState ? `region.is.null,region.eq.${builderState}` : 'region.is.null'
 
   const [learnedRes, prefRes, supplierRes, platformRes, networkRes, retailRes, labourRes, catalogue] = await Promise.all([
-    supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count').eq('builder_id', builderId),
-    supabase.from('builder_rate_preferences').select('line_item_key, rate, unit').eq('builder_id', builderId),
-    supabase.from('builder_supplier_rates').select('line_item_key, rate, unit').eq('builder_id', builderId),
-    supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state').or(stateFilter),
-    supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50').or(stateFilter),
+    supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count, updated_at').eq('builder_id', builderId),
+    supabase.from('builder_rate_preferences').select('line_item_key, rate, unit, set_at').eq('builder_id', builderId),
+    supabase.from('builder_supplier_rates').select('line_item_key, rate, unit, imported_at').eq('builder_id', builderId),
+    supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state, created_at').or(stateFilter),
+    supabase.from('network_rate_aggregates').select('line_item_key, state, rate_p50, updated_at').or(stateFilter),
     supabase.from('market_material_prices').select('line_item_key, trade_category_id, brand, product_name, unit, unit_price, source, captured_at, region').or(regionFilter),
     supabase.from('labour_rate_benchmarks').select('trade_category_id, unit, labour_rate, region').or(regionFilter),
     loadPricingCatalogue(supabase),
   ])
 
-  const platform = (platformRes.data ?? []) as Array<StateRateRow & { description: string }>
+  // Each tier's own timestamp column has a different name (set_at/imported_at/
+  // updated_at/created_at) — normalized here, once, to the shared `rate_date`
+  // field RateRow/StateRateRow/NetworkRateRow expose, so resolveRateForKey
+  // doesn't need to know which column name belongs to which tier.
+  const learned = ((learnedRes.data ?? []) as Array<RateRow & { updated_at?: string | null }>)
+    .map((r) => ({ ...r, rate_date: r.updated_at ?? null }))
+  const preferences = ((prefRes.data ?? []) as Array<RateRow & { set_at?: string | null }>)
+    .map((r) => ({ ...r, rate_date: r.set_at ?? null }))
+  const supplier = ((supplierRes.data ?? []) as Array<RateRow & { imported_at?: string | null }>)
+    .map((r) => ({ ...r, rate_date: r.imported_at ?? null }))
+  const platform = ((platformRes.data ?? []) as Array<StateRateRow & { description: string; created_at?: string | null }>)
+    .map((r) => ({ ...r, rate_date: r.created_at ?? null }))
+  const network = ((networkRes.data ?? []) as Array<NetworkRateRow & { updated_at?: string | null }>)
   const retail = (retailRes.data ?? []) as Array<MaterialPriceRow & { brand: string | null; product_name: string }>
 
   return {
-    learned: (learnedRes.data ?? []) as RateRow[],
-    preferences: (prefRes.data ?? []) as RateRow[],
-    supplier: (supplierRes.data ?? []) as RateRow[],
+    learned,
+    preferences,
+    supplier,
     retailMaterial: retail,
     labourBenchmarks: (labourRes.data ?? []) as LabourBenchmarkRow[],
     platform,
-    network: (networkRes.data ?? []) as NetworkRateRow[],
+    network,
     catalogue,
     builderState,
   }
@@ -387,17 +413,17 @@ export function resolveRateForKey(
   const learned = ctx.learned.find(
     (r) => r.line_item_key === key && unitMatches(r.unit) && (r.sample_count ?? 1) >= MIN_LEARNED_RATE_SAMPLES
   )
-  if (learned) return { rate: learned.rate, unit: learned.unit, source: 'learned', line_item_key: key }
+  if (learned) return { rate: learned.rate, unit: learned.unit, source: 'learned', line_item_key: key, rateDate: learned.rate_date ?? null }
 
   // Tier 2: preference
   const pref = ctx.preferences.find((r) => r.line_item_key === key && unitMatches(r.unit))
-  if (pref) return { rate: pref.rate, unit: pref.unit, source: 'preference', line_item_key: key }
+  if (pref) return { rate: pref.rate, unit: pref.unit, source: 'preference', line_item_key: key, rateDate: pref.rate_date ?? null }
 
   // Tier 3: supplier (cheapest compatible rate across imported lists)
   const supplierRates = ctx.supplier.filter((r) => r.line_item_key === key && unitMatches(r.unit))
   if (supplierRates.length > 0) {
     const cheapest = supplierRates.reduce((a, b) => (b.rate < a.rate ? b : a))
-    return { rate: cheapest.rate, unit: cheapest.unit, source: 'supplier', line_item_key: key }
+    return { rate: cheapest.rate, unit: cheapest.unit, source: 'supplier', line_item_key: key, rateDate: cheapest.rate_date ?? null }
   }
 
   // Tier 3.5: retail/material baseline — a real material price is never
@@ -422,6 +448,7 @@ export function resolveRateForKey(
         materialRate: retail.unit_price,
         materialSource: retail.source,
         labourRate: labour.labour_rate,
+        rateDate: retail.captured_at ?? null,
       }
     }
   }
@@ -432,7 +459,7 @@ export function resolveRateForKey(
   const nationalRate = platformRates.find((r) => r.state === null)
   const platformRate = stateRate ?? nationalRate
   if (platformRate) {
-    return { rate: platformRate.rate, unit: platformRate.unit, source: 'platform', line_item_key: key }
+    return { rate: platformRate.rate, unit: platformRate.unit, source: 'platform', line_item_key: key, rateDate: platformRate.rate_date ?? null }
   }
 
   // Tier 5: network P50 — state-specific first, national fallback
@@ -441,7 +468,7 @@ export function resolveRateForKey(
     networkRates.find((r) => r.state !== null && r.state === ctx.builderState) ??
     networkRates.find((r) => r.state === null)
   if (networkRate && networkRate.rate_p50 !== null) {
-    return { rate: networkRate.rate_p50, unit: itemUnit ?? 'each', source: 'network', line_item_key: key }
+    return { rate: networkRate.rate_p50, unit: itemUnit ?? 'each', source: 'network', line_item_key: key, rateDate: networkRate.updated_at ?? null }
   }
 
   return null
@@ -603,6 +630,25 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
+/** Human-readable "as of" suffix for a rate's own last-updated/set/imported/
+ *  captured timestamp — observability only, appended to pricing_basis so a
+ *  builder can see how stale a resolved rate is without a new column or UI. */
+function rateDateSuffix(rateDate: string | null | undefined): string {
+  if (!rateDate) return ''
+  const d = new Date(rateDate)
+  if (isNaN(d.getTime())) return ''
+  return ` (rate set ${d.toISOString().slice(0, 10)})`
+}
+
+const PRICING_SOURCE_LABEL: Record<RateSource, string> = {
+  learned: "Builder's own learned rate from past accepted quotes",
+  preference: 'Builder rate preference (manual override)',
+  supplier: 'Imported supplier/subcontractor price list',
+  retail_baseline: 'Retail material price + labour benchmark',
+  platform: 'Platform default cost rate (industry benchmark)',
+  network: 'Anonymised network median rate across builders',
+}
+
 /**
  * Client-facing price: internal cost marked up by the builder's margin.
  * Everything a client sees (quote view, PDF, email) must use this — raw cost
@@ -731,8 +777,8 @@ export async function priceLineItems<T extends PriceableItem>(
     const rate = resolved.rate
     const total = item.quantity !== null && item.quantity > 0 ? round2(item.quantity * rate) : null
     const pricingBasis = resolved.source === 'retail_baseline'
-      ? `Material $${resolved.materialRate?.toFixed(2)}/${resolved.unit} (${resolved.materialSource}) + trade labour benchmark $${resolved.labourRate?.toFixed(2)}/${resolved.unit}.`
-      : null
+      ? `Material $${resolved.materialRate?.toFixed(2)}/${resolved.unit} (${resolved.materialSource}) + trade labour benchmark $${resolved.labourRate?.toFixed(2)}/${resolved.unit}.${rateDateSuffix(resolved.rateDate)}`
+      : `${PRICING_SOURCE_LABEL[resolved.source]}${match?.strength === 'normalized' ? ' — matched via a normalized (fuzzy) description match, not exact' : ''}.${rateDateSuffix(resolved.rateDate)}`
     const materialCost = resolved.source === 'retail_baseline' && item.quantity !== null && item.quantity > 0 && resolved.materialRate !== undefined
       ? round2(item.quantity * resolved.materialRate) : null
     const labourCost = resolved.source === 'retail_baseline' && item.quantity !== null && item.quantity > 0 && resolved.labourRate !== undefined
