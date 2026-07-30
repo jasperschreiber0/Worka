@@ -244,10 +244,28 @@ async function main() {
     //      stages to leave the primary file in a recognized terminal state.
     //      Not a hard requirement for PASS beyond "reachable and progressing"
     //      — see header comment on why content-level accuracy isn't judged here.
+    //      Also polls document_processing_batches' diagnostic columns
+    //      (stall_stage/stall_reason, stage6_failure_*, ai_failure_*) and logs
+    //      any CHANGE in them — this is the only visibility into WHY a run
+    //      doesn't converge, since cleanup below deletes the batch/file rows
+    //      unconditionally and this script's own DB access is the only path
+    //      available to inspect them (direct DB access from a normal dev
+    //      session is not always available).
     let finalIntakeStatus = null
+    let lastDiagnosticSnapshot = null
     const classificationDeadline = Date.now() + CLASSIFICATION_TIMEOUT_MS
     while (Date.now() < classificationDeadline) {
-      const { data: f } = await supabase.from('files').select('intake_status').eq('id', fileRow.id).single()
+      const { data: f } = await supabase.from('files').select('intake_status, intake_stage, intake_pct, ai_failure_classification, ai_failure_count, failure_stage, failure_reason').eq('id', fileRow.id).single()
+      const { data: b } = await supabase
+        .from('document_processing_batches')
+        .select('status, stall_stage, stall_reason, stalled_at, stall_count, scope_reasoning_completed_at, stage6_failure_classification, stage6_failure_count, quote_id')
+        .eq('id', batchRow.id)
+        .single()
+      const snapshot = JSON.stringify({ f, b })
+      if (snapshot !== lastDiagnosticSnapshot) {
+        lastDiagnosticSnapshot = snapshot
+        log('health_check_diagnostic_snapshot', { job_id: jobId, batch_id: batchRow.id, file: f, batch: b })
+      }
       if (f && ['extracted', 'needs_info', 'failed'].includes(f.intake_status)) {
         finalIntakeStatus = f.intake_status
         break
