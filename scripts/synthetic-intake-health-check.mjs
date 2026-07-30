@@ -57,7 +57,16 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !ANON_KEY) {
 const BUILDER_ID = '00000000-0000-0000-0000-0000000000fe'
 
 const EXTRACTION_TIMEOUT_MS = 90_000
-const CLASSIFICATION_TIMEOUT_MS = 240_000
+// Widened from 240_000: files.intake_status only reaches 'extracted' AFTER
+// the full pipeline (Stage 1/2 classification through Stage 6 Estimate
+// Generation + quote build — see index.ts's own comment on
+// recompute_batch_file_intake_statuses, migration 052), not just
+// classification. Stage 3 (up to 220s) + Stage 6 (up to 220s,
+// STAGE6_PER_CALL_TIMEOUT_MS) can exceed one invocation's wall-clock budget
+// on a real project, in which case the recovery cron (runs ~every minute)
+// resumes it — this budget leaves room for that resume rather than only a
+// single invocation's worth of time.
+const CLASSIFICATION_TIMEOUT_MS = 360_000
 const POLL_INTERVAL_MS = 3_000
 
 function log(event, fields = {}) {
@@ -247,6 +256,58 @@ async function main() {
     }
     result.steps.final_intake_status = finalIntakeStatus ?? 'timed_out_still_processing'
     log('health_check_classification_result', { job_id: jobId, final_intake_status: result.steps.final_intake_status })
+
+    // ── 8. If the pipeline reached 'extracted', verify the actual quote it
+    //      produced, not just that classification finished — this is what
+    //      distinguishes "the pipeline is reachable" (what this script has
+    //      always certified) from "a builder gets a usable estimate" (what
+    //      this run adds, read-only, ahead of cleanup deleting everything).
+    if (finalIntakeStatus === 'extracted') {
+      const { data: quoteRow } = await supabase
+        .from('quotes')
+        .select('id, status, total_cost, margin_pct, overall_confidence, qa_report')
+        .eq('job_id', jobId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (!quoteRow) {
+        result.steps.quote_verified = false
+        log('health_check_quote_missing', { job_id: jobId, reason: 'intake_status reached extracted but no quotes row exists for this job' })
+      } else {
+        const { data: lineItems } = await supabase
+          .from('quote_line_items')
+          .select('id, trade_category_id, rate, total, margin_pct, pricing_type')
+          .eq('quote_id', quoteRow.id)
+
+        const items = lineItems ?? []
+        const pricedItems = items.filter((i) => i.rate !== null || i.pricing_type === 'provisional_sum')
+        const tradeCategoriesCovered = new Set(items.map((i) => i.trade_category_id)).size
+        const clientPrice = items.reduce((sum, i) => {
+          if (i.total === null) return sum
+          const marginFraction = i.margin_pct ?? 0
+          return sum + i.total * (1 + marginFraction)
+        }, 0)
+
+        result.steps.quote_verified = true
+        result.quote = {
+          quote_id: quoteRow.id,
+          status: quoteRow.status,
+          total_cost: quoteRow.total_cost,
+          margin_pct: quoteRow.margin_pct,
+          overall_confidence: quoteRow.overall_confidence,
+          has_qa_report: quoteRow.qa_report !== null,
+          line_item_count: items.length,
+          priced_line_item_count: pricedItems.length,
+          trade_categories_covered: tradeCategoriesCovered,
+          computed_client_price_ex_gst: Math.round(clientPrice * 100) / 100,
+        }
+        log('health_check_quote_verified', { job_id: jobId, ...result.quote })
+      }
+    } else {
+      result.steps.quote_verified = false
+      log('health_check_quote_skipped', { job_id: jobId, reason: `final_intake_status was '${result.steps.final_intake_status}', not 'extracted'` })
+    }
 
     result.passed = true
     log('health_check_passed', result)
