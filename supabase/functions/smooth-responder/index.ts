@@ -41,7 +41,7 @@ import {
   splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
-  shouldSkipStage6Call,
+  shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
@@ -607,13 +607,14 @@ async function callTool(
   tool: any,
   maxTokens: number,
   // Override for stages whose call shape genuinely needs more room than the
-  // 150s default — currently only Scope Reasoning (see its call site). Unlike
-  // Stage 1/2, that stage has no per-file "shrink and retry smaller" lever
-  // (it reasons over the whole accumulated fact base in one call, not a
-  // batch of files), so on a fact-heavy project the identical-payload retry
-  // that follows a timeout is guaranteed to hit the same wall again — a
-  // wider ceiling is the only lever that can actually help. Still well
-  // inside Supabase's real 400s isolate wall-clock limit.
+  // 150s default — Scope Reasoning (Stage 3) and Estimate Generation (Stage
+  // 6, main call only — see their call sites). Unlike Stage 1/2, neither
+  // stage has a per-file "shrink and retry smaller" lever (Stage 3 reasons
+  // over the whole accumulated fact base per chunk; Stage 6's main call
+  // produces a full-project takeoff in one call), so on a large project the
+  // identical-payload retry that follows a timeout is guaranteed to hit the
+  // same wall again — a wider ceiling is the only lever that can actually
+  // help. Still well inside Supabase's real 400s isolate wall-clock limit.
   timeoutMs = 150_000
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
@@ -2428,8 +2429,8 @@ For each relevant trade, state what is included, what is excluded, dependencies,
 
     const estimateUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
 
-    if (!hasWallClockBudget(150_000)) {
-      await bailForWallClockBudget('generating_estimate', 150_000)
+    if (!hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)) {
+      await bailForWallClockBudget('generating_estimate', STAGE6_PER_CALL_TIMEOUT_MS)
       return
     }
 
@@ -2468,7 +2469,11 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     const estimateStartedAt = Date.now()
     let estimateResult: { line_items?: unknown[] } | null = null
     try {
-      estimateResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation', parentJobId }, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000)
+      // STAGE6_PER_CALL_TIMEOUT_MS (220s), widened from callTool's 150s
+      // default -- see that constant's own comment in pipeline-logic.ts for
+      // the production evidence (two clean application_timeout aborts at
+      // ~150002ms, including on a tiny synthetic document).
+      estimateResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation', parentJobId }, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000, STAGE6_PER_CALL_TIMEOUT_MS)
     } catch (err) {
       const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
       const errMessage = err instanceof Error ? err.message : String(err)

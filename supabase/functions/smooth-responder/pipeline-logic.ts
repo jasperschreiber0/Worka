@@ -1061,6 +1061,20 @@ export function splitTradeCategoriesIntoChunks<T>(items: T[], chunkCount: number
 // chunking exists to remove.
 export const STAGE3_PER_CALL_TIMEOUT_MS = 220_000
 
+// Stage 6 (Estimate Generation) equivalent of the widening above -- Stage 6
+// never received it originally, so its callTool call site kept using
+// callTool's 150s default. Confirmed in production: a full-project takeoff
+// call (80-250 line items across every in-scope trade, in ONE call — unlike
+// Stage 3's per-trade-chunk calls) was cleanly aborted by our own
+// AbortController at ~150002ms (classification: application_timeout),
+// reproduced twice, including on a tiny synthetic 3-sentence document — this
+// is our own configured ceiling firing, not Anthropic actually taking that
+// long on complex input. Same value and same reasoning as Stage 3's widening:
+// well inside Supabase's real ~400s isolate wall-clock limit, and Stage 6's
+// own hasWallClockBudget check (index.ts) still bails cleanly with zero spend
+// if a prior stage in the same invocation already used most of the budget.
+export const STAGE6_PER_CALL_TIMEOUT_MS = 220_000
+
 export interface Stage3ChunkPlan<T> {
   // Chunks safe to actually attempt in THIS invocation, sized at the
   // proven-safe STAGE3_DEFAULT_CHUNK_COUNT split (or fewer chunks if the
