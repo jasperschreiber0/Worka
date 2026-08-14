@@ -46,6 +46,12 @@ import crypto from 'node:crypto'
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+// Optional: when set, a detected wall-clock stall directly invokes the real
+// GET /api/cron/intake-recovery route once (see the poll loop below) instead
+// of only waiting on the external cron to fire before this script's own
+// deadline. Absent = old behavior (observe only).
+const RECOVERY_APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL
+const RECOVERY_CRON_SECRET = process.env.CRON_SECRET
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !ANON_KEY) {
   console.error(JSON.stringify({ event: 'health_check_config_error', message: 'NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and NEXT_PUBLIC_SUPABASE_ANON_KEY must all be set' }))
@@ -66,7 +72,7 @@ const EXTRACTION_TIMEOUT_MS = 90_000
 // on a real project, in which case the recovery cron (runs ~every minute)
 // resumes it — this budget leaves room for that resume rather than only a
 // single invocation's worth of time.
-const CLASSIFICATION_TIMEOUT_MS = 360_000
+const CLASSIFICATION_TIMEOUT_MS = 480_000
 const POLL_INTERVAL_MS = 3_000
 
 function log(event, fields = {}) {
@@ -253,6 +259,7 @@ async function main() {
     //      session is not always available).
     let finalIntakeStatus = null
     let lastDiagnosticSnapshot = null
+    let recoveryTriggered = false
     const classificationDeadline = Date.now() + CLASSIFICATION_TIMEOUT_MS
     while (Date.now() < classificationDeadline) {
       const { data: f } = await supabase.from('files').select('intake_status, intake_stage, intake_pct, ai_failure_classification, ai_failure_count, failure_stage, failure_reason').eq('id', fileRow.id).single()
@@ -269,6 +276,27 @@ async function main() {
       if (f && ['extracted', 'needs_info', 'failed'].includes(f.intake_status)) {
         finalIntakeStatus = f.intake_status
         break
+      }
+      // ── Diagnostic-only: a wall-clock stall (bailForWallClockBudget) is a
+      //    normal, designed-for outcome that's supposed to self-heal via the
+      //    recovery cron (GET /api/cron/intake-recovery, ~1-5 min cadence).
+      //    Calling it directly here, once, the moment a stall is observed,
+      //    tests whether that resume path actually works end-to-end in ONE
+      //    run rather than hoping an external cron fires before this script's
+      //    own deadline (and before cleanup deletes the evidence). Same route,
+      //    same auth, same idempotent RPCs the real cron uses — not a new
+      //    recovery mechanism, just calling the existing one directly.
+      if (!recoveryTriggered && b?.stall_stage && RECOVERY_APP_URL && RECOVERY_CRON_SECRET) {
+        recoveryTriggered = true
+        try {
+          const recRes = await fetch(`${RECOVERY_APP_URL.replace(/\/$/, '')}/api/cron/intake-recovery`, {
+            headers: { Authorization: `Bearer ${RECOVERY_CRON_SECRET}` },
+          })
+          const recBody = await recRes.text().catch(() => '')
+          log('health_check_recovery_triggered', { job_id: jobId, batch_id: batchRow.id, http_status: recRes.status, body: recBody.slice(0, 2000) })
+        } catch (recErr) {
+          log('health_check_recovery_trigger_failed', { job_id: jobId, batch_id: batchRow.id, error: recErr instanceof Error ? recErr.message : String(recErr) })
+        }
       }
       await sleep(POLL_INTERVAL_MS)
     }
