@@ -410,6 +410,25 @@ async function main() {
         } catch (recErr) {
           log('health_check_recovery_trigger_failed', { job_id: jobId, batch_id: batchRow.id, error: recErr instanceof Error ? recErr.message : String(recErr) })
         }
+        // ── Diagnostic-only: the recovery route's own fetch to smooth-responder
+        //    is fire-and-forget with only a network-level .catch() -- it never
+        //    checks the HTTP response status, so a real rejection (auth, bad
+        //    body, etc.) from smooth-responder would be silently invisible in
+        //    "stuck_files_retried: 1" being reported as if it worked. Calling
+        //    the exact same endpoint/body directly here, and logging the real
+        //    status + body, answers whether smooth-responder is actually
+        //    accepting (202) or rejecting the resume request.
+        try {
+          const directRes = await fetch(`${SUPABASE_URL}/functions/v1/smooth-responder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ANON_KEY}` },
+            body: JSON.stringify({ parent_job_id: batchRow.id }),
+          })
+          const directBody = await directRes.text().catch(() => '')
+          log('health_check_direct_smooth_responder_call', { job_id: jobId, batch_id: batchRow.id, http_status: directRes.status, body: directBody.slice(0, 2000) })
+        } catch (directErr) {
+          log('health_check_direct_smooth_responder_call_failed', { job_id: jobId, batch_id: batchRow.id, error: directErr instanceof Error ? directErr.message : String(directErr) })
+        }
       }
       await sleep(POLL_INTERVAL_MS)
     }

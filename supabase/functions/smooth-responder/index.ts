@@ -3122,12 +3122,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return new Response(JSON.stringify({ error: 'Unknown parent_job_id' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
+    // TEMPORARY DIAGNOSTIC (investigating a resumed/retriggered batch that
+    // never progresses past Stage 3 despite repeated recovery retriggers,
+    // stall_count/total_ai_call_attempts/quote_id all staying frozen —
+    // consistent with runPipeline throwing uncaught before touching any of
+    // those, which was previously completely invisible since this is a
+    // fire-and-forget EdgeRuntime.waitUntil background task with no caller
+    // to observe a rejection). Persists the error into the same
+    // stall_stage/stall_reason columns bailForWallClockBudget already uses
+    // (clearly prefixed so it's not confused with a genuine wall-clock
+    // stall) so the next poll surfaces it. Remove once the actual cause is
+    // found and fixed.
     EdgeRuntime.waitUntil(
       runPipeline(
         { fileId: batch.primary_file_id, jobId: batch.job_id, builderId: batch.builder_id, siblingFileIds: [], resume: false, parentJobId: batch.id },
         supabase,
         anthropic
-      )
+      ).catch(async (err) => {
+        const message = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
+        console.error('UNCAUGHT runPipeline exception (parent_job_id resume path):', message)
+        await supabase.from('document_processing_batches').update({
+          stall_stage: 'UNCAUGHT_EXCEPTION', stall_reason: message.slice(0, 2000), stalled_at: new Date().toISOString(),
+        }).eq('id', batch.id).then(() => {}, () => {})
+      })
     )
     return new Response(JSON.stringify({ status: 'started' }), { status: 202, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
