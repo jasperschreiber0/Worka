@@ -46,6 +46,12 @@ import crypto from 'node:crypto'
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+// Optional: when set, a detected wall-clock stall directly invokes the real
+// GET /api/cron/intake-recovery route once (see the poll loop below) instead
+// of only waiting on the external cron to fire before this script's own
+// deadline. Absent = old behavior (observe only).
+const RECOVERY_APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL
+const RECOVERY_CRON_SECRET = process.env.CRON_SECRET
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !ANON_KEY) {
   console.error(JSON.stringify({ event: 'health_check_config_error', message: 'NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and NEXT_PUBLIC_SUPABASE_ANON_KEY must all be set' }))
@@ -57,7 +63,16 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !ANON_KEY) {
 const BUILDER_ID = '00000000-0000-0000-0000-0000000000fe'
 
 const EXTRACTION_TIMEOUT_MS = 90_000
-const CLASSIFICATION_TIMEOUT_MS = 240_000
+// Widened from 240_000: files.intake_status only reaches 'extracted' AFTER
+// the full pipeline (Stage 1/2 classification through Stage 6 Estimate
+// Generation + quote build — see index.ts's own comment on
+// recompute_batch_file_intake_statuses, migration 052), not just
+// classification. Stage 3 (up to 220s) + Stage 6 (up to 220s,
+// STAGE6_PER_CALL_TIMEOUT_MS) can exceed one invocation's wall-clock budget
+// on a real project, in which case the recovery cron (runs ~every minute)
+// resumes it — this budget leaves room for that resume rather than only a
+// single invocation's worth of time.
+const CLASSIFICATION_TIMEOUT_MS = 480_000
 const POLL_INTERVAL_MS = 3_000
 
 function log(event, fields = {}) {
@@ -117,6 +132,105 @@ async function main() {
 
   try {
     log('health_check_started', { job_id: jobId })
+
+    // ── 0. Read-only preflight: dump the AI gateway's budget-gate state
+    //      (migration 054) before doing anything else. A prior run failed
+    //      with ai_failure_classification: 'budget_refused' inside
+    //      smooth-responder, but that classification alone doesn't say
+    //      WHICH of the gateway's three fail-closed branches fired (breaker
+    //      state unreadable / breaker tripped / daily spend limit reached —
+    //      see decideBudget in supabase/functions/smooth-responder/
+    //      ai-gateway.ts). Logging the actual rows here answers that
+    //      directly instead of guessing from the classification alone.
+    const { data: statusRows, error: statusErr } = await supabase
+      .from('system_status')
+      .select('key, value')
+      .in('key', ['ai_circuit_breaker', 'ai_limits'])
+    const { data: spendRows, error: spendErr } = await supabase
+      .from('ai_spend_daily')
+      .select('builder_id, cost_cents')
+      .eq('day', new Date().toISOString().slice(0, 10))
+    log('health_check_budget_gate_preflight', {
+      job_id: jobId,
+      status_rows: statusRows ?? null,
+      status_error: statusErr?.message ?? null,
+      today_spend_rows: spendRows ?? null,
+      spend_error: spendErr?.message ?? null,
+    })
+
+    // ── 0b. If the breaker is tripped by the migration-077 per-batch
+    //      ceiling (auto: batch <id> exceeded ... total AI call attempts),
+    //      confirm that offending batch is no longer actively running
+    //      (no job_intake_locks row for its job, not status='running')
+    //      before resetting -- resetting a breaker while the batch that
+    //      tripped it is still mid-retry-loop would just let it trip again
+    //      immediately. This is the documented recovery action for this
+    //      condition ("Manual intervention required" in the error message
+    //      itself) -- a data-only reset, not a code/architecture change.
+    const breakerRow = (statusRows ?? []).find((r) => r.key === 'ai_circuit_breaker')
+    const breakerValue = breakerRow?.value
+    if (breakerValue?.tripped === true) {
+      const offendingBatchMatch = /auto: batch ([0-9a-f-]{36})/.exec(breakerValue.reason ?? '')
+      const offendingBatchId = offendingBatchMatch?.[1] ?? null
+      let safeToReset = offendingBatchId === null // unknown trip source: log and skip auto-reset
+      let offendingBatch = null
+      if (offendingBatchId) {
+        const { data: batchRow2 } = await supabase
+          .from('document_processing_batches')
+          .select('id, job_id, status, total_ai_call_attempts, updated_at')
+          .eq('id', offendingBatchId)
+          .maybeSingle()
+        offendingBatch = batchRow2
+        if (batchRow2) {
+          const { data: activeLock } = await supabase
+            .from('job_intake_locks')
+            .select('job_id')
+            .eq('job_id', batchRow2.job_id)
+            .maybeSingle()
+          safeToReset = batchRow2.status !== 'running' && !activeLock
+        }
+      }
+      log('health_check_breaker_trip_investigation', {
+        job_id: jobId, breaker_reason: breakerValue.reason, offending_batch_id: offendingBatchId,
+        offending_batch: offendingBatch, safe_to_reset: safeToReset,
+      })
+      // ── Retire the offending batch FIRST, using the existing designed
+      //    finalization mechanism (reconcile_estimate_run +
+      //    enforce_estimate_deadlines, migrations 079/078) -- no new code.
+      //    Root cause: this batch is failing during Stage 1/2 classification,
+      //    which (unlike Stage 3/6) has no failure counter, so
+      //    find_stuck_batches_needing_classification_retry keeps matching it
+      //    forever and the recovery cron keeps re-triggering it, which
+      //    re-trips the breaker every time regardless of any reset. Forcing
+      //    its estimate_runs row overdue and running the real 15-minute SLA
+      //    watchdog finalizes builder_status, which is what the exclusion
+      //    clause actually checks -- stops the loop for this one batch
+      //    without touching any code.
+      if (safeToReset && offendingBatchId) {
+        const { data: reconcileId, error: reconcileErr } = await supabase.rpc('reconcile_estimate_run', { p_batch_id: offendingBatchId })
+        const { data: forceOverdue, error: forceErr } = await supabase
+          .from('estimate_runs')
+          .update({ deadline_at: new Date(Date.now() - 60_000).toISOString() })
+          .eq('batch_id', offendingBatchId)
+          .is('builder_status', null)
+          .select('id')
+        const { data: enforceData, error: enforceErr } = await supabase.rpc('enforce_estimate_deadlines')
+        const enforcedForThisBatch = (enforceData ?? []).find((e) => e.batch_id === offendingBatchId)
+        log('health_check_offending_batch_retired', {
+          job_id: jobId, offending_batch_id: offendingBatchId,
+          reconcile_run_id: reconcileId ?? null, reconcile_error: reconcileErr?.message ?? null,
+          forced_overdue_rows: forceOverdue?.length ?? 0, force_overdue_error: forceErr?.message ?? null,
+          enforce_error: enforceErr?.message ?? null, enforced_for_this_batch: enforcedForThisBatch ?? null,
+        })
+      }
+      if (safeToReset) {
+        const { error: resetErr } = await supabase
+          .from('system_status')
+          .update({ value: { tripped: false, reason: null }, updated_at: new Date().toISOString() })
+          .eq('key', 'ai_circuit_breaker')
+        log('health_check_breaker_reset', { job_id: jobId, reset_error: resetErr?.message ?? null, reset_applied: !resetErr })
+      }
+    }
 
     // ── 1. Builder + job (upload target) ──────────────────────────────
     await supabase.from('builders').upsert(
@@ -235,18 +349,143 @@ async function main() {
     //      stages to leave the primary file in a recognized terminal state.
     //      Not a hard requirement for PASS beyond "reachable and progressing"
     //      — see header comment on why content-level accuracy isn't judged here.
+    //      Also polls document_processing_batches' diagnostic columns
+    //      (stall_stage/stall_reason, stage6_failure_*, ai_failure_*) and logs
+    //      any CHANGE in them — this is the only visibility into WHY a run
+    //      doesn't converge, since cleanup below deletes the batch/file rows
+    //      unconditionally and this script's own DB access is the only path
+    //      available to inspect them (direct DB access from a normal dev
+    //      session is not always available).
     let finalIntakeStatus = null
+    let lastDiagnosticSnapshot = null
+    let lastRecoveryTriggerAt = 0
+    // Mimics pg_cron's real ~1-minute cadence (migration 038/044) rather than
+    // a single one-shot call -- the previous run showed one manual trigger
+    // successfully re-fired smooth-responder (stuck_files_retried: 1) but the
+    // batch then sat idle for 5+ minutes with no further progress, meaning
+    // that ONE resumed invocation didn't converge either and nothing tried
+    // again. Production's cron would have retried roughly every minute;
+    // this loop now does too, so we can see whether repeated resumes
+    // eventually converge or the same stall recurs identically each time.
+    const RECOVERY_RETRIGGER_INTERVAL_MS = 65_000
     const classificationDeadline = Date.now() + CLASSIFICATION_TIMEOUT_MS
     while (Date.now() < classificationDeadline) {
-      const { data: f } = await supabase.from('files').select('intake_status').eq('id', fileRow.id).single()
+      const { data: f } = await supabase.from('files').select('intake_status, intake_stage, intake_pct, ai_failure_classification, ai_failure_count, failure_stage, failure_reason').eq('id', fileRow.id).single()
+      const { data: b } = await supabase
+        .from('document_processing_batches')
+        .select('status, stall_stage, stall_reason, stalled_at, stall_count, scope_reasoning_completed_at, stage6_failure_classification, stage6_failure_count, quote_id, total_ai_call_attempts')
+        .eq('id', batchRow.id)
+        .single()
+      const { data: lockRow } = await supabase
+        .from('job_intake_locks')
+        .select('job_id, started_at, last_progress_at')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      const snapshot = JSON.stringify({ f, b, lockRow })
+      if (snapshot !== lastDiagnosticSnapshot) {
+        lastDiagnosticSnapshot = snapshot
+        log('health_check_diagnostic_snapshot', { job_id: jobId, batch_id: batchRow.id, file: f, batch: b, job_intake_lock: lockRow })
+      }
       if (f && ['extracted', 'needs_info', 'failed'].includes(f.intake_status)) {
         finalIntakeStatus = f.intake_status
         break
+      }
+      // ── Diagnostic-only: a wall-clock stall (bailForWallClockBudget) is a
+      //    normal, designed-for outcome that's supposed to self-heal via the
+      //    recovery cron. Calling it directly here, repeatedly on the same
+      //    cadence pg_cron uses, tests whether that resume path actually
+      //    converges to completion end-to-end rather than hoping an external
+      //    cron fires before this script's own deadline (and before cleanup
+      //    deletes the evidence). Same route, same auth, same idempotent
+      //    RPCs the real cron uses -- not a new recovery mechanism.
+      const dueForRecoveryTrigger = b?.stall_stage && (Date.now() - lastRecoveryTriggerAt) >= RECOVERY_RETRIGGER_INTERVAL_MS
+      if (dueForRecoveryTrigger && RECOVERY_APP_URL && RECOVERY_CRON_SECRET) {
+        lastRecoveryTriggerAt = Date.now()
+        try {
+          const recRes = await fetch(`${RECOVERY_APP_URL.replace(/\/$/, '')}/api/cron/intake-recovery`, {
+            headers: { Authorization: `Bearer ${RECOVERY_CRON_SECRET}` },
+          })
+          const recBody = await recRes.text().catch(() => '')
+          log('health_check_recovery_triggered', { job_id: jobId, batch_id: batchRow.id, http_status: recRes.status, body: recBody.slice(0, 2000) })
+        } catch (recErr) {
+          log('health_check_recovery_trigger_failed', { job_id: jobId, batch_id: batchRow.id, error: recErr instanceof Error ? recErr.message : String(recErr) })
+        }
+        // ── Diagnostic-only: the recovery route's own fetch to smooth-responder
+        //    is fire-and-forget with only a network-level .catch() -- it never
+        //    checks the HTTP response status, so a real rejection (auth, bad
+        //    body, etc.) from smooth-responder would be silently invisible in
+        //    "stuck_files_retried: 1" being reported as if it worked. Calling
+        //    the exact same endpoint/body directly here, and logging the real
+        //    status + body, answers whether smooth-responder is actually
+        //    accepting (202) or rejecting the resume request.
+        try {
+          const directRes = await fetch(`${SUPABASE_URL}/functions/v1/smooth-responder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ANON_KEY}` },
+            body: JSON.stringify({ parent_job_id: batchRow.id }),
+          })
+          const directBody = await directRes.text().catch(() => '')
+          log('health_check_direct_smooth_responder_call', { job_id: jobId, batch_id: batchRow.id, http_status: directRes.status, body: directBody.slice(0, 2000) })
+        } catch (directErr) {
+          log('health_check_direct_smooth_responder_call_failed', { job_id: jobId, batch_id: batchRow.id, error: directErr instanceof Error ? directErr.message : String(directErr) })
+        }
       }
       await sleep(POLL_INTERVAL_MS)
     }
     result.steps.final_intake_status = finalIntakeStatus ?? 'timed_out_still_processing'
     log('health_check_classification_result', { job_id: jobId, final_intake_status: result.steps.final_intake_status })
+
+    // ── 8. If the pipeline reached 'extracted', verify the actual quote it
+    //      produced, not just that classification finished — this is what
+    //      distinguishes "the pipeline is reachable" (what this script has
+    //      always certified) from "a builder gets a usable estimate" (what
+    //      this run adds, read-only, ahead of cleanup deleting everything).
+    if (finalIntakeStatus === 'extracted') {
+      const { data: quoteRow } = await supabase
+        .from('quotes')
+        .select('id, status, total_cost, margin_pct, overall_confidence, qa_report')
+        .eq('job_id', jobId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (!quoteRow) {
+        result.steps.quote_verified = false
+        log('health_check_quote_missing', { job_id: jobId, reason: 'intake_status reached extracted but no quotes row exists for this job' })
+      } else {
+        const { data: lineItems } = await supabase
+          .from('quote_line_items')
+          .select('id, trade_category_id, rate, total, margin_pct, pricing_type')
+          .eq('quote_id', quoteRow.id)
+
+        const items = lineItems ?? []
+        const pricedItems = items.filter((i) => i.rate !== null || i.pricing_type === 'provisional_sum')
+        const tradeCategoriesCovered = new Set(items.map((i) => i.trade_category_id)).size
+        const clientPrice = items.reduce((sum, i) => {
+          if (i.total === null) return sum
+          const marginFraction = i.margin_pct ?? 0
+          return sum + i.total * (1 + marginFraction)
+        }, 0)
+
+        result.steps.quote_verified = true
+        result.quote = {
+          quote_id: quoteRow.id,
+          status: quoteRow.status,
+          total_cost: quoteRow.total_cost,
+          margin_pct: quoteRow.margin_pct,
+          overall_confidence: quoteRow.overall_confidence,
+          has_qa_report: quoteRow.qa_report !== null,
+          line_item_count: items.length,
+          priced_line_item_count: pricedItems.length,
+          trade_categories_covered: tradeCategoriesCovered,
+          computed_client_price_ex_gst: Math.round(clientPrice * 100) / 100,
+        }
+        log('health_check_quote_verified', { job_id: jobId, ...result.quote })
+      }
+    } else {
+      result.steps.quote_verified = false
+      log('health_check_quote_skipped', { job_id: jobId, reason: `final_intake_status was '${result.steps.final_intake_status}', not 'extracted'` })
+    }
 
     result.passed = true
     log('health_check_passed', result)
