@@ -358,19 +358,33 @@ async function main() {
     //      session is not always available).
     let finalIntakeStatus = null
     let lastDiagnosticSnapshot = null
-    let recoveryTriggered = false
+    let lastRecoveryTriggerAt = 0
+    // Mimics pg_cron's real ~1-minute cadence (migration 038/044) rather than
+    // a single one-shot call -- the previous run showed one manual trigger
+    // successfully re-fired smooth-responder (stuck_files_retried: 1) but the
+    // batch then sat idle for 5+ minutes with no further progress, meaning
+    // that ONE resumed invocation didn't converge either and nothing tried
+    // again. Production's cron would have retried roughly every minute;
+    // this loop now does too, so we can see whether repeated resumes
+    // eventually converge or the same stall recurs identically each time.
+    const RECOVERY_RETRIGGER_INTERVAL_MS = 65_000
     const classificationDeadline = Date.now() + CLASSIFICATION_TIMEOUT_MS
     while (Date.now() < classificationDeadline) {
       const { data: f } = await supabase.from('files').select('intake_status, intake_stage, intake_pct, ai_failure_classification, ai_failure_count, failure_stage, failure_reason').eq('id', fileRow.id).single()
       const { data: b } = await supabase
         .from('document_processing_batches')
-        .select('status, stall_stage, stall_reason, stalled_at, stall_count, scope_reasoning_completed_at, stage6_failure_classification, stage6_failure_count, quote_id')
+        .select('status, stall_stage, stall_reason, stalled_at, stall_count, scope_reasoning_completed_at, stage6_failure_classification, stage6_failure_count, quote_id, total_ai_call_attempts')
         .eq('id', batchRow.id)
         .single()
-      const snapshot = JSON.stringify({ f, b })
+      const { data: lockRow } = await supabase
+        .from('job_intake_locks')
+        .select('job_id, started_at, last_progress_at')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      const snapshot = JSON.stringify({ f, b, lockRow })
       if (snapshot !== lastDiagnosticSnapshot) {
         lastDiagnosticSnapshot = snapshot
-        log('health_check_diagnostic_snapshot', { job_id: jobId, batch_id: batchRow.id, file: f, batch: b })
+        log('health_check_diagnostic_snapshot', { job_id: jobId, batch_id: batchRow.id, file: f, batch: b, job_intake_lock: lockRow })
       }
       if (f && ['extracted', 'needs_info', 'failed'].includes(f.intake_status)) {
         finalIntakeStatus = f.intake_status
@@ -378,15 +392,15 @@ async function main() {
       }
       // ── Diagnostic-only: a wall-clock stall (bailForWallClockBudget) is a
       //    normal, designed-for outcome that's supposed to self-heal via the
-      //    recovery cron (GET /api/cron/intake-recovery, ~1-5 min cadence).
-      //    Calling it directly here, once, the moment a stall is observed,
-      //    tests whether that resume path actually works end-to-end in ONE
-      //    run rather than hoping an external cron fires before this script's
-      //    own deadline (and before cleanup deletes the evidence). Same route,
-      //    same auth, same idempotent RPCs the real cron uses — not a new
-      //    recovery mechanism, just calling the existing one directly.
-      if (!recoveryTriggered && b?.stall_stage && RECOVERY_APP_URL && RECOVERY_CRON_SECRET) {
-        recoveryTriggered = true
+      //    recovery cron. Calling it directly here, repeatedly on the same
+      //    cadence pg_cron uses, tests whether that resume path actually
+      //    converges to completion end-to-end rather than hoping an external
+      //    cron fires before this script's own deadline (and before cleanup
+      //    deletes the evidence). Same route, same auth, same idempotent
+      //    RPCs the real cron uses -- not a new recovery mechanism.
+      const dueForRecoveryTrigger = b?.stall_stage && (Date.now() - lastRecoveryTriggerAt) >= RECOVERY_RETRIGGER_INTERVAL_MS
+      if (dueForRecoveryTrigger && RECOVERY_APP_URL && RECOVERY_CRON_SECRET) {
+        lastRecoveryTriggerAt = Date.now()
         try {
           const recRes = await fetch(`${RECOVERY_APP_URL.replace(/\/$/, '')}/api/cron/intake-recovery`, {
             headers: { Authorization: `Bearer ${RECOVERY_CRON_SECRET}` },
