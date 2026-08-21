@@ -133,6 +133,31 @@ async function main() {
   try {
     log('health_check_started', { job_id: jobId })
 
+    // ── 0. Read-only preflight: dump the AI gateway's budget-gate state
+    //      (migration 054) before doing anything else. A prior run failed
+    //      with ai_failure_classification: 'budget_refused' inside
+    //      smooth-responder, but that classification alone doesn't say
+    //      WHICH of the gateway's three fail-closed branches fired (breaker
+    //      state unreadable / breaker tripped / daily spend limit reached —
+    //      see decideBudget in supabase/functions/smooth-responder/
+    //      ai-gateway.ts). Logging the actual rows here answers that
+    //      directly instead of guessing from the classification alone.
+    const { data: statusRows, error: statusErr } = await supabase
+      .from('system_status')
+      .select('key, value')
+      .in('key', ['ai_circuit_breaker', 'ai_limits'])
+    const { data: spendRows, error: spendErr } = await supabase
+      .from('ai_spend_daily')
+      .select('builder_id, cost_cents')
+      .eq('day', new Date().toISOString().slice(0, 10))
+    log('health_check_budget_gate_preflight', {
+      job_id: jobId,
+      status_rows: statusRows ?? null,
+      status_error: statusErr?.message ?? null,
+      today_spend_rows: spendRows ?? null,
+      spend_error: spendErr?.message ?? null,
+    })
+
     // ── 1. Builder + job (upload target) ──────────────────────────────
     await supabase.from('builders').upsert(
       { id: BUILDER_ID, email: 'health-check@getworka.com', name: 'Synthetic Health Check' },
