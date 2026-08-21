@@ -194,6 +194,35 @@ async function main() {
         job_id: jobId, breaker_reason: breakerValue.reason, offending_batch_id: offendingBatchId,
         offending_batch: offendingBatch, safe_to_reset: safeToReset,
       })
+      // ── Retire the offending batch FIRST, using the existing designed
+      //    finalization mechanism (reconcile_estimate_run +
+      //    enforce_estimate_deadlines, migrations 079/078) -- no new code.
+      //    Root cause: this batch is failing during Stage 1/2 classification,
+      //    which (unlike Stage 3/6) has no failure counter, so
+      //    find_stuck_batches_needing_classification_retry keeps matching it
+      //    forever and the recovery cron keeps re-triggering it, which
+      //    re-trips the breaker every time regardless of any reset. Forcing
+      //    its estimate_runs row overdue and running the real 15-minute SLA
+      //    watchdog finalizes builder_status, which is what the exclusion
+      //    clause actually checks -- stops the loop for this one batch
+      //    without touching any code.
+      if (safeToReset && offendingBatchId) {
+        const { data: reconcileId, error: reconcileErr } = await supabase.rpc('reconcile_estimate_run', { p_batch_id: offendingBatchId })
+        const { data: forceOverdue, error: forceErr } = await supabase
+          .from('estimate_runs')
+          .update({ deadline_at: new Date(Date.now() - 60_000).toISOString() })
+          .eq('batch_id', offendingBatchId)
+          .is('builder_status', null)
+          .select('id')
+        const { data: enforceData, error: enforceErr } = await supabase.rpc('enforce_estimate_deadlines')
+        const enforcedForThisBatch = (enforceData ?? []).find((e) => e.batch_id === offendingBatchId)
+        log('health_check_offending_batch_retired', {
+          job_id: jobId, offending_batch_id: offendingBatchId,
+          reconcile_run_id: reconcileId ?? null, reconcile_error: reconcileErr?.message ?? null,
+          forced_overdue_rows: forceOverdue?.length ?? 0, force_overdue_error: forceErr?.message ?? null,
+          enforce_error: enforceErr?.message ?? null, enforced_for_this_batch: enforcedForThisBatch ?? null,
+        })
+      }
       if (safeToReset) {
         const { error: resetErr } = await supabase
           .from('system_status')
