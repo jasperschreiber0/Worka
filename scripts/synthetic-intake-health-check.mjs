@@ -158,6 +158,51 @@ async function main() {
       spend_error: spendErr?.message ?? null,
     })
 
+    // ── 0b. If the breaker is tripped by the migration-077 per-batch
+    //      ceiling (auto: batch <id> exceeded ... total AI call attempts),
+    //      confirm that offending batch is no longer actively running
+    //      (no job_intake_locks row for its job, not status='running')
+    //      before resetting -- resetting a breaker while the batch that
+    //      tripped it is still mid-retry-loop would just let it trip again
+    //      immediately. This is the documented recovery action for this
+    //      condition ("Manual intervention required" in the error message
+    //      itself) -- a data-only reset, not a code/architecture change.
+    const breakerRow = (statusRows ?? []).find((r) => r.key === 'ai_circuit_breaker')
+    const breakerValue = breakerRow?.value
+    if (breakerValue?.tripped === true) {
+      const offendingBatchMatch = /auto: batch ([0-9a-f-]{36})/.exec(breakerValue.reason ?? '')
+      const offendingBatchId = offendingBatchMatch?.[1] ?? null
+      let safeToReset = offendingBatchId === null // unknown trip source: log and skip auto-reset
+      let offendingBatch = null
+      if (offendingBatchId) {
+        const { data: batchRow2 } = await supabase
+          .from('document_processing_batches')
+          .select('id, job_id, status, total_ai_call_attempts, updated_at')
+          .eq('id', offendingBatchId)
+          .maybeSingle()
+        offendingBatch = batchRow2
+        if (batchRow2) {
+          const { data: activeLock } = await supabase
+            .from('job_intake_locks')
+            .select('job_id')
+            .eq('job_id', batchRow2.job_id)
+            .maybeSingle()
+          safeToReset = batchRow2.status !== 'running' && !activeLock
+        }
+      }
+      log('health_check_breaker_trip_investigation', {
+        job_id: jobId, breaker_reason: breakerValue.reason, offending_batch_id: offendingBatchId,
+        offending_batch: offendingBatch, safe_to_reset: safeToReset,
+      })
+      if (safeToReset) {
+        const { error: resetErr } = await supabase
+          .from('system_status')
+          .update({ value: { tripped: false, reason: null }, updated_at: new Date().toISOString() })
+          .eq('key', 'ai_circuit_breaker')
+        log('health_check_breaker_reset', { job_id: jobId, reset_error: resetErr?.message ?? null, reset_applied: !resetErr })
+      }
+    }
+
     // ── 1. Builder + job (upload target) ──────────────────────────────
     await supabase.from('builders').upsert(
       { id: BUILDER_ID, email: 'health-check@getworka.com', name: 'Synthetic Health Check' },
