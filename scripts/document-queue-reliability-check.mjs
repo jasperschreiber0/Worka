@@ -338,6 +338,61 @@ async function main() {
       log('scenario_passed', { scenario: 'complete_status_ignores_blocking_question_and_draft_quote', batch_id: batchRow.id })
     }
 
+    // ── Scenario 7: a batch whose document has a recorded Stage 1/2 AI
+    //    failure (files.ai_failure_count > 0) must never be picked up by
+    //    find_stuck_batches_needing_classification_retry again — this is
+    //    the fix for the 60ea9c63-96ba-40b5-be2c-37c01fb33f01 incident
+    //    (migration 088): Stage 3/6 both have a batch-level failure counter
+    //    this query already excludes on, but Stage 1/2's failure signal
+    //    (files.ai_failure_count, migration 042/043) lived on `files`,
+    //    which this query never joined -- so a batch that failed during
+    //    classification (before ever reaching Stage 3/6) matched this query
+    //    forever: reclaim lock, retrigger smooth-responder, fail again,
+    //    every cron tick, each retrigger a real attempted Anthropic call --
+    //    which is what drove total_ai_call_attempts past the 20-call
+    //    ceiling and tripped the GLOBAL circuit breaker, blocking every
+    //    builder's AI calls platform-wide. Also proves an UNRELATED fresh
+    //    batch (no failure recorded) is completely unaffected -- the fix is
+    //    scoped to the poisoned batch only. ─────────────────────────────────
+    {
+      const staleUpdatedAt = new Date(Date.now() - 5 * 60_000).toISOString() // past the 3-minute grace
+
+      // Poisoned batch: its document has a recorded Stage 1/2 AI failure.
+      const poisonedJobId = crypto.randomUUID()
+      createdJobIds.push(poisonedJobId)
+      const [poisonedFile] = await makeJobAndFiles(supabase, poisonedJobId, ['poisoned.pdf'])
+      const { batchRow: poisonedBatch } = await makeBatch(supabase, poisonedJobId, poisonedFile.id, [poisonedFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', poisonedBatch.id)
+      await supabase.from('document_processing_batches').update({
+        status: 'failed', classification_triggered: true, updated_at: staleUpdatedAt,
+      }).eq('id', poisonedBatch.id)
+      // Simulates what record_ai_failure (migration 043) already writes on
+      // a genuine Stage 1/2 failure -- the exact signal this fix reads.
+      await supabase.from('files').update({ ai_failure_count: 1, ai_failure_classification: 'budget_refused' }).eq('id', poisonedFile.id)
+
+      // Unrelated healthy batch: same shape, no failure recorded -- must
+      // remain eligible, proving the fix doesn't over-exclude.
+      const healthyJobId = crypto.randomUUID()
+      createdJobIds.push(healthyJobId)
+      const [healthyFile] = await makeJobAndFiles(supabase, healthyJobId, ['healthy.pdf'])
+      const { batchRow: healthyBatch } = await makeBatch(supabase, healthyJobId, healthyFile.id, [healthyFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', healthyBatch.id)
+      await supabase.from('document_processing_batches').update({
+        status: 'failed', classification_triggered: true, updated_at: staleUpdatedAt,
+      }).eq('id', healthyBatch.id)
+
+      const { data: stuckBatches, error: stuckErr } = await supabase.rpc('find_stuck_batches_needing_classification_retry')
+      if (stuckErr) throw new Error(`find_stuck_batches_needing_classification_retry failed: ${stuckErr.message}`)
+      const ids = (stuckBatches ?? []).map((b) => b.batch_id)
+      assert(!ids.includes(poisonedBatch.id), 'a batch with a Stage 1/2 AI failure recorded on its document must never be eligible for classification retry again')
+      assert(ids.includes(healthyBatch.id), 'an unrelated batch with no recorded failure must remain eligible for classification retry')
+      results.scenarios.stage12_failed_batch_excluded_healthy_batch_unaffected = true
+      log('scenario_passed', {
+        scenario: 'stage12_failed_batch_excluded_healthy_batch_unaffected',
+        poisoned_batch_id: poisonedBatch.id, healthy_batch_id: healthyBatch.id,
+      })
+    }
+
     results.passed = true
     log('queue_check_passed', results)
   } catch (err) {

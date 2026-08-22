@@ -1,0 +1,19 @@
+-- Rollback for 088_stage12_failure_recovery_exclusion.sql
+-- Restores find_stuck_batches_needing_classification_retry to its
+-- migration-078 definition (drops the files.ai_failure_count exclusion).
+CREATE OR REPLACE FUNCTION find_stuck_batches_needing_classification_retry(p_grace interval DEFAULT interval '3 minutes')
+RETURNS TABLE(batch_id uuid, job_id uuid, builder_id uuid, primary_file_id uuid) AS $$
+  SELECT b.id, b.job_id, b.builder_id, b.primary_file_id
+  FROM document_processing_batches b
+  WHERE b.status IN ('completed', 'completed_with_failures', 'failed')
+    AND b.classification_triggered = true
+    AND b.updated_at < now() - p_grace
+    AND b.stage3_failure_count = 0
+    AND b.stage6_failure_count = 0
+    AND NOT EXISTS (SELECT 1 FROM job_intake_locks l WHERE l.job_id = b.job_id)
+    AND NOT EXISTS (SELECT 1 FROM estimate_runs er WHERE er.batch_id = b.id AND er.builder_status IS NOT NULL);
+$$ LANGUAGE sql STABLE;
+
+COMMENT ON FUNCTION find_stuck_batches_needing_classification_retry IS
+  'Batches whose document-processing finished and flipped classification_triggered, but no job_intake_locks row ever appeared for the job. Excludes any batch with stage3_failure_count > 0 OR stage6_failure_count > 0 (migration 077) and any batch whose estimate_runs row already has a finalized builder_status (migration 078).';
+NOTIFY pgrst, 'reload schema';
