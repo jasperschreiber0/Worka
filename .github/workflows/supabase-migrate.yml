@@ -22,6 +22,16 @@ on:
           of being silently forced through.
         type: boolean
         default: false
+      diagnostic_only:
+        description: >-
+          Type the literal word true to ONLY run
+          supabase/verification/check_intake_recovery_scheduler.sql
+          (read-only: pg_cron job state, recent run history, Vault secret
+          NAME presence -- never values -- and intake_recovery_runs cadence)
+          and skip every other step (migration list/push, schema cache
+          reload, schema assertions). Safe to run any time.
+        type: string
+        default: 'false'
 
 concurrency:
   group: supabase-migrate
@@ -37,7 +47,14 @@ jobs:
         with:
           version: latest
 
+      - name: Check intake-recovery scheduler (read-only, diagnostic only)
+        if: ${{ inputs.diagnostic_only == 'true' }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: psql "$SUPABASE_DB_URL" -f supabase/verification/check_intake_recovery_scheduler.sql
+
       - name: List migration status
+        if: ${{ inputs.diagnostic_only != 'true' }}
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: supabase migration list --db-url "$SUPABASE_DB_URL"
@@ -53,6 +70,7 @@ jobs:
       # re-running its SQL, then retry. A genuine new-migration error (any
       # other failure) still aborts the loop instead of being papered over.
       - name: Push migrations
+        if: ${{ inputs.diagnostic_only != 'true' }}
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
@@ -82,6 +100,7 @@ jobs:
           exit 1
 
       - name: Reload PostgREST schema cache
+        if: ${{ inputs.diagnostic_only != 'true' }}
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: psql "$SUPABASE_DB_URL" -c "NOTIFY pgrst, 'reload schema';"
@@ -94,6 +113,7 @@ jobs:
       # the 008_/021/026 schema-cache incident (see CLAUDE.md) went
       # unnoticed for months. ON_ERROR_STOP is set inside the script itself.
       - name: Verify schema assertions
+        if: ${{ inputs.diagnostic_only != 'true' }}
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: psql "$SUPABASE_DB_URL" -f supabase/verification/schema_assertions.sql
@@ -103,6 +123,7 @@ jobs:
       # touched) so they can never drift out of date with the schema they
       # read from.
       - name: Apply health monitoring views
+        if: ${{ inputs.diagnostic_only != 'true' }}
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: psql "$SUPABASE_DB_URL" -f supabase/verification/health_monitoring_views.sql
