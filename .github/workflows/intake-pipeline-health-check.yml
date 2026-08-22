@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: 'false'
+      trigger_quote_pricing_qa:
+        description: "Quote ID: calls the real GET /api/quotes/[quoteId] route once, triggering its existing lazy pricing (ensureQuotePriced) + QA (runQualityAssurance) backfill for an already-completed estimate that hasn't been priced yet"
+        required: false
+        type: string
+        default: ''
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -82,8 +87,17 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/reset-circuit-breaker-if-safe.mjs
 
+      - name: Trigger quote pricing + QA backfill
+        if: ${{ inputs.trigger_quote_pricing_qa != '' }}
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          QUOTE_ID: ${{ inputs.trigger_quote_pricing_qa }}
+          BUILDER_ID: '00000000-0000-0000-0000-0000000000fc'
+        run: node scripts/trigger-quote-pricing-qa.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
