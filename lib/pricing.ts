@@ -562,6 +562,11 @@ const AI_RATE_TOOL = {
   },
 }
 
+// Caps how many AI-measured-rate candidates one resolveAiMeasuredRates call
+// covers — see the call site's own comment (priceLineItems, Tier 4) for the
+// production incident (HTTP 502 on a 220-line-item quote) this closes.
+const MAX_AI_MEASURED_RATE_CANDIDATES_PER_PASS = 40
+
 /**
  * Batches every item that reached this tier into one Claude call (mirrors
  * Stage 6's own batching philosophy — one call, not N). Routed through the
@@ -995,7 +1000,21 @@ export async function priceLineItems<T extends PriceableItem>(
       unit: r.item.unit as string, quantity: r.item.quantity,
     })
   })
-  const aiResults = await resolveAiMeasuredRates(supabase, builderId, aiCandidates)
+  // Bounded, same reasoning as LEARNED_RATE_BATCH_SIZE below: a single
+  // unbounded prompt covering every AI-measured-rate candidate at once has
+  // no ceiling on request/response size, and this call sits synchronously
+  // on ensureQuotePriced's caller (the quote GET route's lazy pricing
+  // backfill) -- a one-time large backlog (e.g. a quote priced for the
+  // first time well after Stage 6 generated it) can push a single call past
+  // the platform's request timeout, observed live as an HTTP 502
+  // "Application failed to respond" on a 220-line-item quote. Capping this
+  // tier per pass, like every other bounded loop in this codebase, trades
+  // "resolve everything in one pass" for "make bounded, guaranteed progress
+  // every pass" -- ensureQuotePriced is idempotent and re-runs on every
+  // subsequent quote read, so candidates past the cap are simply picked up
+  // by the next call, never silently dropped.
+  const boundedAiCandidates = aiCandidates.slice(0, MAX_AI_MEASURED_RATE_CANDIDATES_PER_PASS)
+  const aiResults = await resolveAiMeasuredRates(supabase, builderId, boundedAiCandidates)
 
   const final = afterCategory.map((r, index) => {
     if (r.matched) return r
