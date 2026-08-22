@@ -23,20 +23,31 @@ ORDER BY created_at DESC
 LIMIT 3;
 
 \echo '=== job_intake_locks currently held for this builder''s recent jobs ==='
-SELECT l.job_id, l.acquired_at, l.last_progress_at, now() - l.last_progress_at AS stale_for
+SELECT l.job_id, l.file_id, l.started_at, l.last_progress_at,
+       now() - l.started_at AS lock_age, now() - l.last_progress_at AS stale_for
 FROM job_intake_locks l
 JOIN jobs j ON j.id = l.job_id
 WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
-ORDER BY l.acquired_at DESC;
+ORDER BY l.started_at DESC;
 
-\echo '=== estimate_runs for this builder''s recent jobs ==='
+\echo '=== estimate_runs for this builder''s recent jobs (builder_status is the ESTIMATE_READY signal) ==='
 SELECT er.id, er.job_id, er.batch_id, er.status, er.builder_status, er.needs_review_reason,
-       er.deadline_at, er.deadline_extensions_used, er.created_at, er.completed_at
+       er.deadline_at, er.deadline_extensions_used, er.lock_held, er.stall_reason, er.failure_reason,
+       er.started_at, er.last_progress_at, er.completed_at, er.reconciled_at
 FROM estimate_runs er
 JOIN jobs j ON j.id = er.job_id
 WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
-ORDER BY er.created_at DESC
+ORDER BY er.started_at DESC
 LIMIT 3;
+
+\echo '=== estimate_run_events for the most recent run -- the actual state transition history ==='
+SELECT ere.from_status, ere.to_status, ere.detail, ere.created_at
+FROM estimate_run_events ere
+JOIN estimate_runs er ON er.id = ere.estimate_run_id
+JOIN jobs j ON j.id = er.job_id
+WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
+ORDER BY ere.created_at DESC
+LIMIT 30;
 
 \echo '=== Quote + line item count, if a quote already exists ==='
 SELECT q.id, q.job_id, q.status, q.total_cost, q.overall_confidence, (q.qa_report IS NOT NULL) AS has_qa_report,
@@ -48,10 +59,11 @@ WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
 ORDER BY q.created_at DESC
 LIMIT 3;
 
-\echo '=== intake_recovery_runs since this test started ==='
-SELECT id, created_at, duration_ms, document_jobs_reclaimed, job_locks_reclaimed,
-       stale_locks_released, abandoned_files_marked_failed, files_permanently_failed, errors
-FROM intake_recovery_runs
-WHERE created_at > now() - interval '30 minutes'
-ORDER BY created_at DESC
-LIMIT 30;
+\echo '=== files row for this builder''s recent jobs -- intake_status/failure_stage/failure_reason ==='
+SELECT f.id, f.job_id, f.intake_status, f.intake_stage, f.intake_pct, f.failure_stage, f.failure_reason,
+       f.quote_id, f.processing_batch_id, f.created_at
+FROM files f
+JOIN jobs j ON j.id = f.job_id
+WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
+ORDER BY f.created_at DESC
+LIMIT 3;
