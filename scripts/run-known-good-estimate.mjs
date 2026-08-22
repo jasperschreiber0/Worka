@@ -178,7 +178,19 @@ async function main() {
 
     while (!finalEvent && Date.now() < overallDeadline) {
       connectionCount++
-      const intakeUrl = `${APP_URL.replace(/\/$/, '')}/api/intake/${fileRow.id}?job_id=${jobId}&started_at=${startedAtMs}&last_progress_at=${lastProgressAtMs}${connectionCount > 1 ? '&resumed=1' : ''}`
+      // Deliberately NEVER sets &resumed=1 -- that flag means "the /clarify
+      // route already re-triggered the engine directly, this reconnect must
+      // only poll" (route.ts: `if (!alreadyTriggered && !alreadyProcessing)`
+      // gates the fresh-trigger/resume attempt entirely). A NORMAL SSE
+      // reconnect (EventSource auto-reconnecting to the SAME URL after
+      // Railway's edge proxy recycles the connection) never sets it either --
+      // confirmed by reading IntakeProgress.tsx: resumedParam only comes from
+      // the clarify-flow's own resumeKey state, not from reconnecting per se.
+      // Setting it here on every reconnect was the actual bug in the
+      // previous run: it silently told the server never to resume a batch
+      // that had wall-clock-stalled and released its lock, so it just sat
+      // frozen at 85% for the rest of the run instead of ever resuming.
+      const intakeUrl = `${APP_URL.replace(/\/$/, '')}/api/intake/${fileRow.id}?job_id=${jobId}&started_at=${startedAtMs}&last_progress_at=${lastProgressAtMs}`
       log('intake_route_call_started', { job_id: jobId, url: intakeUrl, connection: connectionCount })
 
       const controller = new AbortController()
