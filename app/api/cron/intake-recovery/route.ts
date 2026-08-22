@@ -92,13 +92,6 @@ interface RunSummary {
   files_permanently_failed: number
   deadlines_enforced: number
   errors: Array<{ stage: string; message: string }>
-  // TEMPORARY diagnostic trace (remove once the eligible-but-never-selected
-  // gap in step 5 is root-caused) -- exposes the raw RPC result and every
-  // per-row decision point directly in this route's own JSON response,
-  // since Railway application logs are not otherwise inspectable from this
-  // environment. Tiny (bounded by MAX_STUCK_FILES_PER_RUN), safe to leave
-  // on briefly.
-  debug_step5_trace?: unknown
 }
 
 function log(event: string, fields: Record<string, unknown> = {}) {
@@ -697,13 +690,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         if (stuckBatches.length > MAX_STUCK_FILES_PER_RUN) {
           log('recovery_stuck_files_cap_hit', { candidates: stuckBatches.length, capped_to: MAX_STUCK_FILES_PER_RUN })
         }
-        const debugTrace: Array<Record<string, unknown>> = [
-          { raw_rpc_row_count: stuckBatches.length, raw_rpc_rows: stuckBatches, to_retry_count: toRetry.length },
-        ]
 
         for (const b of toRetry) {
-          const rowTrace: Record<string, unknown> = { batch_id: b.batch_id, job_id: b.job_id, primary_file_id: b.primary_file_id, entered_loop: true }
-          debugTrace.push(rowTrace)
           // acquire_or_reclaim_job_intake_lock also guards this path — if a
           // fresh upload or a step 4 reclaim just started a run for this same
           // job, this simply fails to acquire and is skipped, never double-fires.
@@ -714,10 +702,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             p_job_id: b.job_id,
             p_file_id: b.primary_file_id,
           })
-          rowTrace.lock_attempted = true
-          rowTrace.lock_error = lockErr ? (lockErr instanceof Error ? lockErr.message : String(lockErr)) : null
-          rowTrace.lock_result = lockData ?? null
-          if (lockErr || !lockData?.[0]?.acquired) { rowTrace.outcome = 'lock_not_acquired_skip'; continue }
+          if (lockErr || !lockData?.[0]?.acquired) continue
 
           // Retry cap via the same atomic RPC as step 4 (migration 051) —
           // a batch that keeps needing a classification retry is failing
@@ -729,13 +714,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             p_max_attempts: MAX_RECOVERY_ATTEMPTS,
             p_cap_reason: `Automatic recovery retry cap (${MAX_RECOVERY_ATTEMPTS}) reached while retrying classification — processing failed to complete repeatedly and was stopped to prevent runaway retries. Manual re-upload required.`,
           })
-          rowTrace.attempt_result = attemptData ?? null
-          rowTrace.attempt_error = attemptErr ? (attemptErr instanceof Error ? attemptErr.message : String(attemptErr)) : null
           if (attemptErr) {
             const message = attemptErr instanceof Error ? attemptErr.message : String(attemptErr)
             summary.errors.push({ stage: `record_intake_recovery_attempt:${b.primary_file_id}`, message })
             log('recovery_stage_failed', { stage: 'record_intake_recovery_attempt', file_id: b.primary_file_id, error: message })
-            rowTrace.outcome = 'attempt_rpc_error_skip'
             continue
           }
           const attemptResult = attemptData?.[0]
@@ -745,7 +727,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             log('recovery_retry_cap_reached', {
               stage: 'stuck_classification_retry', job_id: b.job_id, file_id: b.primary_file_id, attempts: attemptResult.prior_attempts,
             })
-            rowTrace.outcome = 'retry_cap_reached_skip'
             continue
           }
 
@@ -793,12 +774,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             retriggerError = fetchErr instanceof Error ? fetchErr.message : String(fetchErr)
           }
 
-          rowTrace.retrigger_fetch_attempted = true
-          rowTrace.retrigger_ok = retriggerOk
-          rowTrace.retrigger_error = retriggerError
           if (retriggerOk) {
             summary.stuck_files_retried++
-            rowTrace.outcome = 'stuck_files_retried_incremented'
             log('recovery_classification_retriggered', {
               job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id,
               recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1,
@@ -806,7 +783,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
               resume_kind: tradesAlreadyDone > 0 ? 'converging_partial_progress' : 'fresh_or_unstarted',
             })
           } else {
-            rowTrace.outcome = 'retrigger_failed'
             // Deliberately NOT rolled back: the lock and the recovery-attempt
             // counter above already reflect a real attempt (they must, to
             // keep the retry cap correct across repeated failures) -- only
@@ -819,7 +795,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             })
           }
         }
-        summary.debug_step5_trace = debugTrace
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         summary.errors.push({ stage: 'find_stuck_batches_needing_classification_retry', message })

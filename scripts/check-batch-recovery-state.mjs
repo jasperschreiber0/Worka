@@ -63,6 +63,25 @@ async function main() {
       .eq('batch_id', BATCH_ID)
       .maybeSingle()
     log('estimate_run_state', { batch_id: BATCH_ID, estimate_run: run ?? null })
+
+    if (batch.quote_id) {
+      const { data: quote, error: quoteErr } = await supabase
+        .from('quotes')
+        .select('id, status, total_cost, margin_pct, overall_confidence, qa_report, document_contribution')
+        .eq('id', batch.quote_id)
+        .maybeSingle()
+      const { data: lineItems, error: liErr } = await supabase
+        .from('quote_line_items')
+        .select('trade_category_id, rate, total, pricing_type')
+        .eq('quote_id', batch.quote_id)
+      const items = lineItems ?? []
+      log('quote_state', {
+        quote_id: batch.quote_id, quote: quote ?? null, error: quoteErr?.message ?? liErr?.message ?? null,
+        line_item_count: items.length,
+        priced_line_item_count: items.filter((i) => i.rate !== null || i.pricing_type === 'provisional_sum').length,
+        trade_categories_covered: Array.from(new Set(items.map((i) => i.trade_category_id))).sort((a, b) => a - b),
+      })
+    }
   }
 
   const { data: statusRows } = await supabase
