@@ -29,10 +29,10 @@ on:
         required: false
         type: string
       run_known_good_estimate:
-        description: 'Run scripts/run-known-good-estimate.mjs (a realistic bathroom-reno brief through the real /api/intake route, including pricing/QA) instead of the trivial synthetic health check'
+        description: "Run scripts/run-known-good-estimate.mjs (a realistic bathroom-reno brief through the real /api/intake route, including pricing/QA) instead of the trivial synthetic health check -- type the literal word true to enable"
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: 'false'
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
