@@ -39,6 +39,17 @@ async function main() {
   log('batch_state', { batch, error: batchErr?.message ?? null })
 
   if (batch) {
+    const { data: files, error: filesErr } = await supabase
+      .from('files')
+      .select('id, filename, intake_status, failure_stage, failure_reason, ai_failure_classification, ai_failure_count, intake_recovery_attempts, processing_batch_id')
+      .eq('job_id', batch.job_id)
+    log('files_state', { job_id: batch.job_id, files: files ?? null, error: filesErr?.message ?? null })
+
+    const { data: docJobs, error: docJobsErr } = await supabase
+      .from('document_processing_jobs')
+      .select('id, document_id, status, attempts, error_message, locked_at, locked_by')
+      .eq('parent_job_id', BATCH_ID)
+    log('document_processing_jobs_state', { batch_id: BATCH_ID, jobs: docJobs ?? null, error: docJobsErr?.message ?? null })
     const { data: lock } = await supabase
       .from('job_intake_locks')
       .select('job_id, file_id, started_at, last_progress_at')
@@ -48,7 +59,7 @@ async function main() {
 
     const { data: run } = await supabase
       .from('estimate_runs')
-      .select('id, status, builder_status, deadline_at, completed_at, needs_review_reason, stall_reason, failure_reason, reconciled_at')
+      .select('id, status, builder_status, deadline_at, completed_at, needs_review_reason, stall_reason, failure_reason, reconciled_at, deadline_extensions_used')
       .eq('batch_id', BATCH_ID)
       .maybeSingle()
     log('estimate_run_state', { batch_id: BATCH_ID, estimate_run: run ?? null })
