@@ -61,6 +61,29 @@ async function main() {
     .single()
   log('after_state', { quote: after ?? null, error: afterErr?.message ?? null })
 
+  // Root-cause check for the ACTUAL app bug (not the probe write, which just
+  // proved the DB path works): computeQuoteTotals sums every included item's
+  // `total` via reduce -- one non-finite value (NaN/Infinity, from a
+  // malformed quantity*rate) poisons the whole sum, and JSON.stringify(NaN)
+  // silently becomes `null` on the wire, so the write "succeeds" with no
+  // error while writing null. Scan every line item's total/quantity/rate for
+  // exactly this.
+  const { data: items, error: itemsErr } = await supabase
+    .from('quote_line_items')
+    .select('id, description, quantity, rate, total, assumption_status')
+    .eq('quote_id', QUOTE_ID)
+  const suspects = (items ?? []).filter((i) => {
+    const t = i.total
+    return t !== null && (typeof t !== 'number' || !Number.isFinite(t))
+  })
+  log('line_item_total_scan', {
+    error: itemsErr?.message ?? null,
+    total_items: (items ?? []).length,
+    null_total_count: (items ?? []).filter((i) => i.total === null).length,
+    non_finite_total_count: suspects.length,
+    non_finite_examples: suspects.slice(0, 10),
+  })
+
   process.exit(0)
 }
 
