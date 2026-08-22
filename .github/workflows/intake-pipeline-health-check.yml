@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: 'false'
+      run_multitrade_known_good_estimate:
+        description: "Run scripts/run-multitrade-known-good-estimate.mjs (a full 13-trade renovation+extension brief through the real /api/intake route, purpose-built to force Stage 6 to chunk -- migration 090) -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
       reset_circuit_breaker_if_safe:
         description: "Run scripts/reset-circuit-breaker-if-safe.mjs (only resets the global AI circuit breaker if the batch that tripped it has a finalized, terminal builder_status) -- type the literal word true to enable"
         required: false
@@ -82,13 +87,22 @@ jobs:
         run: node scripts/check-batch-recovery-state.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: node scripts/run-known-good-estimate.mjs
+
+      - name: Run MULTI-TRADE known-good estimate (forces Stage 6 chunking -- migration 090)
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_multitrade_known_good_estimate == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/run-multitrade-known-good-estimate.mjs
 
       - name: Reset circuit breaker if safe
         if: ${{ inputs.reset_circuit_breaker_if_safe == 'true' }}
@@ -116,7 +130,7 @@ jobs:
         run: node scripts/probe-quote-total-cost-write.mjs
 
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
