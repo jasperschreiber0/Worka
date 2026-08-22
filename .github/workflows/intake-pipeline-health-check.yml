@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: 'false'
+      reset_circuit_breaker_if_safe:
+        description: "Run scripts/reset-circuit-breaker-if-safe.mjs (only resets the global AI circuit breaker if the batch that tripped it has a finalized, terminal builder_status) -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -62,7 +67,7 @@ jobs:
         run: node scripts/check-batch-recovery-state.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -70,8 +75,15 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: node scripts/run-known-good-estimate.mjs
 
+      - name: Reset circuit breaker if safe
+        if: ${{ inputs.reset_circuit_breaker_if_safe == 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/reset-circuit-breaker-if-safe.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
