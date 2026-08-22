@@ -161,55 +161,82 @@ async function main() {
     //    actually exercises pricing (ensureQuotePriced) and QA
     //    (runQualityAssurance), which only fire from this route, not from
     //    a direct document-worker/smooth-responder invocation. ──────────
-    const intakeUrl = `${APP_URL.replace(/\/$/, '')}/api/intake/${fileRow.id}?job_id=${jobId}`
-    log('intake_route_call_started', { job_id: jobId, url: intakeUrl })
-
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), OVERALL_TIMEOUT_MS)
+    //    The route deliberately self-closes the connection well under
+    //    Railway's edge-proxy ceiling (CONNECTION_SAFETY_MARGIN_MS, 260s)
+    //    and emits a 'reconnect' event first -- the real browser client
+    //    (IntakeProgress.tsx) has EventSource auto-reconnect to the SAME
+    //    URL (carrying started_at/last_progress_at so elapsed-time and
+    //    stuck-detection tracking survives the reconnect chain). A plain
+    //    fetch() has no auto-reconnect, so this loop replicates it
+    //    explicitly -- treating a stream that just ends (no terminal
+    //    event) as "reconnect and keep polling", not as failure.
+    const overallDeadline = Date.now() + OVERALL_TIMEOUT_MS
+    const startedAtMs = Date.now()
+    let lastProgressAtMs = startedAtMs
     let finalEvent = null
-    try {
-      const res = await fetch(intakeUrl, {
-        headers: {
-          Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-          'x-worka-builder-id': BUILDER_ID,
-          Accept: 'text/event-stream',
-        },
-        signal: controller.signal,
-      })
-      if (!res.ok || !res.body) {
-        const bodyText = await res.text().catch(() => '')
-        throw new Error(`intake route returned HTTP ${res.status}: ${bodyText.slice(0, 1000)}`)
-      }
+    let connectionCount = 0
 
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let currentEvent = null
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice('event: '.length).trim()
-          } else if (line.startsWith('data: ')) {
-            const data = JSON.parse(line.slice('data: '.length))
-            log('sse_event', { job_id: jobId, event: currentEvent, data })
-            if (currentEvent === 'complete' || currentEvent === 'needs_clarification' || currentEvent === 'error') {
-              finalEvent = { event: currentEvent, data }
+    while (!finalEvent && Date.now() < overallDeadline) {
+      connectionCount++
+      const intakeUrl = `${APP_URL.replace(/\/$/, '')}/api/intake/${fileRow.id}?job_id=${jobId}&started_at=${startedAtMs}&last_progress_at=${lastProgressAtMs}${connectionCount > 1 ? '&resumed=1' : ''}`
+      log('intake_route_call_started', { job_id: jobId, url: intakeUrl, connection: connectionCount })
+
+      const controller = new AbortController()
+      const remainingMs = overallDeadline - Date.now()
+      const timer = setTimeout(() => controller.abort(), remainingMs)
+      let streamEndedCleanly = false
+      try {
+        const res = await fetch(intakeUrl, {
+          headers: {
+            Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+            'x-worka-builder-id': BUILDER_ID,
+            Accept: 'text/event-stream',
+          },
+          signal: controller.signal,
+        })
+        if (!res.ok || !res.body) {
+          const bodyText = await res.text().catch(() => '')
+          throw new Error(`intake route returned HTTP ${res.status}: ${bodyText.slice(0, 1000)}`)
+        }
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let currentEvent = null
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) { streamEndedCleanly = true; break }
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice('event: '.length).trim()
+            } else if (line.startsWith('data: ')) {
+              const data = JSON.parse(line.slice('data: '.length))
+              log('sse_event', { job_id: jobId, event: currentEvent, data })
+              if (currentEvent === 'progress' || currentEvent === 'document_progress') {
+                lastProgressAtMs = Date.now()
+              }
+              if (currentEvent === 'complete' || currentEvent === 'needs_clarification' || currentEvent === 'error') {
+                finalEvent = { event: currentEvent, data }
+              }
             }
           }
+          if (finalEvent) break
         }
-        if (finalEvent) break
+        reader.cancel().catch(() => {})
+      } finally {
+        clearTimeout(timer)
       }
-      reader.cancel().catch(() => {})
-    } finally {
-      clearTimeout(timer)
+
+      if (!finalEvent && streamEndedCleanly) {
+        log('reconnecting', { job_id: jobId, connection: connectionCount })
+        await sleep(3_000) // matches EventSource's default retry delay
+      }
     }
 
-    if (!finalEvent) throw new Error('SSE stream ended without a complete/needs_clarification/error event')
+    if (!finalEvent) throw new Error(`SSE stream never reached a terminal event within ${OVERALL_TIMEOUT_MS}ms across ${connectionCount} connection(s)`)
     result.final_event = finalEvent
 
     if (finalEvent.event !== 'complete') {
