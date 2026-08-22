@@ -46,6 +46,9 @@ import {
   planStage3Chunks,
   STAGE3_PER_CALL_TIMEOUT_MS,
   STAGE3_DEFAULT_CHUNK_COUNT,
+  planStage6Chunks,
+  STAGE6_MAX_TRADES_PER_CHUNK,
+  STAGE6_PER_CALL_TIMEOUT_MS,
   mergeScopeReasoningResults,
   shouldSkipStage3Call,
   nextStage3FailureHistory,
@@ -1334,6 +1337,73 @@ test('planStage3Chunks: never plans a call needing more than STAGE3_PER_CALL_TIM
   // more budget must never cause fewer, bigger chunks.
   const plan = planStage3Chunks(TRADES_13, 10_000_000, 150)
   assert.equal(plan.chunksToRunNow.length, STAGE3_DEFAULT_CHUNK_COUNT)
+})
+
+// ─── planStage6Chunks: budget-aware Stage 6 (Estimate Generation) chunk planning ──
+//
+// Reuses planStage3Chunks itself (chunkThreshold=0 forces the "chunk"
+// branch unconditionally, desiredChunkCount computed from trade count /
+// STAGE6_MAX_TRADES_PER_CHUNK rather than fact count) -- these tests are
+// deliberately about Stage 6's own chunk-count/size behavior, not a
+// re-test of planStage3Chunks' budget arithmetic (already covered above).
+
+test('planStage6Chunks: no remaining trades -> nothing to do, no more after', () => {
+  const plan = planStage6Chunks([], 340_000)
+  assert.deepEqual(plan, { chunksToRunNow: [], hasMoreAfterThisInvocation: false })
+})
+
+test('planStage6Chunks: small trade count (at or under STAGE6_MAX_TRADES_PER_CHUNK) with ample budget -> single chunk, all trades, no deferral', () => {
+  const trades = Array.from({ length: STAGE6_MAX_TRADES_PER_CHUNK }, (_, i) => ({ id: i + 1 }))
+  const plan = planStage6Chunks(trades, 340_000)
+  assert.equal(plan.chunksToRunNow.length, 1)
+  assert.equal(plan.chunksToRunNow[0].length, trades.length)
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage6Chunks: 13 trades with ample budget -> ceil(13 / STAGE6_MAX_TRADES_PER_CHUNK) chunks, every trade covered exactly once, none deferred', () => {
+  const plan = planStage6Chunks(TRADES_13, 10_000_000)
+  const expectedChunkCount = Math.ceil(13 / STAGE6_MAX_TRADES_PER_CHUNK)
+  assert.equal(plan.chunksToRunNow.length, expectedChunkCount)
+  assert.equal(plan.chunksToRunNow.reduce((sum, c) => sum + c.length, 0), 13)
+  assert.equal(new Set(plan.chunksToRunNow.flat().map((t) => t.id)).size, 13)
+  assert.ok(plan.chunksToRunNow.every((c) => c.length <= STAGE6_MAX_TRADES_PER_CHUNK))
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage6Chunks: zero room for even one call -> nothing attempted this invocation, everything deferred, no wasted spend', () => {
+  const plan = planStage6Chunks(TRADES_13, STAGE6_PER_CALL_TIMEOUT_MS - 1)
+  assert.deepEqual(plan.chunksToRunNow, [])
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage6Chunks: budget fits only some of the desired chunks -> runs what fits now, defers the rest, never inflates a chunk beyond STAGE6_MAX_TRADES_PER_CHUNK', () => {
+  // Room for exactly 2 calls (13 trades / 3-per-chunk = 5 desired chunks;
+  // budget only affords 2 of them).
+  const plan = planStage6Chunks(TRADES_13, STAGE6_PER_CALL_TIMEOUT_MS * 2 + 5_000)
+  const expectedChunkCount = Math.ceil(13 / STAGE6_MAX_TRADES_PER_CHUNK)
+  assert.ok(plan.chunksToRunNow.length < expectedChunkCount, 'fewer than the full desired chunk plan runs now')
+  assert.ok(plan.chunksToRunNow.every((c) => c.length <= STAGE6_MAX_TRADES_PER_CHUNK), 'no chunk is inflated past the max trades/chunk just because budget allowed it')
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage6Chunks: resuming with only some trades remaining (prior invocation already completed + persisted the rest) -- only the remainder is planned, never the original full set', () => {
+  const remaining = TRADES_13.slice(10) // as if trades 1-10 already completed via stage6_completed_trade_ids
+  const plan = planStage6Chunks(remaining, 10_000_000)
+  assert.equal(plan.chunksToRunNow.flat().length, 3, 'only the 3 remaining trades are planned')
+  assert.equal(new Set(plan.chunksToRunNow.flat().map((t) => t.id)).size, 3)
+  assert.ok(!plan.chunksToRunNow.flat().some((t) => t.id <= 10), 'already-completed trades never reappear in the plan')
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage6Chunks: never plans a chunk larger than STAGE6_MAX_TRADES_PER_CHUNK regardless of how much budget is available', () => {
+  const plan = planStage6Chunks(TRADES_13, 10_000_000_000)
+  assert.ok(plan.chunksToRunNow.every((c) => c.length <= STAGE6_MAX_TRADES_PER_CHUNK), 'more budget must never mean bigger chunks -- the whole point of chunking is bounding a single call\'s output size')
+})
+
+test('planStage6Chunks: honors a custom maxTradesPerChunk override', () => {
+  const plan = planStage6Chunks(TRADES_13, 10_000_000, 5)
+  assert.ok(plan.chunksToRunNow.every((c) => c.length <= 5))
+  assert.equal(plan.chunksToRunNow.reduce((sum, c) => sum + c.length, 0), 13)
 })
 
 test('mergeScopeReasoningResults: concatenates disjoint per-trade scope from each chunk', () => {

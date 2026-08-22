@@ -1,0 +1,4 @@
+-- Rollback for 090_stage6_chunk_progress_persistence.sql
+-- NOT applied automatically -- rename to .sql and run manually if needed.
+
+ALTER TABLE document_processing_batches DROP COLUMN IF EXISTS stage6_completed_trade_ids;

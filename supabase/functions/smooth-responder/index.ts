@@ -41,7 +41,7 @@ import {
   splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
-  shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS,
+  shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, isTruncatedResponseError,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
@@ -2421,18 +2421,46 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       }))
     }
 
-    const scopeBlock = (scopeForEstimate ?? [])
-      .map((s: Record<string, unknown>) => `Trade ${s.trade_category_id} (${TRADE_CATEGORIES.find((t) => t.id === s.trade_category_id)?.name}): included = ${(s.included_scope as string[]).join('; ')}. excluded = ${(s.excluded_scope as string[]).join('; ')}.`)
+    const scopeRows = (scopeForEstimate ?? []) as Array<{ trade_category_id: number; included_scope: string[] | null; excluded_scope: string[] | null }>
+    const scopeBlock = scopeRows
+      .map((s) => `Trade ${s.trade_category_id} (${TRADE_CATEGORIES.find((t) => t.id === s.trade_category_id)?.name}): included = ${(s.included_scope ?? []).join('; ')}. excluded = ${(s.excluded_scope ?? []).join('; ')}.`)
       .join('\n')
 
-    const estimateSystemPrompt = `You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project facts and scope below — never invent a quantity or a material. Produce a complete takeoff across all in-scope trades (typically 80-250 line items for a full residential project — fewer for a small job, do not pad to hit a number). Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured (derived from a dimension/schedule), pc_allowance (prime cost item), or provisional_sum (scope TBD by others). If the source documents are themselves a priced estimate/BOQ, extract the printed unit rate and line total into document_rate/document_total as COST figures (exclude margin and GST) — otherwise leave them null so the platform's rate engine can price the line. When a quantity cannot be derived from anything provided, do NOT simply set manual_input_required = true and leave the line unpriced — a professional estimator does not leave scope silently uncosted. First ask: do I understand this scope well enough to propose a considered allowance? If yes, set allowance_value to your own $ estimate (with pricing_type pc_allowance or provisional_sum, lower confidence reflecting the judgment call, and pricing_basis explaining why), the same way an experienced estimator uses allowances, historical knowledge, and judgement rather than measuring everything. Only fall back to manual_input_required = true, with quantity/unit/allowance_value all null, when you genuinely cannot even estimate a reasonable range — that should be the exception, not the default outcome for anything without a clean dimension.`
+    const estimateSystemPrompt = `You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project facts and scope below — never invent a quantity or a material. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured (derived from a dimension/schedule), pc_allowance (prime cost item), or provisional_sum (scope TBD by others). If the source documents are themselves a priced estimate/BOQ, extract the printed unit rate and line total into document_rate/document_total as COST figures (exclude margin and GST) — otherwise leave them null so the platform's rate engine can price the line. When a quantity cannot be derived from anything provided, do NOT simply set manual_input_required = true and leave the line unpriced — a professional estimator does not leave scope silently uncosted. First ask: do I understand this scope well enough to propose a considered allowance? If yes, set allowance_value to your own $ estimate (with pricing_type pc_allowance or provisional_sum, lower confidence reflecting the judgment call, and pricing_basis explaining why), the same way an experienced estimator uses allowances, historical knowledge, and judgement rather than measuring everything. Only fall back to manual_input_required = true, with quantity/unit/allowance_value all null, when you genuinely cannot even estimate a reasonable range — that should be the exception, not the default outcome for anything without a clean dimension.`
 
-    const estimateUserContent = [{ type: 'text' as const, text: `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.` }]
-
-    if (!hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)) {
-      await bailForWallClockBudget('generating_estimate', STAGE6_PER_CALL_TIMEOUT_MS)
+    // ── Stage 6: budget-aware, per-trade-chunk generation (migration 090) ──
+    // Root cause this closes: Stage 6 used to ask for EVERY in-scope
+    // trade's full line-item takeoff (80-250 items) in one Claude call —
+    // the one stage in this pipeline that never got Stage 3's chunking
+    // treatment. A response that hit the 16,000-token ceiling
+    // (stop_reason: 'max_tokens') was thrown by callTool, classified
+    // 'unknown' (deliberately non-retryable), and permanently failed the
+    // whole estimate after one attempt on a genuinely large, real project.
+    // Fix, mirroring Stage 3 exactly: plan trades into small chunks
+    // (planStage6Chunks — itself a thin wrapper around planStage3Chunks,
+    // not a second scheduling system), persist each chunk's line items and
+    // a stage6_completed_trade_ids checkpoint before moving to the next
+    // chunk, and defer whatever doesn't fit this invocation's wall-clock
+    // budget to a later one (the same recovery mechanism that already
+    // resumes a wall-clock-bailed Stage 3/Stage 6 run).
+    const scopedTradeIds = new Set(
+      scopeRows.filter((s) => (s.included_scope?.length ?? 0) > 0).map((s) => s.trade_category_id)
+    )
+    if (scopedTradeIds.size === 0) {
+      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', reason: 'no scoped trades to generate items for' }))
+      await fail('Estimate generation has no in-scope trades to generate line items for')
       return
     }
+    let stage6CompletedTradeIds: number[] = []
+    if (parentJobId) {
+      const { data: stage6ProgressRow } = await supabase
+        .from('document_processing_batches')
+        .select('stage6_completed_trade_ids')
+        .eq('id', parentJobId)
+        .single()
+      stage6CompletedTradeIds = (stage6ProgressRow?.stage6_completed_trade_ids as number[] | null) ?? []
+    }
+    const remainingTrades = TRADE_CATEGORIES.filter((t) => scopedTradeIds.has(t.id) && !stage6CompletedTradeIds.includes(t.id))
 
     // Stage 6 failure escalation (migration 077, mirrors Stage 3's identical
     // shouldSkipStage3Call/record_stage3_failure pattern) — closes the gap
@@ -2440,6 +2468,9 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     // to Stage 3's circuit breaker, so a deterministic Stage 6 failure had
     // nothing stopping the recovery cron re-triggering it every ~60s
     // indefinitely (job 8d553ebe / 52 Bendio St, stage_estimate_generation).
+    // Kept as ONE breaker for the whole stage (keyed on the stable facts +
+    // scope inputs, not per-chunk) — a genuine failure on any chunk still
+    // trips it and halts the run, exactly as before chunking existed.
     const stage6InputHash = await hashAiInput([factsBlock, scopeBlock])
     let stage6History: Stage6FailureHistory = { inputHash: null, classification: null, count: 0 }
     if (parentJobId) {
@@ -2460,72 +2491,25 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       console.log(JSON.stringify({
         stage: 'generating_estimate', status: 'skipped_exhausted_retries', job_id: jobId, batch_id: parentJobId,
         prior_classification: stage6History.classification, prior_count: stage6History.count,
-        reason: 'identical Stage 6 input already failed the maximum tolerated number of times — not resending',
       }))
       await fail(`Estimate generation previously failed repeatedly with an unchanged project fact base/scope (${stage6History.classification}) — resolve the underlying issue or upload additional documents before retrying.`)
       return
     }
 
-    const estimateStartedAt = Date.now()
-    let estimateResult: { line_items?: unknown[] } | null = null
-    try {
-      // STAGE6_PER_CALL_TIMEOUT_MS (220s), widened from callTool's 150s
-      // default -- see that constant's own comment in pipeline-logic.ts for
-      // the production evidence (two clean application_timeout aborts at
-      // ~150002ms, including on a tiny synthetic document).
-      estimateResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation', parentJobId }, estimateSystemPrompt, estimateUserContent, ESTIMATE_GENERATION_TOOL, 16000, STAGE6_PER_CALL_TIMEOUT_MS)
-    } catch (err) {
-      const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
-      const errMessage = err instanceof Error ? err.message : String(err)
-      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, classification, error: errMessage }))
-      if (isBillingHaltClassification(classification)) {
-        await haltForBilling(classification, errMessage)
-        return
-      }
-      // Race-safe, atomic — mirrors record_stage3_failure exactly (migration 077).
-      if (parentJobId) {
-        try {
-          const { data: recordData, error: recordErr } = await supabase.rpc('record_stage6_failure', {
-            p_batch_id: parentJobId,
-            p_input_hash: stage6InputHash,
-            p_classification: classification,
-            p_max_occurrences: maxConsecutiveOccurrences(classification),
-          })
-          if (recordErr) throw recordErr
-          const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
-          console.log(JSON.stringify({
-            event: 'stage6_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
-            consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
-          }))
-        } catch (recordErr) {
-          console.error('record_stage6_failure RPC failed:', recordErr)
-        }
-      }
-      await fail(`Estimate generation call failed: ${errMessage}`)
+    const stage6RemainingBudgetMs = WALL_CLOCK_SAFETY_MS - (Date.now() - startedAt)
+    const stage6Plan = planStage6Chunks(remainingTrades, stage6RemainingBudgetMs)
+    if (stage6Plan.chunksToRunNow.length === 0 && stage6Plan.hasMoreAfterThisInvocation) {
+      // No room for even one chunk this invocation -- never start a call
+      // that can't finish. Zero spend; everything deferred to a later
+      // invocation with a fresh wall-clock window.
+      await bailForWallClockBudget('generating_estimate', STAGE6_PER_CALL_TIMEOUT_MS)
       return
     }
-    if (!estimateResult || !estimateResult.line_items || estimateResult.line_items.length === 0) {
-      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, reason: 'no line items returned' }))
-      await fail('Estimate generation returned no line items')
-      return
-    }
-    console.log(JSON.stringify({ stage: 'generating_estimate', status: 'processed', durationMs: Date.now() - estimateStartedAt, lineItems: estimateResult.line_items.length }))
-
-    // ── Validation gates ────────────────────────────────────────────────────
-    await setStage('validating')
-
-    // Deterministic confidence cap for any trade a conservative assumption
-    // applies to — never relies on Claude's own Stage 6 confidence to
-    // already reflect an unanswered blocking question (see
-    // capConfidenceForBlockingTrade, pipeline-logic.ts). Confidence-only:
-    // does not touch quantity, rate, or pricing_type — Stage 6 pricing
-    // itself is unchanged. AI Allowance / gate / pricing_source derivation
-    // now lives in the shared validateStage6Items (above runPipeline) so the
-    // targeted completeness recovery pass further down reuses the identical
-    // logic rather than a second, potentially-drifting copy of it.
-    const { validated, assumptionsToInsert } = validateStage6Items(estimateResult.line_items, conservativeAssumptions)
 
     // ── Stage 6/8 wiring: build the quote ───────────────────────────────────
+    // Moved BEFORE the chunk loop (was previously built once, after a
+    // single full-scope call): each chunk needs a real quote_id to persist
+    // its line items into as it completes, not just at the very end.
     await setStage('building_quote')
 
     // Incremental upload: reuse an existing draft/pending_review quote for
@@ -2566,6 +2550,206 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     {
       const { error: currentErr } = await supabase.rpc('set_current_quote', { p_job_id: jobId, p_quote_id: quoteId })
       if (currentErr) console.error('set_current_quote failed:', currentErr.message)
+    }
+
+    await setStage('validating')
+
+    // existingKeys is threaded through the whole chunk loop (and the
+    // completeness recovery pass further down) so "already exists" has one
+    // definition, kept current chunk-by-chunk — the exact mechanism that
+    // already made incremental uploads idempotent, just now also guarding
+    // against a resumed/retried Stage 6 invocation re-inserting a trade's
+    // items a prior invocation already persisted.
+    const { data: existingLineItemsForQuote } = await supabase
+      .from('quote_line_items')
+      .select('trade_category_id, description')
+      .eq('quote_id', quoteId)
+    const existingKeys = new Set(
+      (existingLineItemsForQuote ?? []).map((li: Record<string, unknown>) => `${li.trade_category_id}::${String(li.description).trim().toLowerCase()}`)
+    )
+
+    let unresolvedCount = 0
+    let stage6ItemsGeneratedThisRun = 0
+
+    // Recursive, depth-bounded by chunk size (STAGE6_MAX_TRADES_PER_CHUNK=3,
+    // so at most 2 splits to reach singleton trades — never unbounded):
+    // requirement is "do NOT increase max_tokens as the fix" — a truncated
+    // chunk is treated as evidence the CHUNK was too large, not that the
+    // token ceiling was too low, so a truncation retries the SAME 16000
+    // budget against a smaller trade subset (reusing splitBatchForRetry,
+    // the same halving primitive Stage 1/2 batch retries already use).
+    // A truncation at chunk size 1 (a single trade alone needs >16000
+    // output tokens) is left unresolved here — it falls through to the
+    // existing post-hoc findMissingTrades recovery pass below, which tries
+    // again with its own, higher, purpose-built token ladder
+    // (TRADE_RECOVERY_INITIAL_MAX_TOKENS/TRADE_RECOVERY_RETRY_MAX_TOKENS) —
+    // never resolved by simply raising the limit here.
+    const generateChunk = async (
+      tradeChunk: typeof remainingTrades,
+    ): Promise<{ items: Array<Record<string, unknown>>; failedTradeIds: number[] }> => {
+      const restrictToChunk = stage6Plan.chunksToRunNow.length > 1 || stage6CompletedTradeIds.length > 0 || tradeChunk.length < remainingTrades.length
+      const chunkUserContent = [{
+        type: 'text' as const,
+        text: restrictToChunk
+          ? `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING (full project, for context):\n${scopeBlock}\n\nGenerate line items ONLY for these trade categories in THIS call (the remaining trades are covered by a separate call — do not include them here):\n${tradeChunk.map((t) => `${t.id}. ${t.name}`).join('\n')}\n\nUse the generate_estimate tool.`
+          : `PROJECT FACTS:\n${factsBlock}\n\nSCOPE REASONING:\n${scopeBlock}\n\nUse the generate_estimate tool.`,
+      }]
+      try {
+        // STAGE6_PER_CALL_TIMEOUT_MS (220s), widened from callTool's 150s
+        // default -- see that constant's own comment in pipeline-logic.ts
+        // for the production evidence (two clean application_timeout
+        // aborts at ~150002ms, including on a tiny synthetic document).
+        const chunkResult = await callTool(
+          anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation', parentJobId },
+          estimateSystemPrompt, chunkUserContent, ESTIMATE_GENERATION_TOOL, 16000, STAGE6_PER_CALL_TIMEOUT_MS,
+        ) as { line_items?: unknown[] } | null
+        return { items: (chunkResult?.line_items ?? []) as Array<Record<string, unknown>>, failedTradeIds: [] }
+      } catch (err) {
+        if (isTruncatedResponseError(err) && tradeChunk.length > 1 && hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS * 2)) {
+          const halves = splitBatchForRetry(tradeChunk)
+          if (halves) {
+            console.log(JSON.stringify({
+              event: 'stage6_chunk_truncated_splitting', job_id: jobId, batch_id: parentJobId,
+              chunk_trade_ids: tradeChunk.map((t) => t.id), split_sizes: halves.map((h) => h.length),
+            }))
+            const [firstHalf, secondHalf] = halves
+            const a = await generateChunk(firstHalf)
+            const b = await generateChunk(secondHalf)
+            return { items: [...a.items, ...b.items], failedTradeIds: [...a.failedTradeIds, ...b.failedTradeIds] }
+          }
+        }
+        if (isTruncatedResponseError(err)) {
+          console.log(JSON.stringify({
+            event: 'stage6_chunk_truncated_unresolved', job_id: jobId, batch_id: parentJobId,
+            chunk_trade_ids: tradeChunk.map((t) => t.id),
+            reason: tradeChunk.length > 1 ? 'insufficient wall-clock budget to split and retry' : 'a single trade alone exceeded the token budget',
+          }))
+          return { items: [], failedTradeIds: tradeChunk.map((t) => t.id) }
+        }
+        throw err // genuine (non-truncation) failure — handled by the loop's own catch below
+      }
+    }
+
+    const estimateStartedAt = Date.now()
+    try {
+      for (const [chunkIndex, tradeChunk] of stage6Plan.chunksToRunNow.entries()) {
+        const { items: chunkItems, failedTradeIds } = await generateChunk(tradeChunk)
+        stage6ItemsGeneratedThisRun += chunkItems.length
+
+        if (chunkItems.length > 0) {
+          const { validated, assumptionsToInsert } = validateStage6Items(chunkItems, conservativeAssumptions)
+          const toInsert = filterNewLineItems(validated, existingKeys)
+          const lineItemInserts = buildLineItemInsertRows(toInsert, quoteId)
+          if (lineItemInserts.length > 0) {
+            // Upsert with ignoreDuplicates, not a plain insert: existingKeys
+            // only guards against rows already committed to the DB, not
+            // against two concurrent runs racing this exact insert (or the
+            // model emitting the same trade+description twice). The unique
+            // index from migration 030 makes that a no-op conflict here
+            // instead of a duplicate row — this is what makes a crash/retry
+            // between Claude completion and the checkpoint update below
+            // safe: re-running this same chunk re-upserts the identical
+            // rows rather than duplicating them.
+            const { data: insertedItemsRaw, error: insertErr } = await supabase
+              .from('quote_line_items')
+              .upsert(lineItemInserts, { onConflict: 'quote_id,trade_category_id,description', ignoreDuplicates: true })
+              .select()
+            if (insertErr) {
+              await fail(`Line items could not be saved: ${insertErr.message}`)
+              return
+            }
+            const insertedItems = insertedItemsRaw ?? []
+            for (const li of lineItemInserts) existingKeys.add(lineItemKey(li.trade_category_id, li.description))
+
+            const relevantAssumptions = assumptionsToInsert.filter((a) => toInsert.some((i) => String(i.description) === a.description))
+            if (relevantAssumptions.length > 0) {
+              const assumptionInserts = relevantAssumptions.map((a) => {
+                const match = insertedItems.find((li: Record<string, unknown>) => li.description === a.description)
+                return { quote_id: quoteId, line_item_id: match?.id ?? null, description: a.message, gate: a.gate, resolution_type: null, resolved_at: null, resolved_by: null }
+              })
+              await supabase.from('assumptions').insert(assumptionInserts)
+              unresolvedCount += relevantAssumptions.filter((a) => a.gate !== 3).length
+            }
+          }
+        }
+
+        // Only trades that actually produced a persisted result are marked
+        // complete — a trade left in failedTradeIds (truncation even at
+        // chunk size 1) is deliberately NOT added here, so it stays visible
+        // to findMissingTrades' completeness pass below (this same
+        // invocation) or, if this invocation ends before reaching that
+        // pass, to a later invocation's remainingTrades computation. Never
+        // loses a completed trade: this only ever grows.
+        const tradesToMarkComplete = tradeChunk.map((t) => t.id).filter((id) => !failedTradeIds.includes(id))
+        if (parentJobId && tradesToMarkComplete.length > 0) {
+          stage6CompletedTradeIds = Array.from(new Set([...stage6CompletedTradeIds, ...tradesToMarkComplete]))
+          await supabase.from('document_processing_batches').update({
+            stage6_completed_trade_ids: stage6CompletedTradeIds,
+            updated_at: new Date().toISOString(),
+          }).eq('id', parentJobId)
+        }
+
+        console.log(JSON.stringify({
+          stage: 'generating_estimate', status: 'chunk_processed', job_id: jobId, batch_id: parentJobId,
+          chunk: chunkIndex + 1, chunk_count: stage6Plan.chunksToRunNow.length,
+          tradesInChunk: tradeChunk.length, itemsGenerated: chunkItems.length, tradesFailed: failedTradeIds,
+          trades_completed_total: stage6CompletedTradeIds.length, trades_remaining: remainingTrades.length - stage6CompletedTradeIds.filter((id) => remainingTrades.some((t) => t.id === id)).length,
+        }))
+      }
+    } catch (err) {
+      const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
+      const errMessage = err instanceof Error ? err.message : String(err)
+      console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, classification, error: errMessage }))
+      if (isBillingHaltClassification(classification)) {
+        await haltForBilling(classification, errMessage)
+        return
+      }
+      // Race-safe, atomic — mirrors record_stage3_failure exactly (migration 077).
+      if (parentJobId) {
+        try {
+          const { data: recordData, error: recordErr } = await supabase.rpc('record_stage6_failure', {
+            p_batch_id: parentJobId,
+            p_input_hash: stage6InputHash,
+            p_classification: classification,
+            p_max_occurrences: maxConsecutiveOccurrences(classification),
+          })
+          if (recordErr) throw recordErr
+          const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
+          console.log(JSON.stringify({
+            event: 'stage6_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
+            consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
+          }))
+        } catch (recordErr) {
+          console.error('record_stage6_failure RPC failed:', recordErr)
+        }
+      }
+      await fail(`Estimate generation call failed: ${errMessage}`)
+      return
+    }
+
+    console.log(JSON.stringify({ stage: 'generating_estimate', status: 'processed', durationMs: Date.now() - estimateStartedAt, itemsGeneratedThisRun: stage6ItemsGeneratedThisRun, chunksRun: stage6Plan.chunksToRunNow.length }))
+
+    if (stage6Plan.hasMoreAfterThisInvocation) {
+      // Genuine forward progress this invocation (every chunk above ran,
+      // its line items and checkpoint durably persisted), but the
+      // remaining trades didn't fit — defer them, cleanly, to a later
+      // invocation with a fresh wall-clock window, exactly like Stage 3's
+      // own deferral. The quote already exists with this invocation's
+      // items on it; findMissingTrades/document-contribution/file
+      // finalization deliberately do NOT run yet — they belong to the
+      // invocation that actually finishes the remaining trades.
+      console.log(JSON.stringify({
+        stage: 'generating_estimate', status: 'partial_progress_deferred', job_id: jobId, batch_id: parentJobId,
+        trades_completed_total: stage6CompletedTradeIds.length, trades_remaining_of_scoped: Array.from(scopedTradeIds).filter((id) => !stage6CompletedTradeIds.includes(id)).length,
+      }))
+      if (parentJobId) {
+        await supabase.from('document_processing_batches').update({
+          stall_stage: 'generating_estimate',
+          stall_reason: `Stage 6 partially complete (${stage6CompletedTradeIds.length}/${scopedTradeIds.size} scoped trades generated) — remaining trades deferred to a future invocation with a fresh wall-clock budget.`,
+          stalled_at: new Date().toISOString(),
+        }).eq('id', parentJobId)
+      }
+      return
     }
 
     // ── Non-blocking estimation: reconcile conservative-assumption rows ────
@@ -2671,63 +2855,22 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       console.log(JSON.stringify({ stage: 'building_quote', document_contribution_failed: reportErr instanceof Error ? reportErr.message : String(reportErr) }))
     }
 
-    // Avoid re-inserting a line item that already exists on this quote for
-    // the same trade + description (best-effort de-dupe on incremental runs).
-    const { data: existingLineItems } = await supabase
-      .from('quote_line_items')
-      .select('trade_category_id, description')
-      .eq('quote_id', quoteId)
-    const existingKeys = new Set((existingLineItems ?? []).map((li: Record<string, unknown>) => `${li.trade_category_id}::${String(li.description).trim().toLowerCase()}`))
-
-    const toInsert = filterNewLineItems(validated, existingKeys)
-    const lineItemInserts = buildLineItemInsertRows(toInsert, quoteId)
-
-    let unresolvedCount = 0
-    if (lineItemInserts.length > 0) {
-      // Upsert with ignoreDuplicates instead of a plain insert: the app-level
-      // existingKeys filter above only guards against rows already committed
-      // to the DB, not against two concurrent runs racing this exact insert
-      // (or the model emitting the same trade+description twice in one
-      // response). The unique index from migration 030 makes that a no-op
-      // conflict here instead of a duplicate row.
-      const { data: insertedItemsRaw, error: insertErr } = await supabase
-        .from('quote_line_items')
-        .upsert(lineItemInserts, { onConflict: 'quote_id,trade_category_id,description', ignoreDuplicates: true })
-        .select()
-      if (insertErr) {
-        await fail(`Line items could not be saved: ${insertErr.message}`)
-        return
-      }
-      // ignoreDuplicates means a row skipped as a conflict is legitimately
-      // absent from the RETURNING set — an empty array here (all rows
-      // happened to already exist) is success, not a failure.
-      const insertedItems = insertedItemsRaw ?? []
-
-      const relevantAssumptions = assumptionsToInsert.filter((a) => toInsert.some((i) => String(i.description) === a.description))
-      if (relevantAssumptions.length > 0) {
-        const assumptionInserts = relevantAssumptions.map((a) => {
-          const match = insertedItems.find((li: Record<string, unknown>) => li.description === a.description)
-          return { quote_id: quoteId, line_item_id: match?.id ?? null, description: a.message, gate: a.gate, resolution_type: null, resolved_at: null, resolved_by: null }
-        })
-        await supabase.from('assumptions').insert(assumptionInserts)
-        unresolvedCount = relevantAssumptions.filter((a) => a.gate !== 3).length
-      }
-    }
-
     // ── Stage 6 completeness recovery ───────────────────────────────────────
     // Post-generation safeguard, not a redesign of Stage 6: Stage 3 can
-    // correctly scope a trade with real included_scope while the main
-    // generation call above still returns zero line items for it — a
-    // generation gap, confirmed on a real project (Colorbond roofing /
-    // sarking / flashings / gutters / skylights / solar PV scoped, never
-    // generated). Checked against quote_line_items AS THEY STAND after the
-    // main insert above — not against estimateResult.line_items alone —
-    // so a trade already covered by a PRIOR incremental upload's line items
-    // is correctly never flagged, even though this run's own Stage 6 call
-    // legitimately didn't need to regenerate it.
-    for (const key of lineItemInserts.map((li) => lineItemKey(li.trade_category_id, li.description))) {
-      existingKeys.add(key)
-    }
+    // correctly scope a trade with real included_scope while the chunk loop
+    // above still ends up with zero line items for it (every chunk attempt
+    // truncated even at a single trade, or the trade was never in scope of
+    // any chunk this invocation because it was deferred and this invocation
+    // never got the deferred chunk back — the outer hasMoreAfterThisInvocation
+    // check above already returns before reaching here in that case, so by
+    // the time this runs every scoped trade genuinely got at least one
+    // attempt this invocation). Checked against quote_line_items AS THEY
+    // STAND after the chunk loop above — not against any one chunk's raw
+    // response alone — so a trade already covered by a PRIOR incremental
+    // upload's line items is correctly never flagged, even though this run's
+    // own Stage 6 chunks legitimately didn't need to regenerate it.
+    // existingKeys is already current here (maintained chunk-by-chunk above)
+    // — no separate re-sync needed before the recovery pass below.
     const { data: currentTradeRows } = await supabase
       .from('quote_line_items')
       .select('trade_category_id, assumption_status')
@@ -2839,7 +2982,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     const totalRecoveredItems = recoveryResults.reduce((sum, r) => sum + r.items_generated, 0)
     if (initialMissingTrades.length > 0) {
       const tradeRecoveryReport = buildTradeRecoveryReport(initialMissingTrades, recoveryResults)
-      console.log(JSON.stringify({ event: 'stage6_completeness_recovery_report', job_id: jobId, quote_id: quoteId, ...tradeRecoveryReport }))
+      console.log(JSON.stringify({ event: 'stage6_completeness_recovery_report', job_id: jobId, quote_id: quoteId, total_recovered_items: totalRecoveredItems, ...tradeRecoveryReport }))
       // Best-effort: the report describes the recovery pass, must never fail the estimate it describes.
       const { error: reportErr } = await supabase.from('quotes').update({ trade_recovery_report: tradeRecoveryReport }).eq('id', quoteId)
       if (reportErr) console.error('trade_recovery_report write failed:', reportErr.message)
@@ -2869,7 +3012,12 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         pipeline_stage: 'complete',
         quote_id: quoteId,
         intake_assumption_count: totalUnresolved ?? unresolvedCount,
-        line_item_count: lineItemInserts.length + totalRecoveredItems,
+        // existingKeys is seeded from every line item already on the quote
+        // and augmented by both the chunk loop and the completeness
+        // recovery pass below, so its size is the quote's true current
+        // line-item count (deliberately not a "this run only" tally, which
+        // would undercount a resumed Stage 6 run's earlier invocations).
+        line_item_count: existingKeys.size,
         processing_time_ms: Date.now() - startedAt,
         failure_stage: null,
         failure_reason: null,
@@ -2897,7 +3045,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       stage: 'building_quote', completed_at: new Date().toISOString(),
       documents_count: null, facts_count: facts.length,
       scope_items_count: (scopeForEstimate ?? []).length,
-      quote_created: true, quote_id: quoteId, line_items_count: lineItemInserts.length + totalRecoveredItems,
+      quote_created: true, quote_id: quoteId, line_items_count: existingKeys.size,
     }))
   } catch (err) {
     console.error('estimating-engine error:', err)

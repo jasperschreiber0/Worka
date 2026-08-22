@@ -1128,6 +1128,59 @@ export function planStage3Chunks<T>(
   return { chunksToRunNow, hasMoreAfterThisInvocation }
 }
 
+// ─── Stage 6 (Estimate Generation) chunk planning ──────────────────────────
+// Reuses planStage3Chunks itself (the same budget-aware "how many right-
+// sized chunks fit THIS invocation's remaining wall-clock window" logic),
+// not a second scheduling system — Stage 6's chunk-size DRIVER differs from
+// Stage 3's (output-token risk per trade, not input-fact count), so this is
+// a thin wrapper that computes a Stage-6-appropriate desired chunk count and
+// hands it straight to planStage3Chunks via chunkThreshold=0 (always chunk)
+// and largeProjectThreshold=Infinity (never take the "large project" branch
+// — this wrapper's own desiredChunkCount is already Stage-6-tuned, so that
+// branch would only fight it).
+
+// Root cause this bounds: a Stage 6 call asking for every in-scope trade's
+// full line-item takeoff at once can exceed the 16,000-token output ceiling
+// (stop_reason: 'max_tokens') on a genuinely large real project — unlike
+// Stage 3, whose input (facts) is a good proxy for call cost, Stage 6's risk
+// is OUTPUT size, which scales with trade count fairly directly regardless
+// of how many facts fed the reasoning that produced them. A flat per-chunk
+// trade cap is the safe, simple lever available without measuring real
+// token-per-trade production data (the same reasoning STAGE3_DEFAULT_CHUNK_COUNT
+// itself used before enough production data existed to tune further).
+export const STAGE6_MAX_TRADES_PER_CHUNK = 3
+
+export interface Stage6ChunkPlan<T> {
+  chunksToRunNow: T[][]
+  hasMoreAfterThisInvocation: boolean
+}
+
+/**
+ * Budget-aware Stage 6 chunk planning. remainingTrades should already
+ * exclude any trade whose line items were durably persisted in a PRIOR
+ * invocation of this same batch (document_processing_batches.
+ * stage6_completed_trade_ids, migration 090) — this function only decides
+ * how much of what's LEFT fits in the current invocation's remaining
+ * wall-clock budget, exactly like planStage3Chunks for Stage 3.
+ */
+export function planStage6Chunks<T>(
+  remainingTrades: T[],
+  remainingBudgetMs: number,
+  maxTradesPerChunk: number = STAGE6_MAX_TRADES_PER_CHUNK,
+): Stage6ChunkPlan<T> {
+  if (remainingTrades.length === 0) {
+    return { chunksToRunNow: [], hasMoreAfterThisInvocation: false }
+  }
+  const desiredChunkCount = Math.ceil(remainingTrades.length / Math.max(1, maxTradesPerChunk))
+  // chunkThreshold=0 -> shouldChunkTradeReasoning(1, 0) is always true, so
+  // desiredStage3ChunkCount always takes its "chunk" branch and returns
+  // exactly desiredChunkCount -- the factsInPromptCount value passed here
+  // (1, arbitrary; Stage 6 doesn't size by fact count) stays far below
+  // desiredStage3ChunkCount's own internal large-project threshold (150),
+  // so that branch never overrides desiredChunkCount.
+  return planStage3Chunks(remainingTrades, remainingBudgetMs, 1, 0, desiredChunkCount)
+}
+
 export interface ScopeReasoningResult {
   scope: Array<Record<string, unknown>>
   clarifying_questions: Array<Record<string, unknown>>
