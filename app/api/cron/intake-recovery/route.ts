@@ -730,7 +730,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             continue
           }
 
-          summary.stuck_files_retried++
           touchedBatchIds.add(b.batch_id)
           // Clear audit distinction (2026-07-19 wall-clock redesign): a
           // retrigger of a batch with real Stage 3 progress already
@@ -746,19 +745,55 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             .eq('id', b.batch_id)
             .single()
           const tradesAlreadyDone = (progressRow?.stage3_completed_trade_ids as number[] | null)?.length ?? 0
-          log('recovery_classification_retriggered', {
-            job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id,
-            recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1,
-            stage3_trades_already_completed: tradesAlreadyDone,
-            resume_kind: tradesAlreadyDone > 0 ? 'converging_partial_progress' : 'fresh_or_unstarted',
-          })
-          await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-            body: JSON.stringify({ parent_job_id: b.batch_id }),
-          }).catch((fetchErr) => {
-            log('recovery_smooth_responder_trigger_failed', { job_id: b.job_id, error: String(fetchErr) })
-          })
+          // Root-cause fix: `stuck_files_retried` used to increment (and the
+          // lock/attempt bookkeeping above used to be the only visible
+          // signal) BEFORE this fetch resolved -- a fire-and-forget request
+          // whose failure was swallowed into a log line still counted as a
+          // reported success (stuck_files_retried: 1, errors: []), even
+          // though smooth-responder was never actually reached. This only
+          // confirms the edge function ACCEPTED the request (its own
+          // EdgeRuntime.waitUntil background work is still detached from
+          // this HTTP call either way) -- but "accepted" is a strictly
+          // stronger, checkable signal than "the fetch call was made", and
+          // closes the specific gap where a rejected/network-failed request
+          // was indistinguishable from a real retry in this route's own
+          // response and counters.
+          let retriggerOk = false
+          let retriggerError: string | null = null
+          try {
+            const retriggerRes = await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              body: JSON.stringify({ parent_job_id: b.batch_id }),
+            })
+            retriggerOk = retriggerRes.ok
+            if (!retriggerOk) {
+              retriggerError = `smooth-responder returned HTTP ${retriggerRes.status}`
+            }
+          } catch (fetchErr) {
+            retriggerError = fetchErr instanceof Error ? fetchErr.message : String(fetchErr)
+          }
+
+          if (retriggerOk) {
+            summary.stuck_files_retried++
+            log('recovery_classification_retriggered', {
+              job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id,
+              recovery_attempts: (attemptResult?.prior_attempts ?? 0) + 1,
+              stage3_trades_already_completed: tradesAlreadyDone,
+              resume_kind: tradesAlreadyDone > 0 ? 'converging_partial_progress' : 'fresh_or_unstarted',
+            })
+          } else {
+            // Deliberately NOT rolled back: the lock and the recovery-attempt
+            // counter above already reflect a real attempt (they must, to
+            // keep the retry cap correct across repeated failures) -- only
+            // the "it worked" signal was wrong before this fix. Surfaced in
+            // `errors` so it's visible in the route's own JSON response, not
+            // only in function logs.
+            summary.errors.push({ stage: `smooth_responder_retrigger:${b.job_id}`, message: retriggerError ?? 'unknown error' })
+            log('recovery_smooth_responder_trigger_failed', {
+              job_id: b.job_id, file_id: b.primary_file_id, processing_batch_id: b.batch_id, error: retriggerError,
+            })
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
