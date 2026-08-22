@@ -2602,8 +2602,33 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         const chunkResult = await callTool(
           anthropic, { supabase, builderId, jobId, stage: 'stage_estimate_generation', parentJobId },
           estimateSystemPrompt, chunkUserContent, ESTIMATE_GENERATION_TOOL, 16000, STAGE6_PER_CALL_TIMEOUT_MS,
-        ) as { line_items?: unknown[] } | null
-        return { items: (chunkResult?.line_items ?? []) as Array<Record<string, unknown>>, failedTradeIds: [] }
+        ) as { line_items?: unknown } | null
+        // BUG FOUND LIVE (production-shaped test, 2026-08-22): `as Array<...>`
+        // is a compile-time-only TypeScript assertion -- it does not validate
+        // or convert anything at runtime. The very first real resumed Stage 6
+        // call for a 13-trade project returned a `line_items` value that was
+        // NOT an array; the old `(chunkResult?.line_items ?? []) as Array<...>`
+        // let it through unchanged, `chunkItems.length > 0` happened to still
+        // be true, and validateStage6Items' internal `rawLineItems.map(...)`
+        // threw a raw TypeError ("rawLineItems.map is not a function") that
+        // was NOT recognized as a truncation, escaped generateChunk's own
+        // catch (only isTruncatedResponseError is handled here), hit the
+        // OUTER catch, and PERMANENTLY failed the whole file via
+        // record_stage6_failure/fail() -- exactly the kind of single-chunk
+        // failure this whole redesign exists to make non-fatal. A malformed
+        // response is treated exactly like an unresolvable truncation: these
+        // trades are left unfinished (never marked complete) for
+        // findMissingTrades' post-hoc recovery pass, not a crash.
+        const rawItems = chunkResult?.line_items
+        if (rawItems !== undefined && rawItems !== null && !Array.isArray(rawItems)) {
+          console.log(JSON.stringify({
+            event: 'stage6_chunk_malformed_response', job_id: jobId, batch_id: parentJobId,
+            chunk_trade_ids: tradeChunk.map((t) => t.id), line_items_type: typeof rawItems,
+            reason: 'line_items in the tool response was not an array -- leaving these trades for findMissingTrades rather than crashing the run',
+          }))
+          return { items: [], failedTradeIds: tradeChunk.map((t) => t.id) }
+        }
+        return { items: (rawItems ?? []) as Array<Record<string, unknown>>, failedTradeIds: [] }
       } catch (err) {
         if (isTruncatedResponseError(err)) {
           // splitBatchForRetry itself already returns null for a
