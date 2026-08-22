@@ -43,6 +43,11 @@ on:
         required: false
         type: string
         default: ''
+      probe_quote_total_cost_write:
+        description: "Quote ID: one-off diagnostic that writes a test value directly to quotes.total_cost via the Supabase client (bypassing the app) to isolate a DB-level write failure from an application-level one"
+        required: false
+        type: string
+        default: ''
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -96,8 +101,16 @@ jobs:
           BUILDER_ID: '00000000-0000-0000-0000-0000000000fc'
         run: node scripts/trigger-quote-pricing-qa.mjs
 
+      - name: Probe quote total_cost write
+        if: ${{ inputs.probe_quote_total_cost_write != '' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          QUOTE_ID: ${{ inputs.probe_quote_total_cost_write }}
+        run: node scripts/probe-quote-total-cost-write.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
