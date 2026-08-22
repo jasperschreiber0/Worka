@@ -1150,7 +1150,36 @@ export async function ensureQuotePriced(
     // persisted total, but price_coverage_pct read back as 18% (≈31/171)
     // because 116 AI Allowance items got re-swept and nulled here.
     const unpriced = items.filter((i) => i.total === null)
-    if (unpriced.length === 0) return false
+    if (unpriced.length === 0) {
+      // Every item already carries a total, but the quote-level cache
+      // (quotes.total_cost) was never successfully written -- confirmed live
+      // on a real quote (252/252 line items priced, quotes.total_cost still
+      // null days later): a prior call's own quotes.update() at the bottom
+      // of this function can fail (timeout, transient error) AFTER the line-
+      // item batch upsert already committed, and once every item is priced,
+      // `unpriced.length === 0` short-circuited every subsequent call before
+      // it ever got another chance to compute/write the aggregate -- a
+      // permanently stuck state despite the pricing itself being complete.
+      // "Idempotent, resumes work" (this function's own doc comment) should
+      // cover this case too: recompute and write the totals from the
+      // already-priced items, skip only when there is truly nothing left to
+      // do (no new items to price AND totals already cached).
+      if (quote.total_cost !== null) return false
+      const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(items)
+      const { error: totalsUpdateErr } = await supabase
+        .from('quotes')
+        .update({
+          total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct,
+          margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT,
+        })
+        .eq('id', quoteId)
+      if (totalsUpdateErr) {
+        console.error('ensureQuotePriced: totals-only update failed:', totalsUpdateErr.message)
+        return false
+      }
+      console.log(JSON.stringify({ event: 'ensure_quote_priced_totals_only', quote_id: quoteId, item_count: items.length, duration_ms: Date.now() - startedAt }))
+      return true
+    }
 
     // Document-confirmed selections (Tier 0) — a builder's own already-
     // extracted, confirmed product/schedule price always outranks a generic
@@ -1212,7 +1241,7 @@ export async function ensureQuotePriced(
     const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
     const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(finalItems)
 
-    await supabase
+    const { error: quoteUpdateErr } = await supabase
       .from('quotes')
       .update({
         total_cost,
@@ -1223,6 +1252,13 @@ export async function ensureQuotePriced(
         margin_pct: quote.margin_pct ?? DEFAULT_MARGIN_PCT,
       })
       .eq('id', quoteId)
+    // Previously unchecked -- a failure here (transient DB error, timeout)
+    // was silently swallowed while the function still returned true, leaving
+    // the caller believing pricing succeeded when the quote-level totals
+    // never actually landed. Now logged so a real failure is at least
+    // visible; the unpriced.length === 0 branch above is what makes this
+    // recoverable on a later call instead of stuck permanently.
+    if (quoteUpdateErr) console.error('ensureQuotePriced: quote totals update failed:', quoteUpdateErr.message)
 
     console.log(JSON.stringify({ event: 'ensure_quote_priced', quote_id: quoteId, item_count: items.length, priced_count: rowsToUpdate.length, duration_ms: Date.now() - startedAt }))
 

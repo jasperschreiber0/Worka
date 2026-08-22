@@ -48,6 +48,11 @@ on:
         required: false
         type: string
         default: ''
+      probe_reset_to_null:
+        description: "When probe_quote_total_cost_write is set: type 'true' to reset the quote's cached totals back to null instead of writing the 12345.67 test value (used to undo the probe's own test write)"
+        required: false
+        type: string
+        default: 'false'
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -107,6 +112,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           QUOTE_ID: ${{ inputs.probe_quote_total_cost_write }}
+          RESET_TO_NULL: ${{ inputs.probe_reset_to_null }}
         run: node scripts/probe-quote-total-cost-write.mjs
 
       - name: Run synthetic intake pipeline health check

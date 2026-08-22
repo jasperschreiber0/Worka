@@ -35,17 +35,13 @@ async function main() {
     .single()
   log('before_state', { quote: before ?? null, error: beforeErr?.message ?? null })
 
-  const probeValue = 12345.67
+  const resetToNull = process.env.RESET_TO_NULL === 'true'
+  const probeValue = resetToNull ? null : 12345.67
   const { data: updateData, error: updateErr, status, statusText } = await supabase
     .from('quotes')
-    .update({
-      total_cost: probeValue,
-      confidence_score: 42,
-      price_coverage_pct: 50,
-      pricing_match_rate_pct: 50,
-      allowance_pct: 10,
-      margin_pct: 0.15,
-    })
+    .update(resetToNull
+      ? { total_cost: null, confidence_score: null, price_coverage_pct: null, pricing_match_rate_pct: null, allowance_pct: null, margin_pct: null }
+      : { total_cost: probeValue, confidence_score: 42, price_coverage_pct: 50, pricing_match_rate_pct: 50, allowance_pct: 10, margin_pct: 0.15 })
     .eq('id', QUOTE_ID)
     .select('id, total_cost, margin_pct, confidence_score')
 
