@@ -28,6 +28,11 @@ on:
         description: 'Optional: document_processing_batches.id to read-only inspect (scripts/check-batch-recovery-state.mjs) instead of running the synthetic health check'
         required: false
         type: string
+      run_known_good_estimate:
+        description: 'Run scripts/run-known-good-estimate.mjs (a realistic bathroom-reno brief through the real /api/intake route, including pricing/QA) instead of the trivial synthetic health check'
+        required: false
+        type: boolean
+        default: false
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -56,8 +61,16 @@ jobs:
           BATCH_ID: ${{ inputs.diagnostic_batch_id }}
         run: node scripts/check-batch-recovery-state.mjs
 
+      - name: Run known-good estimate (real /api/intake route, pricing + QA)
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/run-known-good-estimate.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
