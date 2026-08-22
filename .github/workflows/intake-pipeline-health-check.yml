@@ -22,7 +22,12 @@ name: Document intake pipeline health check
 # workflow) whenever you want to verify the live pipeline by hand.
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      diagnostic_batch_id:
+        description: 'Optional: document_processing_batches.id to read-only inspect (scripts/check-batch-recovery-state.mjs) instead of running the synthetic health check'
+        required: false
+        type: string
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -43,7 +48,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --omit=dev
 
+      - name: Check batch recovery state (read-only)
+        if: ${{ inputs.diagnostic_batch_id != '' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BATCH_ID: ${{ inputs.diagnostic_batch_id }}
+        run: node scripts/check-batch-recovery-state.mjs
+
       - name: Run synthetic intake pipeline health check
+        if: ${{ inputs.diagnostic_batch_id == '' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
