@@ -24,14 +24,20 @@ on:
         default: false
       diagnostic_only:
         description: >-
-          Type the literal word true to ONLY run
-          supabase/verification/check_intake_recovery_scheduler.sql
-          (read-only: pg_cron job state, recent run history, Vault secret
-          NAME presence -- never values -- and intake_recovery_runs cadence)
-          and skip every other step (migration list/push, schema cache
-          reload, schema assertions). Safe to run any time.
+          Type the literal word true to ONLY run the SQL file named in
+          diagnostic_sql_file below (read-only) and skip every other step
+          (migration list/push, schema cache reload, schema assertions).
+          Safe to run any time.
         type: string
         default: 'false'
+      diagnostic_sql_file:
+        description: >-
+          Path (relative to repo root) of the read-only SQL file to run
+          when diagnostic_only=true. Defaults to the intake-recovery
+          scheduler check (pg_cron job state, Vault secret presence,
+          intake_recovery_runs cadence).
+        type: string
+        default: 'supabase/verification/check_intake_recovery_scheduler.sql'
 
 concurrency:
   group: supabase-migrate
@@ -47,11 +53,11 @@ jobs:
         with:
           version: latest
 
-      - name: Check intake-recovery scheduler (read-only, diagnostic only)
+      - name: Run diagnostic SQL (read-only, diagnostic only)
         if: ${{ inputs.diagnostic_only == 'true' }}
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: psql "$SUPABASE_DB_URL" -f supabase/verification/check_intake_recovery_scheduler.sql
+        run: psql "$SUPABASE_DB_URL" -f "${{ inputs.diagnostic_sql_file }}"
 
       - name: List migration status
         if: ${{ inputs.diagnostic_only != 'true' }}
