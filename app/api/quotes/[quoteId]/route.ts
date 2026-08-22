@@ -404,26 +404,51 @@ export async function GET(
 
     // Stage 8 QA normally runs from the intake poller right after pricing —
     // but a quote viewed before that ran (or where it failed) would otherwise
-    // show no "what to check" list at all. Lazy-run it here exactly once so
-    // qa_report is never structurally absent from the review screen. Cheap
-    // (a few scoped queries, no AI call) and idempotent.
+    // show no "what to check" list at all. Cheap (a few scoped queries, no AI
+    // call) and idempotent, so — mirroring the identical fix already applied
+    // to the pricing backfill immediately above (see that comment) — this is
+    // called on every GET rather than only when qa_report is still null.
+    // Previously gated on `!qaReport`, which only ever caught a quote that
+    // had NEVER been QA'd at all: a quote's line-item count can now grow
+    // across MULTIPLE separate invocations that never touch this Next.js
+    // route at all — Stage 6's per-trade chunking (migration 090) checkpoints
+    // and persists items chunk-by-chunk across resumable smooth-responder
+    // invocations, and the older completeness-recovery pass could already do
+    // the same across recovery-cron-triggered retries. A builder (or a
+    // monitoring script) opening this route while only the first chunk/trade
+    // had landed would compute qa_report once, against a partial line-item
+    // set, and then — under the old null-only gate — that stale report would
+    // never be recomputed again once more chunks/trades landed, exactly the
+    // "premature QA" failure mode a chunked Stage 6 must not produce.
     let qaReport = (quoteRow as { qa_report?: QAReport | null }).qa_report ?? null
     let scopeConfidence = (quoteRow as { scope_confidence?: number | null }).scope_confidence ?? null
     let overallEstimateConfidence = (quoteRow as { overall_estimate_confidence?: number | null }).overall_estimate_confidence ?? null
-    if (!qaReport) {
+    {
       try {
         const { runQualityAssurance } = await import('@/lib/estimating/qa')
-        qaReport = await runQualityAssurance(supabase, quoteId, quoteRow.job_id)
-        // runQualityAssurance writes scope_confidence/overall_estimate_confidence
-        // straight to the quotes row — re-read them fresh rather than
-        // duplicating that computation here.
-        const { data: freshConfidence } = await supabase
-          .from('quotes')
-          .select('scope_confidence, overall_estimate_confidence')
-          .eq('id', quoteId)
-          .single()
-        scopeConfidence = freshConfidence?.scope_confidence ?? null
-        overallEstimateConfidence = freshConfidence?.overall_estimate_confidence ?? null
+        // runQualityAssurance returns null on its own INTERNAL failure
+        // (caught inside qa.ts, not thrown) as well as on genuine success
+        // with nothing to report — those are indistinguishable from here.
+        // Only overwrite the cached report when a fresh one actually came
+        // back: this call now runs on every GET (see comment above), so an
+        // overwrite-on-null would mean a single transient failure on an
+        // already-QA'd quote replaces a good cached report with nothing,
+        // which is a regression the old null-gated version could never hit
+        // (it only ever ran once, when there was nothing to lose yet).
+        const freshQaReport = await runQualityAssurance(supabase, quoteId, quoteRow.job_id)
+        if (freshQaReport) {
+          qaReport = freshQaReport
+          // runQualityAssurance writes scope_confidence/overall_estimate_confidence
+          // straight to the quotes row — re-read them fresh rather than
+          // duplicating that computation here.
+          const { data: freshConfidence } = await supabase
+            .from('quotes')
+            .select('scope_confidence, overall_estimate_confidence')
+            .eq('id', quoteId)
+            .single()
+          scopeConfidence = freshConfidence?.scope_confidence ?? null
+          overallEstimateConfidence = freshConfidence?.overall_estimate_confidence ?? null
+        }
       } catch (qaErr) {
         console.error('[quotes:get] lazy QA run failed:', qaErr)
       }

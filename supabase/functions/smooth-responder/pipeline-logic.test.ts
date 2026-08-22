@@ -1406,6 +1406,71 @@ test('planStage6Chunks: honors a custom maxTradesPerChunk override', () => {
   assert.equal(plan.chunksToRunNow.reduce((sum, c) => sum + c.length, 0), 13)
 })
 
+// ── Production-readiness review (before first deploy) — additional cases ──
+
+test('planStage6Chunks: a single remaining trade (e.g. the last one left after a long resume chain) plans exactly one singleton chunk', () => {
+  const plan = planStage6Chunks([{ id: 7 }], 340_000)
+  assert.equal(plan.chunksToRunNow.length, 1)
+  assert.deepEqual(plan.chunksToRunNow[0], [{ id: 7 }])
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage6Chunks: REAL WALL_CLOCK_SAFETY_MS (340s, index.ts) cannot fit 5 full 220s chunks for a 13-trade project -- chunk 1 completing never guarantees chunk 2 fits, by design', () => {
+  // Mirrors the equivalent, already-proven Stage 3 test above exactly --
+  // same two real constants (WALL_CLOCK_SAFETY_MS=340_000 hardcoded here
+  // since it's defined inside runPipeline in index.ts, not exported;
+  // STAGE6_PER_CALL_TIMEOUT_MS is imported for real). A 13-trade project
+  // needs ceil(13/3)=5 chunks; even a hypothetical zero-elapsed invocation
+  // can fit only floor(340_000/220_000)=1 of them. This is exactly the
+  // "chunk 1 completes -> insufficient time for chunk 2 -> clean bail"
+  // scenario -- planStage6Chunks is what makes index.ts defer chunks 2-5
+  // rather than attempt chunk 2 with no room to finish it.
+  const REAL_WALL_CLOCK_SAFETY_MS = 340_000
+  const plan = planStage6Chunks(TRADES_13, REAL_WALL_CLOCK_SAFETY_MS)
+  assert.equal(plan.chunksToRunNow.length, 1, 'only one of the five desired chunks fits even in the full real budget')
+  assert.ok(plan.chunksToRunNow[0].length <= STAGE6_MAX_TRADES_PER_CHUNK)
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage6Chunks: after chunk 1 already ran (real elapsed time consumed), the SAME real budget can no longer fit even chunk 2 -- confirms the mid-loop budget re-check in index.ts is load-bearing, not defensive-only', () => {
+  // Simulates "chunk 1 completed" by reducing the remaining budget by one
+  // real STAGE6_PER_CALL_TIMEOUT_MS worth of elapsed time, then re-planning
+  // against the remaining 3 trades (13 - 1 chunk of up to 3, worst case 10
+  // left) with what's left of the invocation's wall-clock window.
+  const REAL_WALL_CLOCK_SAFETY_MS = 340_000
+  const remainingAfterChunk1 = TRADES_13.slice(STAGE6_MAX_TRADES_PER_CHUNK) // 10 trades left
+  const budgetAfterChunk1 = REAL_WALL_CLOCK_SAFETY_MS - STAGE6_PER_CALL_TIMEOUT_MS // 120_000ms left
+  const plan = planStage6Chunks(remainingAfterChunk1, budgetAfterChunk1)
+  assert.deepEqual(plan.chunksToRunNow, [], 'no room for even one more real 220s call out of 120s remaining')
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('truncation recovery composition: a real callTool-shaped truncation error on a full-size (3-trade) chunk is detected and reduces to two smaller chunks, never the same size', () => {
+  // Uses the EXACT error shape callTool (index.ts) throws on stop_reason
+  // === 'max_tokens', and the exact primitives generateChunk (index.ts)
+  // composes: isTruncatedResponseError to detect it, splitBatchForRetry to
+  // reduce chunk size. This is the pure-function half of the fix verified
+  // here; the Deno-only recursive orchestration around it is exercised by
+  // the production-shaped live test, not Node unit tests.
+  const chunk = [{ id: 1 }, { id: 2 }, { id: 3 }]
+  const err = new Error(`${TRUNCATED_RESPONSE_PREFIX}16000 — increase the token budget for this stage`)
+  assert.equal(isTruncatedResponseError(err), true)
+  const halves = splitBatchForRetry(chunk)
+  assert.deepEqual(halves, [[{ id: 1 }, { id: 2 }], [{ id: 3 }]], 'reduced to two smaller chunks -- 2 and 1 -- never re-attempting the original size-3 chunk unchanged')
+  // If the size-2 half also truncates, it reduces further to two singletons --
+  // the recursion bottoms out at chunk size 1 (splitBatchForRetry returns
+  // null there), which is exactly the bound on additional calls: at most 2
+  // extra split levels for a STAGE6_MAX_TRADES_PER_CHUNK=3 chunk.
+  const secondSplit = splitBatchForRetry(halves![0])
+  assert.deepEqual(secondSplit, [[{ id: 1 }], [{ id: 2 }]])
+  assert.equal(splitBatchForRetry(secondSplit![0]), null, 'a singleton chunk cannot be split further -- this is where recursion terminates')
+})
+
+test('truncation recovery composition: a non-truncation error (e.g. a genuine billing/validation failure) is never treated as splittable', () => {
+  const err = new Error('400 invalid_request_error: something else entirely')
+  assert.equal(isTruncatedResponseError(err), false)
+})
+
 test('mergeScopeReasoningResults: concatenates disjoint per-trade scope from each chunk', () => {
   const chunkA = { scope: [{ trade_category_id: 1, included_scope: ['footings'] }], clarifying_questions: [] }
   const chunkB = { scope: [{ trade_category_id: 12, included_scope: ['power points'] }], clarifying_questions: [] }

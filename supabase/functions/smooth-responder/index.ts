@@ -2605,7 +2605,27 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         ) as { line_items?: unknown[] } | null
         return { items: (chunkResult?.line_items ?? []) as Array<Record<string, unknown>>, failedTradeIds: [] }
       } catch (err) {
-        if (isTruncatedResponseError(err) && tradeChunk.length > 1 && hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS * 2)) {
+        if (isTruncatedResponseError(err)) {
+          // splitBatchForRetry itself already returns null for a
+          // single-trade chunk (nothing left to split), so no separate
+          // length>1 guard is needed here.
+          //
+          // FIXED (production-readiness review, before first deploy):
+          // the original guard here required hasWallClockBudget(
+          // STAGE6_PER_CALL_TIMEOUT_MS * 2) -- i.e. 440,000ms -- BEFORE
+          // even attempting a split. WALL_CLOCK_SAFETY_MS is 340,000ms,
+          // so that condition could never be true at ANY elapsed time
+          // (340,000 - 440,000 is negative regardless of how little of
+          // the invocation had been used) -- the split path was
+          // unreachable dead code; every multi-trade truncation silently
+          // fell through to "leave every trade in this chunk for
+          // findMissingTrades" without ever trying a smaller chunk, which
+          // is exactly the "reduce the chunk size and safely retry"
+          // behaviour this fix was supposed to provide. Each half is now
+          // independently budget-checked (one call's worth, not two) at
+          // the moment it's about to be attempted -- correct whether this
+          // is the first split of a top-level chunk or a further split of
+          // an already-split half.
           const halves = splitBatchForRetry(tradeChunk)
           if (halves) {
             console.log(JSON.stringify({
@@ -2613,16 +2633,18 @@ For each relevant trade, state what is included, what is excluded, dependencies,
               chunk_trade_ids: tradeChunk.map((t) => t.id), split_sizes: halves.map((h) => h.length),
             }))
             const [firstHalf, secondHalf] = halves
-            const a = await generateChunk(firstHalf)
-            const b = await generateChunk(secondHalf)
+            const a = hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)
+              ? await generateChunk(firstHalf)
+              : { items: [], failedTradeIds: firstHalf.map((t) => t.id) }
+            const b = hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)
+              ? await generateChunk(secondHalf)
+              : { items: [], failedTradeIds: secondHalf.map((t) => t.id) }
             return { items: [...a.items, ...b.items], failedTradeIds: [...a.failedTradeIds, ...b.failedTradeIds] }
           }
-        }
-        if (isTruncatedResponseError(err)) {
           console.log(JSON.stringify({
             event: 'stage6_chunk_truncated_unresolved', job_id: jobId, batch_id: parentJobId,
             chunk_trade_ids: tradeChunk.map((t) => t.id),
-            reason: tradeChunk.length > 1 ? 'insufficient wall-clock budget to split and retry' : 'a single trade alone exceeded the token budget',
+            reason: 'a single trade alone exceeded the token budget',
           }))
           return { items: [], failedTradeIds: tradeChunk.map((t) => t.id) }
         }
@@ -2631,9 +2653,32 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     }
 
     const estimateStartedAt = Date.now()
+    let ranOutOfBudgetMidLoop = false
+    let chunksActuallyRun = 0
     try {
       for (const [chunkIndex, tradeChunk] of stage6Plan.chunksToRunNow.entries()) {
+        // FIXED (production-readiness review, before first deploy): the
+        // upfront plan (planStage6Chunks, above) only guarantees enough
+        // budget for stage6Plan.chunksToRunNow.length calls AT THE MOMENT
+        // IT WAS COMPUTED -- it has no way to account for a truncation on
+        // an EARLIER chunk in this same loop consuming extra calls via the
+        // split-retry above. Without this check, a later planned chunk
+        // could start with insufficient room left, hit callTool's own
+        // AbortController, and surface as a genuine (non-truncation)
+        // application_timeout failure -- turning a recoverable "ran out of
+        // time" into a hard Stage 6 failure. Re-checking here, on every
+        // iteration, makes this self-correcting: any chunk that can't
+        // safely start is deferred (never begun), never force-failed.
+        if (!hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)) {
+          console.log(JSON.stringify({
+            stage: 'generating_estimate', status: 'chunk_skipped_budget_exhausted_mid_run', job_id: jobId, batch_id: parentJobId,
+            chunk: chunkIndex + 1, chunk_count: stage6Plan.chunksToRunNow.length,
+          }))
+          ranOutOfBudgetMidLoop = true
+          break
+        }
         const { items: chunkItems, failedTradeIds } = await generateChunk(tradeChunk)
+        chunksActuallyRun++
         stage6ItemsGeneratedThisRun += chunkItems.length
 
         if (chunkItems.length > 0) {
@@ -2727,25 +2772,32 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       return
     }
 
-    console.log(JSON.stringify({ stage: 'generating_estimate', status: 'processed', durationMs: Date.now() - estimateStartedAt, itemsGeneratedThisRun: stage6ItemsGeneratedThisRun, chunksRun: stage6Plan.chunksToRunNow.length }))
+    console.log(JSON.stringify({ stage: 'generating_estimate', status: 'processed', durationMs: Date.now() - estimateStartedAt, itemsGeneratedThisRun: stage6ItemsGeneratedThisRun, chunksPlanned: stage6Plan.chunksToRunNow.length, chunksActuallyRun }))
 
-    if (stage6Plan.hasMoreAfterThisInvocation) {
-      // Genuine forward progress this invocation (every chunk above ran,
-      // its line items and checkpoint durably persisted), but the
-      // remaining trades didn't fit — defer them, cleanly, to a later
+    if (stage6Plan.hasMoreAfterThisInvocation || ranOutOfBudgetMidLoop) {
+      // Genuine forward progress this invocation (every chunk that DID run
+      // above had its line items and checkpoint durably persisted), but
+      // the remaining trades didn't fit — defer them, cleanly, to a later
       // invocation with a fresh wall-clock window, exactly like Stage 3's
-      // own deferral. The quote already exists with this invocation's
-      // items on it; findMissingTrades/document-contribution/file
-      // finalization deliberately do NOT run yet — they belong to the
-      // invocation that actually finishes the remaining trades.
+      // own deferral. Two distinct ways to land here: the upfront plan
+      // itself didn't cover every scoped trade (hasMoreAfterThisInvocation),
+      // or the plan looked sufficient but a truncation-triggered split
+      // partway through consumed more calls than budgeted, so a later
+      // planned chunk was never started (ranOutOfBudgetMidLoop) — both are
+      // "we made real progress, resume the rest later", not a failure. The
+      // quote already exists with this invocation's items on it;
+      // findMissingTrades/document-contribution/file finalization
+      // deliberately do NOT run yet — they belong to the invocation that
+      // actually finishes the remaining trades.
       console.log(JSON.stringify({
         stage: 'generating_estimate', status: 'partial_progress_deferred', job_id: jobId, batch_id: parentJobId,
         trades_completed_total: stage6CompletedTradeIds.length, trades_remaining_of_scoped: Array.from(scopedTradeIds).filter((id) => !stage6CompletedTradeIds.includes(id)).length,
+        ran_out_of_budget_mid_loop: ranOutOfBudgetMidLoop,
       }))
       if (parentJobId) {
         await supabase.from('document_processing_batches').update({
           stall_stage: 'generating_estimate',
-          stall_reason: `Stage 6 partially complete (${stage6CompletedTradeIds.length}/${scopedTradeIds.size} scoped trades generated) — remaining trades deferred to a future invocation with a fresh wall-clock budget.`,
+          stall_reason: `Stage 6 partially complete (${stage6CompletedTradeIds.length}/${scopedTradeIds.size} scoped trades generated) — remaining trades deferred to a future invocation with a fresh wall-clock budget${ranOutOfBudgetMidLoop ? ' (a truncation-triggered split retry consumed more of this invocation\'s budget than the upfront plan accounted for)' : ''}.`,
           stalled_at: new Date().toISOString(),
         }).eq('id', parentJobId)
       }
@@ -2860,8 +2912,10 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     // correctly scope a trade with real included_scope while the chunk loop
     // above still ends up with zero line items for it (every chunk attempt
     // truncated even at a single trade, or the trade was never in scope of
-    // any chunk this invocation because it was deferred and this invocation
-    // never got the deferred chunk back — the outer hasMoreAfterThisInvocation
+    // any chunk this invocation because it was deferred — either the
+    // upfront plan didn't cover it, or a truncation-triggered split ate
+    // into the budget a later planned chunk needed. Either way, the
+    // `stage6Plan.hasMoreAfterThisInvocation || ranOutOfBudgetMidLoop`
     // check above already returns before reaching here in that case, so by
     // the time this runs every scoped trade genuinely got at least one
     // attempt this invocation). Checked against quote_line_items AS THEY
