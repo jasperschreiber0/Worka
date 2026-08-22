@@ -27,6 +27,7 @@ import crypto from 'node:crypto'
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 const APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL
+const CRON_SECRET = process.env.CRON_SECRET
 const OVERALL_TIMEOUT_MS = 600_000 // 10 min safety ceiling for this script
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !APP_URL) {
@@ -243,6 +244,26 @@ async function main() {
       }
 
       if (!finalEvent && streamEndedCleanly) {
+        // The SSE route itself never resumes a stalled run on reconnect --
+        // that's deliberately the external recovery cron's job
+        // (files.intake_status stays 'processing' the whole time, which is
+        // exactly what route.ts's alreadyProcessing check reads to skip its
+        // own trigger attempt on every reconnect, real client or this
+        // script). Directly invoking the same recovery route the cron
+        // calls closes that gap here instead of depending on the cron's
+        // actual real-world cadence (observed elsewhere to run well behind
+        // its configured 5-minute schedule) -- this is the identical,
+        // idempotent, already-safe mechanism, just invoked eagerly rather
+        // than waited for.
+        if (CRON_SECRET) {
+          try {
+            const recRes = await fetch(`${APP_URL.replace(/\/$/, '')}/api/cron/intake-recovery`, { headers: { Authorization: `Bearer ${CRON_SECRET}` } })
+            const recBody = await recRes.text().catch(() => '')
+            log('recovery_triggered', { job_id: jobId, http_status: recRes.status, body: recBody.slice(0, 2000) })
+          } catch (recErr) {
+            log('recovery_trigger_failed', { job_id: jobId, error: recErr instanceof Error ? recErr.message : String(recErr) })
+          }
+        }
         log('reconnecting', { job_id: jobId, connection: connectionCount })
         await sleep(3_000) // matches EventSource's default retry delay
       }
