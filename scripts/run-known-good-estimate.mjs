@@ -321,13 +321,37 @@ async function main() {
     result.error = err instanceof Error ? err.message : String(err)
     log('run_failed', result)
   } finally {
+    // On failure, preserve every row for forensic inspection instead of
+    // deleting it -- a definitive root-cause trace (document_processing_batches
+    // .stall_stage/stall_reason, job_intake_locks state, files.ai_failure_*)
+    // is only possible if this state survives past the script exiting. Only
+    // skips cleanup on failure -- a passing run still cleans up exactly as
+    // before, so this does not change behavior for the normal/green path.
     try {
-      await supabase.from('files').delete().eq('job_id', jobId)
-      await supabase.from('jobs').delete().eq('id', jobId)
-      await supabase.storage.from('plans').remove([storagePath])
-      log('cleanup_complete', { job_id: jobId })
-    } catch (cleanupErr) {
-      log('cleanup_failed', { job_id: jobId, error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr) })
+      const { data: batchRow } = await supabase
+        .from('document_processing_batches')
+        .select('id, status, stall_stage, stall_reason, stalled_at, stall_count, total_ai_call_attempts, classification_triggered, quote_id, scope_reasoning_completed_at')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      if (batchRow) {
+        result.batch_id = batchRow.id
+        log('diagnostic_batch_state', { job_id: jobId, batch: batchRow })
+      }
+    } catch (diagErr) {
+      log('diagnostic_batch_state_failed', { job_id: jobId, error: diagErr instanceof Error ? diagErr.message : String(diagErr) })
+    }
+
+    if (result.passed) {
+      try {
+        await supabase.from('files').delete().eq('job_id', jobId)
+        await supabase.from('jobs').delete().eq('id', jobId)
+        await supabase.storage.from('plans').remove([storagePath])
+        log('cleanup_complete', { job_id: jobId })
+      } catch (cleanupErr) {
+        log('cleanup_failed', { job_id: jobId, error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr) })
+      }
+    } else {
+      log('cleanup_skipped_for_forensics', { job_id: jobId, batch_id: result.batch_id, message: 'run did not pass -- job/file/batch/lock rows left in place for check-batch-recovery-state.mjs inspection; delete manually once done' })
     }
   }
 
