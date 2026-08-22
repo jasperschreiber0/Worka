@@ -1,0 +1,44 @@
+-- Rollback for 089_estimate_deadline_extension_for_pending_recovery.sql
+-- Restores enforce_estimate_deadlines to its migration-078 definition
+-- (no deadline-extension branch) and drops the tracking column.
+-- NOT applied automatically -- rename to .sql and run manually if needed.
+
+CREATE OR REPLACE FUNCTION enforce_estimate_deadlines()
+RETURNS TABLE(estimate_run_id uuid, job_id uuid, batch_id uuid, builder_status text, reason text) AS $$
+DECLARE
+  r record;
+  v_status text;
+  v_reason text;
+BEGIN
+  FOR r IN
+    SELECT er.id, er.job_id, er.batch_id, er.status
+    FROM estimate_runs er
+    WHERE er.deadline_at < now()
+      AND er.builder_status IS NULL
+    FOR UPDATE SKIP LOCKED
+  LOOP
+    SELECT cbs.builder_status, cbs.reason INTO v_status, v_reason FROM compute_builder_status(r.batch_id) cbs;
+    v_reason := format('15-minute processing window exceeded (was in stage: %s). %s', r.status, v_reason);
+
+    UPDATE estimate_runs
+    SET builder_status = v_status,
+        needs_review_reason = v_reason,
+        completed_at = COALESCE(completed_at, now())
+    WHERE id = r.id;
+
+    INSERT INTO estimate_run_events (estimate_run_id, from_status, to_status, detail)
+    VALUES (r.id, r.status, r.status, jsonb_build_object(
+      'event', 'deadline_enforced', 'builder_status', v_status, 'reason', v_reason
+    ));
+
+    estimate_run_id := r.id; job_id := r.job_id; batch_id := r.batch_id;
+    builder_status := v_status; reason := v_reason;
+    RETURN NEXT;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION enforce_estimate_deadlines IS
+  'The 15-minute SLA watchdog. Finds every estimate_runs row whose deadline_at has passed with builder_status still NULL (genuinely undecided) and finalizes it via compute_builder_status — using only whatever quote/line-item state already exists, never generating anything new. This is what guarantees a builder returning after 15 minutes always finds ESTIMATE_READY, ESTIMATE_READY_WITH_WARNINGS, or NEEDS_REVIEW, never silence. Called from GET /api/cron/intake-recovery on every tick, independent of DOCUMENT_RECOVERY_DISABLED/AI_RECOVERY_DISABLED (finalizing a status makes no Anthropic call and triggers no worker).';
+
+ALTER TABLE estimate_runs DROP COLUMN IF EXISTS deadline_extensions_used;
