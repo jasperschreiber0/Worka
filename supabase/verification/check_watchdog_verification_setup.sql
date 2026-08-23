@@ -38,7 +38,7 @@ new_run AS (
       'deadline_at', (now() - interval '1 minute')::text,
       'started_at', (now() - interval '16 minutes')::text,
       'completed_at', null,
-      'reconciled_at', null
+      'reconciled_at', now()::text
     )
     FROM estimate_runs er WHERE er.id = '826ffcee-d1b7-45bf-8431-5630ba85d358'
   ))
