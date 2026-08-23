@@ -1234,6 +1234,62 @@ export function planStage6Chunks<T>(
   return { chunksToRunNow, hasMoreAfterThisInvocation }
 }
 
+// ─── Stage 6 batch-level concurrency claim (mirrors claim_stage6_slot /
+// release_stage6_slot, migration 094) ───────────────────────────────────
+//
+// STAGE6_MAX_PARALLEL_CHUNKS only bounds concurrency WITHIN one invocation's
+// own Promise.allSettled — it does nothing to stop TWO separate invocations
+// of the SAME batch from each running their own pair of concurrent chunks at
+// once. Found live in production (2026-08-23): a reclaimed job_intake_lock
+// does not kill the physical old invocation still running server-side (a
+// pre-existing, documented characteristic of this pipeline — see
+// acquire_or_reclaim_job_intake_lock's own comment), and the recovery cron's
+// retriggers can land while an earlier invocation's EdgeRuntime.waitUntil
+// work is still finishing. 4 concurrent stage_estimate_generation Anthropic
+// calls for one job were observed in ai_operations timestamps, double the
+// intended ceiling of 2.
+//
+// These pure functions are the exact decision logic the SQL RPCs
+// (claim_stage6_slot / release_stage6_slot) implement — kept here, tested
+// without a live database, the same pattern shouldSkipStage3Call mirrors
+// record_stage3_failure. A slot older than STAGE6_SLOT_TTL_MS is treated as
+// abandoned and no longer counts — self-healing against an invocation killed
+// uncleanly (Supabase's external CPU-time governor kill bypasses try/finally,
+// a well-documented risk elsewhere in this pipeline) without any separate
+// sweep/cron logic. TTL is STAGE6_PER_CALL_TIMEOUT_MS (220s) plus a 20s
+// margin — long enough that a genuinely still-running call's slot can never
+// expire out from under it.
+export interface Stage6SlotClaim {
+  callId: string
+  claimedAt: string // ISO timestamp
+}
+
+export const STAGE6_SLOT_TTL_MS = STAGE6_PER_CALL_TIMEOUT_MS + 20_000
+
+export function pruneExpiredStage6Slots(
+  slots: Stage6SlotClaim[],
+  nowMs: number,
+  slotTtlMs: number = STAGE6_SLOT_TTL_MS,
+): Stage6SlotClaim[] {
+  return slots.filter((s) => nowMs - new Date(s.claimedAt).getTime() < slotTtlMs)
+}
+
+// Pre-call guard mirroring claim_stage6_slot's own decision: true when
+// fewer than maxConcurrent non-expired slots are currently held for this
+// batch. A caller that gets false must NOT make an Anthropic call or
+// increment AI attempts for this chunk, and must NOT retry within the same
+// invocation — it simply leaves the chunk unclaimed for a later invocation,
+// exactly like any other deferred chunk (a wall-clock defer, a truncation
+// split).
+export function canClaimStage6Slot(
+  slots: Stage6SlotClaim[],
+  nowMs: number,
+  maxConcurrent: number = STAGE6_MAX_PARALLEL_CHUNKS,
+  slotTtlMs: number = STAGE6_SLOT_TTL_MS,
+): boolean {
+  return pruneExpiredStage6Slots(slots, nowMs, slotTtlMs).length < maxConcurrent
+}
+
 export interface ScopeReasoningResult {
   scope: Array<Record<string, unknown>>
   clarifying_questions: Array<Record<string, unknown>>

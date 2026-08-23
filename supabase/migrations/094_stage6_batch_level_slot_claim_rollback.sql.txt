@@ -1,0 +1,10 @@
+-- Rollback for 094_stage6_batch_level_slot_claim.sql
+-- Additive-only migration -- drops the two new functions and the new column.
+
+DROP FUNCTION IF EXISTS release_stage6_slot(uuid, uuid);
+DROP FUNCTION IF EXISTS claim_stage6_slot(uuid, integer, interval);
+
+ALTER TABLE document_processing_batches
+  DROP COLUMN IF EXISTS stage6_active_calls;
+
+NOTIFY pgrst, 'reload schema';

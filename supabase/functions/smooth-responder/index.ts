@@ -2800,7 +2800,61 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         chunksToAttempt = []
       }
 
-      const settled = await Promise.allSettled(chunksToAttempt.map((tradeChunk) => generateChunk(tradeChunk)))
+      // Batch-level concurrency claim (migration 094) -- STAGE6_MAX_PARALLEL_
+      // CHUNKS above only bounds concurrency WITHIN this invocation's own
+      // Promise.allSettled; it does nothing to stop a SEPARATE overlapping
+      // invocation of the same batch (a reclaimed job_intake_lock does not
+      // kill the physical old invocation still running server-side) from
+      // also running its own concurrent chunks at the same time. Confirmed
+      // live: 4 concurrent stage_estimate_generation calls for one job,
+      // double the intended ceiling of 2. Each chunk claims its own slot
+      // (atomic, DB-backed, TTL-based) before making any Anthropic call or
+      // touching total_ai_call_attempts; a chunk that fails to claim makes
+      // ZERO Anthropic calls and is left unclaimed for a later invocation,
+      // exactly like any other deferred chunk -- no retry loop here.
+      const claimStage6Slot = async (): Promise<{ claimed: boolean; callId: string | null }> => {
+        if (!parentJobId) return { claimed: true, callId: null } // legacy no-batch path: nothing to key concurrency on
+        const { data, error } = await supabase.rpc('claim_stage6_slot', { p_batch_id: parentJobId })
+        if (error) {
+          // Fail CLOSED, unlike increment_batch_ai_attempts's own error
+          // handler (which proceeds, since the circuit breaker is an
+          // independent backstop for THAT check) -- concurrency has no
+          // equivalent backstop, so a failed safety check here must refuse
+          // rather than risk the exact unbounded-concurrency gap this
+          // migration exists to close.
+          console.error('claim_stage6_slot RPC failed:', error)
+          return { claimed: false, callId: null }
+        }
+        const result = (data as Array<{ claimed: boolean; call_id: string | null }> | null)?.[0]
+        return { claimed: result?.claimed ?? false, callId: result?.call_id ?? null }
+      }
+      const releaseStage6Slot = async (callId: string | null) => {
+        if (!parentJobId || !callId) return
+        try {
+          await supabase.rpc('release_stage6_slot', { p_batch_id: parentJobId, p_call_id: callId })
+        } catch (err) {
+          console.error('release_stage6_slot RPC failed:', err)
+        }
+      }
+
+      const settled = await Promise.allSettled(chunksToAttempt.map(async (tradeChunk) => {
+        const claim = await claimStage6Slot()
+        if (!claim.claimed) {
+          return { skipped: true as const }
+        }
+        try {
+          const result = await generateChunk(tradeChunk)
+          return { skipped: false as const, ...result }
+        } finally {
+          // try/finally, not just a trailing call -- releases on BOTH a
+          // normal return and a thrown (genuine, non-truncation) failure,
+          // so a sibling chunk waiting on this slot isn't starved by an
+          // error this same catch block is about to handle anyway. Only an
+          // uncatchable external kill skips this; that slot then simply
+          // expires via claim_stage6_slot's own TTL.
+          await releaseStage6Slot(claim.callId)
+        }
+      }))
       let firstRejection: unknown = null
 
       for (const [chunkIndex, tradeChunk] of chunksToAttempt.entries()) {
@@ -2817,6 +2871,14 @@ For each relevant trade, state what is included, what is excluded, dependencies,
           // trade: this only ever grows" -- see the checkpoint comment
           // below), just extended from one chunk to several run at once.
           firstRejection ??= settledResult.reason
+          continue
+        }
+        if (settledResult.value.skipped) {
+          console.log(JSON.stringify({
+            stage: 'generating_estimate', status: 'chunk_skipped_slot_unavailable', job_id: jobId, batch_id: parentJobId,
+            chunk: chunkIndex + 1, chunk_count: chunksToAttempt.length, tradesInChunk: tradeChunk.length,
+            reason: 'another overlapping invocation already holds the batch-level Stage 6 concurrency allowance -- deferring to a later invocation',
+          }))
           continue
         }
         const { items: chunkItems, failedTradeIds } = settledResult.value

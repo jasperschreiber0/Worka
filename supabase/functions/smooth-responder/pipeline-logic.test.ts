@@ -47,6 +47,9 @@ import {
   STAGE3_PER_CALL_TIMEOUT_MS,
   STAGE3_DEFAULT_CHUNK_COUNT,
   planStage6Chunks,
+  pruneExpiredStage6Slots,
+  canClaimStage6Slot,
+  STAGE6_SLOT_TTL_MS,
   STAGE6_MAX_TRADES_PER_CHUNK,
   STAGE6_MAX_PARALLEL_CHUNKS,
   STAGE6_PER_CALL_TIMEOUT_MS,
@@ -1492,6 +1495,82 @@ test('planStage6Chunks: concurrent mode converges a 13-trade project in 3 invoca
     assert.ok(invocations <= 5, 'must never take MORE invocations than the old sequential design')
   }
   assert.equal(invocations, 3, 'was 5 sequential invocations before bounded concurrency; now 3')
+})
+
+// ── Stage 6 batch-level concurrency claim (canClaimStage6Slot/
+// pruneExpiredStage6Slots — mirrors claim_stage6_slot/release_stage6_slot,
+// migration 094). Regression coverage for the confirmed production finding
+// (2026-08-23): STAGE6_MAX_PARALLEL_CHUNKS only bounds concurrency WITHIN
+// one invocation, so two overlapping invocations of the same batch could
+// together run 4 concurrent Stage 6 calls, double the intended ceiling. ──
+
+const NOW = Date.parse('2026-08-23T09:00:00.000Z')
+const isoBefore = (ms: number) => new Date(NOW - ms).toISOString()
+
+test('canClaimStage6Slot: allows a claim when zero slots are held', () => {
+  assert.equal(canClaimStage6Slot([], NOW), true)
+})
+
+test('canClaimStage6Slot: allows a second claim when only one fresh slot is held (max 2)', () => {
+  const slots = [{ callId: 'a', claimedAt: isoBefore(1_000) }]
+  assert.equal(canClaimStage6Slot(slots, NOW), true)
+})
+
+test('canClaimStage6Slot: refuses a third claim when two fresh slots are already held', () => {
+  const slots = [
+    { callId: 'a', claimedAt: isoBefore(1_000) },
+    { callId: 'b', claimedAt: isoBefore(2_000) },
+  ]
+  assert.equal(canClaimStage6Slot(slots, NOW), false)
+})
+
+test('canClaimStage6Slot: simulated overlapping invocations A and B for the SAME batch X — B is refused once A holds 2 slots, so max concurrency stays <= 2', () => {
+  // Invocation A successfully claims both of its 2 concurrent chunks.
+  let slots: Array<{ callId: string; claimedAt: string }> = []
+  assert.equal(canClaimStage6Slot(slots, NOW), true)
+  slots = [...slots, { callId: 'A-1', claimedAt: isoBefore(500) }]
+  assert.equal(canClaimStage6Slot(slots, NOW), true)
+  slots = [...slots, { callId: 'A-2', claimedAt: isoBefore(400) }]
+
+  // Invocation B, overlapping in real time, tries to claim its own chunks
+  // against the SAME batch's slot state -- both attempts must be refused,
+  // since A already holds the full allowance. No retry loop: a single
+  // false result per attempt, exactly matching the required contract.
+  assert.equal(canClaimStage6Slot(slots, NOW), false, 'B chunk 1 refused')
+  assert.equal(canClaimStage6Slot(slots, NOW), false, 'B chunk 2 refused')
+})
+
+test('pruneExpiredStage6Slots: drops a slot older than the TTL, keeps a fresh one', () => {
+  const slots = [
+    { callId: 'stale', claimedAt: isoBefore(STAGE6_SLOT_TTL_MS + 1_000) },
+    { callId: 'fresh', claimedAt: isoBefore(1_000) },
+  ]
+  const pruned = pruneExpiredStage6Slots(slots, NOW)
+  assert.deepEqual(pruned.map((s) => s.callId), ['fresh'])
+})
+
+test('canClaimStage6Slot: a crashed invocation that never released does NOT permanently lock the batch -- its slot expires via the TTL', () => {
+  // Two slots held, both past the TTL (simulating an invocation killed
+  // uncleanly by an external CPU-time governor kill, which bypasses
+  // try/finally and therefore never calls release_stage6_slot).
+  const staleSlots = [
+    { callId: 'crashed-1', claimedAt: isoBefore(STAGE6_SLOT_TTL_MS + 5_000) },
+    { callId: 'crashed-2', claimedAt: isoBefore(STAGE6_SLOT_TTL_MS + 3_000) },
+  ]
+  assert.equal(canClaimStage6Slot(staleSlots, NOW), true, 'expired slots must not block a fresh claim forever')
+})
+
+test('canClaimStage6Slot: a slot claimed just under the TTL is still honoured (never expires while a genuinely running call could still succeed)', () => {
+  const slots = [
+    { callId: 'a', claimedAt: isoBefore(STAGE6_SLOT_TTL_MS - 1_000) },
+    { callId: 'b', claimedAt: isoBefore(1_000) },
+  ]
+  assert.equal(canClaimStage6Slot(slots, NOW), false, 'both slots still within TTL -- correctly refuses a third')
+})
+
+test('STAGE6_SLOT_TTL_MS is comfortably longer than STAGE6_PER_CALL_TIMEOUT_MS -- a genuinely in-flight call\'s slot can never expire out from under it', () => {
+  assert.ok(STAGE6_SLOT_TTL_MS > STAGE6_PER_CALL_TIMEOUT_MS)
+  assert.equal(STAGE6_SLOT_TTL_MS - STAGE6_PER_CALL_TIMEOUT_MS, 20_000)
 })
 
 test('truncation recovery composition: a real callTool-shaped truncation error on a full-size (3-trade) chunk is detected and reduces to two smaller chunks, never the same size', () => {
