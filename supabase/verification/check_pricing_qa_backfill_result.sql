@@ -23,6 +23,13 @@ SELECT
   (SELECT count(*) FROM quotes WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS quotes,
   (SELECT count(*) FROM document_processing_batches WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS batches;
 
+-- project_facts.source_document_id -> project_documents(id) has no cascade,
+-- and both project_facts and project_documents cascade directly from
+-- jobs(id) -- cascading them together via one DELETE FROM jobs hit an FK
+-- ordering error live (project_documents deleted before project_facts in
+-- the same statement's cascade resolution). Deleting project_facts
+-- explicitly first avoids relying on cross-sibling cascade ordering.
+DELETE FROM project_facts WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330';
 DELETE FROM files WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330';
 DELETE FROM jobs WHERE id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330';
 

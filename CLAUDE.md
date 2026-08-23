@@ -842,6 +842,47 @@ All tables in `public` schema with RLS. Types in `lib/types/database.types.ts` �
                                 worst-case damage of ANY retry-loop bug to the configured daily
                                 ceiling regardless of the bug's mechanism. Additive only; rollback
                                 is DROP TABLE/FUNCTION plus per-call-site revert.
+
+-- Catalog gap: migrations 055-090 exist in supabase/migrations/ and are referenced by name
+-- throughout the prose sections below (estimate_runs/builder_status, Stage 3/6 checkpointing,
+-- the AI failure-classification redesign, the intake recovery service) but were never backfilled
+-- into this numbered list — check the actual migrations directory for anything not itemized here
+-- rather than assuming this list is exhaustive above 054.
+091_abandoned_file_check_excludes_retry_eligible_batches.sql — closes a live, confirmed oscillation:
+                                find_and_fail_abandoned_files (migration 046) and the classification-
+                                retry cron (route.ts step 5) were firing for the SAME file every
+                                single tick, each briefly acquiring/releasing job_intake_locks
+                                between ticks — 3c marking the file 'failed', the retriggered run's
+                                derived-status recompute (migration 052) flipping it back to
+                                'processing', repeat forever — burning the shared recovery-attempts
+                                cap on the oscillation's own churn rather than genuine failures.
+                                Adds one more exclusion to find_and_fail_abandoned_files: don't touch
+                                a file whose batch is still a structurally legitimate classification-
+                                retry candidate (the exact same predicate
+                                find_stuck_batches_needing_classification_retry already uses).
+                                Confirmed live: on the very next cron tick after deploy, the
+                                oscillation stopped and the batch converged to a completed quote
+                                within that same minute. See "Independent Intake Recovery Service"
+                                below for the full incident writeup.
+092_builder_status_requires_pricing_and_qa.sql — closes a false-positive completion signal found
+                                live immediately after 091 unblocked the batch above: Stage 6
+                                completed via the recovery-cron resume path (no SSE client, no
+                                builder ever opened the quote) and created a real quote, but pricing
+                                (lib/pricing.ts ensureQuotePriced) and QA (lib/estimating/qa.ts
+                                runQualityAssurance) never ran — both had only ever fired from the
+                                SSE intake poller or a lazy quote-GET backfill, neither of which the
+                                cron-only completion path reaches. Yet estimate_runs.builder_status
+                                was set to ESTIMATE_READY anyway, since compute_builder_status never
+                                checked quotes.total_cost/qa_report before declaring readiness — a
+                                textbook "apparently-successful-but-incomplete quote." Fix:
+                                compute_builder_status now requires both to be non-null before
+                                returning ESTIMATE_READY/ESTIMATE_READY_WITH_WARNINGS (otherwise
+                                NEEDS_REVIEW with reason_code pricing_not_run/qa_not_run); paired
+                                with a new bounded sweep in GET /api/cron/intake-recovery
+                                (route.ts) that actually triggers pricing/QA for any quote whose
+                                batch has finished processing but was never priced/QA'd — the real
+                                missing trigger, not just a stricter check. Does not touch
+                                getSendBlockingReasons, which remains the sole send-time authority.
 ```
 
 **If you ever see "Could not find the function/table X in the schema cache" from PostgREST**
@@ -926,7 +967,11 @@ not serverless — an un-awaited promise keeps running after the response is sen
   quote GET route's lazy-refresh-on-null-`qa_report` fallback** — that response contract has always
   returned `qa_report` inline, and backgrounding it there would change visible behaviour for no
   latency win (a builder opening a quote with no cached QA yet is exactly the case that fallback
-  exists for).
+  exists for). **As of migration 092, also triggered from `GET /api/cron/intake-recovery`'s own
+  bounded pricing/QA backfill sweep** — closes a real gap where a quote created via the recovery
+  cron's resume path (Stage 6 completing with no SSE client connected and no builder ever opening
+  the quote) had no other trigger to ever price or QA it; see migration 092's own entry above and
+  "Independent Intake Recovery Service" below for the incident.
 - Tier-1 rate learning (`captureLearnedRates`, `lib/pricing.ts`) — folds an approved quote's rates
   into `builder_learned_rates`, batched (see below), never blocks activation.
 - Project-understanding persistence (`persistProjectUnderstanding`, `lib/project-context.ts`)
@@ -1119,18 +1164,34 @@ note below), (2) re-enable `AI_RECOVERY_DISABLED`/`DOCUMENT_RECOVERY_DISABLED` i
 via `intake_recovery_runs`/`document_processing_batches.stall_count` that retries actually stop
 recurring, not just that they're now visible.
 
-**Known open issue, found live, not yet root-caused:** independent of the wall-clock deadlock above,
-production logs on the same day showed `find_and_fail_abandoned_files` (migration 046, step 3c)
-re-marking the same two files `intake_status='failed'` on every single cron tick, each time
-reporting `previous_status: 'processing'` — meaning something resets `files.intake_status` back to
-a non-terminal value between ticks, which the function's own candidate query then matches again.
-Not an Anthropic-spend issue (confirmed via `ai_recovery_enabled: false` in the same logs — the
-AI-calling half of the cron was already off), but real, non-converging load running every minute.
-Root cause not isolated — the session that found this had no live DB access to watch
-`files.intake_status` change between ticks. `DOCUMENT_RECOVERY_DISABLED` was set `true` as an
-emergency stop; do not re-enable until this is diagnosed (plausibly an interaction with migration
-052's derived-`intake_status` recompute path re-deriving `'processing'` for these specific files
-independent of this function's direct write — unconfirmed).
+**Resolved (migration 091, 2026-08-23):** the open issue below was root-caused and fixed live, not
+just diagnosed. Mechanism confirmed directly in Railway deploy logs: `abandoned_file_marked_failed`
+(step 3c) and `recovery_classification_retriggered` (step 5) were firing for the *same file* on
+every single cron tick — once Stage 3 is checkpointed (migration 053) and a batch resumes straight
+to Stage 6, each resumed `smooth-responder` invocation is brief, so `job_intake_locks` exists only
+transiently while it runs. For most of any 60-second interval no lock exists even though the batch
+is being actively, successfully worked on — `find_and_fail_abandoned_files`'s own precondition ("no
+lock" = "abandoned") was simply wrong for this specific, otherwise-healthy case. Step 3c marks the
+file `'failed'`; the derived-`intake_status` recompute (migration 052) flips it back to `'processing'`
+once the freshly-retriggered invocation progresses; repeat every tick — burning the shared
+`recovery_attempts` cap on the oscillation's own churn, not on genuine failures, threatening to
+permanently fail an otherwise-converging job. This confirms migration 052's derived-status recompute
+*was* the interaction, exactly as this section's prior "unconfirmed" hypothesis guessed. Fix:
+`find_and_fail_abandoned_files` (migration 091) now excludes any file whose batch is still a
+structurally legitimate classification-retry candidate — the *same* eligibility predicate
+`find_stuck_batches_needing_classification_retry` already uses, so the two can never drift apart
+again, mirroring the pattern migration 089 already used for `enforce_estimate_deadlines`. Verified
+live: on the very next cron tick after deploying 091, `abandoned_files_marked_failed` dropped to 0
+and the batch converged to a real, completed quote within that same minute.
+
+**Original open issue, found live, not yet root-caused (2026-07-19), for reference:** independent of
+the wall-clock deadlock above, production logs on the same day showed `find_and_fail_abandoned_files`
+(migration 046, step 3c) re-marking the same two files `intake_status='failed'` on every single cron
+tick, each time reporting `previous_status: 'processing'` — meaning something resets
+`files.intake_status` back to a non-terminal value between ticks, which the function's own candidate
+query then matches again. Not an Anthropic-spend issue (confirmed via `ai_recovery_enabled: false`
+in the same logs — the AI-calling half of the cron was already off), but real, non-converging load
+running every minute. `DOCUMENT_RECOVERY_DISABLED` was set `true` as an emergency stop at the time.
 
 ---
 
@@ -1425,12 +1486,14 @@ text-extraction queue) and `AI_RECOVERY_DISABLED` (steps 4-5: `find_stale_job_in
 both, so the emergency stop for the AI-spend incident also silently disabled the everyday,
 zero-cost document-extraction recovery — an ordinary stuck upload (a crashed extraction worker, or
 a lost `triggerNext`/`triggerClassification` fetch) had no automatic fix either while that flag was
-on. Current state (as of 2026-07-24, verified directly against `route.ts`, not assumed from this
-paragraph — the two had drifted out of sync, see below): `DOCUMENT_RECOVERY_DISABLED = true` — still
-disabled, unresolved oscillation risk between `find_and_fail_abandoned_files` and
-`recompute_file_intake_status` documented under "Known open issue" further up; do not flip without
-fixing that first. `AI_RECOVERY_DISABLED = false` — genuinely re-enabled now (see the dated note
-immediately below for why "genuinely" is doing real work in that sentence). Every specific cause of
+on. Current state (as of 2026-08-23, verified directly against `route.ts`): `DOCUMENT_RECOVERY_DISABLED
+= false` and `AI_RECOVERY_DISABLED = false` — both genuinely enabled. The `find_and_fail_abandoned_files`
+oscillation this paragraph used to cite as the reason `DOCUMENT_RECOVERY_DISABLED` stayed `true` is
+now root-caused and fixed (migration 091 — see "Resolved" note under "Known open issue" above), so
+that blocker no longer applies; if you ever find this constant back at `true` with no comment
+explaining why, that's drift from an earlier documented state, not a deliberate current safeguard —
+check `route.ts` directly rather than trusting prose here, the same lesson the 2026-08-23 paragraph
+below this one exists to teach. Every specific cause of
 the original spend incident is independently closed: solo-forcing on `ai_failure_count>=1` means a
 retry can never resend the identical payload that just timed out; `maxConsecutiveOccurrences` is
 enforced *inside* `record_ai_failure`, migration 043, regardless of trigger source, so a cron-triggered
