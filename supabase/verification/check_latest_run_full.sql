@@ -9,7 +9,9 @@ ORDER BY created_at DESC LIMIT 1;
 
 \echo '=== Batch state (Stage1/2, Stage3, Stage6, AI ceiling) ==='
 SELECT b.id, b.status, b.classification_triggered, b.quote_id, b.stall_stage, b.stall_count,
-       b.stage3_trades_done, b.stage6_trades_done, b.stage3_failure_count, b.stage6_failure_count,
+       array_length(b.stage3_completed_trade_ids, 1) AS stage3_trades_done,
+       array_length(b.stage6_completed_trade_ids, 1) AS stage6_trades_done,
+       b.stage3_failure_count, b.stage6_failure_count,
        b.total_ai_call_attempts, b.stage6_active_calls, b.created_at, b.updated_at
 FROM document_processing_batches b
 JOIN jobs j ON j.id = b.job_id
@@ -18,18 +20,18 @@ ORDER BY b.created_at DESC LIMIT 1;
 
 \echo '=== estimate_runs + event history ==='
 SELECT er.id, er.status, er.builder_status, er.needs_review_reason, er.needs_review_reason_code,
-       er.deadline_extensions_used, er.deadline_at, er.completed_at
+       er.deadline_extensions_used, er.deadline_at, er.started_at, er.completed_at
 FROM estimate_runs er
 JOIN jobs j ON j.id = er.job_id
 WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
-ORDER BY er.created_at DESC LIMIT 1;
+ORDER BY er.started_at DESC LIMIT 1;
 
 SELECT ere.created_at, ere.from_status, ere.to_status, ere.detail
 FROM estimate_run_events ere
 WHERE ere.estimate_run_id = (
   SELECT er.id FROM estimate_runs er JOIN jobs j ON j.id = er.job_id
   WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
-  ORDER BY er.created_at DESC LIMIT 1
+  ORDER BY er.started_at DESC LIMIT 1
 )
 ORDER BY ere.created_at;
 
@@ -60,28 +62,27 @@ WITH s6 AS (
 SELECT COALESCE(max(running), 0) AS max_concurrent_stage6_calls
 FROM (SELECT sum(delta) OVER (ORDER BY t, delta DESC) AS running FROM s6) x;
 
-\echo '=== Quote + line items + duplicate check ==='
+\echo '=== Quote + line items + duplicate check (scoped strictly to the latest job) ==='
 SELECT q.id, q.status, q.total_cost, q.margin_pct, q.confidence_score, q.overall_confidence,
        (q.qa_report IS NOT NULL) AS has_qa_report
 FROM quotes q
-JOIN jobs j ON j.id = q.job_id
-WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
+WHERE q.job_id = (SELECT id FROM jobs WHERE builder_id = '00000000-0000-0000-0000-0000000000fd' ORDER BY created_at DESC LIMIT 1)
 ORDER BY q.created_at DESC LIMIT 1;
 
 SELECT count(*) AS total_line_items, count(*) FILTER (WHERE rate IS NOT NULL) AS priced,
        count(DISTINCT trade_category_id) AS distinct_trades
 FROM quote_line_items
 WHERE quote_id = (
-  SELECT q.id FROM quotes q JOIN jobs j ON j.id = q.job_id
-  WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
+  SELECT q.id FROM quotes q
+  WHERE q.job_id = (SELECT id FROM jobs WHERE builder_id = '00000000-0000-0000-0000-0000000000fd' ORDER BY created_at DESC LIMIT 1)
   ORDER BY q.created_at DESC LIMIT 1
 );
 
 SELECT trade_category_id, description, count(*) AS occurrences
 FROM quote_line_items
 WHERE quote_id = (
-  SELECT q.id FROM quotes q JOIN jobs j ON j.id = q.job_id
-  WHERE j.builder_id = '00000000-0000-0000-0000-0000000000fd'
+  SELECT q.id FROM quotes q
+  WHERE q.job_id = (SELECT id FROM jobs WHERE builder_id = '00000000-0000-0000-0000-0000000000fd' ORDER BY created_at DESC LIMIT 1)
   ORDER BY q.created_at DESC LIMIT 1
 )
 GROUP BY trade_category_id, description HAVING count(*) > 1;
