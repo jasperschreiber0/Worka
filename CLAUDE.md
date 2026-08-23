@@ -1546,9 +1546,15 @@ the existing resumable-stall design in this section actually resumable.
   schedule actually firing roughly once an HOUR (GitHub Actions' scheduler queue degrading far past
   "a few minutes' slip" for a low-traffic repo) — functionally no recovery for up to an hour after a
   lost `triggerNext()`/`triggerClassification()` call, which is what produced a real stuck-batch
-  incident. The GitHub Actions workflow is left in place as a harmless redundant secondary trigger
-  (every RPC this route calls is idempotent, so double-firing is a no-op) rather than deleted —
-  same pattern this file already documents for `vercel.json`'s inert cron entries. `vercel.json`'s
+  incident. **The GitHub Actions workflow's schedule was removed (2026-08-23)** — it was NOT actually
+  harmless: production evidence traced an 8h56m-stuck `estimate_runs` row directly to this workflow's
+  5-minute schedule overlapping pg_cron's 1-minute schedule, both invoking the same route concurrently.
+  `enforce_estimate_deadlines()`'s finalization loop uses `FOR UPDATE SKIP LOCKED`, so a second
+  concurrent invocation could silently skip an eligible row with zero error on either invocation —
+  contention, not idempotency, was the risk (every RPC being idempotent only means a *duplicate*
+  action is harmless; it says nothing about two invocations *contending for the same row lock*).
+  `.github/workflows/intake-recovery-cron.yml` is now `workflow_dispatch`-only (manual trigger for
+  targeted verification) — pg_cron is the sole automatic production scheduler. `vercel.json`'s
   cron entry for this route was never what ran it either way — see "Hosting" above; Vercel isn't
   even deploying `main`. Requires a one-time Vault setup (`vault.create_secret` for the app URL and
   `CRON_SECRET`, run once via the Supabase SQL editor — see migration 038's header comment); until

@@ -976,6 +976,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     job_locks_reclaimed: summary.job_locks_reclaimed,
     stuck_files_retried: summary.stuck_files_retried,
     files_permanently_failed: summary.files_permanently_failed,
+    deadlines_enforced: summary.deadlines_enforced,
     errors: summary.errors,
   }).then(({ error }) => {
     if (error) log('recovery_audit_log_write_failed', { error: error.message })

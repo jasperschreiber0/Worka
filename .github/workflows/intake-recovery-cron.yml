@@ -1,20 +1,35 @@
 name: Intake recovery cron
 
-# Fires GET /api/cron/intake-recovery on a schedule — see
-# scripts/trigger-cron-route.mjs and CLAUDE.md's "Independent Intake
-# Recovery Service" for what that route does and why it needs to run
-# frequently (its own staleness windows are 3-6 minutes; a stuck upload
-# should self-heal within one cycle of this schedule).
+# Manually-triggerable only — see below for why the schedule was removed.
 #
-# This app is hosted on Railway, not Vercel (see CLAUDE.md's "Hosting"
-# note) — vercel.json's cron entries are never read by anything, since
-# Railway doesn't consult that file. This workflow (or an equivalent
-# Railway-native Cron Job service running the same script) is the actual
-# scheduler. GitHub Actions' own scheduler is best-effort and can slip by
-# several minutes under load — acceptable here since every run is
-# idempotent and a late/skipped run just means recovery takes one cycle
-# longer, not incorrect; use a Railway Cron Job instead if you need a
-# tighter guarantee.
+# Fires GET /api/cron/intake-recovery — see scripts/trigger-cron-route.mjs
+# and CLAUDE.md's "Independent Intake Recovery Service" for what that route
+# does.
+#
+# SCHEDULE REMOVED (2026-08-23): this workflow used to fire every 5 minutes
+# alongside pg_cron's own 1-minute native schedule (migration 038,
+# `worka-intake-recovery`) hitting the exact same route — two independent
+# schedulers invoking the same handler concurrently. Production evidence
+# traced a real incident to this: an expired, non-extension-eligible
+# estimate_runs row (stage3_failure_count > 0, so migration 089's deadline
+# extension doesn't apply) sat non-terminal for ~8h56m despite pg_cron
+# firing every minute with zero route errors — enforce_estimate_deadlines()
+# uses `FOR UPDATE SKIP LOCKED` in its finalization loop, so a second
+# concurrent invocation (from this workflow) could silently skip an
+# eligible row without ever surfacing as an error, for however many ticks
+# the two schedulers happened to overlap.
+#
+# pg_cron is the sole authoritative production scheduler now — it already
+# fires every minute (tighter than this workflow's 5), runs inside the same
+# database (no cross-network dependency), and doesn't degrade the way
+# GitHub Actions' own scheduler can under load (CLAUDE.md's "Hosting" note
+# documents GitHub Actions' schedule occasionally slipping to ~once/hour
+# for a low-traffic repo — which is exactly why pg_cron was added as the
+# primary trigger in the first place; this workflow was only ever meant as
+# a harmless redundant secondary, not a second authority). Kept as
+# workflow_dispatch-only so it's still available for manual/on-demand
+# triggering (e.g. targeted verification of a specific batch) without
+# ever firing automatically again.
 #
 # Requires two repo secrets: APP_URL (the app's real, currently-live URL —
 # check Railway → Networking, don't assume a domain) and CRON_SECRET (must
@@ -22,8 +37,6 @@ name: Intake recovery cron
 # on Vercel, which does not run this app).
 
 on:
-  schedule:
-    - cron: '*/5 * * * *' # every 5 minutes — GitHub Actions' documented minimum interval
   workflow_dispatch: {}
 
 concurrency:
