@@ -35,3 +35,23 @@ WHERE j.parent_job_id = 'f53db004-c8a1-471e-aaa9-34abae45ceb0'
 SELECT id, intake_recovery_attempts, intake_status, failure_stage
 FROM files
 WHERE id = '80bd56c5-016d-4b4c-8c8a-0cd66cb905a0';
+
+\echo '=== intake_recovery_runs: ALL columns for the last 5 rows (checking for a deadlines_enforced field / hidden errors) ==='
+SELECT * FROM intake_recovery_runs ORDER BY created_at DESC LIMIT 5;
+
+\echo '=== Does enforce_estimate_deadlines exist and what does its signature look like? ==='
+SELECT proname, pronargs, prorettype::regtype
+FROM pg_proc WHERE proname = 'enforce_estimate_deadlines';
+
+\echo '=== pg_cron job run history for the intake-recovery trigger (last 15) ==='
+SELECT jrd.runid, jrd.job_pid, jrd.status, jrd.return_message, jrd.start_time, jrd.end_time
+FROM cron.job_run_details jrd
+JOIN cron.job j ON j.jobid = jrd.jobid
+WHERE j.jobname = 'worka-intake-recovery'
+ORDER BY jrd.start_time DESC
+LIMIT 15;
+
+\echo '=== estimate_runs row raw (is batch_id actually populated/matching?) ==='
+SELECT id, job_id, batch_id, status, builder_status, deadline_at, now() - deadline_at AS overdue_by
+FROM estimate_runs
+WHERE batch_id = 'f53db004-c8a1-471e-aaa9-34abae45ceb0';
