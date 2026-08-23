@@ -48,10 +48,12 @@ import {
   STAGE3_DEFAULT_CHUNK_COUNT,
   planStage6Chunks,
   STAGE6_MAX_TRADES_PER_CHUNK,
+  STAGE6_MAX_PARALLEL_CHUNKS,
   STAGE6_PER_CALL_TIMEOUT_MS,
   mergeScopeReasoningResults,
   shouldSkipStage3Call,
   nextStage3FailureHistory,
+  shouldFailStage3RunImmediately,
   shouldSkipStage6Call,
   nextStage6FailureHistory,
   sha256Hex,
@@ -1445,6 +1447,53 @@ test('planStage6Chunks: after chunk 1 already ran (real elapsed time consumed), 
   assert.equal(plan.hasMoreAfterThisInvocation, true)
 })
 
+// ── Bounded concurrency (STAGE6_MAX_PARALLEL_CHUNKS, added after the 5-run
+// production reliability test found Stage 6 could never fit more than one
+// sequential chunk per invocation) ──────────────────────────────────────
+
+test('planStage6Chunks: default (no maxParallelChunks arg) is byte-identical to the pre-concurrency sequential behaviour', () => {
+  const REAL_WALL_CLOCK_SAFETY_MS = 340_000
+  const withoutArg = planStage6Chunks(TRADES_13, REAL_WALL_CLOCK_SAFETY_MS)
+  const explicitSequential = planStage6Chunks(TRADES_13, REAL_WALL_CLOCK_SAFETY_MS, STAGE6_MAX_TRADES_PER_CHUNK, 1)
+  assert.deepEqual(withoutArg, explicitSequential)
+  assert.equal(withoutArg.chunksToRunNow.length, 1)
+})
+
+test('planStage6Chunks: maxParallelChunks=2 plans TWO chunks in the same real 340s budget that only ever fit ONE sequentially', () => {
+  const REAL_WALL_CLOCK_SAFETY_MS = 340_000
+  const plan = planStage6Chunks(TRADES_13, REAL_WALL_CLOCK_SAFETY_MS, STAGE6_MAX_TRADES_PER_CHUNK, STAGE6_MAX_PARALLEL_CHUNKS)
+  assert.equal(plan.chunksToRunNow.length, 2, 'two 220s calls in parallel cost ~220s of wall-clock, well inside 340s')
+  assert.equal(plan.chunksToRunNow.flat().length, 6, '2 chunks x up to 3 trades each')
+  assert.equal(plan.hasMoreAfterThisInvocation, true, '5 desired chunks total for 13 trades -- 3 still deferred')
+})
+
+test('planStage6Chunks: concurrent mode still refuses to start ANY call when there is not even room for one', () => {
+  const plan = planStage6Chunks(TRADES_13, STAGE6_PER_CALL_TIMEOUT_MS - 1, STAGE6_MAX_TRADES_PER_CHUNK, STAGE6_MAX_PARALLEL_CHUNKS)
+  assert.deepEqual(plan.chunksToRunNow, [])
+  assert.equal(plan.hasMoreAfterThisInvocation, true)
+})
+
+test('planStage6Chunks: concurrent mode never plans more chunks than actually remain, even if maxParallelChunks is larger', () => {
+  const plan = planStage6Chunks([{ id: 1 }, { id: 2 }], 10_000_000, STAGE6_MAX_TRADES_PER_CHUNK, STAGE6_MAX_PARALLEL_CHUNKS)
+  assert.equal(plan.chunksToRunNow.length, 1, 'only 1 chunk of up to 3 trades is needed for 2 trades -- nothing to parallelize against')
+  assert.equal(plan.hasMoreAfterThisInvocation, false)
+})
+
+test('planStage6Chunks: concurrent mode converges a 13-trade project in 3 invocations instead of 5 (2 + 2 + 1 chunks)', () => {
+  const REAL_WALL_CLOCK_SAFETY_MS = 340_000
+  let remaining = TRADES_13
+  let invocations = 0
+  while (remaining.length > 0) {
+    const plan = planStage6Chunks(remaining, REAL_WALL_CLOCK_SAFETY_MS, STAGE6_MAX_TRADES_PER_CHUNK, STAGE6_MAX_PARALLEL_CHUNKS)
+    assert.ok(plan.chunksToRunNow.length > 0, 'must always make forward progress in a fresh invocation')
+    const doneIds = new Set(plan.chunksToRunNow.flat().map((t) => t.id))
+    remaining = remaining.filter((t) => !doneIds.has(t.id))
+    invocations++
+    assert.ok(invocations <= 5, 'must never take MORE invocations than the old sequential design')
+  }
+  assert.equal(invocations, 3, 'was 5 sequential invocations before bounded concurrency; now 3')
+})
+
 test('truncation recovery composition: a real callTool-shaped truncation error on a full-size (3-trade) chunk is detected and reduces to two smaller chunks, never the same size', () => {
   // Uses the EXACT error shape callTool (index.ts) throws on stop_reason
   // === 'max_tokens', and the exact primitives generateChunk (index.ts)
@@ -1598,6 +1647,42 @@ test('nextStage3FailureHistory: end-to-end — identical input escalates to skip
   assert.equal(shouldSkipStage3Call(history, HASH_A), true, 'a repeat of the identical input must now be skipped')
   // A genuinely new upload changes the merged fact base -> different hash -> fresh allowance
   assert.equal(shouldSkipStage3Call(history, HASH_B), false, 'a changed document set must not inherit the exhausted history')
+})
+
+// ─── shouldFailStage3RunImmediately: regression coverage for the confirmed
+// production bug (5-run reliability test, 2026-08-23) — the Stage 3 catch
+// block computed record_stage3_failure's `stopped` decision but called
+// fail() unconditionally regardless of it, so every application_timeout
+// terminated permanently on its FIRST occurrence instead of its documented
+// second one. These lock in the corrected contract. ─────────────────────
+
+test('shouldFailStage3RunImmediately: does NOT fail immediately when the RPC reports the retry allowance is not yet exhausted', () => {
+  assert.equal(shouldFailStage3RunImmediately({ recorded: true, stopped: false }), false)
+})
+
+test('shouldFailStage3RunImmediately: fails immediately when the RPC reports the retry allowance IS exhausted', () => {
+  assert.equal(shouldFailStage3RunImmediately({ recorded: true, stopped: true }), true)
+})
+
+test('shouldFailStage3RunImmediately: falls back to failing immediately when the RPC call itself could not be recorded', () => {
+  // e.g. a network error calling record_stage3_failure, or the legacy
+  // no-batch path with no stage3_failure_* history to key off at all --
+  // must not silently retry an input whose failure history is now
+  // invisible, so this preserves the pre-existing always-fail behaviour.
+  assert.equal(shouldFailStage3RunImmediately({ recorded: false }), true)
+})
+
+test('shouldFailStage3RunImmediately: end-to-end — first application_timeout must NOT terminate the run, second one must', () => {
+  const max = maxConsecutiveOccurrences('application_timeout')
+  assert.equal(max, 1, 'sanity check: application_timeout is a one-more-attempt classification')
+
+  // First occurrence: record_stage3_failure sees prior_count=0, so
+  // v_stop = (0 >= 1) = false -- one more attempt is owed.
+  assert.equal(shouldFailStage3RunImmediately({ recorded: true, stopped: false }), false)
+
+  // Second identical occurrence: record_stage3_failure sees prior_count=1,
+  // so v_stop = (1 >= 1) = true -- now genuinely exhausted.
+  assert.equal(shouldFailStage3RunImmediately({ recorded: true, stopped: true }), true)
 })
 
 // ─── Stage 6: failure-escalation identity (mirrors Stage 3's exactly, migration 077) ─

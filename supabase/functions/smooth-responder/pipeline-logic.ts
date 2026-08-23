@@ -1155,30 +1155,83 @@ export interface Stage6ChunkPlan<T> {
   hasMoreAfterThisInvocation: boolean
 }
 
+// Bounded concurrency for Stage 6 chunks within ONE invocation (index.ts
+// runs chunksToRunNow via Promise.allSettled, not a sequential loop, when
+// maxParallelChunks > 1). Root cause this exists to close, found via the
+// 5-run production reliability test (2026-08-23): WALL_CLOCK_SAFETY_MS
+// (340s) is less than 2 x STAGE6_PER_CALL_TIMEOUT_MS (440s), so the
+// original sequential-only planning could NEVER fit more than one Stage 6
+// call per invocation, regardless of how fast Stage 1/2/3 finished --
+// confirmed live: two separate 13-trade test runs each completed Stage 3
+// fully in one invocation, then advanced only 3 (and 0) of 13 Stage 6
+// trades over 15-17 minutes, because every subsequent chunk needed its OWN
+// invocation, gated by either a live SSE reconnect or the recovery cron's
+// own 3-minute retry grace period.
+//
+// Two (or more) chunks target disjoint trade subsets -- independent
+// prompts, independent facts in, independent line items out -- so running
+// them concurrently is safe: the AI gateway's idempotency key is
+// (job:stage, input_hash), and each chunk's prompt (hence input_hash)
+// differs, so concurrent chunks never collide on reuse; record_ai_spend
+// and increment_batch_ai_attempts are already atomic SELECT...FOR UPDATE
+// RPCs; the line-item unique index is (quote_id, trade_category_id,
+// description), so concurrent inserts for different trades never conflict.
+// Two calls running in PARALLEL cost ~max(their durations) of wall-clock
+// time, not the sum -- room for one call's worth of budget is enough to
+// safely start up to maxParallelChunks of them at once, letting one
+// invocation complete maxParallelChunks x STAGE6_MAX_TRADES_PER_CHUNK
+// trades instead of just STAGE6_MAX_TRADES_PER_CHUNK.
+//
+// Deliberately NOT increasing WALL_CLOCK_SAFETY_MS or
+// STAGE6_PER_CALL_TIMEOUT_MS to fix this -- that would only ever let a
+// SINGLE call run longer, never let multiple calls happen at once, and
+// widening either courts the exact external-CPU-kill risk migration 053
+// was built to bound. Kept as a SEPARATE cap from Stage 3's own chunk
+// planning (planStage3Chunks) rather than layered onto it: Stage 3 stays
+// strictly sequential and completely untouched by this change -- it
+// wasn't the bottleneck the reliability test found, and concurrency for
+// it is out of scope here.
+//
+// Default of 1 preserves the exact prior sequential behaviour (every
+// pre-existing test call site and test expectation is unchanged) --
+// concurrency is opt-in via the explicit maxParallelChunks argument
+// index.ts now passes.
+export const STAGE6_MAX_PARALLEL_CHUNKS = 2
+
 /**
  * Budget-aware Stage 6 chunk planning. remainingTrades should already
  * exclude any trade whose line items were durably persisted in a PRIOR
  * invocation of this same batch (document_processing_batches.
  * stage6_completed_trade_ids, migration 090) — this function only decides
  * how much of what's LEFT fits in the current invocation's remaining
- * wall-clock budget, exactly like planStage3Chunks for Stage 3.
+ * wall-clock budget.
  */
 export function planStage6Chunks<T>(
   remainingTrades: T[],
   remainingBudgetMs: number,
   maxTradesPerChunk: number = STAGE6_MAX_TRADES_PER_CHUNK,
+  maxParallelChunks: number = 1,
 ): Stage6ChunkPlan<T> {
   if (remainingTrades.length === 0) {
     return { chunksToRunNow: [], hasMoreAfterThisInvocation: false }
   }
   const desiredChunkCount = Math.ceil(remainingTrades.length / Math.max(1, maxTradesPerChunk))
-  // chunkThreshold=0 -> shouldChunkTradeReasoning(1, 0) is always true, so
-  // desiredStage3ChunkCount always takes its "chunk" branch and returns
-  // exactly desiredChunkCount -- the factsInPromptCount value passed here
-  // (1, arbitrary; Stage 6 doesn't size by fact count) stays far below
-  // desiredStage3ChunkCount's own internal large-project threshold (150),
-  // so that branch never overrides desiredChunkCount.
-  return planStage3Chunks(remainingTrades, remainingBudgetMs, 1, 0, desiredChunkCount)
+  const fullPlan = splitTradeCategoriesIntoChunks(remainingTrades, desiredChunkCount)
+
+  // maxParallelChunks=1 (the default): identical sequential math as
+  // before this change -- how many STAGE6_PER_CALL_TIMEOUT_MS-sized calls
+  // fit one after another in the remaining budget.
+  //
+  // maxParallelChunks>1: chunks run concurrently (index.ts), so their
+  // combined wall-clock cost is ~one call's duration, not the sum -- room
+  // for a single call is enough to start up to maxParallelChunks of them.
+  const maxAffordableCalls = maxParallelChunks > 1
+    ? (remainingBudgetMs >= STAGE6_PER_CALL_TIMEOUT_MS ? maxParallelChunks : 0)
+    : Math.floor(remainingBudgetMs / STAGE6_PER_CALL_TIMEOUT_MS)
+
+  const chunksToRunNow = fullPlan.slice(0, maxAffordableCalls)
+  const hasMoreAfterThisInvocation = fullPlan.length > chunksToRunNow.length
+  return { chunksToRunNow, hasMoreAfterThisInvocation }
 }
 
 export interface ScopeReasoningResult {
@@ -1340,6 +1393,35 @@ export function nextStage3FailureHistory(
     classification: current.classification,
     count: sameInputAndClassification ? prior.count + 1 : 1,
   }
+}
+
+// Post-call decision for the Stage 3 catch handler: does THIS occurrence
+// terminate the run (files/batch marked permanently failed), or does the
+// retry contract documented on maxConsecutiveOccurrences ("application_
+// timeout/context_window_exceeded get exactly one more attempt") still have
+// an attempt left, in which case the run must end WITHOUT calling fail() —
+// job_intake_locks releases via the existing finally, and the next
+// invocation (an SSE reconnect or the recovery cron) retries Stage 3 fresh,
+// with shouldSkipStage3Call's pre-call guard (above) becoming the actual
+// enforcement point for a second identical failure.
+//
+// Found via the 5-run production reliability test (2026-08-23): the catch
+// block computed record_stage3_failure's `stopped` decision, logged it, and
+// then called fail() unconditionally on the very next line regardless of
+// that decision — so every application_timeout failed permanently on its
+// FIRST occurrence, never reaching the second attempt this contract
+// promises. `record_stage3_failure` (migration 059) already computes the
+// correct decision atomically server-side; this function's only job is to
+// make "did we actually get a decision to act on" explicit and testable
+// without a live database — record_stage3_failure's own RPC call failing
+// (network error, schema-cache miss) falls back to the pre-existing
+// always-fail behaviour rather than silently retrying an input whose
+// failure history is no longer visible.
+export function shouldFailStage3RunImmediately(
+  recordOutcome: { recorded: true; stopped: boolean } | { recorded: false }
+): boolean {
+  if (!recordOutcome.recorded) return true
+  return recordOutcome.stopped
 }
 
 // ─── Stage 6 (Estimate Generation) failure escalation — mirrors Stage 3's

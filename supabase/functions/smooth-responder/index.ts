@@ -40,8 +40,8 @@ import {
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
   splitBatchForRetry, formatWallClockStallReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
-  shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS,
-  shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, isTruncatedResponseError,
+  shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS, shouldFailStage3RunImmediately,
+  shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, STAGE6_MAX_PARALLEL_CHUNKS, STAGE6_MAX_TRADES_PER_CHUNK, isTruncatedResponseError,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
@@ -2288,6 +2288,12 @@ For each relevant trade, state what is included, what is excluded, dependencies,
           // keyed by batch + input hash (migration 059) instead of files.id,
           // since Stage 3 has no per-file correspondence. Best-effort: a
           // failure to RECORD the failure must never mask the original error.
+          //
+          // Legacy no-batch path (parentJobId null) has no stage3_failure_*
+          // history to key off (record_stage3_failure requires a batch row)
+          // — always terminal immediately, matching this path's pre-existing
+          // behaviour; it predates the checkpoint/resume design entirely.
+          let recordOutcome: { recorded: true; stopped: boolean } | { recorded: false } = { recorded: false }
           if (parentJobId) {
             try {
               const { data: recordData, error: recordErr } = await supabase.rpc('record_stage3_failure', {
@@ -2298,13 +2304,37 @@ For each relevant trade, state what is included, what is excluded, dependencies,
               })
               if (recordErr) throw recordErr
               const recordResult = (recordData as Array<{ classification: string; occurrence_count: number; stopped: boolean }> | null)?.[0]
+              recordOutcome = { recorded: true, stopped: recordResult?.stopped ?? true }
               console.log(JSON.stringify({
                 event: 'stage3_failure_recorded', job_id: jobId, batch_id: parentJobId, classification,
-                consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordResult?.stopped ?? false,
+                consecutive_count: recordResult?.occurrence_count ?? null, stopped: recordOutcome.stopped,
               }))
             } catch (recordErr) {
               console.error('record_stage3_failure RPC failed:', recordErr)
             }
+          }
+
+          // Retry contract (migration 059 / maxConsecutiveOccurrences):
+          // application_timeout and context_window_exceeded get exactly one
+          // more attempt before being treated as deterministic for this
+          // input. record_stage3_failure already computed that decision
+          // atomically above (`recordOutcome.stopped`) — this is only the
+          // branch that was previously missing: fail() must NOT be called
+          // when a retry is still owed, or every such failure terminates on
+          // its first occurrence instead of its documented second one
+          // (confirmed live across 3 of 5 production reliability-test runs,
+          // 2026-08-23). When a retry is still owed, this run ends cleanly
+          // WITHOUT calling fail() — job_intake_locks releases via the
+          // existing finally, and the next invocation (an SSE reconnect or
+          // the recovery cron) retries Stage 3 fresh; shouldSkipStage3Call's
+          // pre-call guard is what turns a second identical failure into a
+          // permanent one on that next attempt.
+          if (!shouldFailStage3RunImmediately(recordOutcome)) {
+            console.log(JSON.stringify({
+              event: 'stage3_failure_retry_deferred', job_id: jobId, batch_id: parentJobId, classification,
+              reason: 'retry allowance not yet exhausted -- deferring to a later invocation instead of failing permanently',
+            }))
+            return
           }
           await fail(`Scope reasoning call failed: ${errMessage}`)
           return
@@ -2545,7 +2575,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     }
 
     const stage6RemainingBudgetMs = WALL_CLOCK_SAFETY_MS - (Date.now() - startedAt)
-    const stage6Plan = planStage6Chunks(remainingTrades, stage6RemainingBudgetMs)
+    const stage6Plan = planStage6Chunks(remainingTrades, stage6RemainingBudgetMs, STAGE6_MAX_TRADES_PER_CHUNK, STAGE6_MAX_PARALLEL_CHUNKS)
     if (stage6Plan.chunksToRunNow.length === 0 && stage6Plan.hasMoreAfterThisInvocation) {
       // No room for even one chunk this invocation -- never start a call
       // that can't finish. Zero spend; everything deferred to a later
@@ -2729,28 +2759,67 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     let ranOutOfBudgetMidLoop = false
     let chunksActuallyRun = 0
     try {
-      for (const [chunkIndex, tradeChunk] of stage6Plan.chunksToRunNow.entries()) {
-        // FIXED (production-readiness review, before first deploy): the
-        // upfront plan (planStage6Chunks, above) only guarantees enough
-        // budget for stage6Plan.chunksToRunNow.length calls AT THE MOMENT
-        // IT WAS COMPUTED -- it has no way to account for a truncation on
-        // an EARLIER chunk in this same loop consuming extra calls via the
-        // split-retry above. Without this check, a later planned chunk
-        // could start with insufficient room left, hit callTool's own
-        // AbortController, and surface as a genuine (non-truncation)
-        // application_timeout failure -- turning a recoverable "ran out of
-        // time" into a hard Stage 6 failure. Re-checking here, on every
-        // iteration, makes this self-correcting: any chunk that can't
-        // safely start is deferred (never begun), never force-failed.
-        if (!hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)) {
-          console.log(JSON.stringify({
-            stage: 'generating_estimate', status: 'chunk_skipped_budget_exhausted_mid_run', job_id: jobId, batch_id: parentJobId,
-            chunk: chunkIndex + 1, chunk_count: stage6Plan.chunksToRunNow.length,
-          }))
-          ranOutOfBudgetMidLoop = true
-          break
+      // Bounded concurrency (STAGE6_MAX_PARALLEL_CHUNKS, planStage6Chunks
+      // above): every planned chunk targets a disjoint set of trades --
+      // independent prompt, independent facts in, independent line items
+      // out -- so they're started together via Promise.allSettled instead
+      // of one at a time. Two 220s calls running in PARALLEL cost ~220s of
+      // wall-clock, not ~440s, which is what lets one invocation complete
+      // more than STAGE6_MAX_TRADES_PER_CHUNK trades without widening any
+      // timeout or the wall-clock budget itself. Safe under this pipeline's
+      // existing atomicity: the AI gateway's idempotency key is
+      // (job:stage, input_hash), and each chunk's prompt differs, so
+      // concurrent chunks never collide on reuse; record_ai_spend and
+      // increment_batch_ai_attempts are already atomic SELECT...FOR UPDATE
+      // RPCs; the line-item unique index is (quote_id, trade_category_id,
+      // description), so concurrent inserts for different trades can never
+      // conflict. Found live, 5-run production reliability test
+      // (2026-08-23): the old strictly-sequential loop could never fit a
+      // second 220s chunk inside the 340s WALL_CLOCK_SAFETY_MS ceiling, so
+      // every trade past the first chunk needed its OWN invocation --
+      // gated by a live SSE reconnect or the recovery cron's own 3-minute
+      // retry grace period -- to make any further progress at all.
+      //
+      // Persistence (line items + the shared stage6_completed_trade_ids
+      // checkpoint array) happens in ONE sequential pass below, only after
+      // every concurrent call has settled -- this is what keeps the
+      // checkpoint race-free: no two chunks ever read-modify-write that
+      // shared array concurrently, only the network calls themselves
+      // overlap. Defensive re-check (mirrors the old per-iteration one,
+      // now done once for the whole batch): the plan was computed against
+      // the budget at planning time, which the reading/quote-setup work
+      // just above may have already eaten into slightly -- never start a
+      // batch of calls that can't safely finish.
+      let chunksToAttempt = stage6Plan.chunksToRunNow
+      if (chunksToAttempt.length > 0 && !hasWallClockBudget(STAGE6_PER_CALL_TIMEOUT_MS)) {
+        console.log(JSON.stringify({
+          stage: 'generating_estimate', status: 'chunk_skipped_budget_exhausted_mid_run', job_id: jobId, batch_id: parentJobId,
+          chunk_count: chunksToAttempt.length,
+        }))
+        ranOutOfBudgetMidLoop = true
+        chunksToAttempt = []
+      }
+
+      const settled = await Promise.allSettled(chunksToAttempt.map((tradeChunk) => generateChunk(tradeChunk)))
+      let firstRejection: unknown = null
+
+      for (const [chunkIndex, tradeChunk] of chunksToAttempt.entries()) {
+        const settledResult = settled[chunkIndex]
+        if (settledResult.status === 'rejected') {
+          // A genuine (non-truncation) failure in one concurrent chunk must
+          // never discard a SIBLING chunk's already-succeeded work -- every
+          // fulfilled result in this loop is still persisted below
+          // regardless of position; the first rejection is only rethrown
+          // (reaching the existing outer catch / record_stage6_failure /
+          // fail() handling, unchanged) once every fulfilled sibling has
+          // been safely written. Matches this file's own pre-existing
+          // philosophy for a partial failure ("never loses a completed
+          // trade: this only ever grows" -- see the checkpoint comment
+          // below), just extended from one chunk to several run at once.
+          firstRejection ??= settledResult.reason
+          continue
         }
-        const { items: chunkItems, failedTradeIds } = await generateChunk(tradeChunk)
+        const { items: chunkItems, failedTradeIds } = settledResult.value
         chunksActuallyRun++
         stage6ItemsGeneratedThisRun += chunkItems.length
 
@@ -2814,6 +2883,12 @@ For each relevant trade, state what is included, what is excluded, dependencies,
           trades_completed_total: stage6CompletedTradeIds.length, trades_remaining: remainingTrades.length - stage6CompletedTradeIds.filter((id) => remainingTrades.some((t) => t.id === id)).length,
         }))
       }
+      // Every fulfilled sibling above has already been safely persisted --
+      // only now, once that's done, does a genuine (non-truncation)
+      // failure in any ONE of the concurrent chunks propagate to the
+      // existing outer catch (record_stage6_failure / fail()) below,
+      // exactly as it would have if that chunk had run sequentially.
+      if (firstRejection) throw firstRejection
     } catch (err) {
       const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
       const errMessage = err instanceof Error ? err.message : String(err)
