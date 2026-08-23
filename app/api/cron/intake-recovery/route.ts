@@ -81,6 +81,10 @@ const MAX_RECOVERY_ATTEMPTS = 3
 // work).
 const MAX_RECONCILE_SWEEP_PER_RUN = 100
 
+// Bound on how many quotes the pricing/QA backfill sweep (below) will act
+// on in one run — same backpressure reasoning as every other cap here.
+const MAX_PRICING_QA_BACKFILL_PER_RUN = 10
+
 interface RunSummary {
   document_jobs_reclaimed: number
   stalled_batches_recomputed: number
@@ -271,23 +275,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey)
-
-  // ── TEMPORARY DIAGNOSTIC (2026-08-23) — remove once resolved ────────────
-  // Every recovery step has been completing in 5-9ms with all-zero results
-  // and zero errors, even for a batch directly confirmed (via raw SQL) to
-  // match every eligibility predicate these RPCs check. That combination —
-  // fast, empty, silent — is exactly what an RLS-restricted (non-service-
-  // role) Postgres session would produce against these tables, since none
-  // of the RPCs are SECURITY DEFINER. This logs only the JWT's `role`
-  // claim (public metadata already embedded in the token, not the secret
-  // itself) to confirm or rule out whether this route is actually running
-  // with the RLS-bypassing service_role key it's supposed to have.
-  try {
-    const payload = JSON.parse(Buffer.from(supabaseKey.split('.')[1], 'base64').toString('utf8'))
-    log('diagnostic_supabase_key_role', { role: payload.role ?? 'unknown', iss: payload.iss ?? 'unknown' })
-  } catch (err) {
-    log('diagnostic_supabase_key_role_decode_failed', { error: err instanceof Error ? err.message : String(err) })
-  }
 
   // ── 0. Enforce the 15-minute estimate SLA (migration 078) — independent of
   // DOCUMENT_RECOVERY_DISABLED/AI_RECOVERY_DISABLED, deliberately: finalizing
@@ -855,11 +842,87 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     log('recovery_stage_failed', { stage: 'estimate_run_reconcile_sweep', error: message })
   }
 
+  // ── Pricing/QA backfill for any quote a batch has produced but that has ──
+  // ── never actually been priced or QA'd ──────────────────────────────────
+  // Root cause this closes (found live, 2026-08-23, batch d58c3e92): Stage 6
+  // completing and creating a quote via this cron's own resume path (no SSE
+  // client ever connected, no builder ever opened the quote) left the quote
+  // permanently unpriced and un-QA'd — ensureQuotePriced/runQualityAssurance
+  // (lib/pricing.ts / lib/estimating/qa.ts) only ever fire from the SSE
+  // intake poller or lazily from the quote GET route, neither of which this
+  // path reaches. Without this, migration 092's compute_builder_status gate
+  // would correctly report NEEDS_REVIEW forever instead of the job ever
+  // actually converging to a genuine ESTIMATE_READY. Deliberately NOT scoped
+  // to touchedBatchIds — a quote produced by an earlier run (before this fix
+  // existed, or simply on a run that didn't otherwise need to touch this
+  // batch again) would never be re-touched by anything else in this route,
+  // so it would sit unpriced forever without its own independent sweep.
+  // Bounded (MAX_PRICING_QA_BACKFILL_PER_RUN) for the same backpressure
+  // reason every other step here is bounded. Best-effort and isolated per
+  // quote — a pricing/QA failure here must not affect this run's own
+  // recovery outcome (already committed above); the quote GET route's own
+  // lazy backfill remains the fallback if this misses one.
+  try {
+    // Scoped to batches whose document-processing has genuinely finished
+    // (terminal status, classification_triggered) with no active lock —
+    // never a quote that's simply moments away from the normal SSE-poller
+    // pricing path completing on its own. The 3-minute age floor on the
+    // quote itself gives that normal path room to finish first, matching
+    // the same grace-period pattern used throughout this route (e.g.
+    // find_stuck_batches_needing_classification_retry's own p_grace).
+    const { data: eligibleBatches } = await supabase
+      .from('document_processing_batches')
+      .select('id, quote_id, job_id')
+      .not('quote_id', 'is', null)
+      .in('status', ['completed', 'completed_with_failures', 'failed'])
+      .eq('classification_triggered', true)
+    const batchByQuoteId = new Map(
+      ((eligibleBatches ?? []) as Array<{ id: string; quote_id: string; job_id: string }>).map((b) => [b.quote_id, b])
+    )
+    const candidateQuoteIds = Array.from(batchByQuoteId.keys())
+    const unpricedQuotes = candidateQuoteIds.length === 0 ? [] : (
+      await supabase
+        .from('quotes')
+        .select('id, job_id, total_cost, qa_report, created_at')
+        .in('id', candidateQuoteIds)
+        .or('total_cost.is.null,qa_report.is.null')
+        .lt('created_at', new Date(Date.now() - 3 * 60_000).toISOString())
+        .limit(MAX_PRICING_QA_BACKFILL_PER_RUN)
+    ).data
+    const jobsWithActiveLock = new Set(
+      (unpricedQuotes ?? []).length > 0
+        ? ((await supabase.from('job_intake_locks').select('job_id')).data ?? []).map((l: { job_id: string }) => l.job_id)
+        : []
+    )
+    for (const q of (unpricedQuotes ?? []) as Array<{ id: string; job_id: string; total_cost: number | null; qa_report: unknown }>) {
+      if (jobsWithActiveLock.has(q.job_id)) continue // still genuinely in-flight — leave it alone
+      try {
+        if (q.total_cost === null) {
+          const { ensureQuotePriced } = await import('@/lib/pricing')
+          await ensureQuotePriced(supabase, q.id)
+        }
+        if (q.qa_report === null) {
+          const { runQualityAssurance } = await import('@/lib/estimating/qa')
+          await runQualityAssurance(supabase, q.id, q.job_id)
+        }
+        log('recovery_pricing_qa_backfilled', { quote_id: q.id, job_id: q.job_id })
+      } catch (backfillErr) {
+        const message = backfillErr instanceof Error ? backfillErr.message : String(backfillErr)
+        log('recovery_pricing_qa_backfill_failed', { quote_id: q.id, job_id: q.job_id, error: message })
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log('recovery_stage_failed', { stage: 'pricing_qa_backfill_sweep', error: message })
+  }
+
   // Refresh the estimate_runs projection for every batch this run actually
   // touched (recovery actions above, plus the coverage sweep just above).
-  // Best-effort and parallel — a failure here never affects recovery's own
-  // outcome (already committed above) or this run's audit row below, only
-  // how current the projection is for that batch.
+  // Runs AFTER the pricing/QA backfill above so a freshly-priced/QA'd quote
+  // is reflected in the SAME tick's builder_status computation, not a tick
+  // later. Best-effort and parallel — a failure here never affects
+  // recovery's own outcome (already committed above) or this run's audit
+  // row below, only how current the projection is for that batch.
   if (touchedBatchIds.size > 0) {
     const reconcileResults = await Promise.allSettled(
       Array.from(touchedBatchIds).map((batchId) =>
