@@ -272,6 +272,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const supabase = createClient(supabaseUrl, supabaseKey)
 
+  // ── TEMPORARY DIAGNOSTIC (2026-08-23) — remove once resolved ────────────
+  // Every recovery step has been completing in 5-9ms with all-zero results
+  // and zero errors, even for a batch directly confirmed (via raw SQL) to
+  // match every eligibility predicate these RPCs check. That combination —
+  // fast, empty, silent — is exactly what an RLS-restricted (non-service-
+  // role) Postgres session would produce against these tables, since none
+  // of the RPCs are SECURITY DEFINER. This logs only the JWT's `role`
+  // claim (public metadata already embedded in the token, not the secret
+  // itself) to confirm or rule out whether this route is actually running
+  // with the RLS-bypassing service_role key it's supposed to have.
+  try {
+    const payload = JSON.parse(Buffer.from(supabaseKey.split('.')[1], 'base64').toString('utf8'))
+    log('diagnostic_supabase_key_role', { role: payload.role ?? 'unknown', iss: payload.iss ?? 'unknown' })
+  } catch (err) {
+    log('diagnostic_supabase_key_role_decode_failed', { error: err instanceof Error ? err.message : String(err) })
+  }
+
   // ── 0. Enforce the 15-minute estimate SLA (migration 078) — independent of
   // DOCUMENT_RECOVERY_DISABLED/AI_RECOVERY_DISABLED, deliberately: finalizing
   // a builder_status makes no Anthropic call and triggers no worker, so
