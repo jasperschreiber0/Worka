@@ -1,0 +1,98 @@
+-- Rollback for 093_builder_status_self_heal_and_backfill_claim.sql
+-- Restores reconcile_estimate_run to its migration-079 definition (no
+-- self-heal step) and drops the backfill-claim function/columns.
+
+DROP FUNCTION IF EXISTS claim_quote_for_pricing_qa_backfill(uuid, integer, interval);
+
+ALTER TABLE quotes
+  DROP COLUMN IF EXISTS pricing_qa_backfill_attempts,
+  DROP COLUMN IF EXISTS pricing_qa_backfill_claimed_at;
+
+CREATE OR REPLACE FUNCTION reconcile_estimate_run(p_batch_id uuid)
+RETURNS uuid AS $$
+DECLARE
+  v_batch    document_processing_batches%ROWTYPE;
+  v_proj     estimate_run_projection;
+  v_run_id   uuid;
+  v_prev_status text;
+  v_builder_status text;
+  v_reason text;
+  v_reason_code text;
+  v_coverage estimate_document_coverage;
+  v_cbs record;
+BEGIN
+  SELECT * INTO v_batch FROM document_processing_batches WHERE id = p_batch_id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  v_proj := derive_estimate_run_projection(p_batch_id);
+
+  SELECT status INTO v_prev_status FROM estimate_runs WHERE batch_id = p_batch_id;
+
+  IF v_proj.status IN ('complete', 'failed') THEN
+    SELECT * INTO v_cbs FROM compute_builder_status(p_batch_id) cbs;
+    v_builder_status := v_cbs.builder_status;
+    v_reason := v_cbs.reason;
+    v_reason_code := v_cbs.reason_code;
+    v_coverage := v_cbs.coverage;
+  END IF;
+
+  INSERT INTO estimate_runs AS er (
+    job_id, builder_id, batch_id, status, quote_id,
+    documents_total, documents_processed, documents_failed,
+    blocking_questions_open, lock_held, stall_reason, failure_reason,
+    last_progress_at, completed_at, reconciled_at,
+    deadline_at, builder_status, needs_review_reason, needs_review_reason_code,
+    coverage_documents_uploaded, coverage_documents_analyzed, coverage_percentage,
+    confidence_level, contributing_documents, missing_documents
+  ) VALUES (
+    v_batch.job_id, v_batch.builder_id, p_batch_id, v_proj.status, v_proj.quote_id,
+    v_proj.documents_total, v_proj.documents_processed, v_proj.documents_failed,
+    v_proj.blocking_questions_open, v_proj.lock_held, v_proj.stall_reason, v_proj.failure_reason,
+    v_proj.last_progress_at,
+    CASE WHEN v_proj.status IN ('complete', 'failed') THEN now() ELSE NULL END,
+    now(),
+    now() + interval '15 minutes',
+    v_builder_status, v_reason, v_reason_code,
+    (v_coverage).documents_uploaded, (v_coverage).documents_analyzed, (v_coverage).coverage_percentage,
+    (v_coverage).confidence_level, (v_coverage).contributing_documents, (v_coverage).missing_documents
+  )
+  ON CONFLICT (batch_id) DO UPDATE SET
+    status = EXCLUDED.status,
+    quote_id = EXCLUDED.quote_id,
+    documents_total = EXCLUDED.documents_total,
+    documents_processed = EXCLUDED.documents_processed,
+    documents_failed = EXCLUDED.documents_failed,
+    blocking_questions_open = EXCLUDED.blocking_questions_open,
+    lock_held = EXCLUDED.lock_held,
+    stall_reason = EXCLUDED.stall_reason,
+    failure_reason = EXCLUDED.failure_reason,
+    last_progress_at = EXCLUDED.last_progress_at,
+    completed_at = COALESCE(er.completed_at, EXCLUDED.completed_at),
+    reconciled_at = now(),
+    builder_status = COALESCE(er.builder_status, EXCLUDED.builder_status),
+    needs_review_reason = COALESCE(er.needs_review_reason, EXCLUDED.needs_review_reason),
+    needs_review_reason_code = COALESCE(er.needs_review_reason_code, EXCLUDED.needs_review_reason_code),
+    coverage_documents_uploaded = COALESCE(er.coverage_documents_uploaded, EXCLUDED.coverage_documents_uploaded),
+    coverage_documents_analyzed = COALESCE(er.coverage_documents_analyzed, EXCLUDED.coverage_documents_analyzed),
+    coverage_percentage = COALESCE(er.coverage_percentage, EXCLUDED.coverage_percentage),
+    confidence_level = COALESCE(er.confidence_level, EXCLUDED.confidence_level),
+    contributing_documents = COALESCE(er.contributing_documents, EXCLUDED.contributing_documents),
+    missing_documents = COALESCE(er.missing_documents, EXCLUDED.missing_documents)
+  RETURNING er.id INTO v_run_id;
+
+  IF v_prev_status IS DISTINCT FROM v_proj.status THEN
+    INSERT INTO estimate_run_events (estimate_run_id, from_status, to_status, detail)
+    VALUES (v_run_id, v_prev_status, v_proj.status, jsonb_build_object(
+      'documents_total', v_proj.documents_total, 'documents_processed', v_proj.documents_processed,
+      'documents_failed', v_proj.documents_failed, 'builder_status', v_builder_status,
+      'coverage_percentage', (v_coverage).coverage_percentage
+    ));
+  END IF;
+
+  RETURN v_run_id;
+END;
+$$ LANGUAGE plpgsql;
+
+NOTIFY pgrst, 'reload schema';

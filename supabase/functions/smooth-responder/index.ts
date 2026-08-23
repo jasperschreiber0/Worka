@@ -1600,6 +1600,30 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           return { ok: false, billingHalt: false, classification: 'unknown', errMessage: 'no structured response from document intelligence stage' }
         }
 
+        // Runtime shape guard (not just a compile-time cast) — the exact
+        // same class of bug that crashed Stage 6 in production (see
+        // validateStage6Items's own history): `?? []` only substitutes for
+        // null/undefined, not for a non-array truthy value Claude might
+        // return. Computed BEFORE the observability log below, which used
+        // to call `.length` directly on the unguarded field and would have
+        // crashed just as fast as the persistence step further down.
+        // Treated as "nothing this batch" rather than crashing the whole
+        // batch — a genuinely malformed response degrades to reduced
+        // extraction, not a lost run.
+        const rawDocuments = docResult.documents
+        const documentsIsArray = rawDocuments == null || Array.isArray(rawDocuments)
+        const rawFacts = docResult.facts
+        const factsIsArray = rawFacts == null || Array.isArray(rawFacts)
+        if (!documentsIsArray || !factsIsArray) {
+          console.log(JSON.stringify({
+            event: 'stage12_response_malformed', job_id: jobId, batch_id: parentJobId,
+            documents_type: typeof rawDocuments, facts_type: typeof rawFacts,
+            reason: 'documents and/or facts in the tool response was not an array -- treating the malformed field(s) as empty rather than crashing the batch',
+          }))
+        }
+        const docRows = (documentsIsArray ? (rawDocuments ?? []) : []) as Array<Record<string, unknown>>
+        const factRows = (factsIsArray ? (rawFacts ?? []) : []) as Array<Record<string, unknown>>
+
         // Structured observability log — real per-batch duration and token
         // usage (from the Claude response's own usage object, via callTool's
         // internal log). Per-document token attribution isn't reported by
@@ -1608,14 +1632,13 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         console.log(JSON.stringify({
           documents: batchFiles.map((f) => f.filename), status: 'processed',
           durationMs: Date.now() - batchStartedAt,
-          factsFound: (docResult.facts ?? []).length,
-          documentsClassified: (docResult.documents ?? []).length,
+          factsFound: factRows.length,
+          documentsClassified: docRows.length,
         }))
 
         await setStage('understanding_project')
 
         // Persist Stage 1 — document map (this batch)
-        const docRows = (docResult.documents ?? []) as Array<Record<string, unknown>>
         const fileIndexToId: Record<number, string> = {}
         batchFiles.forEach((f, idx) => { fileIndexToId[idx] = f.fileId })
 
@@ -1652,7 +1675,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         // file_id -> project_document_id itself, atomically with the
         // document upsert it does in the same call, so there's no need to
         // pre-resolve it here the way the old two-step write required.
-        const factRows = (docResult.facts ?? []) as Array<Record<string, unknown>>
+        // (factRows already computed and shape-guarded above.)
         const factInsertsBase = factRows.map((f) => ({
           job_id: jobId,
           category: f.category as string,
@@ -2177,10 +2200,35 @@ For each relevant trade, state what is included, what is excluded, dependencies,
             // this — 220s per call stays well inside Supabase's real 400s
             // isolate wall-clock ceiling even when this stage runs after
             // Stage 1/2 in the same invocation.
-            const chunkResult = await callTool(
+            const rawChunkResult = await callTool(
               anthropic, { supabase, builderId, jobId, stage: 'stage_scope_reasoning', parentJobId },
               scopeSystemPrompt, scopeUserContent, SCOPE_REASONING_TOOL, 16000, STAGE3_PER_CALL_TIMEOUT_MS
             ) as ScopeReasoningResult
+
+            // Runtime shape guard, applied once at the source — the exact
+            // same class of bug that crashed Stage 6 in production (see
+            // validateStage6Items's own history): a `?? []` cast alone
+            // doesn't protect against a non-array truthy value Claude might
+            // return for `scope`/`clarifying_questions`. Sanitizing HERE,
+            // before this chunk is pushed to chunkResults, protects both the
+            // immediate per-chunk persistence below AND the later
+            // mergeScopeReasoningResults(chunkResults) call, which would
+            // otherwise inherit the same malformed shape from any chunk.
+            const scopeIsArray = rawChunkResult.scope == null || Array.isArray(rawChunkResult.scope)
+            const questionsIsArray = rawChunkResult.clarifying_questions == null || Array.isArray(rawChunkResult.clarifying_questions)
+            if (!scopeIsArray || !questionsIsArray) {
+              console.log(JSON.stringify({
+                event: 'stage3_chunk_malformed_response', job_id: jobId, batch_id: parentJobId,
+                chunk_trade_ids: tradeChunk.map((t) => t.id),
+                scope_type: typeof rawChunkResult.scope, clarifying_questions_type: typeof rawChunkResult.clarifying_questions,
+                reason: 'scope and/or clarifying_questions in the tool response was not an array -- treating the malformed field(s) as empty rather than crashing the run',
+              }))
+            }
+            const chunkResult: ScopeReasoningResult = {
+              ...rawChunkResult,
+              scope: scopeIsArray ? (rawChunkResult.scope ?? []) : [],
+              clarifying_questions: questionsIsArray ? (rawChunkResult.clarifying_questions ?? []) : [],
+            }
             chunkResults.push(chunkResult)
 
             // Persist THIS chunk's scope + progress immediately — durability
@@ -2188,7 +2236,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
             // re-enters this loop after a crash mid-way still doesn't
             // re-spend on a chunk that already succeeded: this write lands
             // before the loop ever reaches Anthropic again for these trades.
-            const chunkScopeRows = (chunkResult.scope ?? []) as Array<Record<string, unknown>>
+            const chunkScopeRows = chunkResult.scope
             if (chunkScopeRows.length > 0) {
               const chunkScopeInserts = chunkScopeRows
                 .filter((s) => typeof s.trade_category_id === 'number')

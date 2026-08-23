@@ -896,6 +896,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     )
     for (const q of (unpricedQuotes ?? []) as Array<{ id: string; job_id: string; total_cost: number | null; qa_report: unknown }>) {
       if (jobsWithActiveLock.has(q.job_id)) continue // still genuinely in-flight — leave it alone
+
+      // Atomic claim (migration 093) — same idiom as claim_next_document_job
+      // and record_intake_recovery_attempt: protects against two concurrent
+      // recovery-cron invocations both backfilling the same quote, and caps
+      // retries at 3 attempts so a genuinely broken pricing/QA call doesn't
+      // retry the same quote forever, unlike every other retry mechanism in
+      // this pipeline (which all already have a cap).
+      const { data: claimData, error: claimErr } = await supabase.rpc('claim_quote_for_pricing_qa_backfill', {
+        p_quote_id: q.id,
+      })
+      if (claimErr) {
+        log('recovery_stage_failed', { stage: 'claim_quote_for_pricing_qa_backfill', quote_id: q.id, error: claimErr.message })
+        continue
+      }
+      const claim = claimData?.[0] as { claimed: boolean; capped: boolean; attempts: number } | undefined
+      if (!claim?.claimed) {
+        if (claim?.capped) {
+          log('recovery_pricing_qa_backfill_capped', { quote_id: q.id, job_id: q.job_id, attempts: claim.attempts })
+        }
+        continue
+      }
+
       try {
         if (q.total_cost === null) {
           const { ensureQuotePriced } = await import('@/lib/pricing')
@@ -905,10 +927,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           const { runQualityAssurance } = await import('@/lib/estimating/qa')
           await runQualityAssurance(supabase, q.id, q.job_id)
         }
-        log('recovery_pricing_qa_backfilled', { quote_id: q.id, job_id: q.job_id })
+        const batch = batchByQuoteId.get(q.id)
+        if (batch) touchedBatchIds.add(batch.id)
+        log('recovery_pricing_qa_backfilled', { quote_id: q.id, job_id: q.job_id, attempts: claim.attempts })
       } catch (backfillErr) {
         const message = backfillErr instanceof Error ? backfillErr.message : String(backfillErr)
-        log('recovery_pricing_qa_backfill_failed', { quote_id: q.id, job_id: q.job_id, error: message })
+        log('recovery_pricing_qa_backfill_failed', { quote_id: q.id, job_id: q.job_id, attempts: claim.attempts, error: message })
       }
     }
   } catch (err) {
