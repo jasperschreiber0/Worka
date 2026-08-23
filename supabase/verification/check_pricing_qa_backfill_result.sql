@@ -1,26 +1,36 @@
--- Read-only: did the recovery cron's new pricing/QA backfill sweep
--- actually price and QA the quote that migration 091 unblocked?
+-- Cleanup: delete the disposable multi-trade test job created this session
+-- for diagnosing the Stage 6 wall-clock/recovery-cron incident (address
+-- field literally says "safe to delete"). Wrapped in a transaction with a
+-- pre/post row count check so a mistake rolls back visibly rather than
+-- silently deleting the wrong thing.
+--
+-- files.job_id / document_processing_batches.primary_file_id cascade in a
+-- way that requires files deleted first (document_processing_batches has
+-- no cascade FROM files.processing_batch_id, only TO it via primary_file_id
+-- -- deleting files cascades the batch via primary_file_id, and
+-- document_processing_jobs cascades from both files.id and batches.id).
+-- Everything else (quotes, quote_line_items, assumptions, scope_items,
+-- project_facts, project_documents, clarifying_questions, estimate_runs,
+-- estimate_run_events, job_tasks, job_workers, job_intake_locks) cascades
+-- directly from jobs(id) ON DELETE CASCADE.
 
-\echo '=== Quote state ==='
-SELECT id, status, total_cost, margin_pct, confidence_score, overall_confidence,
-       (qa_report IS NOT NULL) AS has_qa_report,
-       qa_report -> 'top_risks' AS qa_top_risks,
-       price_coverage_pct, pricing_match_rate_pct
-FROM quotes WHERE id = '700fc7b2-db92-4373-af21-827030e72f84';
+BEGIN;
 
-\echo '=== Line items: priced count / total ==='
-SELECT count(*) AS total_line_items,
-       count(*) FILTER (WHERE total IS NOT NULL) AS priced_line_items,
-       round(sum(coalesce(total,0) * (1+coalesce(margin_pct,0)))::numeric,2) AS computed_client_price_ex_gst
-FROM quote_line_items WHERE quote_id = '700fc7b2-db92-4373-af21-827030e72f84';
+\echo '=== Before: row counts for this job ==='
+SELECT
+  (SELECT count(*) FROM jobs WHERE id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS jobs,
+  (SELECT count(*) FROM files WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS files,
+  (SELECT count(*) FROM quotes WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS quotes,
+  (SELECT count(*) FROM document_processing_batches WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS batches;
 
-\echo '=== estimate_runs (may still show stale builder_status -- set-once/COALESCE) ==='
-SELECT id, status, builder_status, needs_review_reason, completed_at
-FROM estimate_runs WHERE batch_id = 'd58c3e92-d16f-425d-ad78-fbc5e8d0c86e';
+DELETE FROM files WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330';
+DELETE FROM jobs WHERE id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330';
 
-\echo '=== Recent recovery runs -- did the new backfill sweep log anything? ==='
-SELECT id, created_at, stuck_files_retried, errors
-FROM intake_recovery_runs
-WHERE created_at > now() - interval '10 minutes'
-ORDER BY created_at DESC
-LIMIT 10;
+\echo '=== After: row counts (all should be 0) ==='
+SELECT
+  (SELECT count(*) FROM jobs WHERE id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS jobs,
+  (SELECT count(*) FROM files WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS files,
+  (SELECT count(*) FROM quotes WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS quotes,
+  (SELECT count(*) FROM document_processing_batches WHERE job_id = '21cbdd51-0bcd-4c1b-87db-fb39c1968330') AS batches;
+
+COMMIT;
