@@ -1,0 +1,36 @@
+-- Rollback for 091_abandoned_file_check_excludes_retry_eligible_batches.sql
+-- Restores find_and_fail_abandoned_files to its migration-046 definition
+-- (no retry-eligibility exclusion).
+
+CREATE OR REPLACE FUNCTION find_and_fail_abandoned_files(p_stale_after interval DEFAULT interval '2 hours')
+RETURNS TABLE(file_id uuid, job_id uuid, filename text, previous_status text, age interval) AS $$
+  WITH candidates AS (
+    SELECT f.id, f.job_id, f.filename, f.intake_status, f.created_at
+    FROM files f
+    WHERE f.intake_status IN ('uploaded', 'queued', 'processing')
+      AND f.created_at < now() - p_stale_after
+      AND NOT EXISTS (SELECT 1 FROM job_intake_locks l WHERE l.job_id = f.job_id)
+    FOR UPDATE SKIP LOCKED
+  ),
+  updated AS (
+    UPDATE files
+    SET intake_status = 'failed',
+        failure_stage = 'ABANDONED',
+        failure_reason = left(
+          'No processing activity detected for over ' || p_stale_after::text ||
+          ' since upload — automatically marked failed by the document-recovery service so it stops appearing as silently stuck. Re-upload to retry.',
+          500
+        )
+    FROM candidates c
+    WHERE files.id = c.id
+    RETURNING files.id
+  )
+  SELECT c.id, c.job_id, c.filename, c.intake_status, now() - c.created_at
+  FROM candidates c
+  JOIN updated u ON u.id = c.id;
+$$ LANGUAGE sql;
+
+COMMENT ON FUNCTION find_and_fail_abandoned_files IS
+  'Marks files.intake_status=failed for uploads that have been non-terminal for over p_stale_after with no job_intake_locks row protecting them — closes the "silently stuck forever, no visible failure" gap for the file itself (migration 045 closed the equivalent gap for the job-level lock). Read+write on files only; never calls Anthropic, never triggers smooth-responder or document-worker.';
+
+NOTIFY pgrst, 'reload schema';
