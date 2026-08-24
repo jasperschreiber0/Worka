@@ -538,4 +538,39 @@ DO $$ BEGIN
   );
 END $$;
 
+-- ─── Watchdog observability + bounded escalation (migration 096, Option D) ──
+DO $$
+DECLARE
+  v_bogus_uuid uuid := '00000000-0000-0000-0000-0000000000ee';
+BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'estimate_runs' AND column_name = 'watchdog_consecutive_misses') = 1,
+    'estimate_runs.watchdog_consecutive_misses column is missing (migration 096)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'intake_recovery_runs' AND column_name = 'watchdog_escalations') = 1,
+    'intake_recovery_runs.watchdog_escalations column is missing (migration 096)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'record_watchdog_post_tick') = 1,
+    'record_watchdog_post_tick() function is missing (migration 096)'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_proc WHERE proname = 'escalate_watchdog_finalize' AND pg_get_function_arguments(oid) = 'p_estimate_run_id uuid') = 1,
+    'escalate_watchdog_finalize(uuid) function is missing or its signature changed (migration 096)'
+  );
+
+  -- Callability probe against a bogus id that matches zero real rows —
+  -- same safe-to-run-in-production shape as record_ai_failure/
+  -- acquire_or_reclaim_job_intake_lock above. escalate_watchdog_finalize's
+  -- own idempotency guard (builder_status IS NULL) means this returns
+  -- escalated=false with no writes for a non-existent row.
+  BEGIN
+    PERFORM * FROM record_watchdog_post_tick();
+    PERFORM * FROM escalate_watchdog_finalize(v_bogus_uuid);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'SCHEMA ASSERTION FAILED: watchdog escalation functions are not callable: %', SQLERRM;
+  END;
+END $$;
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;

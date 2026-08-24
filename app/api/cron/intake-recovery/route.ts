@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { partitionWatchdogObservations, formatWatchdogEscalationReason } from '@/lib/estimating/watchdog-escalation'
 
 // ─── GET /api/cron/intake-recovery ───────────────────────────────────────────
 //
@@ -95,6 +96,8 @@ interface RunSummary {
   stuck_files_retried: number
   files_permanently_failed: number
   deadlines_enforced: number
+  watchdog_escalations: number
+  watchdog_escalations_finalized: number
   errors: Array<{ stage: string; message: string }>
 }
 
@@ -271,6 +274,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     stuck_files_retried: 0,
     files_permanently_failed: 0,
     deadlines_enforced: 0,
+    watchdog_escalations: 0,
+    watchdog_escalations_finalized: 0,
     errors: [],
   }
 
@@ -304,15 +309,129 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     log('recovery_stage_failed', { stage: 'enforce_estimate_deadlines', error: message })
   }
 
-  // Phase 1, increment 1 (migration 056): estimate_runs is a derived
-  // projection reconciled from the same tables/RPCs this route already
-  // reads and writes — collected here purely so every batch this run
-  // TOUCHED gets its projection refreshed at the end, alongside (never
-  // instead of) the real recovery work above. See reconcile_estimate_run's
-  // own comment: read-only against everything but estimate_runs, so this
-  // can never affect what recovery actually does, only how quickly the
-  // projection catches up to it.
+  // Declared here (rather than after step 0b below) so the watchdog-
+  // escalation step can also add batch IDs it finalized — the escalation
+  // fallback is a form of recovery work too, and its projection should be
+  // refreshed by the same end-of-run reconcile_estimate_run sweep as every
+  // other step's touched batches.
   const touchedBatchIds = new Set<string>()
+
+  // ── 0b. Watchdog observability + bounded escalation (Option D, migration
+  // 096) — independent of both kill switches, exactly like step 0 above:
+  // record_watchdog_post_tick makes zero Anthropic calls (plain UPDATEs,
+  // no FOR UPDATE/SKIP LOCKED — it never competes with enforce_estimate_
+  // deadlines' own selection), and escalate_watchdog_finalize reuses
+  // compute_builder_status — the same zero-Anthropic-call logic step 0's
+  // own finalize branch already calls. This closes the one gap the
+  // Run 4 investigation proved: enforce_estimate_deadlines' FOR UPDATE
+  // SKIP LOCKED loop has no mathematically guaranteed finite time to
+  // terminal state for any single row. See lib/estimating/watchdog-
+  // escalation.ts for the full threshold derivation (10 consecutive
+  // missed 1-minute ticks = warning, 30 = escalate — chosen because the
+  // normal 15min+3x6min extension lifecycle resets this counter to 0 on
+  // every successful extension, so only genuine SKIP LOCKED starvation
+  // can ever reach either threshold).
+  try {
+    const { data, error } = await supabase.rpc('record_watchdog_post_tick')
+    if (error) throw error
+    const observed = ((data ?? []) as Array<{
+      estimate_run_id: string; batch_id: string
+      consecutive_misses: number; total_misses: number; first_eligible_at: string | null
+    }>).map((row) => ({
+      estimateRunId: row.estimate_run_id,
+      batchId: row.batch_id,
+      consecutiveMisses: row.consecutive_misses,
+      totalMisses: row.total_misses,
+      firstEligibleAt: row.first_eligible_at,
+    }))
+
+    const { ok: _ok, warning, escalate } = partitionWatchdogObservations(observed)
+
+    for (const obs of warning) {
+      log('watchdog_miss_warning', {
+        estimate_run_id: obs.estimateRunId, batch_id: obs.batchId,
+        consecutive_misses: obs.consecutiveMisses, total_misses: obs.totalMisses,
+        first_eligible_at: obs.firstEligibleAt,
+        reason: formatWatchdogEscalationReason(obs),
+      })
+    }
+
+    for (const obs of escalate) {
+      // Look up extra context for strong logging before/regardless of
+      // outcome — current stage, AI attempt count, deadline state, whether
+      // a job_intake_lock is currently held. Best-effort: a failure here
+      // must not block the escalation call itself.
+      let currentStage: string | null = null
+      let aiAttemptCount: number | null = null
+      let deadlineExtensionsUsed: number | null = null
+      let lockHeld = false
+      try {
+        const [{ data: batchRow }, { data: lockRow }] = await Promise.all([
+          supabase
+            .from('document_processing_batches')
+            .select('status, total_ai_call_attempts, job_id')
+            .eq('id', obs.batchId)
+            .maybeSingle(),
+          supabase.from('job_intake_locks').select('job_id').limit(1),
+        ])
+        currentStage = (batchRow as { status?: string } | null)?.status ?? null
+        aiAttemptCount = (batchRow as { total_ai_call_attempts?: number } | null)?.total_ai_call_attempts ?? null
+        const jobId = (batchRow as { job_id?: string } | null)?.job_id
+        lockHeld = Boolean(jobId && (lockRow ?? []).some((l: { job_id: string }) => l.job_id === jobId))
+        const { data: erRow } = await supabase
+          .from('estimate_runs')
+          .select('deadline_extensions_used')
+          .eq('id', obs.estimateRunId)
+          .maybeSingle()
+        deadlineExtensionsUsed = (erRow as { deadline_extensions_used?: number } | null)?.deadline_extensions_used ?? null
+      } catch {
+        // best-effort context only — never blocks escalation itself
+      }
+
+      log('watchdog_escalation_attempt', {
+        estimate_run_id: obs.estimateRunId, batch_id: obs.batchId,
+        consecutive_misses: obs.consecutiveMisses, total_misses: obs.totalMisses,
+        first_eligible_at: obs.firstEligibleAt,
+        current_stage: currentStage, ai_attempt_count: aiAttemptCount,
+        deadline_extensions_used: deadlineExtensionsUsed, lock_held: lockHeld,
+        reason: formatWatchdogEscalationReason(obs),
+      })
+
+      try {
+        const { data: escResult, error: escError } = await supabase.rpc('escalate_watchdog_finalize', {
+          p_estimate_run_id: obs.estimateRunId,
+        })
+        if (escError) throw escError
+        const result = (Array.isArray(escResult) ? escResult[0] : escResult) as
+          | { escalated: boolean; builder_status: string | null; reason: string | null }
+          | undefined
+        summary.watchdog_escalations += 1
+        if (result?.escalated) summary.watchdog_escalations_finalized += 1
+        touchedBatchIds.add(obs.batchId)
+        log('watchdog_escalation_result', {
+          estimate_run_id: obs.estimateRunId, batch_id: obs.batchId,
+          escalated: result?.escalated ?? false,
+          final_builder_status: result?.builder_status ?? null,
+          finalize_reason: result?.reason ?? null,
+          consecutive_misses: obs.consecutiveMisses, total_misses: obs.totalMisses,
+          fallback_succeeded: Boolean(result?.escalated),
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        summary.errors.push({ stage: 'escalate_watchdog_finalize', message })
+        log('watchdog_escalation_result', {
+          estimate_run_id: obs.estimateRunId, batch_id: obs.batchId,
+          escalated: false, fallback_succeeded: false, error: message,
+          consecutive_misses: obs.consecutiveMisses, total_misses: obs.totalMisses,
+        })
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    summary.errors.push({ stage: 'record_watchdog_post_tick', message })
+    log('recovery_stage_failed', { stage: 'record_watchdog_post_tick', error: message })
+  }
+
 
   if (DOCUMENT_RECOVERY_DISABLED) {
     log('recovery_document_steps_skipped', { reason: 'DOCUMENT_RECOVERY_DISABLED' })
@@ -977,6 +1096,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     stuck_files_retried: summary.stuck_files_retried,
     files_permanently_failed: summary.files_permanently_failed,
     deadlines_enforced: summary.deadlines_enforced,
+    watchdog_escalations: summary.watchdog_escalations,
+    watchdog_escalations_finalized: summary.watchdog_escalations_finalized,
     errors: summary.errors,
   }).then(({ error }) => {
     if (error) log('recovery_audit_log_write_failed', { error: error.message })

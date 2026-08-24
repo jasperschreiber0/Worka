@@ -1,0 +1,20 @@
+-- Rollback for 096_watchdog_escalation.sql
+-- Additive-only migration -- drops the two new functions and the new columns.
+
+DROP FUNCTION IF EXISTS escalate_watchdog_finalize(uuid);
+DROP FUNCTION IF EXISTS record_watchdog_post_tick();
+
+ALTER TABLE estimate_runs
+  DROP COLUMN IF EXISTS watchdog_first_eligible_at,
+  DROP COLUMN IF EXISTS watchdog_last_eligible_at,
+  DROP COLUMN IF EXISTS watchdog_last_attempt_at,
+  DROP COLUMN IF EXISTS watchdog_consecutive_misses,
+  DROP COLUMN IF EXISTS watchdog_total_misses,
+  DROP COLUMN IF EXISTS watchdog_escalated_at,
+  DROP COLUMN IF EXISTS watchdog_escalation_reason;
+
+ALTER TABLE intake_recovery_runs
+  DROP COLUMN IF EXISTS watchdog_escalations,
+  DROP COLUMN IF EXISTS watchdog_escalations_finalized;
+
+NOTIFY pgrst, 'reload schema';
