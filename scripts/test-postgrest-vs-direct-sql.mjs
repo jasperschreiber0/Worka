@@ -49,7 +49,7 @@ async function main() {
     .from('estimate_runs')
     .select('*, document_processing_batches!inner(*)')
     .in('document_processing_batches.status', ['completed', 'completed_with_failures', 'failed'])
-    .order('created_at', { ascending: false })
+    .order('started_at', { ascending: false })
     .limit(1)
   if (sourceErr || !sourceRuns?.[0]) {
     log('fatal', { message: 'no source batch+run pair found', error: sourceErr?.message })
