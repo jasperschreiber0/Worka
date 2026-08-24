@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: 'false'
+      run_manual_estimate_e2e:
+        description: "Run scripts/run-manual-estimate-e2e.mjs -- live end-to-end check of manual estimate creation (create blank estimate, add/edit/delete line items, confirm persistence) plus its interaction with the real AI pipeline (confirm AI reuses the same quote, adds items without deleting manual ones, and an AI-generated item stays editable afterward) -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
       reset_circuit_breaker_if_safe:
         description: "Run scripts/reset-circuit-breaker-if-safe.mjs (only resets the global AI circuit breaker if the batch that tripped it has a finalized, terminal builder_status) -- type the literal word true to enable"
         required: false
@@ -109,6 +114,15 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: node scripts/run-multitrade-known-good-estimate.mjs
 
+      - name: Run manual estimate creation E2E check (real routes, incl. AI-pipeline interaction)
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_manual_estimate_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/run-manual-estimate-e2e.mjs
+
       - name: Reset circuit breaker if safe
         if: ${{ inputs.reset_circuit_breaker_if_safe == 'true' }}
         env:
@@ -142,7 +156,7 @@ jobs:
         run: node scripts/test-postgrest-vs-direct-sql.mjs
 
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
