@@ -1657,6 +1657,89 @@ export function formatWallClockStallReason(
     `cron; a completed Stage 3 checkpoint (if reached) means the retry skips straight to Stage 6.`
 }
 
+/**
+ * Priority 1 fix (Stage 3 -> Stage 6 determinism): once Stage 3 is durably
+ * checkpointed (scope_reasoning_completed_at persisted), this decides
+ * whether Stage 6 must wait for a fresh invocation rather than continuing
+ * opportunistically in the same one and relying on however much wall-clock
+ * budget happens to remain.
+ *
+ * Pass `justCompletedStage3InQueueModel = hasParentJobId && !scopeAlreadyComplete`
+ * — true only for a queue-model batch (parentJobId set) whose Stage 3
+ * checkpoint did NOT already exist when this invocation started, i.e. an
+ * invocation that just finished Stage 3 for the first time. A batch that
+ * was ALREADY checkpointed on entry (the resumed "Invocation 2") has
+ * nothing left to defer and must fall through to Stage 6 directly — do not
+ * pass true for that case, or the batch can never make progress past
+ * Stage 3. The legacy no-batch invocation (parentJobId null) predates the
+ * checkpoint/resume design entirely and has nothing to resume from, so it
+ * is deliberately left running Stage 6 in the same invocation exactly as
+ * before — this is an existing-compatible narrowing, not a new behaviour
+ * for that path.
+ *
+ * Deliberately NOT wall-clock-budget-aware: this is what removes the
+ * non-determinism the task exists to close (Stage 6 opportunistically
+ * starting in the same invocation "if there happens to be enough budget
+ * left") rather than only bailing once the budget is nearly exhausted.
+ */
+export function shouldDeferStage6ToNextInvocation(justCompletedStage3InQueueModel: boolean): boolean {
+  return justCompletedStage3InQueueModel
+}
+
+/**
+ * Priority 1 follow-up: the immediate self-retrigger request smooth-
+ * responder sends to ITSELF right after the Stage 3 -> Stage 6 checkpoint
+ * (scope_reasoning_completed_at) is persisted, so the fresh invocation that
+ * actually runs Stage 6 starts within seconds instead of waiting for the
+ * recovery cron's next tick.
+ *
+ * Mirrors document-worker's existing triggerClassification/triggerNext
+ * self-chain pattern exactly (same URL shape, same
+ * `Authorization: Bearer <anon key>` header, same fire-and-forget
+ * philosophy) rather than inventing a second triggering architecture.
+ * `parent_job_id` is what actually routes the fresh invocation to the
+ * resumed path (index.ts's own `if (body.parent_job_id)` handler branch) —
+ * `resume: true` is included in the payload as an explicit, verifiable
+ * statement of intent even though that branch does not read it today (see
+ * index.ts's own comment at the call site for why that's safe: the
+ * existing extraction_status='complete' defensive filter already makes
+ * Stage 1/2 a no-op for this batch's documents regardless of the flag, and
+ * scope_reasoning_completed_at already makes Stage 3 a no-op via the
+ * ordinary scopeAlreadyComplete check).
+ */
+export interface Stage6RetriggerRequest {
+  url: string
+  method: 'POST'
+  headers: Record<string, string>
+  body: { parent_job_id: string; resume: true }
+}
+
+export function buildStage6RetriggerRequest(
+  supabaseUrl: string,
+  anonKey: string,
+  parentJobId: string,
+): Stage6RetriggerRequest {
+  return {
+    url: `${supabaseUrl}/functions/v1/smooth-responder`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+    body: { parent_job_id: parentJobId, resume: true },
+  }
+}
+
+/**
+ * Human-readable reason logged (never persisted to a DB failure column —
+ * this is not a batch failure) when the immediate Stage 6 self-retrigger
+ * above fails to send or is rejected. Pure/testable for the same reason
+ * formatWallClockStallReason is: the wording is the one place this failure
+ * mode is described, and it must always say the recovery cron remains the
+ * backstop — that sentence is the load-bearing part of the "never leave
+ * the batch unrecoverable" contract, not just documentation.
+ */
+export function formatStage6RetriggerFailureReason(parentJobId: string, detail: string): string {
+  return `Immediate Stage 6 self-retrigger failed for batch ${parentJobId} (${detail}) — not marking the batch failed or stalled; the existing recovery cron (find_stuck_batches_needing_classification_retry) remains the backstop and will pick this batch up once its grace period elapses.`
+}
+
 export type ChildJobStatus = 'pending' | 'running' | 'completed' | 'failed'
 export type ParentBatchStatus = 'pending' | 'running' | 'completed' | 'completed_with_failures' | 'failed'
 

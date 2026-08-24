@@ -38,7 +38,8 @@ import {
   splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
-  splitBatchForRetry, formatWallClockStallReason,
+  splitBatchForRetry, formatWallClockStallReason, shouldDeferStage6ToNextInvocation,
+  buildStage6RetriggerRequest, formatStage6RetriggerFailureReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS, shouldFailStage3RunImmediately,
   shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, STAGE6_MAX_PARALLEL_CHUNKS, STAGE6_MAX_TRADES_PER_CHUNK, isTruncatedResponseError,
@@ -1136,6 +1137,59 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     }
   }
 
+  // ── Priority 1 follow-up: immediate Stage 3 -> Stage 6 self-retrigger ──
+  // Fires right after the Stage 3 checkpoint (scope_reasoning_completed_at)
+  // has been durably persisted (see the "Priority 1: clean Stage 3 -> Stage
+  // 6 handoff" section below, the only call site) — makes the normal,
+  // healthy handoff independent of the recovery cron, which becomes a
+  // backstop for a LOST retrigger rather than the every-time mechanism.
+  // Mirrors document-worker's existing triggerClassification/triggerNext
+  // pattern exactly: fire-and-forget-shaped (awaited here only because this
+  // whole function already runs inside the caller's EdgeRuntime.waitUntil
+  // background task, so there is no external HTTP caller left blocking on
+  // this), never throws, a failure is only ever logged — never fail()'d,
+  // never marks stall_stage. The batch's own durable state (checkpoint
+  // just persisted, job_intake_locks about to release via the outer
+  // finally) already satisfies find_stuck_batches_needing_classification_
+  // retry's predicate the instant this invocation exits, regardless of
+  // whether this retrigger itself succeeds — that predicate, the cron
+  // schedule, and the grace period are all UNCHANGED by this fix.
+  const retriggerStage6 = async () => {
+    const retriggerSupabaseUrl = Deno.env.get('SUPABASE_URL')
+    const retriggerAnonKey = Deno.env.get('SUPABASE_ANON_KEY')
+    if (!parentJobId) return // only the queue-model handoff ever calls this
+    if (!retriggerSupabaseUrl || !retriggerAnonKey) {
+      console.error(JSON.stringify({
+        event: 'stage_boundary_retrigger_failed', job_id: jobId, batch_id: parentJobId,
+        reason: formatStage6RetriggerFailureReason(parentJobId, 'SUPABASE_URL/SUPABASE_ANON_KEY not available in this invocation\'s environment'),
+      }))
+      return
+    }
+    try {
+      const req = buildStage6RetriggerRequest(retriggerSupabaseUrl, retriggerAnonKey, parentJobId)
+      const res = await fetch(req.url, { method: req.method, headers: req.headers, body: JSON.stringify(req.body) })
+      if (res.ok) {
+        console.log(JSON.stringify({
+          event: 'stage_boundary_retrigger_requested', job_id: jobId, batch_id: parentJobId,
+          from_stage: 'reasoning_scope', to_stage: 'generating_estimate', http_status: res.status,
+        }))
+      } else {
+        const bodyText = await res.text().catch(() => '')
+        console.error(JSON.stringify({
+          event: 'stage_boundary_retrigger_failed', job_id: jobId, batch_id: parentJobId,
+          http_status: res.status, response_body: bodyText.slice(0, 500),
+          reason: formatStage6RetriggerFailureReason(parentJobId, `HTTP ${res.status}`),
+        }))
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(JSON.stringify({
+        event: 'stage_boundary_retrigger_failed', job_id: jobId, batch_id: parentJobId,
+        error: detail, reason: formatStage6RetriggerFailureReason(parentJobId, detail),
+      }))
+    }
+  }
+
   try {
     await supabase.from('files').update({ intake_status: 'processing' }).eq('id', fileId)
     await setStage('reading')
@@ -2159,11 +2213,22 @@ For each relevant trade, state what is included, what is excluded, dependencies,
 
       if (remainingTrades.length === 0) {
         // Defensive only — scopeAlreadyComplete above should already have
-        // caught the "every trade done" case. Nothing left to reason
-        // about; fall through to Stage 6 with what's already persisted.
+        // caught the "every trade done" case (reachable only if a prior
+        // invocation finished every Stage 3 chunk but was killed before
+        // reaching the checkpoint write below — an uncatchable CPU kill
+        // between the last chunk's stage3_completed_trade_ids write and
+        // this checkpoint). Write the checkpoint here too so the new
+        // Priority 1 handoff below (which relies on scope_reasoning_
+        // completed_at being durably set before it defers) can't loop
+        // forever re-entering this same branch without ever persisting it.
         console.log(JSON.stringify({
           stage: 'reasoning_scope', status: 'all_trades_already_complete', job_id: jobId, batch_id: parentJobId,
         }))
+        if (parentJobId) {
+          await supabase.from('document_processing_batches')
+            .update({ scope_reasoning_completed_at: new Date().toISOString() })
+            .eq('id', parentJobId)
+        }
       } else {
         const remainingBudgetMs = WALL_CLOCK_SAFETY_MS - (Date.now() - startedAt)
         const plan = planStage3Chunks(remainingTrades, remainingBudgetMs, factsForPrompt.length)
@@ -2443,6 +2508,68 @@ For each relevant trade, state what is included, what is excluded, dependencies,
             .eq('id', parentJobId)
         }
       }
+    }
+
+    // ── Priority 1: clean Stage 3 -> Stage 6 handoff ────────────────────────
+    // Reaching here means Stage 3 is genuinely, durably done for this batch
+    // (either scopeAlreadyComplete was already true on entry, i.e. this IS
+    // the resumed invocation reading the checkpoint set above, or the
+    // checkpoint was just written this invocation, above). Previously,
+    // "just written this invocation" fell straight through into the Stage 6
+    // section below in the SAME invocation, opportunistically relying on
+    // whatever wall-clock budget happened to remain — the exact
+    // non-determinism this fix closes (see WALL_CLOCK_SAFETY_MS /
+    // bailForWallClockBudget comments above: only a NEAR-exhausted budget
+    // ever triggered a clean bail; a comfortably-remaining budget silently
+    // proceeded into Stage 6 in-process). Now, a batch that JUST finished
+    // Stage 3 this invocation always exits here and lets Stage 6 begin in a
+    // fresh invocation with its own full wall-clock window — deterministic
+    // regardless of how much budget Stage 1/2/3 happened to consume.
+    //
+    // This is a deliberate, successful stage boundary, NOT a wall-clock
+    // stall or a failure — it deliberately does NOT go through
+    // bailForWallClockBudget (which would misrepresent it as
+    // stall_stage/stall_reason/stall_count, a scheduling-exhaustion signal
+    // this is not). scope_reasoning_completed_at (just persisted above) IS
+    // the existing, durable "Stage 3 done, Stage 6 pending" checkpoint —
+    // no new schema/state machine needed. Recovery: the existing
+    // find_stuck_batches_needing_classification_retry (migration 052/077/
+    // 078/088, UNCHANGED by this fix) already matches ANY batch with
+    // classification_triggered=true, no active job_intake_locks row, no
+    // finalized estimate_runs.builder_status, and zero stage3/stage6
+    // failure counts — which this batch satisfies the instant the lock
+    // releases via the existing outer finally. The very next invocation
+    // reads scope_reasoning_completed_at=true (scopeAlreadyComplete branch
+    // above) and skips straight to Stage 6, exactly like the pre-existing
+    // wall-clock-bail resume path — this only changes WHEN that resume
+    // path is entered (proactively, every time, not only near-exhaustion).
+    //
+    // A resumed invocation (scopeAlreadyComplete was already true when this
+    // invocation started, read from the DB before Stage 3 ran at all) has
+    // nothing left to defer — it falls through and runs Stage 6 directly,
+    // exactly the target "Invocation 2" pattern. Only an invocation that
+    // did NOT start already-resumed (scopeAlreadyComplete was false on
+    // entry) and reaches this point (every earlier branch that couldn't
+    // fully complete Stage 3 this invocation already returned above) just
+    // finished Stage 3 for the first time — that's the one that defers.
+    // The legacy no-batch path (parentJobId null) has no batch-level
+    // checkpoint to resume from and is unaffected — see
+    // shouldDeferStage6ToNextInvocation's own doc comment.
+    if (shouldDeferStage6ToNextInvocation(Boolean(parentJobId) && !scopeAlreadyComplete)) {
+      console.log(JSON.stringify({
+        event: 'stage_boundary_handoff', job_id: jobId, batch_id: parentJobId,
+        from_stage: 'reasoning_scope', to_stage: 'generating_estimate',
+        reason: 'Stage 3 complete — deferring Stage 6 to a fresh invocation for a deterministic per-stage wall-clock budget (not a wall-clock exhaustion bail)',
+      }))
+      // Immediate self-retrigger (retriggerStage6, defined above) — fired
+      // strictly AFTER the checkpoint write(s) above have already
+      // succeeded (this line is unreachable otherwise: every branch that
+      // could have failed to complete/persist the checkpoint already
+      // returned earlier). Never throws; a failure only logs
+      // stage_boundary_retrigger_failed and leaves the recovery cron as
+      // the intact backstop — see retriggerStage6's own comment.
+      await retriggerStage6()
+      return
     }
 
     // ── Stage 6: Estimate Generation (spec Stage 5) ────────────────────────

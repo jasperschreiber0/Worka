@@ -34,6 +34,9 @@ import {
   splitBatchForRetry,
   dedupeRealFileIds,
   formatWallClockStallReason,
+  shouldDeferStage6ToNextInvocation,
+  buildStage6RetriggerRequest,
+  formatStage6RetriggerFailureReason,
   truncateEvidence,
   formatFactForScopePrompt,
   STAGE3_MAX_EVIDENCE_CHARS,
@@ -1134,6 +1137,122 @@ test('formatWallClockStallReason: includes stage name and every millisecond figu
   assert.match(reason, /not a content or model failure/)
 })
 
+// ─── shouldDeferStage6ToNextInvocation (Priority 1: Stage 3 -> Stage 6 determinism) ──
+//
+// Pure decision extracted from index.ts's post-Stage-3 handoff. Test A/B
+// from the Priority 1 task map directly onto this: Test A is "Stage 3 just
+// completed this invocation -> defer" (true), Test B is "already resumed
+// (checkpoint existed on entry) -> continue to Stage 6 now" (false).
+
+test('shouldDeferStage6ToNextInvocation: Test A — Stage 3 just completed this invocation (queue model, not already resumed) -> defer', () => {
+  // hasParentJobId=true, scopeAlreadyComplete=false on entry
+  assert.equal(shouldDeferStage6ToNextInvocation(true), true)
+})
+
+test('shouldDeferStage6ToNextInvocation: Test B — already-resumed invocation (checkpoint existed on entry) -> do NOT defer, Stage 6 runs directly', () => {
+  // Caller computes hasParentJobId && !scopeAlreadyComplete; scopeAlreadyComplete=true collapses this to false.
+  assert.equal(shouldDeferStage6ToNextInvocation(false), false)
+})
+
+test('shouldDeferStage6ToNextInvocation: legacy no-batch invocation (parentJobId null) is unaffected -- no checkpoint to resume from, runs Stage 6 in the same invocation', () => {
+  assert.equal(shouldDeferStage6ToNextInvocation(false), false)
+})
+
+// ─── buildStage6RetriggerRequest / formatStage6RetriggerFailureReason ──────
+// (Priority 1 follow-up: immediate self-retrigger, independent of the
+// recovery cron). Task tests 1-4 map onto these.
+
+test('buildStage6RetriggerRequest: Test 2 — payload includes parent_job_id and resume: true', () => {
+  const req = buildStage6RetriggerRequest('https://proj.supabase.co', 'anon-key-123', 'batch-abc')
+  assert.deepEqual(req.body, { parent_job_id: 'batch-abc', resume: true })
+})
+
+test('buildStage6RetriggerRequest: targets the same function URL shape document-worker\'s existing self-chain pattern uses (no second architecture)', () => {
+  const req = buildStage6RetriggerRequest('https://proj.supabase.co', 'anon-key-123', 'batch-abc')
+  assert.equal(req.url, 'https://proj.supabase.co/functions/v1/smooth-responder')
+  assert.equal(req.method, 'POST')
+})
+
+test('buildStage6RetriggerRequest: authenticates with Bearer <anon key>, matching triggerClassification/triggerNext exactly', () => {
+  const req = buildStage6RetriggerRequest('https://proj.supabase.co', 'anon-key-123', 'batch-abc')
+  assert.equal(req.headers.Authorization, 'Bearer anon-key-123')
+  assert.equal(req.headers['Content-Type'], 'application/json')
+})
+
+test('buildStage6RetriggerRequest: targets the SAME batch that just completed Stage 3, never a different one', () => {
+  const req = buildStage6RetriggerRequest('https://proj.supabase.co', 'anon-key-123', 'batch-xyz-789')
+  assert.equal(req.body.parent_job_id, 'batch-xyz-789')
+})
+
+test('formatStage6RetriggerFailureReason: Test 4 — explicitly states the recovery cron remains the backstop (never marks the batch unrecoverable)', () => {
+  const reason = formatStage6RetriggerFailureReason('batch-abc', 'network error')
+  assert.match(reason, /batch-abc/)
+  assert.match(reason, /network error/)
+  assert.match(reason, /recovery cron.*remains the backstop/)
+  assert.match(reason, /find_stuck_batches_needing_classification_retry/)
+  // Never says "failed" or "stalled" in the sense of a terminal/blocking
+  // batch state — only that the retrigger attempt itself didn't land.
+  assert.match(reason, /not marking the batch failed or stalled/)
+})
+
+// ─── Source-regression guards: call-site ordering and failure-safety ──────
+// (Priority 1 follow-up, Test 1 and Test 3). The actual HTTP call and its
+// exact position relative to the checkpoint write can't be exercised
+// without a live Deno runtime + network, so — matching this file's own
+// existing precedent for DB-adjacent logic with no live-DB harness (see
+// the migration-034 SQL-text assertions above) — this reads index.ts's own
+// source and asserts the structural invariants the task requires.
+
+const indexTsSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), 'index.ts'),
+  'utf-8',
+)
+
+test('index.ts source: retriggerStage6() is called exactly once, only from the Stage 3 -> Stage 6 handoff block', () => {
+  const callSites = indexTsSource.match(/(?<!async )\bretriggerStage6\(\)/g) ?? []
+  assert.equal(callSites.length, 1, 'retriggerStage6() must be invoked from exactly one call site')
+})
+
+test('index.ts source: Test 1/3 — the retrigger call site is textually AFTER scope_reasoning_completed_at is persisted and BEFORE the handoff return', () => {
+  const handoffBlockStart = indexTsSource.indexOf('Priority 1: clean Stage 3 -> Stage 6 handoff')
+  assert.ok(handoffBlockStart > -1, 'handoff block comment must exist')
+  const handoffBlock = indexTsSource.slice(handoffBlockStart, handoffBlockStart + 6000)
+
+  const checkpointIdx = handoffBlock.lastIndexOf('scope_reasoning_completed_at')
+  const retriggerCallIdx = handoffBlock.indexOf('await retriggerStage6()')
+  const returnIdx = handoffBlock.indexOf('return', retriggerCallIdx)
+
+  assert.ok(checkpointIdx > -1 && retriggerCallIdx > -1 && returnIdx > -1, 'all three markers must be present in the handoff block')
+  assert.ok(retriggerCallIdx > checkpointIdx, 'retrigger must be called AFTER the checkpoint reference')
+  assert.ok(returnIdx > retriggerCallIdx, 'the clean return must come AFTER the retrigger call, never before it')
+})
+
+test('index.ts source: Test 4 — a retrigger failure never calls fail() or writes stall_stage (only stage_boundary_retrigger_failed is logged)', () => {
+  const retriggerFnStart = indexTsSource.indexOf('const retriggerStage6 = async ()')
+  assert.ok(retriggerFnStart > -1, 'retriggerStage6 definition must exist')
+  // Bounded slice covering the function body (it ends well before the next
+  // top-level `const`/`try {` at this indentation in the real file).
+  const retriggerFnBody = indexTsSource.slice(retriggerFnStart, retriggerFnStart + 2500)
+  assert.match(retriggerFnBody, /stage_boundary_retrigger_failed/)
+  assert.match(retriggerFnBody, /stage_boundary_retrigger_requested/)
+  assert.doesNotMatch(retriggerFnBody, /\bawait fail\(/, 'retrigger failure must never call fail()')
+  assert.doesNotMatch(retriggerFnBody, /stall_stage/, 'retrigger failure must never write stall_stage — it is not a wall-clock stall')
+})
+
+test('index.ts source: Test 6 — the resumed-invocation entry point (parent_job_id branch) the retrigger targets still exists and is the sole such branch', () => {
+  // The retrigger's payload (parent_job_id, no file_id/job_id/builder_id)
+  // only reaches the resumed path if the handler's `if (body.parent_job_id)`
+  // branch still exists and is still what routes it — proving this isn't
+  // a second, parallel entry point invented alongside the existing one.
+  // Skipping Stage 1/2 (extraction_status='complete' filter) and Stage 3
+  // (scopeAlreadyComplete, exercised by the shouldDeferStage6ToNextInvocation
+  // Test B above) for THIS invocation shape are both pre-existing,
+  // untouched behaviours of that branch — not modified by this fix.
+  const branchMatches = indexTsSource.match(/if \(body\.parent_job_id\)/g) ?? []
+  assert.equal(branchMatches.length, 1, 'exactly one parent_job_id handler branch must exist — no second triggering architecture')
+  assert.match(indexTsSource, /scopeAlreadyComplete/, 'the Stage 3 checkpoint-skip a resumed invocation relies on must still exist')
+})
+
 // ─── Stage 3: evidence truncation ───────────────────────────────────────────
 
 test('truncateEvidence: leaves short evidence untouched', () => {
@@ -1538,6 +1657,29 @@ test('canClaimStage6Slot: simulated overlapping invocations A and B for the SAME
   // false result per attempt, exactly matching the required contract.
   assert.equal(canClaimStage6Slot(slots, NOW), false, 'B chunk 1 refused')
   assert.equal(canClaimStage6Slot(slots, NOW), false, 'B chunk 2 refused')
+})
+
+test('canClaimStage6Slot: Test 5 (Priority 1 follow-up) — the immediate self-retrigger invocation and a coincidental recovery-cron retrigger for the SAME batch cannot both process Stage 6 concurrently', () => {
+  // Models the exact scenario the task asks to prove safe: the new
+  // immediate retrigger (invocation "immediate") starts first and claims
+  // its chunk slots; a coincidental recovery-cron-triggered invocation
+  // ("cron") for the same batch overlaps in real time and tries to claim
+  // its own. This is the SAME claim_stage6_slot mechanism as the A/B test
+  // above (migration 094, untouched by this fix) — reused, not
+  // reimplemented — because it is keyed on the batch, not on which trigger
+  // source (self-retrigger vs. cron) caused the invocation.
+  let slots: Array<{ callId: string; claimedAt: string }> = []
+  assert.equal(canClaimStage6Slot(slots, NOW), true, 'immediate retrigger chunk 1 claims successfully')
+  slots = [...slots, { callId: 'immediate-1', claimedAt: isoBefore(300) }]
+  assert.equal(canClaimStage6Slot(slots, NOW), true, 'immediate retrigger chunk 2 claims successfully')
+  slots = [...slots, { callId: 'immediate-2', claimedAt: isoBefore(200) }]
+
+  // The recovery cron's overlapping invocation for the SAME batch: both of
+  // its claim attempts are refused (zero Anthropic calls made for either),
+  // and are simply left for a later invocation exactly like any other
+  // deferred chunk -- never a retry loop, never a duplicate call.
+  assert.equal(canClaimStage6Slot(slots, NOW), false, 'cron-triggered invocation chunk 1 refused -- no concurrent Stage 6 processing')
+  assert.equal(canClaimStage6Slot(slots, NOW), false, 'cron-triggered invocation chunk 2 refused -- no concurrent Stage 6 processing')
 })
 
 test('pruneExpiredStage6Slots: drops a slot older than the TTL, keeps a fresh one', () => {
