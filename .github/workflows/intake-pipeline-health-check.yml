@@ -58,6 +58,11 @@ on:
         required: false
         type: string
         default: 'false'
+      run_postgrest_vs_direct_sql_test:
+        description: "Run scripts/test-postgrest-vs-direct-sql.mjs -- creates its own disposable synthetic estimate_runs row, calls enforce_estimate_deadlines()/find_stuck_batches_needing_classification_retry() via the app's own PostgREST .rpc() mechanism, reports before/after state, cleans up -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -129,8 +134,15 @@ jobs:
           RESET_TO_NULL: ${{ inputs.probe_reset_to_null }}
         run: node scripts/probe-quote-total-cost-write.mjs
 
+      - name: Test PostgREST RPC path vs direct SQL (enforce_estimate_deadlines / find_stuck_batches_needing_classification_retry)
+        if: ${{ inputs.run_postgrest_vs_direct_sql_test == 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/test-postgrest-vs-direct-sql.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
