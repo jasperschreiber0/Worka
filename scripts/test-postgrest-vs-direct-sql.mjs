@@ -41,28 +41,30 @@ async function main() {
   const { count: opsBefore } = await supabase.from('ai_operations').select('*', { count: 'exact', head: true })
   log('financial_safety_before', { ops_before: opsBefore })
 
-  // ── Find the most recent real terminal batch to clone from ───────────
-  const { data: sourceBatches, error: sourceErr } = await supabase
-    .from('document_processing_batches')
-    .select('*, estimate_runs(*)')
-    .in('status', ['completed', 'completed_with_failures', 'failed'])
+  // ── Find the most recent real terminal batch that HAS an estimate_runs row ──
+  // (queried from the estimate_runs side with an inner join, so a terminal
+  // batch that happens to have no run -- e.g. legacy pre-Option-D data --
+  // is never selected as the clone source)
+  const { data: sourceRuns, error: sourceErr } = await supabase
+    .from('estimate_runs')
+    .select('*, document_processing_batches!inner(*)')
+    .in('document_processing_batches.status', ['completed', 'completed_with_failures', 'failed'])
     .order('created_at', { ascending: false })
     .limit(1)
-  if (sourceErr || !sourceBatches?.[0]) {
-    log('fatal', { message: 'no source batch found', error: sourceErr?.message })
+  if (sourceErr || !sourceRuns?.[0]) {
+    log('fatal', { message: 'no source batch+run pair found', error: sourceErr?.message })
     process.exit(1)
   }
-  const sourceBatch = sourceBatches[0]
-  const sourceRun = sourceBatch.estimate_runs?.[0]
-  if (!sourceRun) {
-    log('fatal', { message: 'source batch has no estimate_runs row' })
+  const sourceRun = sourceRuns[0]
+  const sourceBatch = sourceRun.document_processing_batches
+  if (!sourceBatch) {
+    log('fatal', { message: 'source run has no embedded batch' })
     process.exit(1)
   }
 
   // ── Create the disposable synthetic batch, explicitly extension-eligible ──
   const newBatchId = crypto.randomUUID()
   const batchClone = { ...sourceBatch }
-  delete batchClone.estimate_runs
   batchClone.id = newBatchId
   batchClone.created_at = new Date().toISOString()
   batchClone.updated_at = new Date(Date.now() - 5 * 60_000).toISOString()
@@ -80,6 +82,7 @@ async function main() {
 
   const newRunId = crypto.randomUUID()
   const runClone = { ...sourceRun }
+  delete runClone.document_processing_batches
   runClone.id = newRunId
   runClone.batch_id = newBatchId
   runClone.builder_status = null
