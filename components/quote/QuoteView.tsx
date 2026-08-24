@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { calculateSellTotal, calculateClientPrice } from '@/lib/pricing'
+import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
 import SendQuoteModal from './SendQuoteModal'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -86,6 +87,16 @@ interface QAReportPayload {
     missing_trade_names: string[]
     detected_characteristics: string[]
   }
+}
+
+/** Form state for the full line-item edit / add-item forms — strings for
+ *  every numeric field so a half-typed input never fights React. */
+interface EditItemFields {
+  trade_category_id: number
+  description: string
+  quantity: string
+  unit: string
+  rate: string
 }
 
 interface DocumentContributionPayload {
@@ -346,9 +357,13 @@ interface LineItemRowProps {
   onSetRate?: (itemId: string, rate: number) => Promise<boolean>
   /** Exclude an unpriced line from the quote. Resolves true on success. */
   onExclude?: (itemId: string) => Promise<boolean>
+  /** Edit any field on the line. Resolves an error message, or null on success. */
+  onEditItem?: (itemId: string, fields: EditItemFields) => Promise<string | null>
+  /** Delete the line entirely. Resolves an error message, or null on success. */
+  onDeleteItem?: (itemId: string) => Promise<string | null>
 }
 
-function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) {
+function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDeleteItem }: LineItemRowProps) {
   const isExcluded = item.assumption_status === 'excluded'
   const isUnresolved = item.is_assumption && item.assumption_status === 'unresolved'
   const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
@@ -374,6 +389,50 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) 
     setSaving(true)
     await onExclude(item.id)
     setSaving(false)
+  }
+
+  // ── Full edit / delete — every field, any line item ────────────────────
+  const [editingItem, setEditingItem] = useState(false)
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [editFields, setEditFields] = useState<EditItemFields>({
+    trade_category_id: item.trade_category_id,
+    description: item.description,
+    quantity: item.quantity !== null ? String(item.quantity) : '',
+    unit: item.unit ?? '',
+    rate: item.rate !== null ? String(item.rate) : '',
+  })
+
+  const openEdit = () => {
+    setEditFields({
+      trade_category_id: item.trade_category_id,
+      description: item.description,
+      quantity: item.quantity !== null ? String(item.quantity) : '',
+      unit: item.unit ?? '',
+      rate: item.rate !== null ? String(item.rate) : '',
+    })
+    setEditError(null)
+    setEditingItem(true)
+  }
+
+  const submitEdit = async () => {
+    if (!onEditItem || editSaving) return
+    const description = editFields.description.trim()
+    if (!description) { setEditError('Description is required'); return }
+    setEditSaving(true)
+    const err = await onEditItem(item.id, editFields)
+    setEditSaving(false)
+    if (err) { setEditError(err); return }
+    setEditingItem(false)
+  }
+
+  const submitDelete = async () => {
+    if (!onDeleteItem || editSaving) return
+    if (!window.confirm(`Delete "${item.description}"? This can't be undone.`)) return
+    setEditSaving(true)
+    const err = await onDeleteItem(item.id)
+    setEditSaving(false)
+    if (err) setEditError(err)
   }
 
   // The one canonical sell-price calculation (lib/pricing.ts) — the same
@@ -488,6 +547,109 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude }: LineItemRowProps) 
             >
               Cancel
             </button>
+          </div>
+        )}
+
+        {/* Edit / Delete — any line item, not just unpriced ones */}
+        {canEdit && !editing && !editingItem && (onEditItem || onDeleteItem) && (
+          <div className="flex items-center gap-2 mt-1.5">
+            {onEditItem && (
+              <button
+                type="button"
+                onClick={openEdit}
+                className="text-[11px] font-medium px-2 py-1 rounded"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                Edit
+              </button>
+            )}
+            {onDeleteItem && (
+              <button
+                type="button"
+                onClick={submitDelete}
+                disabled={editSaving}
+                className="text-[11px] font-medium px-2 py-1 rounded disabled:opacity-40"
+                style={{ color: 'var(--status-red)' }}
+              >
+                Delete
+              </button>
+            )}
+          </div>
+        )}
+
+        {editingItem && (
+          <div className="flex flex-col gap-1.5 mt-1.5 p-2 rounded" style={{ backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--bg-border)' }}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <select
+                value={editFields.trade_category_id}
+                onChange={(e) => setEditFields((f) => ({ ...f, trade_category_id: Number(e.target.value) }))}
+                className="px-2 py-1 rounded text-[12px]"
+                style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+                aria-label="Trade"
+              >
+                {TRADE_CATEGORIES.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={editFields.description}
+                onChange={(e) => setEditFields((f) => ({ ...f, description: e.target.value }))}
+                placeholder="Description"
+                className="flex-1 min-w-[140px] px-2 py-1 rounded text-[12px]"
+                style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+                aria-label="Description"
+              />
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <input
+                type="number" inputMode="decimal" min="0"
+                value={editFields.quantity}
+                onChange={(e) => setEditFields((f) => ({ ...f, quantity: e.target.value }))}
+                placeholder="Quantity"
+                className="w-20 px-2 py-1 rounded text-[12px] tabular-nums"
+                style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+                aria-label="Quantity"
+              />
+              <input
+                type="text"
+                value={editFields.unit}
+                onChange={(e) => setEditFields((f) => ({ ...f, unit: e.target.value }))}
+                placeholder="Unit (e.g. m2, ea)"
+                className="w-24 px-2 py-1 rounded text-[12px]"
+                style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+                aria-label="Unit"
+              />
+              <input
+                type="number" inputMode="decimal" min="0"
+                value={editFields.rate}
+                onChange={(e) => setEditFields((f) => ({ ...f, rate: e.target.value }))}
+                placeholder="Rate $"
+                className="w-24 px-2 py-1 rounded text-[12px] tabular-nums"
+                style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+                aria-label="Rate"
+              />
+            </div>
+            {editError && <p className="text-[11px]" style={{ color: 'var(--status-red)' }}>{editError}</p>}
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={submitEdit}
+                disabled={editSaving}
+                className="btn-primary text-[11px] px-2.5 py-1 disabled:opacity-40"
+              >
+                {editSaving ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingItem(false)}
+                disabled={editSaving}
+                className="text-[11px] px-2 py-1"
+                style={{ color: 'var(--text-tertiary)' }}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -650,9 +812,11 @@ interface CategorySectionProps {
   canEdit?: boolean
   onSetRate?: (itemId: string, rate: number) => Promise<boolean>
   onExclude?: (itemId: string) => Promise<boolean>
+  onEditItem?: (itemId: string, fields: EditItemFields) => Promise<string | null>
+  onDeleteItem?: (itemId: string) => Promise<string | null>
 }
 
-function CategorySection({ group, isExpanded, onToggle, canEdit, onSetRate, onExclude }: CategorySectionProps) {
+function CategorySection({ group, isExpanded, onToggle, canEdit, onSetRate, onExclude, onEditItem, onDeleteItem }: CategorySectionProps) {
   const hasUnresolved = group.items.some(
     (i) => i.is_assumption && i.assumption_status === 'unresolved'
   )
@@ -748,12 +912,156 @@ function CategorySection({ group, isExpanded, onToggle, canEdit, onSetRate, onEx
             </div>
           </div>
           {group.items.map((item) => (
-            <LineItemRow key={item.id} item={item} canEdit={canEdit} onSetRate={onSetRate} onExclude={onExclude} />
+            <LineItemRow key={item.id} item={item} canEdit={canEdit} onSetRate={onSetRate} onExclude={onExclude} onEditItem={onEditItem} onDeleteItem={onDeleteItem} />
           ))}
         </div>
       </div>
     </div>
   )
+}
+
+// ─── Add item ─────────────────────────────────────────────────────────────────
+// The manual-estimate entry point inside a quote: Trade, Description,
+// Quantity, Unit, Rate — the same five fields a builder writes on paper.
+// Always visible when the quote is editable, whether it already has items
+// (AI-generated or otherwise) or is completely blank.
+
+interface AddItemFormProps {
+  onAdd: (fields: EditItemFields) => Promise<string | null>
+}
+
+const EMPTY_ITEM_FIELDS: EditItemFields = {
+  trade_category_id: TRADE_CATEGORIES[0].id,
+  description: '',
+  quantity: '',
+  unit: '',
+  rate: '',
+}
+
+function AddItemForm({ onAdd }: AddItemFormProps) {
+  const [open, setOpen] = useState(false)
+  const [fields, setFields] = useState<EditItemFields>(EMPTY_ITEM_FIELDS)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    if (saving) return
+    if (!fields.description.trim()) { setError('Description is required'); return }
+    if (!(Number(fields.quantity) > 0)) { setError('Quantity must be a positive number'); return }
+    if (!fields.unit.trim()) { setError('Unit is required'); return }
+    if (!(Number(fields.rate) > 0)) { setError('Rate must be a positive number'); return }
+    setSaving(true)
+    const err = await onAdd(fields)
+    setSaving(false)
+    if (err) { setError(err); return }
+    setFields(EMPTY_ITEM_FIELDS)
+    setError(null)
+    setOpen(false)
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="btn-secondary text-[13px] px-4 py-2 mx-4 mb-4"
+      >
+        + Add item
+      </button>
+    )
+  }
+
+  return (
+    <div className="mx-4 mb-4 p-3 rounded-lg" style={{ border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-elevated)' }}>
+      <p className="text-[12px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--text-tertiary)' }}>Add item</p>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="flex flex-col gap-0.5 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+            Trade
+            <select
+              value={fields.trade_category_id}
+              onChange={(e) => setFields((f) => ({ ...f, trade_category_id: Number(e.target.value) }))}
+              className="px-2 py-1.5 rounded text-[13px]"
+              style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+            >
+              {TRADE_CATEGORIES.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex-1 min-w-[160px] flex flex-col gap-0.5 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+            Description
+            <input
+              type="text"
+              value={fields.description}
+              onChange={(e) => setFields((f) => ({ ...f, description: e.target.value }))}
+              placeholder="e.g. Supply and install kitchen benchtop"
+              className="px-2 py-1.5 rounded text-[13px]"
+              style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+            />
+          </label>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="flex flex-col gap-0.5 text-[11px] w-24" style={{ color: 'var(--text-tertiary)' }}>
+            Quantity
+            <input
+              type="number" inputMode="decimal" min="0"
+              value={fields.quantity}
+              onChange={(e) => setFields((f) => ({ ...f, quantity: e.target.value }))}
+              className="px-2 py-1.5 rounded text-[13px] tabular-nums"
+              style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+            />
+          </label>
+          <label className="flex flex-col gap-0.5 text-[11px] w-28" style={{ color: 'var(--text-tertiary)' }}>
+            Unit
+            <input
+              type="text"
+              value={fields.unit}
+              onChange={(e) => setFields((f) => ({ ...f, unit: e.target.value }))}
+              placeholder="m2, ea, lm…"
+              className="px-2 py-1.5 rounded text-[13px]"
+              style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+            />
+          </label>
+          <label className="flex flex-col gap-0.5 text-[11px] w-28" style={{ color: 'var(--text-tertiary)' }}>
+            Rate ($)
+            <input
+              type="number" inputMode="decimal" min="0"
+              value={fields.rate}
+              onChange={(e) => setFields((f) => ({ ...f, rate: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
+              className="px-2 py-1.5 rounded text-[13px] tabular-nums"
+              style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
+            />
+          </label>
+        </div>
+        {Number(fields.quantity) > 0 && Number(fields.rate) > 0 && (
+          <p className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+            Total: {formatCurrency(round2Display(Number(fields.quantity) * Number(fields.rate)))}
+          </p>
+        )}
+        {error && <p className="text-[12px]" style={{ color: 'var(--status-red)' }}>{error}</p>}
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={submit} disabled={saving} className="btn-primary text-[13px] px-4 py-1.5 disabled:opacity-40">
+            {saving ? 'Saving…' : 'Save item'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setOpen(false); setFields(EMPTY_ITEM_FIELDS); setError(null) }}
+            disabled={saving}
+            className="text-[13px] px-2 py-1.5"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function round2Display(n: number): number {
+  return Math.round(n * 100) / 100
 }
 
 // ─── Summary card ─────────────────────────────────────────────────────────────
@@ -1523,6 +1831,66 @@ function QuoteViewInner({
   const handleSetRate = useCallback((itemId: string, rate: number) => patchLineItem(itemId, { rate }), [patchLineItem])
   const handleExclude = useCallback((itemId: string) => patchLineItem(itemId, { excluded: true }), [patchLineItem])
 
+  // Manual line-item management — add / edit / delete. Unlike the fix
+  // actions above (which resolve a boolean), these resolve an error message
+  // (or null on success) so the calling form can show exactly why a save
+  // failed — e.g. a duplicate description on the same trade.
+  const handleAddItem = useCallback(async (fields: EditItemFields): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}/line-items`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trade_category_id: fields.trade_category_id,
+          description: fields.description.trim(),
+          quantity: Number(fields.quantity),
+          unit: fields.unit.trim(),
+          rate: Number(fields.rate),
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) return json.error ?? 'Failed to add item — please try again.'
+      await loadQuote()
+      return null
+    } catch {
+      return 'Failed to add item — please try again.'
+    }
+  }, [quoteId, loadQuote])
+
+  const handleEditItem = useCallback(async (itemId: string, fields: EditItemFields): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}/line-items/${itemId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trade_category_id: fields.trade_category_id,
+          description: fields.description.trim(),
+          quantity: fields.quantity.trim() === '' ? null : Number(fields.quantity),
+          unit: fields.unit.trim() === '' ? null : fields.unit.trim(),
+          rate: fields.rate.trim() === '' ? undefined : Number(fields.rate),
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) return json.error ?? 'Failed to save changes — please try again.'
+      await loadQuote()
+      return null
+    } catch {
+      return 'Failed to save changes — please try again.'
+    }
+  }, [quoteId, loadQuote])
+
+  const handleDeleteItem = useCallback(async (itemId: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}/line-items/${itemId}`, { method: 'DELETE' })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) return json.error ?? 'Failed to delete item — please try again.'
+      await loadQuote()
+      return null
+    } catch {
+      return 'Failed to delete item — please try again.'
+    }
+  }, [quoteId, loadQuote])
+
   const canEditItems = !!data && !sentAt && ['draft', 'pending_review'].includes(data.quote.status)
 
   const handleClose = useCallback(() => {
@@ -1753,8 +2121,22 @@ function QuoteViewInner({
                   canEdit={canEditItems}
                   onSetRate={handleSetRate}
                   onExclude={handleExclude}
+                  onEditItem={handleEditItem}
+                  onDeleteItem={handleDeleteItem}
                 />
               ))}
+
+              {/* Empty estimate — no items yet, nothing to do with AI or
+                  documents required to get started. */}
+              {data.line_items_by_category.length === 0 && (
+                <div className="mx-4 mb-4 p-6 rounded-lg text-center" style={{ border: '1px dashed var(--bg-border)' }}>
+                  <p className="text-[13px] font-medium mb-1" style={{ color: 'var(--text-primary)' }}>No items yet</p>
+                  <p className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>Add your first item below to start building this estimate.</p>
+                </div>
+              )}
+
+              {/* Add item — always available while the quote is editable */}
+              {canEditItems && <AddItemForm onAdd={handleAddItem} />}
 
               {/* Bottom padding */}
               <div className="h-4" />

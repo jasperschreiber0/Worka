@@ -26,6 +26,8 @@ export interface JobSnapshotPanelProps {
   userRole?: PermissionRole
   builderId?: string
   onViewQuote?: (quoteId: string) => void
+  /** Create a blank estimate for this job (no document, no AI) and open it. */
+  onCreateEstimate?: (job: ActiveJob) => void
   onVariationApprove?: (variationId: string) => void
   onComposeEmail?: (jobId: string) => void
   onUploadPlans?: (job: ActiveJob) => void
@@ -144,6 +146,7 @@ export default function JobSnapshotPanel({
   job,
   onClose,
   onViewQuote,
+  onCreateEstimate,
   onComposeEmail,
   onUploadPlans,
   onJobActivated,
@@ -411,6 +414,11 @@ export default function JobSnapshotPanel({
   const actions: { label: string; handler: () => void }[] = []
   if (onComposeEmail && job) actions.push({ label: 'Compose email', handler: () => onComposeEmail(job.id) })
   if (onViewQuote && snapshot?.quote?.id) actions.push({ label: 'View quote', handler: () => onViewQuote(snapshot.quote!.id!) })
+  // No quote yet — offer the manual path alongside the document-upload one,
+  // not instead of it. Neither requires the other: a blank estimate started
+  // here can still have documents dropped onto it later, and AI will find
+  // and add to the same quote rather than creating a second one.
+  if (onCreateEstimate && job && !snapshot?.quote?.id) actions.push({ label: 'Create estimate', handler: () => onCreateEstimate(job) })
   if (onUploadPlans && job) actions.push({ label: 'Upload plans', handler: () => onUploadPlans(job) })
   if (onAddTask && job) actions.push({ label: 'Add task', handler: () => onAddTask(job.address) })
 

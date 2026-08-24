@@ -92,6 +92,18 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
 
   const handleUploadPlans = useCallback(() => setUploadOpen(true), [])
 
+  const handleCreateEstimate = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/estimate`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok || !data.quote_id) throw new Error()
+      setRefreshKey((k) => k + 1)
+      setViewingQuoteId(data.quote_id)
+    } catch {
+      setToast({ tone: 'error', message: "Couldn't create the estimate — try again." })
+    }
+  }, [jobId])
+
   const handleIntakeComplete = useCallback(() => {
     setUploadOpen(false)
     // JobSnapshotPanel only refetches when job.id changes — force a remount
@@ -172,6 +184,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
           onClose={() => router.push('/jobs')}
           onUploadPlans={handleUploadPlans}
           onViewQuote={(quoteId) => setViewingQuoteId(quoteId)}
+          onCreateEstimate={handleCreateEstimate}
         />
       ) : (
         <div className="flex flex-col gap-2">

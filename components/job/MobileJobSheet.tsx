@@ -10,12 +10,13 @@ interface MobileJobSheetProps {
   job: ActiveJob
   onClose: () => void
   onViewQuote?: (quoteId: string) => void
+  onCreateEstimate?: (job: ActiveJob) => void
   onAddTask?: (jobAddress: string) => void
 }
 
 // ─── Inner sheet (rendered in portal) ────────────────────────────────────────
 
-function MobileJobSheetInner({ job, onClose, onViewQuote, onAddTask }: MobileJobSheetProps) {
+function MobileJobSheetInner({ job, onClose, onViewQuote, onCreateEstimate, onAddTask }: MobileJobSheetProps) {
   const [visible, setVisible] = useState(false)
   const sheetRef = useRef<HTMLDivElement>(null)
 
@@ -73,7 +74,13 @@ function MobileJobSheetInner({ job, onClose, onViewQuote, onAddTask }: MobileJob
 
         {/* Content — reuse JobSnapshotPanel */}
         <div className="flex-1 overflow-y-auto">
-          <JobSnapshotPanel job={job} onClose={handleClose} onViewQuote={onViewQuote} onAddTask={(addr) => { handleClose(); onAddTask?.(addr) }} />
+          <JobSnapshotPanel
+            job={job}
+            onClose={handleClose}
+            onViewQuote={onViewQuote}
+            onCreateEstimate={onCreateEstimate}
+            onAddTask={(addr) => { handleClose(); onAddTask?.(addr) }}
+          />
         </div>
       </div>
     </>
@@ -82,7 +89,7 @@ function MobileJobSheetInner({ job, onClose, onViewQuote, onAddTask }: MobileJob
 
 // ─── Portal wrapper ───────────────────────────────────────────────────────────
 
-export default function MobileJobSheet({ job, onClose, onViewQuote, onAddTask }: MobileJobSheetProps) {
+export default function MobileJobSheet({ job, onClose, onViewQuote, onCreateEstimate, onAddTask }: MobileJobSheetProps) {
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
@@ -93,7 +100,7 @@ export default function MobileJobSheet({ job, onClose, onViewQuote, onAddTask }:
   if (!mounted) return null
 
   return createPortal(
-    <MobileJobSheetInner job={job} onClose={onClose} onViewQuote={onViewQuote} onAddTask={onAddTask} />,
+    <MobileJobSheetInner job={job} onClose={onClose} onViewQuote={onViewQuote} onCreateEstimate={onCreateEstimate} onAddTask={onAddTask} />,
     document.body
   )
 }

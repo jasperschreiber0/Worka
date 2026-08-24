@@ -153,6 +153,18 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
     setPendingQuoteView(quoteId)
   }, [])
 
+  const handleCreateEstimate = useCallback(async (job: ActiveJob) => {
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/estimate`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok || !data.quote_id) throw new Error()
+      handleViewQuote(data.quote_id)
+    } catch {
+      // Best-effort — the sticky "Create estimate" action stays put so the
+      // builder can just try again, no separate error surface needed here.
+    }
+  }, [handleViewQuote])
+
   const handleQuoteViewConsumed = useCallback(() => {
     setPendingQuoteView(null)
   }, [])
@@ -280,6 +292,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           job={activeJob}
           onClose={handlePanelClose}
           onViewQuote={handleViewQuote}
+          onCreateEstimate={handleCreateEstimate}
           onComposeEmail={handleComposeEmail}
           onUploadPlans={handleUploadPlans}
           onAddInvoice={handleAddInvoice}
@@ -295,6 +308,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
             job={activeJob}
             onClose={handlePanelClose}
             onViewQuote={handleViewQuote}
+            onCreateEstimate={handleCreateEstimate}
             onAddTask={handleAddTask}
           />
         )}
