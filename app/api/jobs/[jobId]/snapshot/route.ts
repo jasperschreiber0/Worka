@@ -5,6 +5,7 @@ import { deriveJobHealth, type JobSnapshot } from '@/lib/job-snapshot-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { daysAgo } from '@/lib/job-activity'
 import { persistProjectUnderstanding } from '@/lib/project-context'
+import { calculateClientPrice } from '@/lib/pricing'
 
 // ─── GET /api/jobs/[jobId]/snapshot ──────────────────────────────────────────
 
@@ -74,6 +75,38 @@ export async function GET(
     .limit(1)
 
   const quote = quotes?.[0] ?? null
+
+  // ── Financials v1 — Live Job Money ─────────────────────────────────────────
+  // Contract value: the canonical client-facing price, via the SAME function
+  // every other client-facing surface uses (lib/pricing.ts) — never
+  // quote.total_cost, which is the builder's internal cost basis, not what
+  // the client is quoted. Only the 3 columns calculateClientPrice actually
+  // reads are fetched here.
+  let contractValue: number | null = null
+  if (quote) {
+    const { data: pricingLineItems } = await sb
+      .from('quote_line_items')
+      .select('total, margin_pct, assumption_status')
+      .eq('quote_id', quote.id)
+    contractValue = calculateClientPrice(pricingLineItems ?? [])
+  }
+
+  // Actual cost: SUM of the costs the builder has actually logged — see
+  // migration 097. 0 (never null) when nothing has been logged yet, since
+  // that's a real, known state, not an unknown one.
+  const { data: costRows } = await sb
+    .from('job_cost_entries')
+    .select('amount')
+    .eq('job_id', jobId)
+  const actualCost = Math.round(
+    (costRows ?? []).reduce((sum: number, r: { amount: number }) => sum + r.amount, 0) * 100
+  ) / 100
+
+  const currentMargin = contractValue !== null ? Math.round((contractValue - actualCost) * 100) / 100 : null
+  const currentMarginPct =
+    contractValue !== null && contractValue > 0
+      ? Math.round((currentMargin! / contractValue) * 100)
+      : null
 
   // Unresolved assumptions count
   let unresolvedCount = 0
@@ -244,8 +277,10 @@ export async function GET(
       workers_on_job: workersOnJob,
       last_activity: lastActivity,
       notes: job.notes ?? null,
-      margin_to_date: null,
-      spend_to_date: null,
+      contract_value: contractValue,
+      actual_cost: actualCost,
+      current_margin: currentMargin,
+      current_margin_pct: currentMarginPct,
     },
     quote: quote
       ? {

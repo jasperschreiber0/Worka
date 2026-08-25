@@ -10,6 +10,7 @@ import Timeline from '@/components/dashboard/Timeline'
 import AIInsightCard from '@/components/dashboard/AIInsightCard'
 import ClarifyingQuestionsPanel from '@/components/chat/ClarifyingQuestionsPanel'
 import VariationCard from '@/components/chat/VariationCard'
+import { TRADE_CATEGORIES, tradeCategoryName } from '@/lib/trade-taxonomy'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,15 @@ export interface JobSnapshotPanelProps {
 interface ActivationModalState {
   isOpen: boolean
   quote: JobSnapshot['quote'] | null
+}
+
+interface CostEntry {
+  id: string
+  trade_category_id: number | null
+  description: string
+  amount: number
+  incurred_on: string
+  created_at: string
 }
 
 // ─── Count-up hook ────────────────────────────────────────────────────────────
@@ -74,6 +84,13 @@ function useCountUp(target: number | null | undefined, duration = 600): number |
 function formatAUD(amount: number | null | undefined): string {
   if (amount == null) return '—'
   return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
+}
+
+// "25 Aug" — for a job_cost_entries.incurred_on date string ("YYYY-MM-DD").
+function formatShortDate(isoDate: string): string {
+  const d = new Date(`${isoDate}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return isoDate
+  return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })
 }
 
 function getInitials(name: string): string {
@@ -212,6 +229,89 @@ export default function JobSnapshotPanel({
     }
     fetchSnapshot(job.id)
   }, [job?.id, fetchSnapshot])
+
+  // ── Financials v1 — Live Job Money: cost entries ────────────────────────────
+  const [costs, setCosts] = useState<CostEntry[]>([])
+  const [costsLoading, setCostsLoading] = useState(false)
+  const [logCostOpen, setLogCostOpen] = useState(false)
+  const [logCostSaving, setLogCostSaving] = useState(false)
+  const [logCostError, setLogCostError] = useState<string | null>(null)
+  const [costDeletingId, setCostDeletingId] = useState<string | null>(null)
+  const todayIso = () => new Date().toISOString().slice(0, 10)
+  const [logCostFields, setLogCostFields] = useState({
+    trade_category_id: '' as number | '',
+    description: '',
+    amount: '',
+    incurred_on: todayIso(),
+  })
+
+  const fetchCosts = useCallback((jobId: string) => {
+    setCostsLoading(true)
+    return fetch(`/api/jobs/${jobId}/costs`)
+      .then((r) => r.json())
+      .then((data: { costs?: CostEntry[] }) => {
+        setCosts(data.costs ?? [])
+        setCostsLoading(false)
+      })
+      .catch(() => setCostsLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!job) {
+      setCosts([])
+      return
+    }
+    fetchCosts(job.id)
+  }, [job?.id, fetchCosts])
+
+  const handleLogCost = useCallback(async () => {
+    if (!job || logCostSaving) return
+    const amountNum = Number(logCostFields.amount)
+    if (!logCostFields.description.trim()) { setLogCostError('Description is required'); return }
+    if (!Number.isFinite(amountNum) || amountNum < 0) { setLogCostError('Amount must be 0 or more'); return }
+    setLogCostSaving(true)
+    setLogCostError(null)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/costs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trade_category_id: logCostFields.trade_category_id === '' ? null : logCostFields.trade_category_id,
+          description: logCostFields.description.trim(),
+          amount: amountNum,
+          incurred_on: logCostFields.incurred_on,
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setLogCostError(json.error ?? 'Failed to log cost — please try again.')
+        return
+      }
+      setLogCostFields({ trade_category_id: '', description: '', amount: '', incurred_on: todayIso() })
+      setLogCostOpen(false)
+      // Reload both — the entry list (for the itemised list) and the
+      // snapshot (the authoritative source for Actual Cost/Margin/Margin%,
+      // recomputed server-side, never a client-maintained running total).
+      await Promise.all([fetchCosts(job.id), fetchSnapshot(job.id)])
+    } catch {
+      setLogCostError('Failed to log cost — please try again.')
+    } finally {
+      setLogCostSaving(false)
+    }
+  }, [job, logCostFields, logCostSaving, fetchCosts, fetchSnapshot])
+
+  const handleDeleteCost = useCallback(async (costId: string) => {
+    if (!job || costDeletingId) return
+    setCostDeletingId(costId)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/costs/${costId}`, { method: 'DELETE' })
+      if (res.ok) {
+        await Promise.all([fetchCosts(job.id), fetchSnapshot(job.id)])
+      }
+    } finally {
+      setCostDeletingId(null)
+    }
+  }, [job, costDeletingId, fetchCosts, fetchSnapshot])
 
   useEffect(() => {
     setActivatedJobStatus(null)
@@ -369,6 +469,24 @@ export default function JobSnapshotPanel({
   const animatedContract = useCountUp(quoteTotalCost)
   const animatedInvoiced = useCountUp(paidSentInvoiceTotal)
   const animatedVariations = useCountUp(variationsTotal > 0 ? variationsTotal : null)
+
+  // ── Financials v1 — Live Job Money ───────────────────────────────────────
+  // All five figures are read straight from the snapshot API's own
+  // deterministic calculation (app/api/jobs/[jobId]/snapshot/route.ts) —
+  // this component does not recompute or cache a second copy of any of them.
+  const budgetEstimate = snapshot?.job.budget_estimate ?? null
+  const estimatedCost = snapshot?.quote?.total_cost ?? null // internal cost basis — distinct from contract value
+  const contractValue = snapshot?.overview.contract_value ?? null // canonical client-facing price
+  const actualCostLogged = snapshot?.overview.actual_cost ?? 0
+  const currentMargin = snapshot?.overview.current_margin ?? null
+  const currentMarginPct = snapshot?.overview.current_margin_pct ?? null
+  const marginColorFor = (pct: number) => (pct >= 15 ? 'var(--status-green)' : pct >= 8 ? 'var(--status-amber)' : 'var(--status-red)')
+
+  const animatedBudget = useCountUp(budgetEstimate)
+  const animatedEstimatedCost = useCountUp(estimatedCost)
+  const animatedContractValue = useCountUp(contractValue)
+  const animatedActualCost = useCountUp(actualCostLogged)
+  const animatedCurrentMargin = useCountUp(currentMargin)
 
   const timelineSteps = snapshot ? deriveTimelineSteps(snapshot) : []
   const jobHealth = snapshot?.job_health ?? null
@@ -741,6 +859,63 @@ export default function JobSnapshotPanel({
             </SectionGroup>
             ) : null}
 
+            {/* ── 2a. MONEY — Budget → Estimated Cost → Contract Value → Actual
+                Costs Logged → Current Margin. Current Margin is the most
+                visually prominent figure, per the product spec. Shown
+                whenever there's anything to show — a budget, a quote, or a
+                logged cost — not gated on variations/invoicing. ── */}
+            {budgetEstimate != null || contractValue != null || actualCostLogged > 0 ? (
+            <SectionGroup label="Money">
+              <div style={CARD_STYLE}>
+                {budgetEstimate != null && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Budget</span>
+                    <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedBudget)}</span>
+                  </div>
+                )}
+                {estimatedCost != null && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Estimated cost</span>
+                    <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedEstimatedCost)}</span>
+                  </div>
+                )}
+                {contractValue != null && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Contract value</span>
+                    <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedContractValue)}</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Actual costs logged</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedActualCost)}</span>
+                </div>
+                {/* Current margin — the headline figure of this whole section */}
+                {currentMargin != null && (
+                  <div
+                    style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      padding: '10px 12px', borderRadius: 8,
+                      backgroundColor: currentMarginPct != null ? `color-mix(in srgb, ${marginColorFor(currentMarginPct)} 12%, transparent)` : 'var(--bg-elevated)',
+                    }}
+                  >
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Current margin</span>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                      <span className="animate-number-in" style={{ fontSize: 16, fontWeight: 700, color: currentMarginPct != null ? marginColorFor(currentMarginPct) : 'var(--text-primary)' }}>
+                        {formatAUD(animatedCurrentMargin)}
+                      </span>
+                      {currentMarginPct != null && (
+                        <span style={{ fontSize: 12, fontWeight: 600, color: marginColorFor(currentMarginPct) }}>{currentMarginPct}%</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {currentMargin == null && (
+                  <p style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: 0 }}>Margin appears once this job has an estimate.</p>
+                )}
+              </div>
+            </SectionGroup>
+            ) : null}
+
             {/* ── 2b. MONEY DETAIL — secondary, only when there's more than the headline Value to show ── */}
             {variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
             <SectionGroup label="Money detail">
@@ -757,21 +932,6 @@ export default function JobSnapshotPanel({
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoiced</span>
                   <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedInvoiced)}</span>
                 </div>
-                {/* Feature 18: Margin health */}
-                {quoteTotalCost != null && quoteTotalCost > 0 && snapshot.overview.spend_to_date != null && (() => {
-                  const marginPct = (quoteTotalCost - snapshot.overview.spend_to_date) / quoteTotalCost * 100
-                  const marginColor = marginPct >= 15 ? 'var(--status-green)' : marginPct >= 8 ? 'var(--status-amber)' : 'var(--status-red)'
-                  const marginLabel = marginPct >= 15 ? 'Healthy' : marginPct >= 8 ? 'Watch' : 'At risk'
-                  return (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Margin</span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{ fontSize: 12, fontWeight: 500, color: marginColor }}>{Math.round(marginPct)}%</span>
-                        <span style={{ fontSize: 10, fontWeight: 600, color: marginColor, backgroundColor: 'transparent', border: `1px solid ${marginColor}`, borderRadius: 4, padding: '1px 5px' }}>{marginLabel}</span>
-                      </div>
-                    </div>
-                  )
-                })()}
                 {/* Progress bar */}
                 {quoteTotalCost != null && quoteTotalCost > 0 && (
                   <>
@@ -804,6 +964,123 @@ export default function JobSnapshotPanel({
               </div>
             </SectionGroup>
             ) : null}
+
+            {/* ── 2c. ACTUAL COSTS — the costs the builder has actually logged
+                against this job. Always shown when there's a job, so "Log a
+                cost" is always reachable — an empty list is a normal state
+                for a new job, not an error. ── */}
+            {job && (
+            <SectionGroup label="Actual costs">
+              <div style={CARD_STYLE}>
+                {costsLoading && costs.length === 0 ? (
+                  <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: 0 }}>Loading…</p>
+                ) : costs.length === 0 ? (
+                  <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 10px 0' }}>Nothing logged yet.</p>
+                ) : (
+                  <div style={{ marginBottom: 10 }}>
+                    {costs.map((c) => (
+                      <div
+                        key={c.id}
+                        style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                          padding: '6px 0', borderBottom: '1px solid var(--bg-border)',
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 12, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {c.trade_category_id != null ? `${tradeCategoryName(c.trade_category_id)} — ` : ''}{c.description}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatShortDate(c.incurred_on)}</div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(c.amount)}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCost(c.id)}
+                            disabled={costDeletingId === c.id}
+                            aria-label={`Delete ${c.description}`}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--status-red)', opacity: costDeletingId === c.id ? 0.4 : 1 }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!logCostOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setLogCostOpen(true)}
+                    className="btn-secondary"
+                    style={{ width: '100%', fontSize: 12, padding: '8px 12px' }}
+                  >
+                    + Log a cost
+                  </button>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <select
+                      value={logCostFields.trade_category_id}
+                      onChange={(e) => setLogCostFields((f) => ({ ...f, trade_category_id: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      style={{ fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                    >
+                      <option value="">No trade / other</option>
+                      {TRADE_CATEGORIES.map((t) => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="Description — e.g. Plumber rough-in labour"
+                      value={logCostFields.description}
+                      onChange={(e) => setLogCostFields((f) => ({ ...f, description: e.target.value }))}
+                      style={{ fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                    />
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        placeholder="Amount $"
+                        value={logCostFields.amount}
+                        onChange={(e) => setLogCostFields((f) => ({ ...f, amount: e.target.value }))}
+                        style={{ flex: 1, fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                      />
+                      <input
+                        type="date"
+                        value={logCostFields.incurred_on}
+                        onChange={(e) => setLogCostFields((f) => ({ ...f, incurred_on: e.target.value }))}
+                        style={{ flex: 1, fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                      />
+                    </div>
+                    {logCostError && <p style={{ fontSize: 11, color: 'var(--status-red)', margin: 0 }}>{logCostError}</p>}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={handleLogCost}
+                        disabled={logCostSaving}
+                        className="btn-primary"
+                        style={{ flex: 1, fontSize: 12, padding: '8px 12px', opacity: logCostSaving ? 0.6 : 1 }}
+                      >
+                        {logCostSaving ? 'Saving…' : 'Save cost'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setLogCostOpen(false); setLogCostError(null) }}
+                        disabled={logCostSaving}
+                        style={{ fontSize: 12, padding: '8px 12px', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </SectionGroup>
+            )}
 
             {/* ── 3. TIMELINE — real sub-steps, each backed by a real column (see lib/job-snapshot-demo.ts) ── */}
             <SectionGroup label="Timeline">

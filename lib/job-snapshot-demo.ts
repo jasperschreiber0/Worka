@@ -64,8 +64,14 @@ export interface JobSnapshot {
     workers_on_job: string[]
     last_activity: string
     notes: string | null
-    margin_to_date: number | null
-    spend_to_date: number | null
+    /** Canonical client-facing price (calculateClientPrice) — null when there's no quote yet. */
+    contract_value: number | null
+    /** SUM of job_cost_entries.amount — the costs the builder has actually logged. 0, never null, when nothing's been logged. */
+    actual_cost: number
+    /** contract_value - actual_cost. Null only when contract_value is null (no quote). */
+    current_margin: number | null
+    /** current_margin / contract_value * 100, rounded. Null when contract_value is null or 0. */
+    current_margin_pct: number | null
   }
   quote: {
     id: string | null
@@ -198,8 +204,10 @@ const JOB_1_FITZROY: Omit<JobSnapshot, 'job_health'> = {
     workers_on_job: ['Jack (Carpenter)', 'Mick (Plumber)'],
     last_activity: '2 days ago',
     notes: null,
-    margin_to_date: null,
-    spend_to_date: 112000,
+    contract_value: 163300,
+    actual_cost: 112000,
+    current_margin: 51300,
+    current_margin_pct: 31,
   },
   quote: {
     id: 'demo-fitzroy-quote',
@@ -337,8 +345,10 @@ const JOB_2_TOORAK: Omit<JobSnapshot, 'job_health'> = {
     workers_on_job: [],
     last_activity: '5 days ago',
     notes: null,
-    margin_to_date: null,
-    spend_to_date: null,
+    contract_value: 146625,
+    actual_cost: 0,
+    current_margin: 146625,
+    current_margin_pct: 100,
   },
   quote: {
     id: 'demo-quote-id-toorak',
@@ -434,8 +444,10 @@ const JOB_3_BRUNSWICK: Omit<JobSnapshot, 'job_health'> = {
     workers_on_job: [],
     last_activity: 'today',
     notes: null,
-    margin_to_date: null,
-    spend_to_date: null,
+    contract_value: 146625,
+    actual_cost: 0,
+    current_margin: 146625,
+    current_margin_pct: 100,
   },
   quote: {
     id: 'demo-quote-id',
