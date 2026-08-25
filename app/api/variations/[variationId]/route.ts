@@ -4,11 +4,15 @@ import { createClient } from '@supabase/supabase-js'
 import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/variations-demo'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { recordProofEvent } from '@/lib/proof'
+import { applyApprovedVariationToQuote, type ApplyVariationResult } from '@/lib/variations'
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
 interface VariationResponse {
   variation: DemoVariation
+  /** Present only on a successful PATCH to 'approved' — whether the
+   *  variation was applied to the quote (Contract Value / Current Margin). */
+  contract_effect?: ApplyVariationResult
 }
 
 interface ErrorResponse {
@@ -45,6 +49,7 @@ interface RealVariationRow {
   submitted_by: string | null
   share_token_hash: string | null
   share_token_expires_at: string | null
+  trade_category_id: number | null
 }
 
 function realVariationSb() {
@@ -86,7 +91,7 @@ async function loadByShareToken(variationId: string, token: string): Promise<Rea
 
   const { data } = await sb
     .from('variations')
-    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by, share_token_hash, share_token_expires_at')
+    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by, share_token_hash, share_token_expires_at, trade_category_id')
     .eq('id', variationId)
     .single()
 
@@ -225,7 +230,7 @@ export async function PATCH(
     .update({ status, approved_at: now, approved_by: approvedBy })
     .eq('id', variationId)
     .in('status', ['draft', 'pending'])
-    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by')
+    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by, trade_category_id')
 
   const updated = (updatedRows as RealVariationRow[] | null)?.[0]
   if (error || !updated) {
@@ -240,8 +245,24 @@ export async function PATCH(
     metadata: { variation_id: updated.id, amount: updated.amount, decided_at: now },
   })
 
+  // Same financial connection as the builder-side resolve route — only ever
+  // attempted when THIS request performed the draft/pending -> approved
+  // transition above, never on a retry (which already 422'd above).
+  const contractEffect = status === 'approved'
+    ? await applyApprovedVariationToQuote(sb, {
+        id: updated.id,
+        job_id: updated.job_id,
+        title: updated.title,
+        amount: updated.amount,
+        trade_category_id: updated.trade_category_id,
+      })
+    : undefined
+
   const { data: job } = await sb.from('jobs').select('address').eq('id', updated.job_id).single()
   const jobAddress = (job as { address: string } | null)?.address ?? 'your job'
 
-  return NextResponse.json({ variation: toVariationResponse(updated, jobAddress) })
+  return NextResponse.json({
+    variation: toVariationResponse(updated, jobAddress),
+    ...(contractEffect !== undefined ? { contract_effect: contractEffect } : {}),
+  })
 }

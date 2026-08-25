@@ -456,7 +456,14 @@ export default function JobSnapshotPanel({
     .filter((i) => i.status === 'paid' || i.status === 'sent')
     .reduce((sum, i) => sum + i.amount, 0)
 
-  const variationsTotal = (snapshot?.variations ?? []).reduce((sum, v) => sum + v.amount, 0)
+  // Approved variations are now inside Contract Value (see the "Money"
+  // section below — they've been folded into a real quote_line_items row).
+  // Summing them here too would double-count the same dollars in two rows
+  // right next to each other. This figure is deliberately "not yet
+  // reflected in Contract Value" — draft/pending only.
+  const variationsTotal = (snapshot?.variations ?? [])
+    .filter((v) => v.status === 'draft' || v.status === 'pending')
+    .reduce((sum, v) => sum + v.amount, 0)
 
   const quoteTotalCost = snapshot?.quote?.total_cost ?? null
 
@@ -920,9 +927,10 @@ export default function JobSnapshotPanel({
             {variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
             <SectionGroup label="Money detail">
               <div style={CARD_STYLE}>
-                {/* Variations row */}
+                {/* Variations row — draft/pending only; approved variations
+                    are already inside Contract Value above, not repeated here. */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Variations</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Variations awaiting decision</span>
                   <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: variationsTotal > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>
                     {animatedVariations != null ? formatAUD(animatedVariations) : '—'}
                   </span>

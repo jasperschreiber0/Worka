@@ -4,6 +4,7 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 import { requirePermission } from '@/lib/auth/role-guard'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { recordProofEvent } from '@/lib/proof'
+import { isValidTradeCategoryId } from '@/lib/trade-taxonomy'
 
 function formatAud(amount: number): string {
   return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
@@ -25,6 +26,12 @@ interface CreateVariationBody {
   amount: number
   labour_cost?: number
   materials_cost?: number
+  // Required (not optional) — quote_line_items.trade_category_id is NOT
+  // NULL, so a variation needs one from creation onward to ever become a
+  // quote line item on approval. See migration 098's own comment for why
+  // this is nullable at the DB level (pre-existing rows) despite being
+  // required here for every newly-raised variation.
+  trade_category_id: number
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -62,7 +69,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<Variations
 
     let query = supabase
       .from('variations')
-      .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost')
+      .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, trade_category_id')
       .eq('builder_id', builderId)
       .order('created_at', { ascending: false })
 
@@ -115,12 +122,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { job_id, title, description, amount } = body
+  const { job_id, title, description, amount, trade_category_id } = body
   if (!job_id || !title || !description || amount === undefined) {
     return NextResponse.json(
       { error: 'job_id, title, description, and amount are required' },
       { status: 400 }
     )
+  }
+  if (typeof trade_category_id !== 'number' || !isValidTradeCategoryId(trade_category_id)) {
+    return NextResponse.json({ error: 'A valid trade category is required' }, { status: 400 })
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -156,6 +166,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       amount,
       labour_cost: body.labour_cost ?? null,
       materials_cost: body.materials_cost ?? null,
+      trade_category_id,
       status: 'draft',
     })
     .select()

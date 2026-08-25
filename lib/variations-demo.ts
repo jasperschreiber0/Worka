@@ -19,6 +19,7 @@ export interface DemoVariation {
   labour_cost?: number
   materials_cost?: number
   submitted_by?: string
+  trade_category_id?: number | null
 }
 
 export const DEMO_VARIATIONS: DemoVariation[] = [

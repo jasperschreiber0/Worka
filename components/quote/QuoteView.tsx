@@ -149,6 +149,7 @@ const PRICING_SOURCE_LABELS: Record<string, string> = {
   ai_measured_rate: 'AI estimate',
   retail_baseline: 'Retail baseline + labour benchmark',
   ai_allowance: 'AI allowance',
+  variation: 'From an approved variation',
   manual: 'Manually priced',
 }
 

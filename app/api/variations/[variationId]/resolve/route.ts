@@ -4,6 +4,7 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 import { requirePermission } from '@/lib/auth/role-guard'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
+import { applyApprovedVariationToQuote, type ApplyVariationResult } from '@/lib/variations'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,9 @@ interface ResolveResponse {
   variation: DemoVariation
   notification_draft: NotificationDraft | null
   requires_builder_approval: boolean
+  /** Whether the approved variation was applied to the quote (Contract
+   *  Value / Current Margin) — null when action wasn't 'approved'. */
+  contract_effect: ApplyVariationResult | null
 }
 
 interface ErrorResponse {
@@ -118,6 +122,8 @@ export async function POST(
       variation: updated,
       notification_draft: notificationDraft,
       requires_builder_approval: action === 'approved',
+      // Demo mode has no real quote/quote_line_items to apply this to.
+      contract_effect: null,
     })
   }
 
@@ -135,9 +141,9 @@ export async function POST(
     .eq('id', variationId)
     .eq('builder_id', builderId)
     .in('status', ['draft', 'pending'])
-    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by')
+    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by, trade_category_id')
 
-  const updatedRow = (updatedRows as (DemoVariation & { variation_ref: string | null })[] | null)?.[0]
+  const updatedRow = (updatedRows as (DemoVariation & { variation_ref: string | null; trade_category_id: number | null })[] | null)?.[0]
   if (error || !updatedRow) {
     const { data: existing } = await sb
       .from('variations')
@@ -167,9 +173,24 @@ export async function POST(
   const notificationDraft =
     action === 'approved' ? buildNotificationDraft(updated, 'Dave Nguyen', 'Dave Nguyen Building') : null
 
+  // The financial connection this milestone exists for — only ever attempted
+  // when this exact request performed the draft/pending -> approved
+  // transition above (never on a retry, which already failed the atomic
+  // update and returned 422 before reaching this line).
+  const contractEffect = action === 'approved'
+    ? await applyApprovedVariationToQuote(sb, {
+        id: updatedRow.id,
+        job_id: updatedRow.job_id,
+        title: updatedRow.title,
+        amount: updatedRow.amount,
+        trade_category_id: updatedRow.trade_category_id,
+      })
+    : null
+
   return NextResponse.json({
     variation: updated,
     notification_draft: notificationDraft,
     requires_builder_approval: action === 'approved',
+    contract_effect: contractEffect,
   })
 }

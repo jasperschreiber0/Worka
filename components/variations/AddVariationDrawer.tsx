@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
 
 interface CreatedVariation {
   id: string
@@ -11,6 +12,7 @@ interface CreatedVariation {
   status: string
   labour_cost?: number | null
   materials_cost?: number | null
+  trade_category_id?: number | null
 }
 
 interface AddVariationDrawerProps {
@@ -27,6 +29,7 @@ export default function AddVariationDrawer({ open, jobId, onClose, onCreated }: 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')
+  const [tradeCategoryId, setTradeCategoryId] = useState<number | ''>('')
   const [labourCost, setLabourCost] = useState('')
   const [materialsCost, setMaterialsCost] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -41,6 +44,7 @@ export default function AddVariationDrawer({ open, jobId, onClose, onCreated }: 
       setTitle('')
       setDescription('')
       setAmount('')
+      setTradeCategoryId('')
       setLabourCost('')
       setMaterialsCost('')
       setError(null)
@@ -48,7 +52,10 @@ export default function AddVariationDrawer({ open, jobId, onClose, onCreated }: 
   }, [open])
 
   const amountValue = Number(amount)
-  const canSubmit = title.trim().length > 0 && description.trim().length > 0 && amount.trim().length > 0 && !Number.isNaN(amountValue) && amountValue > 0
+  // Required so an approved variation can always become part of the quote
+  // (quote_line_items.trade_category_id is not-null) — see migration 098's
+  // own comment for why this only applies going forward, not retroactively.
+  const canSubmit = title.trim().length > 0 && description.trim().length > 0 && amount.trim().length > 0 && !Number.isNaN(amountValue) && amountValue > 0 && tradeCategoryId !== ''
 
   async function handleSubmit() {
     if (!canSubmit) return
@@ -63,6 +70,7 @@ export default function AddVariationDrawer({ open, jobId, onClose, onCreated }: 
           title: title.trim(),
           description: description.trim(),
           amount: amountValue,
+          trade_category_id: tradeCategoryId,
           labour_cost: labourCost.trim() ? Number(labourCost) : undefined,
           materials_cost: materialsCost.trim() ? Number(materialsCost) : undefined,
         }),
@@ -125,6 +133,19 @@ export default function AddVariationDrawer({ open, jobId, onClose, onCreated }: 
           <div>
             <label className="label">Amount (AUD, inc. GST)</label>
             <input type="number" min="0" className="input w-full px-3 py-2" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="3200" />
+          </div>
+          <div>
+            <label className="label">Trade</label>
+            <select
+              className="input w-full px-3 py-2"
+              value={tradeCategoryId}
+              onChange={(e) => setTradeCategoryId(e.target.value === '' ? '' : Number(e.target.value))}
+            >
+              <option value="" disabled>Select a trade…</option>
+              {TRADE_CATEGORIES.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
