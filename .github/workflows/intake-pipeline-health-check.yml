@@ -68,6 +68,11 @@ on:
         required: false
         type: string
         default: 'false'
+      run_job_activation_e2e:
+        description: "Run scripts/run-job-activation-e2e.mjs -- live end-to-end check of the job-activation reliability fix (POST /api/jobs/[jobId]/activate): fresh activation persists quote approval + milestones + invoice schedule (verified directly against the DB, not just the response), a fully-activated job stays idempotent with no duplicate rows, a job left partially activated by a prior failure (constructed directly, not via timing) has only its missing pieces completed without duplicating what already exists, a non-canonical quote on an active job declines repair, cross-builder access is rejected -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
       reset_circuit_breaker_if_safe:
         description: "Run scripts/reset-circuit-breaker-if-safe.mjs (only resets the global AI circuit breaker if the batch that tripped it has a finalized, terminal builder_status) -- type the literal word true to enable"
         required: false
@@ -187,6 +192,14 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-project-memory-upsert.mjs
 
+      - name: Run job activation reliability E2E check
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_job_activation_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/run-job-activation-e2e.mjs
+
       - name: Reset circuit breaker if safe
         if: ${{ inputs.reset_circuit_breaker_if_safe == 'true' }}
         env:
@@ -220,7 +233,7 @@ jobs:
         run: node scripts/test-postgrest-vs-direct-sql.mjs
 
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.run_project_memory_upsert_diagnostic != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.run_project_memory_upsert_diagnostic != 'true' && inputs.run_job_activation_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
