@@ -5,6 +5,7 @@ import type { JobSnapshot } from '@/lib/job-snapshot-demo'
 import { deriveTimelineSteps } from '@/lib/job-snapshot-demo'
 import type { PermissionRole } from '@/lib/auth/role-guard'
 import ActivationModal, { type ActivationResult } from '@/components/job/ActivationModal'
+import CloseJobModal, { type CloseJobResult } from '@/components/job/CloseJobModal'
 import ProofTab from '@/components/job/tabs/ProofTab'
 import Timeline from '@/components/dashboard/Timeline'
 import AIInsightCard from '@/components/dashboard/AIInsightCard'
@@ -173,6 +174,8 @@ export default function JobSnapshotPanel({
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [activationModal, setActivationModal] = useState<ActivationModalState>({ isOpen: false, quote: null })
+  const [closeJobModalOpen, setCloseJobModalOpen] = useState(false)
+  const [closeJobSuccess, setCloseJobSuccess] = useState<CloseJobResult | null>(null)
   const [activatedJobStatus, setActivatedJobStatus] = useState<string | null>(null)
   const [pulse, setPulse] = useState<AggregatePulse | null>(null)
   const [answeringQuestions, setAnsweringQuestions] = useState(false)
@@ -449,6 +452,8 @@ export default function JobSnapshotPanel({
     setAnsweringQuestions(false)
     setClarifyError(null)
     setClarifyRetryStatus(null)
+    setCloseJobModalOpen(false)
+    setCloseJobSuccess(null)
   }, [job?.id])
 
   // Same fixed cadence as IntakeProgress.tsx's handleAnswerSubmit.
@@ -553,6 +558,20 @@ export default function JobSnapshotPanel({
       onJobActivated?.(result.job.id)
     },
     [onJobActivated],
+  )
+
+  // Job Closeout v1 — the actual state transition (jobs.status -> 'complete'),
+  // cost_reconciliation writes, and rate learning already happened server-side
+  // by the time this fires (see CloseJobModal / POST /api/estimation/reconcile).
+  // This only refreshes the snapshot so the panel reflects the new status and
+  // shows a clear success state — no reconciliation logic here.
+  const handleJobClosed = useCallback(
+    (result: CloseJobResult) => {
+      setCloseJobModalOpen(false)
+      setCloseJobSuccess(result)
+      if (job) void fetchSnapshot(job.id)
+    },
+    [job, fetchSnapshot],
   )
 
   // ── Derived data ──────────────────────────────────────────────────────────
@@ -1056,6 +1075,32 @@ export default function JobSnapshotPanel({
                 )}
                 {currentMargin == null && (
                   <p style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: 0 }}>Margin appears once this job has an estimate.</p>
+                )}
+                {/* Job Closeout v1 — only while the job is active (forward-only:
+                    hidden for quoting/quoted/complete/archived, and doubles as
+                    the UI-level guard against a duplicate close attempt once
+                    the snapshot refresh brings status back as 'complete'). */}
+                {job && snapshot.job.status === 'active' && (
+                  <button
+                    type="button"
+                    onClick={() => setCloseJobModalOpen(true)}
+                    className="btn-secondary"
+                    style={{ width: '100%', marginTop: 12, fontSize: 12, padding: '8px 12px' }}
+                  >
+                    Close job
+                  </button>
+                )}
+                {closeJobSuccess && (
+                  <div
+                    style={{ marginTop: 12, padding: '8px 10px', borderRadius: 6, background: 'rgba(76,175,80,0.15)' }}
+                  >
+                    <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--status-green)', margin: 0 }}>
+                      {closeJobSuccess.already_reconciled ? 'This job was already closed.' : 'Job closed — reconciliation complete.'}
+                    </p>
+                    <p style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: '2px 0 0 0' }}>
+                      WorkA has learned from the difference between the estimate and the actual cost.
+                    </p>
+                  </div>
                 )}
               </div>
             </SectionGroup>
@@ -1666,6 +1711,26 @@ export default function JobSnapshotPanel({
             version: activationModal.quote.version,
           }}
           builderId="00000000-0000-0000-0000-000000000001"
+        />
+      )}
+
+      {closeJobModalOpen && job && snapshot && (
+        <CloseJobModal
+          isOpen={closeJobModalOpen}
+          onClose={() => setCloseJobModalOpen(false)}
+          onClosed={handleJobClosed}
+          job={{ id: job.id, address: job.address }}
+          quoteId={snapshot.quote?.id ?? null}
+          overview={{
+            contract_value: contractValue,
+            actual_cost: actualCostLogged,
+            current_margin: currentMargin,
+            current_margin_pct: currentMarginPct,
+            invoiced: invoicedTotal,
+            paid: paidTotal,
+            outstanding: outstandingTotal,
+          }}
+          costs={costs}
         />
       )}
 
