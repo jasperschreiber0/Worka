@@ -187,7 +187,10 @@ async function main() {
 
     // ── 7. Multiple invoices + overdue ───────────────────────────────────
     const sendB = await apiFetch(`/api/jobs/${jobId}/invoices/${invoiceBId}`, { method: 'PATCH', body: JSON.stringify({ action: 'send' }) })
-    check('mark_sent_b_ok', sendB.ok && sendB.json?.invoice?.status === 'sent', { status: sendB.status })
+    // B's due_date is already in the past (isoDaysAgo(3) above) — marking it
+    // sent now correctly derives straight to 'overdue' (status is derived at
+    // read/response time, never a separate stored transition), not 'sent'.
+    check('mark_sent_b_ok', sendB.ok && (sendB.json?.invoice?.status === 'sent' || sendB.json?.invoice?.status === 'overdue'), { status: sendB.status, invoiceStatus: sendB.json?.invoice?.status })
 
     const listAfterSendB = await apiFetch(`/api/jobs/${jobId}/invoices`)
     check('multiple_invoices_totals_correct', listAfterSendB.json?.invoiced === 30000 && listAfterSendB.json?.paid === 20000 && listAfterSendB.json?.outstanding === 10000, {
