@@ -72,6 +72,12 @@ export interface JobSnapshot {
     current_margin: number | null
     /** current_margin / contract_value * 100, rounded. Null when contract_value is null or 0. */
     current_margin_pct: number | null
+    /** Invoicing v1 — sum of sent/overdue/paid invoices.amount. Excludes drafts. 0, never null. */
+    invoiced: number
+    /** Sum of paid invoices.amount. 0, never null. */
+    paid: number
+    /** invoiced - paid — billed but not yet collected. 0, never null. */
+    outstanding: number
   }
   quote: {
     id: string | null
@@ -98,8 +104,20 @@ export interface JobSnapshot {
     id: string
     amount: number
     status: string
-    due_date: string
+    due_date: string | null
     sent_at: string | null
+    description?: string | null
+    invoice_number?: string | null
+    paid_at?: string | null
+  }>
+  /** Invoicing v1 — the activation-generated billing plan an invoice can be created from. */
+  invoice_schedule?: Array<{
+    id: string
+    label: string
+    percentage: number
+    amount: number
+    due_trigger: string
+    invoice_id: string | null
   }>
   files: Array<{
     id: string
@@ -208,6 +226,9 @@ const JOB_1_FITZROY: Omit<JobSnapshot, 'job_health'> = {
     actual_cost: 112000,
     current_margin: 51300,
     current_margin_pct: 31,
+    invoiced: 28000,
+    paid: 0,
+    outstanding: 28000,
   },
   quote: {
     id: 'demo-fitzroy-quote',
@@ -349,6 +370,9 @@ const JOB_2_TOORAK: Omit<JobSnapshot, 'job_health'> = {
     actual_cost: 0,
     current_margin: 146625,
     current_margin_pct: 100,
+    invoiced: 0,
+    paid: 0,
+    outstanding: 0,
   },
   quote: {
     id: 'demo-quote-id-toorak',
@@ -448,6 +472,9 @@ const JOB_3_BRUNSWICK: Omit<JobSnapshot, 'job_health'> = {
     actual_cost: 0,
     current_margin: 146625,
     current_margin_pct: 100,
+    invoiced: 0,
+    paid: 0,
+    outstanding: 0,
   },
   quote: {
     id: 'demo-quote-id',

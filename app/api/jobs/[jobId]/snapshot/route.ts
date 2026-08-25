@@ -6,6 +6,7 @@ import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { daysAgo } from '@/lib/job-activity'
 import { persistProjectUnderstanding } from '@/lib/project-context'
 import { calculateClientPrice } from '@/lib/pricing'
+import { computeInvoiceTotals } from '@/lib/invoices'
 
 // ─── GET /api/jobs/[jobId]/snapshot ──────────────────────────────────────────
 
@@ -127,12 +128,25 @@ export async function GET(
     .eq('job_id', jobId)
     .order('created_at', { ascending: false })
 
-  // Invoice schedule (activation-generated)
+  // Invoice schedule (activation-generated billing plan) — kept separate
+  // from the real `invoices` table below; see migration 099.
   const { data: invoiceSchedule } = await sb
     .from('invoice_schedule')
     .select('*')
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+
+  // Invoicing v1 — the real, canonical invoice records. Previously this
+  // section derived a fake invoices[] array from invoice_schedule (status
+  // was only ever 'draft'/'sent', inferred from invoice_id being set) —
+  // invoice_schedule never actually got linked to anything, so that array
+  // could never show 'paid' or a real 'overdue'. Now reads the real table.
+  const { data: realInvoices } = await sb
+    .from('invoices')
+    .select('id, description, invoice_number, amount, status, due_date, sent_at, paid_at, created_at')
+    .eq('job_id', jobId)
+    .order('created_at', { ascending: false })
+  const invoiceTotals = computeInvoiceTotals(realInvoices ?? [])
 
   // Files
   const { data: files } = await sb
@@ -281,6 +295,9 @@ export async function GET(
       actual_cost: actualCost,
       current_margin: currentMargin,
       current_margin_pct: currentMarginPct,
+      invoiced: invoiceTotals.invoiced,
+      paid: invoiceTotals.paid,
+      outstanding: invoiceTotals.outstanding,
     },
     quote: quote
       ? {
@@ -302,12 +319,30 @@ export async function GET(
       created_at: daysAgo(v.created_at),
     })),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    invoices: (invoiceSchedule ?? []).map((inv: any) => ({
-      id: inv.id,
-      amount: inv.amount,
-      status: inv.invoice_id ? 'sent' : 'draft',
-      due_date: inv.due_trigger,
-      sent_at: null,
+    invoices: (realInvoices ?? []).map((inv: any) => {
+      // Overdue is derived at read time, never stored (migration 099's own
+      // comment) — a sent invoice past its due date is overdue right now,
+      // not whenever a cron last ran.
+      const isOverdue = inv.status === 'sent' && inv.due_date != null && new Date(inv.due_date).getTime() < Date.now()
+      return {
+        id: inv.id,
+        description: inv.description ?? null,
+        invoice_number: inv.invoice_number ?? null,
+        amount: inv.amount,
+        status: isOverdue ? 'overdue' : inv.status,
+        due_date: inv.due_date ?? null,
+        sent_at: inv.sent_at ?? null,
+        paid_at: inv.paid_at ?? null,
+      }
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    invoice_schedule: (invoiceSchedule ?? []).map((s: any) => ({
+      id: s.id,
+      label: s.label,
+      percentage: s.percentage,
+      amount: s.amount,
+      due_trigger: s.due_trigger,
+      invoice_id: s.invoice_id ?? null,
     })),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     files: (files ?? []).map((f: any) => ({

@@ -166,6 +166,7 @@ export default function JobSnapshotPanel({
   onCreateEstimate,
   onComposeEmail,
   onUploadPlans,
+  onAddInvoice,
   onJobActivated,
   onAddTask,
 }: JobSnapshotPanelProps) {
@@ -313,6 +314,136 @@ export default function JobSnapshotPanel({
     }
   }, [job, costDeletingId, fetchCosts, fetchSnapshot])
 
+  // ── Invoicing v1 — Real Cash Tracking ────────────────────────────────────
+  interface InvoiceEntry {
+    id: string
+    description: string | null
+    invoice_number: string | null
+    amount: number
+    status: 'draft' | 'sent' | 'overdue' | 'paid'
+    due_date: string | null
+    sent_at: string | null
+    paid_at: string | null
+  }
+  interface ScheduleStage {
+    id: string
+    label: string
+    percentage: number
+    amount: number
+    due_trigger: string
+    invoice_id: string | null
+  }
+
+  const [invoices, setInvoices] = useState<InvoiceEntry[]>([])
+  const [invoiceSchedule, setInvoiceSchedule] = useState<ScheduleStage[]>([])
+  const [invoicesLoading, setInvoicesLoading] = useState(false)
+  const [addInvoiceOpen, setAddInvoiceOpen] = useState(false)
+  const [addInvoiceSaving, setAddInvoiceSaving] = useState(false)
+  const [addInvoiceError, setAddInvoiceError] = useState<string | null>(null)
+  const [invoiceActionId, setInvoiceActionId] = useState<string | null>(null)
+  const [invoiceFields, setInvoiceFields] = useState({
+    schedule_id: '' as string | '',
+    description: '',
+    amount: '',
+    due_date: '',
+  })
+
+  const fetchInvoices = useCallback((jobId: string) => {
+    setInvoicesLoading(true)
+    return fetch(`/api/jobs/${jobId}/invoices`)
+      .then((r) => r.json())
+      .then((data: { invoices?: InvoiceEntry[]; schedule?: ScheduleStage[] }) => {
+        setInvoices(data.invoices ?? [])
+        setInvoiceSchedule(data.schedule ?? [])
+        setInvoicesLoading(false)
+      })
+      .catch(() => setInvoicesLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!job) {
+      setInvoices([])
+      setInvoiceSchedule([])
+      return
+    }
+    fetchInvoices(job.id)
+  }, [job?.id, fetchInvoices])
+
+  const handleCreateInvoice = useCallback(async () => {
+    if (!job || addInvoiceSaving) return
+    const amountNum = invoiceFields.amount.trim() ? Number(invoiceFields.amount) : NaN
+    if (!invoiceFields.schedule_id && !invoiceFields.description.trim()) {
+      setAddInvoiceError('Description is required')
+      return
+    }
+    if (!invoiceFields.schedule_id && (!Number.isFinite(amountNum) || amountNum <= 0)) {
+      setAddInvoiceError('Amount must be greater than 0')
+      return
+    }
+    setAddInvoiceSaving(true)
+    setAddInvoiceError(null)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/invoices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          schedule_id: invoiceFields.schedule_id || undefined,
+          description: invoiceFields.description.trim() || undefined,
+          amount: Number.isFinite(amountNum) ? amountNum : undefined,
+          due_date: invoiceFields.due_date || undefined,
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setAddInvoiceError(json.error ?? 'Failed to create invoice — please try again.')
+        return
+      }
+      setInvoiceFields({ schedule_id: '', description: '', amount: '', due_date: '' })
+      setAddInvoiceOpen(false)
+      await Promise.all([fetchInvoices(job.id), fetchSnapshot(job.id)])
+    } catch {
+      setAddInvoiceError('Failed to create invoice — please try again.')
+    } finally {
+      setAddInvoiceSaving(false)
+    }
+  }, [job, invoiceFields, addInvoiceSaving, fetchInvoices, fetchSnapshot])
+
+  const handleInvoiceAction = useCallback(async (invoiceId: string, action: 'send' | 'mark_paid' | 'mark_unpaid') => {
+    if (!job || invoiceActionId) return
+    setInvoiceActionId(invoiceId)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/invoices/${invoiceId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      if (res.ok) {
+        await Promise.all([fetchInvoices(job.id), fetchSnapshot(job.id)])
+      }
+    } finally {
+      setInvoiceActionId(null)
+    }
+  }, [job, invoiceActionId, fetchInvoices, fetchSnapshot])
+
+  const handleDeleteInvoice = useCallback(async (invoiceId: string) => {
+    if (!job || invoiceActionId) return
+    setInvoiceActionId(invoiceId)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/invoices/${invoiceId}`, { method: 'DELETE' })
+      if (res.ok) {
+        await Promise.all([fetchInvoices(job.id), fetchSnapshot(job.id)])
+      }
+    } finally {
+      setInvoiceActionId(null)
+    }
+  }, [job, invoiceActionId, fetchInvoices, fetchSnapshot])
+
+  const invoiceStatusColor = (status: string) =>
+    status === 'paid' ? 'var(--status-green)' : status === 'overdue' ? 'var(--status-red)' : status === 'sent' ? 'var(--status-blue)' : 'var(--text-tertiary)'
+  const invoiceStatusLabel = (status: string) =>
+    status === 'paid' ? 'Paid' : status === 'overdue' ? 'Overdue' : status === 'sent' ? 'Sent' : 'Draft'
+  const unclaimedSchedule = invoiceSchedule.filter((s) => !s.invoice_id)
+
   useEffect(() => {
     setActivatedJobStatus(null)
     setAnsweringQuestions(false)
@@ -452,9 +583,12 @@ export default function JobSnapshotPanel({
   const nonBlockingQuestions = snapshot?.pending_non_blocking_questions ?? []
   const hasPending = pendingVariations.length > 0 || overdueInvoices.length > 0
 
-  const paidSentInvoiceTotal = (snapshot?.invoices ?? [])
-    .filter((i) => i.status === 'paid' || i.status === 'sent')
-    .reduce((sum, i) => sum + i.amount, 0)
+  // Invoicing v1 — authoritative, server-computed figures from the snapshot
+  // route (lib/invoices.ts's computeInvoiceTotals), never recomputed here.
+  // invoiced = sum of sent/overdue/paid invoices (excludes drafts).
+  const invoicedTotal = snapshot?.overview.invoiced ?? 0
+  const paidTotal = snapshot?.overview.paid ?? 0
+  const outstandingTotal = snapshot?.overview.outstanding ?? 0
 
   // Approved variations are now inside Contract Value (see the "Money"
   // section below — they've been folded into a real quote_line_items row).
@@ -467,14 +601,16 @@ export default function JobSnapshotPanel({
 
   const quoteTotalCost = snapshot?.quote?.total_cost ?? null
 
-  const invoicedPct =
-    quoteTotalCost && quoteTotalCost > 0 ? Math.min(100, Math.round((paidSentInvoiceTotal / quoteTotalCost) * 100)) : null
+  // % invoiced against the canonical contract value (not quote.total_cost,
+  // the internal cost basis) — set below, after contractValue is defined.
 
   const recentComms = (snapshot?.comms.messages ?? []).slice(0, 3)
 
   // Animated count-up for financial figures
   const animatedContract = useCountUp(quoteTotalCost)
-  const animatedInvoiced = useCountUp(paidSentInvoiceTotal)
+  const animatedInvoicedTotal = useCountUp(invoicedTotal)
+  const animatedPaidTotal = useCountUp(paidTotal)
+  const animatedOutstandingTotal = useCountUp(outstandingTotal)
   const animatedVariations = useCountUp(variationsTotal > 0 ? variationsTotal : null)
 
   // ── Financials v1 — Live Job Money ───────────────────────────────────────
@@ -484,6 +620,8 @@ export default function JobSnapshotPanel({
   const budgetEstimate = snapshot?.job.budget_estimate ?? null
   const estimatedCost = snapshot?.quote?.total_cost ?? null // internal cost basis — distinct from contract value
   const contractValue = snapshot?.overview.contract_value ?? null // canonical client-facing price
+  const invoicedPct =
+    contractValue && contractValue > 0 ? Math.min(100, Math.round((invoicedTotal / contractValue) * 100)) : null
   const actualCostLogged = snapshot?.overview.actual_cost ?? 0
   const currentMargin = snapshot?.overview.current_margin ?? null
   const currentMarginPct = snapshot?.overview.current_margin_pct ?? null
@@ -799,7 +937,7 @@ export default function JobSnapshotPanel({
             )}
 
             {/* ── 2. AT A GLANCE — hidden only when there's genuinely nothing to show yet ── */}
-            {snapshot.quote != null || nextAction != null || (quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
+            {snapshot.quote != null || nextAction != null || (quoteTotalCost != null && quoteTotalCost > 0) || variationsTotal > 0 || invoicedTotal > 0 ? (
             <SectionGroup label="At a glance">
               <div style={CARD_STYLE}>
                 {/* Value row */}
@@ -924,7 +1062,7 @@ export default function JobSnapshotPanel({
             ) : null}
 
             {/* ── 2b. MONEY DETAIL — secondary, only when there's more than the headline Value to show ── */}
-            {variationsTotal > 0 || paidSentInvoiceTotal > 0 ? (
+            {variationsTotal > 0 || invoicedTotal > 0 ? (
             <SectionGroup label="Money detail">
               <div style={CARD_STYLE}>
                 {/* Variations row — draft/pending only; approved variations
@@ -935,36 +1073,16 @@ export default function JobSnapshotPanel({
                     {animatedVariations != null ? formatAUD(animatedVariations) : '—'}
                   </span>
                 </div>
-                {/* Invoiced row */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: quoteTotalCost ? 12 : 0 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoiced</span>
-                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedInvoiced)}</span>
-                </div>
                 {/* Progress bar */}
-                {quoteTotalCost != null && quoteTotalCost > 0 && (
+                {contractValue != null && contractValue > 0 && (
                   <>
-                    <div
-                      style={{
-                        height: 3,
-                        borderRadius: 2,
-                        backgroundColor: 'var(--bg-border)',
-                        overflow: 'hidden',
-                        marginBottom: 6,
-                      }}
-                    >
-                      <div
-                        style={{
-                          height: '100%',
-                          width: `${invoicedPct ?? 0}%`,
-                          backgroundColor: 'var(--orange-primary)',
-                          borderRadius: 2,
-                        }}
-                      />
+                    <div style={{ height: 3, borderRadius: 2, backgroundColor: 'var(--bg-border)', overflow: 'hidden', marginBottom: 6 }}>
+                      <div style={{ height: '100%', width: `${invoicedPct ?? 0}%`, backgroundColor: 'var(--orange-primary)', borderRadius: 2 }} />
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{invoicedPct ?? 0}% invoiced</span>
                       <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>
-                        {formatAUD(quoteTotalCost - paidSentInvoiceTotal)} remaining
+                        {formatAUD(contractValue - invoicedTotal)} not yet invoiced
                       </span>
                     </div>
                   </>
@@ -972,6 +1090,202 @@ export default function JobSnapshotPanel({
               </div>
             </SectionGroup>
             ) : null}
+
+            {/* ── 2b.5 INVOICING — Invoicing v1: Invoiced / Paid / Outstanding,
+                the real invoice list, and the actions that move an invoice
+                through draft -> sent -> paid. Always shown once there's a
+                job, same reasoning as "Actual costs" below: "+ Add invoice"
+                should always be reachable, an empty list is a normal state
+                for a new job, not an error. ── */}
+            {job && (
+            <SectionGroup label="Invoicing">
+              <div style={CARD_STYLE}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Invoiced</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedInvoicedTotal)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Paid</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--status-green)' }}>{formatAUD(animatedPaidTotal)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, padding: '8px 10px', borderRadius: 6, background: outstandingTotal > 0 ? 'rgba(255,152,0,0.08)' : 'transparent' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>Outstanding</span>
+                  <span className="animate-number-in" style={{ fontSize: 13, fontWeight: 700, color: outstandingTotal > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>{formatAUD(animatedOutstandingTotal)}</span>
+                </div>
+
+                {invoicesLoading && invoices.length === 0 ? (
+                  <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: 0 }}>Loading…</p>
+                ) : invoices.length === 0 ? (
+                  <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 10px 0' }}>No invoices yet.</p>
+                ) : (
+                  <div style={{ marginBottom: 10 }}>
+                    {invoices.map((inv) => (
+                      <div key={inv.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--bg-border)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 12, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {inv.invoice_number && <span style={{ color: 'var(--text-tertiary)', marginRight: 6 }}>{inv.invoice_number}</span>}
+                              {inv.description ?? 'Invoice'}
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                              {inv.due_date ? `Due ${formatShortDate(inv.due_date)}` : 'No due date'}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 8 }}>
+                            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(inv.amount)}</span>
+                            <span
+                              style={{
+                                fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 10,
+                                color: invoiceStatusColor(inv.status),
+                                background: `color-mix(in srgb, ${invoiceStatusColor(inv.status)} 14%, transparent)`,
+                              }}
+                            >
+                              {invoiceStatusLabel(inv.status)}
+                            </span>
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                          {inv.status === 'draft' && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleInvoiceAction(inv.id, 'send')}
+                                disabled={invoiceActionId === inv.id}
+                                className="btn-secondary"
+                                style={{ fontSize: 11, padding: '4px 10px', opacity: invoiceActionId === inv.id ? 0.5 : 1 }}
+                              >
+                                Mark sent
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteInvoice(inv.id)}
+                                disabled={invoiceActionId === inv.id}
+                                style={{ fontSize: 11, padding: '4px 10px', background: 'none', border: 'none', color: 'var(--status-red)', cursor: 'pointer', opacity: invoiceActionId === inv.id ? 0.5 : 1 }}
+                              >
+                                Delete
+                              </button>
+                            </>
+                          )}
+                          {(inv.status === 'sent' || inv.status === 'overdue') && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleInvoiceAction(inv.id, 'mark_paid')}
+                                disabled={invoiceActionId === inv.id}
+                                className="btn-primary"
+                                style={{ fontSize: 11, padding: '4px 10px', opacity: invoiceActionId === inv.id ? 0.5 : 1 }}
+                              >
+                                Mark paid
+                              </button>
+                              {onAddInvoice && (
+                                <button
+                                  type="button"
+                                  onClick={() => onAddInvoice(job.id)}
+                                  disabled={invoiceActionId === inv.id}
+                                  style={{ fontSize: 11, padding: '4px 10px', background: 'none', border: '1px solid var(--bg-border)', borderRadius: 6, color: 'var(--text-secondary)', cursor: 'pointer' }}
+                                >
+                                  Chase payment
+                                </button>
+                              )}
+                            </>
+                          )}
+                          {inv.status === 'paid' && (
+                            <button
+                              type="button"
+                              onClick={() => handleInvoiceAction(inv.id, 'mark_unpaid')}
+                              disabled={invoiceActionId === inv.id}
+                              style={{ fontSize: 11, padding: '4px 10px', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', opacity: invoiceActionId === inv.id ? 0.5 : 1 }}
+                            >
+                              Mark unpaid
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!addInvoiceOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setAddInvoiceOpen(true)}
+                    className="btn-secondary"
+                    style={{ width: '100%', fontSize: 12, padding: '8px 12px' }}
+                  >
+                    + Add invoice
+                  </button>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {unclaimedSchedule.length > 0 && (
+                      <select
+                        value={invoiceFields.schedule_id}
+                        onChange={(e) => {
+                          const scheduleId = e.target.value
+                          const stage = unclaimedSchedule.find((s) => s.id === scheduleId)
+                          setInvoiceFields((f) => ({
+                            ...f,
+                            schedule_id: scheduleId,
+                            description: stage ? stage.label : f.description,
+                            amount: stage ? String(stage.amount) : f.amount,
+                          }))
+                        }}
+                        style={{ fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                      >
+                        <option value="">Custom invoice…</option>
+                        {unclaimedSchedule.map((s) => (
+                          <option key={s.id} value={s.id}>{s.label} — {s.percentage}% — {formatAUD(s.amount)}</option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      type="text"
+                      placeholder="Description — e.g. Deposit"
+                      value={invoiceFields.description}
+                      onChange={(e) => setInvoiceFields((f) => ({ ...f, description: e.target.value }))}
+                      style={{ fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                    />
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        placeholder="Amount $"
+                        value={invoiceFields.amount}
+                        onChange={(e) => setInvoiceFields((f) => ({ ...f, amount: e.target.value }))}
+                        style={{ flex: 1, fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                      />
+                      <input
+                        type="date"
+                        value={invoiceFields.due_date}
+                        onChange={(e) => setInvoiceFields((f) => ({ ...f, due_date: e.target.value }))}
+                        style={{ flex: 1, fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                      />
+                    </div>
+                    {addInvoiceError && <p style={{ fontSize: 11, color: 'var(--status-red)', margin: 0 }}>{addInvoiceError}</p>}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={handleCreateInvoice}
+                        disabled={addInvoiceSaving}
+                        className="btn-primary"
+                        style={{ flex: 1, fontSize: 12, padding: '8px 12px', opacity: addInvoiceSaving ? 0.6 : 1 }}
+                      >
+                        {addInvoiceSaving ? 'Creating…' : 'Create invoice'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setAddInvoiceOpen(false); setAddInvoiceError(null) }}
+                        disabled={addInvoiceSaving}
+                        style={{ fontSize: 12, padding: '8px 12px', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </SectionGroup>
+            )}
 
             {/* ── 2c. ACTUAL COSTS — the costs the builder has actually logged
                 against this job. Always shown when there's a job, so "Log a
