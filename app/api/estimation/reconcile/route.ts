@@ -90,8 +90,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       })
     }
 
-    // Upsert project_memory record to completed status
-    const { data: memoryRow } = await supabase
+    // Upsert project_memory record to completed status.
+    //
+    // FIX (production incident, Job Closeout v1 E2E): this upsert's error
+    // was never checked, so when it failed (see migration 100 — the prior
+    // partial unique index on job_id couldn't serve as an ON CONFLICT
+    // arbiter, Postgres 42P10) the route fell through the old
+    // `if (memoryRow)` guard and returned ok:true having written nothing —
+    // a false-positive success. Now a failed write here is fatal: no
+    // partial-credit response, no silent no-op.
+    const { data: memoryRow, error: memoryErr } = await supabase
       .from('project_memory')
       .upsert({
         job_id,
@@ -105,81 +113,99 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       .select()
       .single()
 
-    let knowledgeUpdates: ActualCostLearningSummary[] = []
+    if (memoryErr || !memoryRow) {
+      console.error('[estimation/reconcile] project_memory upsert failed', memoryErr)
+      return NextResponse.json({ error: 'Failed to record job closeout — please try again.' }, { status: 500 })
+    }
 
-    if (memoryRow) {
-      // Insert reconciliation rows
-      const reconciliationInserts = entries
-        .filter(e => e.actual_cost !== null)
-        .map(e => ({
-          project_memory_id: memoryRow.id,
-          builder_id,
+    // Insert reconciliation rows
+    const reconciliationInserts = entries
+      .filter(e => e.actual_cost !== null)
+      .map(e => ({
+        project_memory_id: memoryRow.id,
+        builder_id,
+        trade_category_id: e.trade_category_id,
+        estimated_cost: e.estimated_cost,
+        actual_cost: e.actual_cost,
+        recorded_at: new Date().toISOString(),
+      }))
+
+    if (reconciliationInserts.length > 0) {
+      const { error: reconErr } = await supabase.from('cost_reconciliation').insert(reconciliationInserts)
+      if (reconErr) {
+        console.error('[estimation/reconcile] cost_reconciliation insert failed', reconErr)
+        return NextResponse.json({ error: 'Failed to record cost reconciliation — please try again.' }, { status: 500 })
+      }
+    }
+
+    // Close-out this job — the trigger the pricing-intelligence design
+    // identified as missing: jobs.status never reached 'complete' anywhere
+    // in the codebase before this route existed to set it. Forward-only —
+    // skipping ahead from any earlier status to the chain's own end state
+    // (short of 'archived') is intended, same reasoning as the DELETE
+    // route's archive-from-any-status behaviour.
+    const { error: jobUpdateErr } = await supabase
+      .from('jobs')
+      .update({ status: 'complete' })
+      .eq('id', job_id)
+      .eq('builder_id', builder_id)
+      .neq('status', 'archived')
+
+    if (jobUpdateErr) {
+      console.error('[estimation/reconcile] job status update failed', jobUpdateErr)
+      return NextResponse.json({ error: 'Failed to finalize job status — please try again.' }, { status: 500 })
+    }
+
+    // Fold the ACTUAL cost per trade back into Tier 1 (builder_learned_rates)
+    // — fixes the Tier 1 gap the investigation confirmed: captureLearnedRates
+    // only ever learns from the quoted rate, never what the job actually cost.
+    // Best-effort, never blocks the reconciliation response (applyActualCostLearning
+    // already catches its own errors internally).
+    let knowledgeUpdates: ActualCostLearningSummary[] = []
+    if (quote_id) {
+      knowledgeUpdates = await applyActualCostLearning(
+        supabase,
+        quote_id,
+        entries.map((e) => ({
           trade_category_id: e.trade_category_id,
           estimated_cost: e.estimated_cost,
           actual_cost: e.actual_cost,
-          recorded_at: new Date().toISOString(),
         }))
+      )
+    }
 
-      if (reconciliationInserts.length > 0) {
-        await supabase.from('cost_reconciliation').insert(reconciliationInserts)
-      }
+    // Update builder profile accuracy metrics. Best-effort, matching the
+    // rest of this codebase's convention for a secondary metric update
+    // (see recordProofEvent/lib/proof.ts) — a failure here must not undo or
+    // mask the closeout that already genuinely succeeded above.
+    const totalEstimated = entries.reduce((s, e) => s + e.estimated_cost, 0)
+    const totalActual = entries.reduce((s, e) => s + (e.actual_cost ?? e.estimated_cost), 0)
+    const accuracyPct = totalEstimated > 0
+      ? Math.max(0, 100 - Math.abs((totalActual - totalEstimated) / totalEstimated * 100))
+      : null
 
-      // Close-out this job — the trigger the pricing-intelligence design
-      // identified as missing: jobs.status never reached 'complete' anywhere
-      // in the codebase before this route existed to set it. Forward-only —
-      // skipping ahead from any earlier status to the chain's own end state
-      // (short of 'archived') is intended, same reasoning as the DELETE
-      // route's archive-from-any-status behaviour.
-      await supabase
-        .from('jobs')
-        .update({ status: 'complete' })
-        .eq('id', job_id)
+    if (accuracyPct !== null) {
+      // Increment jobs_completed and update running accuracy
+      const { data: profile } = await supabase
+        .from('builder_estimation_profiles')
+        .select('jobs_completed, avg_quote_accuracy_pct')
         .eq('builder_id', builder_id)
-        .neq('status', 'archived')
+        .single()
 
-      // Fold the ACTUAL cost per trade back into Tier 1 (builder_learned_rates)
-      // — fixes the Tier 1 gap the investigation confirmed: captureLearnedRates
-      // only ever learns from the quoted rate, never what the job actually cost.
-      // Best-effort, never blocks the reconciliation response.
-      if (quote_id) {
-        knowledgeUpdates = await applyActualCostLearning(
-          supabase,
-          quote_id,
-          entries.map((e) => ({
-            trade_category_id: e.trade_category_id,
-            estimated_cost: e.estimated_cost,
-            actual_cost: e.actual_cost,
-          }))
-        )
-      }
+      const prevCount = profile?.jobs_completed ?? 0
+      const prevAccuracy = profile?.avg_quote_accuracy_pct ?? accuracyPct
+      const newAccuracy = (prevAccuracy * prevCount + accuracyPct) / (prevCount + 1)
 
-      // Update builder profile accuracy metrics
-      const totalEstimated = entries.reduce((s, e) => s + e.estimated_cost, 0)
-      const totalActual = entries.reduce((s, e) => s + (e.actual_cost ?? e.estimated_cost), 0)
-      const accuracyPct = totalEstimated > 0
-        ? Math.max(0, 100 - Math.abs((totalActual - totalEstimated) / totalEstimated * 100))
-        : null
-
-      if (accuracyPct !== null) {
-        // Increment jobs_completed and update running accuracy
-        const { data: profile } = await supabase
-          .from('builder_estimation_profiles')
-          .select('jobs_completed, avg_quote_accuracy_pct')
-          .eq('builder_id', builder_id)
-          .single()
-
-        const prevCount = profile?.jobs_completed ?? 0
-        const prevAccuracy = profile?.avg_quote_accuracy_pct ?? accuracyPct
-        const newAccuracy = (prevAccuracy * prevCount + accuracyPct) / (prevCount + 1)
-
-        await supabase
-          .from('builder_estimation_profiles')
-          .upsert({
-            builder_id,
-            jobs_completed: prevCount + 1,
-            avg_quote_accuracy_pct: Math.round(newAccuracy * 10) / 10,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'builder_id' })
+      const { error: profileErr } = await supabase
+        .from('builder_estimation_profiles')
+        .upsert({
+          builder_id,
+          jobs_completed: prevCount + 1,
+          avg_quote_accuracy_pct: Math.round(newAccuracy * 10) / 10,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'builder_id' })
+      if (profileErr) {
+        console.error('[estimation/reconcile] builder_estimation_profiles upsert failed (non-fatal)', profileErr)
       }
     }
 

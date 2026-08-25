@@ -573,4 +573,29 @@ BEGIN
   END;
 END $$;
 
+-- ─── project_memory.job_id ON CONFLICT arbiter (migration 100) ─────────────
+-- Regression guard for the Job Closeout v1 production incident: the prior
+-- unique index on project_memory.job_id was PARTIAL ("where job_id is not
+-- null"), which Postgres cannot use as an ON CONFLICT (job_id) arbiter —
+-- POST /api/estimation/reconcile's project_memory upsert silently failed
+-- on every call (Postgres 42P10) while the route returned ok:true anyway.
+-- Migration 100 replaced it with a full (non-partial) unique index, which
+-- behaves identically for existing data (NULLs stay distinct, so multiple
+-- job_id = NULL rows are still allowed) but IS a valid ON CONFLICT target.
+-- If this assertion ever fails again, the reconcile upsert WILL silently
+-- stop persisting closeouts exactly as it did before migration 100.
+DO $$ BEGIN
+  PERFORM pg_temp.assert(
+    (SELECT count(*) FROM pg_indexes WHERE tablename = 'project_memory' AND indexname = 'project_memory_job_id_idx') = 1,
+    'project_memory_job_id_idx index is missing'
+  );
+  PERFORM pg_temp.assert(
+    (SELECT indpred IS NULL
+     FROM pg_index i
+     JOIN pg_class c ON c.oid = i.indexrelid
+     WHERE c.relname = 'project_memory_job_id_idx'),
+    'project_memory_job_id_idx is PARTIAL — this cannot be used as an ON CONFLICT (job_id) arbiter and will reproduce the Job Closeout v1 production incident (Postgres 42P10) the moment POST /api/estimation/reconcile upserts project_memory'
+  );
+END $$;
+
 DO $$ BEGIN RAISE NOTICE 'schema_assertions.sql: all assertions passed.'; END $$;
