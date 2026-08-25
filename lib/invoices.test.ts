@@ -3,7 +3,34 @@ import assert from 'node:assert/strict'
 // Relative, .ts-suffixed import — same reason variations.test.ts/pricing.test.ts
 // document: must resolve identically under plain `node --experimental-strip-types`
 // and under Next.js/webpack.
-import { computeInvoiceTotals, wouldExceedContractValue } from './invoices.ts'
+import { computeInvoiceTotals, wouldExceedContractValue, deriveInvoiceStatus, withDerivedStatus } from './invoices.ts'
+
+test('deriveInvoiceStatus: a sent invoice with a past due_date is overdue', () => {
+  const status = deriveInvoiceStatus({ status: 'sent', due_date: '2020-01-01' })
+  assert.equal(status, 'overdue')
+})
+
+test('deriveInvoiceStatus: a sent invoice with a future due_date stays sent', () => {
+  const status = deriveInvoiceStatus({ status: 'sent', due_date: '2999-01-01' })
+  assert.equal(status, 'sent')
+})
+
+test('deriveInvoiceStatus: a sent invoice with no due_date stays sent (nothing to be overdue against)', () => {
+  const status = deriveInvoiceStatus({ status: 'sent', due_date: null })
+  assert.equal(status, 'sent')
+})
+
+test('deriveInvoiceStatus: draft and paid are never derived to overdue regardless of due_date', () => {
+  assert.equal(deriveInvoiceStatus({ status: 'draft', due_date: '2020-01-01' }), 'draft')
+  assert.equal(deriveInvoiceStatus({ status: 'paid', due_date: '2020-01-01' }), 'paid')
+})
+
+test('withDerivedStatus: maps a list without mutating the input objects', () => {
+  const input = [{ status: 'sent', due_date: '2020-01-01' }]
+  const output = withDerivedStatus(input)
+  assert.equal(output[0].status, 'overdue')
+  assert.equal(input[0].status, 'sent') // original untouched
+})
 
 test('computeInvoiceTotals: drafts are excluded from invoiced/paid/outstanding entirely', () => {
   const result = computeInvoiceTotals([{ id: '1', amount: 5000, status: 'draft' }])

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
-import { getContractValueForJob, wouldExceedContractValue } from '@/lib/invoices'
+import { getContractValueForJob, wouldExceedContractValue, deriveInvoiceStatus } from '@/lib/invoices'
 import { recordProofEvent } from '@/lib/proof'
 
 // ─── PATCH/DELETE /api/jobs/[jobId]/invoices/[invoiceId] ───────────────────
@@ -100,7 +100,7 @@ export async function PATCH(
         metadata: { invoice_id: invoiceId },
       }).catch(() => {})
 
-      return NextResponse.json({ invoice: updated })
+      return NextResponse.json({ invoice: { ...updated, status: deriveInvoiceStatus(updated) } })
     }
 
     if (body.action === 'mark_paid') {
@@ -129,7 +129,7 @@ export async function PATCH(
         metadata: { invoice_id: invoiceId },
       }).catch(() => {})
 
-      return NextResponse.json({ invoice: updated })
+      return NextResponse.json({ invoice: { ...updated, status: deriveInvoiceStatus(updated) } })
     }
 
     if (body.action === 'mark_unpaid') {
@@ -159,7 +159,7 @@ export async function PATCH(
         metadata: { invoice_id: invoiceId },
       }).catch(() => {})
 
-      return NextResponse.json({ invoice: updated })
+      return NextResponse.json({ invoice: { ...updated, status: deriveInvoiceStatus(updated) } })
     }
 
     if (body.action === 'edit') {
@@ -218,7 +218,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Only a draft invoice can be edited.' }, { status: 422 })
       }
 
-      return NextResponse.json({ invoice: updated })
+      return NextResponse.json({ invoice: { ...updated, status: deriveInvoiceStatus(updated) } })
     }
 
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

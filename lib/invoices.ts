@@ -22,6 +22,25 @@ export interface InvoiceRow {
   status: 'draft' | 'sent' | 'overdue' | 'paid'
 }
 
+/**
+ * Overdue is derived at read time, never stored (see migration 099's own
+ * comment) — a sent invoice past its due date is overdue right now, not
+ * whenever a cron last ran. The ONE place this is computed — both the
+ * invoices list route and the job snapshot route call this, so they can
+ * never disagree on a given invoice's displayed status.
+ */
+export function deriveInvoiceStatus(invoice: { status: string; due_date: string | null }): 'draft' | 'sent' | 'overdue' | 'paid' {
+  if (invoice.status === 'sent' && invoice.due_date != null && new Date(invoice.due_date).getTime() < Date.now()) {
+    return 'overdue'
+  }
+  return invoice.status as 'draft' | 'sent' | 'overdue' | 'paid'
+}
+
+/** Applies deriveInvoiceStatus across a list, returning new objects (never mutates input). */
+export function withDerivedStatus<T extends { status: string; due_date: string | null }>(invoices: T[]): T[] {
+  return invoices.map((inv) => ({ ...inv, status: deriveInvoiceStatus(inv) }))
+}
+
 export interface InvoiceTotals {
   invoiced: number
   paid: number

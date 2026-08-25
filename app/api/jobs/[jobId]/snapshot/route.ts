@@ -6,7 +6,7 @@ import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
 import { daysAgo } from '@/lib/job-activity'
 import { persistProjectUnderstanding } from '@/lib/project-context'
 import { calculateClientPrice } from '@/lib/pricing'
-import { computeInvoiceTotals } from '@/lib/invoices'
+import { computeInvoiceTotals, deriveInvoiceStatus } from '@/lib/invoices'
 
 // ─── GET /api/jobs/[jobId]/snapshot ──────────────────────────────────────────
 
@@ -319,22 +319,16 @@ export async function GET(
       created_at: daysAgo(v.created_at),
     })),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    invoices: (realInvoices ?? []).map((inv: any) => {
-      // Overdue is derived at read time, never stored (migration 099's own
-      // comment) — a sent invoice past its due date is overdue right now,
-      // not whenever a cron last ran.
-      const isOverdue = inv.status === 'sent' && inv.due_date != null && new Date(inv.due_date).getTime() < Date.now()
-      return {
-        id: inv.id,
-        description: inv.description ?? null,
-        invoice_number: inv.invoice_number ?? null,
-        amount: inv.amount,
-        status: isOverdue ? 'overdue' : inv.status,
-        due_date: inv.due_date ?? null,
-        sent_at: inv.sent_at ?? null,
-        paid_at: inv.paid_at ?? null,
-      }
-    }),
+    invoices: (realInvoices ?? []).map((inv: any) => ({
+      id: inv.id,
+      description: inv.description ?? null,
+      invoice_number: inv.invoice_number ?? null,
+      amount: inv.amount,
+      status: deriveInvoiceStatus(inv),
+      due_date: inv.due_date ?? null,
+      sent_at: inv.sent_at ?? null,
+      paid_at: inv.paid_at ?? null,
+    })),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     invoice_schedule: (invoiceSchedule ?? []).map((s: any) => ({
       id: s.id,

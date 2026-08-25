@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
-import { getContractValueForJob, generateInvoiceNumber, wouldExceedContractValue, computeInvoiceTotals } from '@/lib/invoices'
+import { getContractValueForJob, generateInvoiceNumber, wouldExceedContractValue, computeInvoiceTotals, withDerivedStatus } from '@/lib/invoices'
 import { recordProofEvent } from '@/lib/proof'
 
 // ─── GET/POST /api/jobs/[jobId]/invoices ───────────────────────────────────
@@ -85,7 +85,7 @@ export async function GET(
     const totals = computeInvoiceTotals(invoices ?? [])
 
     return NextResponse.json({
-      invoices: invoices ?? [],
+      invoices: withDerivedStatus(invoices ?? []),
       schedule: schedule ?? [],
       contract_value: contractValue,
       ...totals,
