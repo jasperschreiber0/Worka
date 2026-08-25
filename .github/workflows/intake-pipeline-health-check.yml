@@ -58,6 +58,11 @@ on:
         required: false
         type: string
         default: 'false'
+      run_job_closeout_e2e:
+        description: "Run scripts/run-job-closeout-e2e.mjs -- live end-to-end check of Job Closeout v1 (wires the existing POST /api/estimation/reconcile into JobSnapshotPanel): closes an active job with an approved variation reflected in contract value, verifies job_cost_entries/invoices/quote_line_items are unchanged, cost_reconciliation rows and the rate-learning side effect are correct, a repeat close with deliberately different entries is idempotent (proving the untouched CloseOutJobDrawer can't cause a conflicting second reconciliation), cross-builder rejection, and cleanup -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
       reset_circuit_breaker_if_safe:
         description: "Run scripts/reset-circuit-breaker-if-safe.mjs (only resets the global AI circuit breaker if the batch that tripped it has a finalized, terminal builder_status) -- type the literal word true to enable"
         required: false
@@ -162,6 +167,14 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
         run: node scripts/run-invoicing-financial-e2e.mjs
 
+      - name: Run job closeout (Job Closeout v1) E2E check
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_job_closeout_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/run-job-closeout-e2e.mjs
+
       - name: Reset circuit breaker if safe
         if: ${{ inputs.reset_circuit_breaker_if_safe == 'true' }}
         env:
@@ -195,7 +208,7 @@ jobs:
         run: node scripts/test-postgrest-vs-direct-sql.mjs
 
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
