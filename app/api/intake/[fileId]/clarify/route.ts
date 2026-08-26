@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
+import { shouldResumeAfterClarify, failedQuestionIds, type ClarifyAnswerOutcome } from '@/lib/clarify-answers'
 
 // ─── POST /api/intake/[fileId]/clarify ────────────────────────────────────────
 // Stage 4/5 resume path. The estimating engine stopped before generating an
@@ -89,6 +90,12 @@ export async function POST(
 
     const now = new Date().toISOString()
 
+    // Tracks every answer that actually reached a clarifying_questions row
+    // (i.e. a project_facts persist was attempted for it) — see
+    // shouldResumeAfterClarify's own doc comment for why an answer that
+    // never matched a row is deliberately excluded from this gate.
+    const outcomes: ClarifyAnswerOutcome[] = []
+
     for (const { question_id, answer } of answers) {
       if (!question_id || !answer) continue
 
@@ -100,18 +107,63 @@ export async function POST(
         .select('question')
         .single()
 
-      if (question) {
-        await supabase.from('project_facts').insert({
-          job_id,
-          category: 'builder_answer',
-          key: question.question,
-          value: answer,
-          source_document_id: null,
-          page_reference: null,
-          evidence: 'Answered directly by the builder.',
-          confidence: 100,
-        })
+      if (!question) continue
+
+      // Duplicate-persistence guard: a retry of this same submission (the
+      // client never saw the earlier success response, or resubmitted the
+      // same answers) must not create a second identical builder_answer
+      // fact — project_facts has no unique constraint to fall back on. See
+      // isDuplicateBuilderAnswerFact's own doc comment.
+      const { data: existingFact } = await supabase
+        .from('project_facts')
+        .select('id')
+        .eq('job_id', job_id)
+        .eq('category', 'builder_answer')
+        .eq('key', question.question)
+        .eq('value', answer)
+        .eq('superseded', false)
+        .limit(1)
+        .maybeSingle()
+
+      if (existingFact) {
+        outcomes.push({ questionId: question_id, factPersisted: true })
+        continue
       }
+
+      const { error: factError } = await supabase.from('project_facts').insert({
+        job_id,
+        category: 'builder_answer',
+        key: question.question,
+        value: answer,
+        source_document_id: null,
+        page_reference: null,
+        evidence: 'Answered directly by the builder.',
+        confidence: 100,
+      })
+
+      if (factError) {
+        console.error(JSON.stringify({
+          event: 'clarify_project_facts_insert_failed',
+          job_id, question_id, file_id: params.fileId,
+          error: factError.message,
+        }))
+      }
+
+      outcomes.push({ questionId: question_id, factPersisted: !factError })
+    }
+
+    // The engine must never resume believing an answer is recorded when its
+    // fact write actually failed — that answer's clarifying_questions row
+    // already shows status='answered', so the engine would otherwise have
+    // no signal the information it's about to reason with is missing.
+    if (!shouldResumeAfterClarify(outcomes)) {
+      return NextResponse.json(
+        {
+          error: 'Failed to save one or more answers — please try submitting again.',
+          failed_question_ids: failedQuestionIds(outcomes),
+        },
+        { status: 500 }
+      )
     }
 
     // Find the file that triggered the pause, so the client can resubscribe

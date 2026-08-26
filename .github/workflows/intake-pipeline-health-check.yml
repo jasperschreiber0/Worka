@@ -113,6 +113,11 @@ on:
         required: false
         type: string
         default: 'false'
+      run_clarify_persistence_e2e:
+        description: "Run scripts/run-clarify-persistence-e2e.mjs -- live end-to-end check of the reliability-audit fix to POST /api/intake/[fileId]/clarify's project_facts insert: submits an answer to a synthetic clarifying_questions row via the real route, independently verifies clarifying_questions.answer + exactly one builder_answer project_facts row, resubmits the identical answer and verifies no duplicate fact is created, checks no unrelated financial/estimate records exist, cleans up -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -264,8 +269,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/test-postgrest-vs-direct-sql.mjs
 
+      - name: Run clarify-answer persistence E2E check
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_clarify_persistence_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/run-clarify-persistence-e2e.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.run_project_memory_upsert_diagnostic != 'true' && inputs.stage3_checkpoint_job_id == '' && inputs.classification_persistence_job_id == '' && inputs.run_job_activation_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.run_project_memory_upsert_diagnostic != 'true' && inputs.stage3_checkpoint_job_id == '' && inputs.classification_persistence_job_id == '' && inputs.run_job_activation_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' && inputs.run_clarify_persistence_e2e != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
