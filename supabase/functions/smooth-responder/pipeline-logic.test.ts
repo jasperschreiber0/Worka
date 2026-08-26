@@ -48,6 +48,8 @@ import {
   splitTradeCategoriesIntoChunks,
   planStage3Chunks,
   resolveStage3ChunkCompletion,
+  resolveClassificationPersistResult,
+  shouldSkipRedundantPersistRetry,
   STAGE3_PER_CALL_TIMEOUT_MS,
   STAGE3_DEFAULT_CHUNK_COUNT,
   planStage6Chunks,
@@ -765,6 +767,31 @@ test('maxConsecutiveOccurrences: classifications that already survive one in-cal
   assert.equal(maxConsecutiveOccurrences('network_interruption'), 2)
   assert.equal(maxConsecutiveOccurrences('rate_limited'), 2)
   assert.equal(maxConsecutiveOccurrences('overloaded'), 2)
+})
+
+test('maxConsecutiveOccurrences: persistence_failed (finding #2 — the Stage 1/2 DB write itself) gets the same 2-strike tolerance as transient infrastructure failures', () => {
+  assert.equal(maxConsecutiveOccurrences('persistence_failed'), 2)
+})
+
+test('shouldStopRetrying: persistence_failed is retried, not given up on immediately — a transient DB write failure is worth more than zero attempts', () => {
+  // First occurrence: not stopped, worth retrying.
+  assert.equal(shouldStopRetrying(null, 0, 'persistence_failed'), false)
+  // Second consecutive occurrence: still under the 2-strike tolerance.
+  assert.equal(shouldStopRetrying('persistence_failed', 1, 'persistence_failed'), false)
+  // Third consecutive occurrence: tolerance exhausted, give up.
+  assert.equal(shouldStopRetrying('persistence_failed', 2, 'persistence_failed'), true)
+})
+
+test('nextFailureHistory: persistence_failed streak accumulates and resets exactly like any other classification', () => {
+  const first = nextFailureHistory({ classification: null, count: 0 }, 'persistence_failed')
+  assert.deepEqual(first, { classification: 'persistence_failed', count: 1 })
+  const second = nextFailureHistory(first, 'persistence_failed')
+  assert.deepEqual(second, { classification: 'persistence_failed', count: 2 })
+  // A successful retry in between (recorded elsewhere, not via this
+  // function) means the next classification seen — e.g. a later, different
+  // failure — resets the streak rather than compounding it.
+  const resetAfterDifferentClassification = nextFailureHistory(second, 'overloaded')
+  assert.deepEqual(resetAfterDifferentClassification, { classification: 'overloaded', count: 1 })
 })
 
 test('shouldStopRetrying: billing-halt classifications still stop on the very first occurrence (unchanged) — regression check for existing billing-halt behaviour', () => {
@@ -1541,6 +1568,74 @@ test('resolveStage3ChunkCompletion: already-completed trades from prior chunks a
   })
   assert.deepEqual(result, [7])
   assert.equal(result.includes(2), false)
+})
+
+// ─── resolveClassificationPersistResult / shouldSkipRedundantPersistRetry:
+// Stage 1/2 document-classification persistence truthfulness (finding #2) ──
+
+test('resolveClassificationPersistResult: success case — reports ok:true with the success payload passed through unchanged', () => {
+  const result = resolveClassificationPersistResult(
+    { persisted: true },
+    { factsFound: 12, documentsClassified: 3 },
+  )
+  assert.deepEqual(result, { ok: true, factsFound: 12, documentsClassified: 3 })
+})
+
+test('resolveClassificationPersistResult: nothing to persist (empty batch) still succeeds trivially — matches persisted:true, same as a real successful write', () => {
+  const result = resolveClassificationPersistResult(
+    { persisted: true },
+    { factsFound: 0, documentsClassified: 0 },
+  )
+  assert.deepEqual(result, { ok: true, factsFound: 0, documentsClassified: 0 })
+})
+
+test('resolveClassificationPersistResult: failure case — the pipeline does NOT report a successful classification when the RPC failed', () => {
+  const result = resolveClassificationPersistResult(
+    { persisted: false, errorMessage: 'duplicate key value violates unique constraint "project_documents_file_id_key"' },
+    { factsFound: 12, documentsClassified: 3 },
+  )
+  assert.equal(result.ok, false)
+  assert.deepEqual(result, {
+    ok: false,
+    billingHalt: false,
+    classification: 'persistence_failed',
+    errMessage: 'duplicate key value violates unique constraint "project_documents_file_id_key"',
+  })
+})
+
+test('resolveClassificationPersistResult: failure case with no error message still reports a failure, never falls back to success', () => {
+  const result = resolveClassificationPersistResult({ persisted: false }, { factsFound: 5, documentsClassified: 1 })
+  assert.equal(result.ok, false)
+  if (!result.ok) {
+    assert.equal(result.classification, 'persistence_failed')
+    assert.ok(result.errMessage.length > 0, 'errMessage must never be empty even when the RPC error carried no message')
+  }
+})
+
+test('resolveClassificationPersistResult: routes into the existing Stage 1/2 failure/retry mechanism — the return shape is identical to a genuine Claude API failure', () => {
+  // classifyBatch's declared return type has exactly two shapes; a
+  // persistence failure must produce the SAME failure shape a Claude API
+  // failure does, so the caller's existing batch-failure-isolation /
+  // solo-retry / recordAiFailure logic handles it with no special-casing.
+  const persistenceFailure = resolveClassificationPersistResult({ persisted: false, errorMessage: 'db error' }, { factsFound: 0, documentsClassified: 0 })
+  assert.equal(persistenceFailure.ok, false)
+  if (!persistenceFailure.ok) {
+    assert.equal(typeof persistenceFailure.billingHalt, 'boolean')
+    assert.equal(persistenceFailure.billingHalt, false)
+    assert.equal(typeof persistenceFailure.classification, 'string')
+    assert.equal(typeof persistenceFailure.errMessage, 'string')
+  }
+})
+
+test('shouldSkipRedundantPersistRetry: a file already durably complete must not be retried — the earlier "failure" was an ambiguous ack, not a real one', () => {
+  assert.equal(shouldSkipRedundantPersistRetry('complete'), true)
+})
+
+test('shouldSkipRedundantPersistRetry: pending/invalidated/missing rows are genuinely not yet persisted — safe, necessary to retry', () => {
+  assert.equal(shouldSkipRedundantPersistRetry('pending'), false)
+  assert.equal(shouldSkipRedundantPersistRetry('invalidated'), false)
+  assert.equal(shouldSkipRedundantPersistRetry(null), false)
+  assert.equal(shouldSkipRedundantPersistRetry(undefined), false)
 })
 
 // ─── planStage6Chunks: budget-aware Stage 6 (Estimate Generation) chunk planning ──

@@ -729,6 +729,12 @@ export type AnthropicFailureClassification =
   | 'context_window_exceeded'  // 400 whose message identifies the request as too large for the model's context window
   | 'validation_error'         // 422 / validation_error — Anthropic accepted the request but rejected the tool/schema shape
   | 'unknown'                  // anything not matched above — deliberately NOT auto-retried; see isRetryableClassification
+  | 'persistence_failed'       // NOT an Anthropic-call failure at all — Claude's extraction succeeded, but the atomic
+                                // persist_document_classification DB write (migration 050) that saves it failed. Reuses
+                                // this same taxonomy/state machine (recordAiFailure, maxConsecutiveOccurrences,
+                                // shouldStopRetrying) so a document-classification persistence failure gets the same
+                                // per-file retry/give-up handling any other Stage 1/2 failure already gets, rather than
+                                // a parallel mechanism — see classifyBatch's persistence step in index.ts.
 
 interface AnthropicLikeError {
   name?: string
@@ -874,8 +880,17 @@ const ONE_MORE_ATTEMPT_CLASSIFICATIONS = new Set<AnthropicFailureClassification>
  *   already-correct tolerance for genuinely transient infrastructure
  *   blips, unrelated to either blocking issue this constant was
  *   introduced to fix.
+ * - 2 (persistence_failed): a DB write failure (persist_document_
+ *   classification) is a different failure surface entirely — not
+ *   classified by classifyAnthropicError at all, since Claude's own call
+ *   already succeeded. Given the same tolerance as the transient-
+ *   infrastructure tier above, since a DB write failure (connection blip,
+ *   transient lock contention, a momentary PostgREST error) is plausibly
+ *   transient and worth more than one retry, unlike a deterministic
+ *   property of the request itself.
  */
 export function maxConsecutiveOccurrences(classification: AnthropicFailureClassification): number {
+  if (classification === 'persistence_failed') return 2
   if (ONE_MORE_ATTEMPT_CLASSIFICATIONS.has(classification)) return 1
   if (isRetryableClassification(classification)) return 2
   return 0
@@ -1166,6 +1181,86 @@ export function resolveStage3ChunkCompletion(outcome: Stage3ChunkPersistOutcome)
   }
   const failed = new Set(outcome.attemptedTradeIds)
   return outcome.tradeChunkIds.filter((id) => !failed.has(id))
+}
+
+// ─── Stage 1/2 document-classification persistence (finding #2) ───────────
+// Root cause: persist_document_classification's RPC `error` was checked
+// (logged) but its result was then ignored — classifyBatch (index.ts)
+// returned { ok: true, ... } unconditionally, so a document whose facts
+// Claude successfully extracted but whose atomic DB write (migration 050)
+// failed was reported as a success. Downstream, that document silently has
+// no project_documents/project_facts row: findMissingTrades (Stage 6),
+// "What WorkA read" (quotes.document_contribution, migration 039), and the
+// zero-contribution QA flag all read those exact tables, so none of them
+// can see this specific failure mode — the estimate can proceed as if the
+// document didn't matter, instead of as if it failed.
+
+export interface ClassificationPersistOutcome {
+  /** true if there was nothing to persist, or the RPC succeeded; false only if the RPC was attempted and returned an error. */
+  persisted: boolean
+  errorMessage?: string
+}
+
+/**
+ * Decides what classifyBatch (index.ts) reports to its caller once Stage
+ * 1/2's atomic persist_document_classification RPC has been attempted.
+ * Extracted as a pure function (same precedent as resolveStage3ChunkCompletion
+ * above) because the surrounding closure — which owns the Claude call, the
+ * RPC call, and the in-memory `facts` array — isn't directly unit-testable.
+ *
+ * `persisted: false` routes through classifyBatch's EXISTING failure return
+ * shape (`{ ok: false, billingHalt: false, classification, errMessage }`),
+ * the same shape any other Stage 1/2 failure (a Claude API error, a
+ * malformed response) already returns — so a persistence failure flows
+ * through the exact same batch-failure-isolation / solo-retry /
+ * recordAiFailure state machine those failures already use. No parallel
+ * retry mechanism is introduced; only one more failure classification
+ * ('persistence_failed', see AnthropicFailureClassification above) feeds
+ * the existing one.
+ */
+export function resolveClassificationPersistResult(
+  outcome: ClassificationPersistOutcome,
+  successPayload: { factsFound: number; documentsClassified: number },
+):
+  | { ok: true; factsFound: number; documentsClassified: number }
+  | { ok: false; billingHalt: false; classification: 'persistence_failed'; errMessage: string } {
+  if (outcome.persisted) {
+    return { ok: true, ...successPayload }
+  }
+  return {
+    ok: false,
+    billingHalt: false,
+    classification: 'persistence_failed',
+    errMessage: outcome.errorMessage || 'persist_document_classification RPC failed with no error message',
+  }
+}
+
+/**
+ * Guards against the one genuine duplicate-persistence risk a retry
+ * introduces: persist_document_classification is a single atomic
+ * transaction (migration 050), so its `error` is only ambiguous, not
+ * false, when the failure is at the network/SDK layer — Postgres may have
+ * already committed before the HTTP response reporting success was lost.
+ * If it did commit, project_documents.extraction_status for that file is
+ * already 'complete' (migration 050: set ONLY atomically with the facts it
+ * depends on). Retrying blindly in that case would re-call Claude and
+ * INSERT a second set of project_facts rows for the same document —
+ * unlike project_documents' `ON CONFLICT (file_id) DO UPDATE`,
+ * project_facts has no unique constraint to fall back on, and the
+ * in-memory `facts` array used for exact/semantic dedup (mergeFacts) was
+ * never updated by the ambiguous attempt, so it wouldn't catch the
+ * duplicate either.
+ *
+ * Checked immediately before a same-invocation solo retry (index.ts) — the
+ * only place a file's classification can be attempted twice within one
+ * invocation, since the top of runPipeline already excludes any file whose
+ * extraction_status is 'complete' from an earlier invocation before this
+ * one even starts. This is the SAME extraction_status signal that
+ * top-of-function filter already trusts as authoritative (migration 050),
+ * applied at one more call site — not a new dedup mechanism.
+ */
+export function shouldSkipRedundantPersistRetry(extractionStatus: string | null | undefined): boolean {
+  return extractionStatus === 'complete'
 }
 
 // ─── Stage 6 (Estimate Generation) chunk planning ──────────────────────────

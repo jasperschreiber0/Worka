@@ -43,6 +43,7 @@ import {
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS, shouldFailStage3RunImmediately,
   resolveStage3ChunkCompletion,
+  resolveClassificationPersistResult, shouldSkipRedundantPersistRetry,
   shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, STAGE6_MAX_PARALLEL_CHUNKS, STAGE6_MAX_TRADES_PER_CHUNK, isTruncatedResponseError,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
@@ -1781,6 +1782,17 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         // read 'complete' while its facts are missing, which is exactly
         // the false-completion bug that let retries silently reprocess
         // already-classified documents.
+        //
+        // The RPC's own error is now a real failure, not just a log line
+        // (finding #2, reliability audit): a document Claude successfully
+        // extracted but whose write failed used to be reported as ok:true
+        // regardless — a false-success state where the document silently
+        // has no project_documents/project_facts row, invisible to
+        // findMissingTrades, "What WorkA read", and the zero-contribution
+        // QA flag alike, since all three read those exact tables. See
+        // resolveClassificationPersistResult (pipeline-logic.ts).
+        let persistSucceeded = true
+        let persistErrorMessage = ''
         if (documentInserts.length > 0 || factsToInsert.length > 0) {
           const { data: persistResult, error: persistError } = await supabase.rpc('persist_document_classification', {
             p_job_id: jobId,
@@ -1794,7 +1806,15 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
             p_superseded_ids: merge.supersededIds,
           })
           if (persistError) {
-            console.error('persist_document_classification RPC failed:', persistError)
+            persistSucceeded = false
+            persistErrorMessage = persistError.message
+            console.error(JSON.stringify({
+              event: 'stage12_persist_document_classification_failed',
+              job_id: jobId, batch_id: parentJobId,
+              documents: batchFiles.map((f) => f.filename),
+              file_ids: documentInserts.map((d) => d.file_id),
+              error: persistError.message,
+            }))
           } else {
             const result = persistResult as { documents: Array<{ file_id: string; project_document_id: string }>; fact_ids: string[] }
             const fileIdToDocId = new Map((result.documents ?? []).map((d) => [d.file_id, d.project_document_id]))
@@ -1812,7 +1832,10 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           }
         }
 
-        return { ok: true, factsFound: (docResult.facts ?? []).length, documentsClassified: (docResult.documents ?? []).length }
+        return resolveClassificationPersistResult(
+          { persisted: persistSucceeded, errorMessage: persistErrorMessage },
+          { factsFound: (docResult.facts ?? []).length, documentsClassified: (docResult.documents ?? []).length },
+        )
       }
 
       // Checked once per invocation, before attempting any classification
@@ -1969,6 +1992,30 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
             // any other wall-clock deferral in this pipeline.
             failedToLoadSiblings.push(soloFile.filename)
             console.log(JSON.stringify({ event: 'document_solo_retry_skipped_wall_clock', filename: soloFile.filename, remaining_ms: remainingMs }))
+            continue
+          }
+
+          // Duplicate-persistence guard (finding #2): persist_document_
+          // classification is one atomic transaction, so an error from it
+          // is only ambiguous, not false, when the failure is at the
+          // network/SDK layer — Postgres may have already committed before
+          // the success response was lost. If it did, extraction_status
+          // for this file is already 'complete' and retrying would insert
+          // a second set of project_facts rows for the same document (no
+          // unique constraint backs project_facts the way project_
+          // documents' ON CONFLICT(file_id) does). Only relevant for a
+          // same-invocation retry — the top of runPipeline already
+          // excludes any file complete from an EARLIER invocation before
+          // this one starts. See shouldSkipRedundantPersistRetry.
+          const soloRealFileId = realFileId(soloFile.fileId)
+          const { data: soloDocStatusRow } = await supabase
+            .from('project_documents')
+            .select('extraction_status')
+            .eq('job_id', jobId)
+            .eq('file_id', soloRealFileId)
+            .maybeSingle()
+          if (shouldSkipRedundantPersistRetry(soloDocStatusRow?.extraction_status)) {
+            console.log(JSON.stringify({ event: 'document_solo_retry_skipped_already_persisted', filename: soloFile.filename }))
             continue
           }
 
