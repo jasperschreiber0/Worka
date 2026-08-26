@@ -1128,6 +1128,46 @@ export function planStage3Chunks<T>(
   return { chunksToRunNow, hasMoreAfterThisInvocation }
 }
 
+// ─── Stage 3 checkpoint truthfulness ───────────────────────────────────────
+// Fixes a confirmed production-risk defect: the scope_items upsert for a
+// chunk was never error-checked, and document_processing_batches.
+// stage3_completed_trade_ids (the checkpoint that decides whether a trade
+// is ever reasoned about again) advanced for the whole chunk regardless.
+// A silently failed write left a trade permanently marked "done" with no
+// scope_items row behind it -- invisible to both Stage 6 (reads scope_items
+// to know what to estimate) and findMissingTrades (reads the same table to
+// catch exactly this kind of gap), since both see "no row" and correctly
+// but wrongly conclude "not in scope for this job."
+//
+// The bulk upsert is one SQL statement -- Postgres makes it all-or-nothing
+// already, so there is no partial-row outcome to track within one call;
+// this function only decides which trade IDs are safe to add to the
+// checkpoint, never re-derives the persistence outcome itself. The caller
+// passes the real Supabase result.
+//
+// Trades in tradeChunkIds that never had a scope_items row attempted (the
+// AI didn't return scope for them, or returned a malformed
+// trade_category_id -- an existing, unrelated, pre-existing product
+// behaviour this function does not change) are unaffected by a persist
+// failure elsewhere in the same chunk: they had nothing to lose, so they
+// stay eligible to be marked complete exactly as before this fix.
+export interface Stage3ChunkPersistOutcome {
+  /** Every trade ID sent to the model in this chunk. */
+  tradeChunkIds: number[]
+  /** Trade IDs that had a scope_items row attempted in this chunk's upsert (empty if nothing was attempted). */
+  attemptedTradeIds: number[]
+  /** true if there was nothing to persist, or the upsert succeeded; false only if an upsert was attempted and returned an error. */
+  persistSucceeded: boolean
+}
+
+export function resolveStage3ChunkCompletion(outcome: Stage3ChunkPersistOutcome): number[] {
+  if (outcome.persistSucceeded) {
+    return outcome.tradeChunkIds
+  }
+  const failed = new Set(outcome.attemptedTradeIds)
+  return outcome.tradeChunkIds.filter((id) => !failed.has(id))
+}
+
 // ─── Stage 6 (Estimate Generation) chunk planning ──────────────────────────
 // Reuses planStage3Chunks itself (the same budget-aware "how many right-
 // sized chunks fit THIS invocation's remaining wall-clock window" logic),

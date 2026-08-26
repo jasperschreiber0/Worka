@@ -42,6 +42,7 @@ import {
   buildStage6RetriggerRequest, formatStage6RetriggerFailureReason,
   formatFactForScopePrompt, mergeScopeReasoningResults,
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS, shouldFailStage3RunImmediately,
+  resolveStage3ChunkCompletion,
   shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, STAGE6_MAX_PARALLEL_CHUNKS, STAGE6_MAX_TRADES_PER_CHUNK, isTruncatedResponseError,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
@@ -2301,10 +2302,26 @@ For each relevant trade, state what is included, what is excluded, dependencies,
             // re-enters this loop after a crash mid-way still doesn't
             // re-spend on a chunk that already succeeded: this write lands
             // before the loop ever reaches Anthropic again for these trades.
+            //
+            // FIX (production risk audit): the scope_items upsert's result
+            // used to go unchecked, and stage3_completed_trade_ids advanced
+            // for the WHOLE chunk regardless of whether it actually landed —
+            // a silently failed write left a trade permanently marked "done"
+            // reasoning about, with no scope_items row behind it, invisible
+            // to both Stage 6 and findMissingTrades (both read the same
+            // table this write should have populated). The upsert is one
+            // SQL statement — already all-or-nothing — so there is no
+            // partial-row outcome within a single attempt; only trades that
+            // actually had a row attempted (scopeInsertTradeIds) are ever
+            // excluded on failure. A trade the model returned no scope for
+            // in this chunk never had anything to persist, and is untouched
+            // by this — same pre-existing behaviour as before this fix.
             const chunkScopeRows = chunkResult.scope
+            let scopePersistSucceeded = true
+            let scopeInsertTradeIds: number[] = []
             if (chunkScopeRows.length > 0) {
               const chunkScopeInserts = chunkScopeRows
-                .filter((s) => typeof s.trade_category_id === 'number')
+                .filter((s): s is Record<string, unknown> & { trade_category_id: number } => typeof s.trade_category_id === 'number')
                 .map((s) => ({
                   job_id: jobId,
                   trade_category_id: s.trade_category_id,
@@ -2315,12 +2332,26 @@ For each relevant trade, state what is included, what is excluded, dependencies,
                   uncertainty_notes: s.uncertainty_notes ?? null,
                   confidence: s.confidence ?? null,
                 }))
+              scopeInsertTradeIds = chunkScopeInserts.map((r) => r.trade_category_id)
               if (chunkScopeInserts.length > 0) {
-                await supabase.from('scope_items').upsert(chunkScopeInserts, { onConflict: 'job_id,trade_category_id' })
+                const { error: scopeUpsertErr } = await supabase.from('scope_items').upsert(chunkScopeInserts, { onConflict: 'job_id,trade_category_id' })
+                if (scopeUpsertErr) {
+                  scopePersistSucceeded = false
+                  console.error(JSON.stringify({
+                    event: 'stage3_scope_items_persist_failed', job_id: jobId, batch_id: parentJobId,
+                    chunk: chunkIndex + 1, chunk_count: plan.chunksToRunNow.length,
+                    affected_trade_ids: scopeInsertTradeIds, error: scopeUpsertErr.message,
+                  }))
+                }
               }
             }
             if (parentJobId) {
-              completedTradeIds = Array.from(new Set([...completedTradeIds, ...tradeChunk.map((t) => t.id)]))
+              const completedThisChunk = resolveStage3ChunkCompletion({
+                tradeChunkIds: tradeChunk.map((t) => t.id),
+                attemptedTradeIds: scopeInsertTradeIds,
+                persistSucceeded: scopePersistSucceeded,
+              })
+              completedTradeIds = Array.from(new Set([...completedTradeIds, ...completedThisChunk]))
               await supabase.from('document_processing_batches').update({
                 stage3_completed_trade_ids: completedTradeIds,
                 updated_at: new Date().toISOString(),

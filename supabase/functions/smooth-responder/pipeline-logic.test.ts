@@ -47,6 +47,7 @@ import {
   STAGE3_LARGE_PROJECT_CHUNK_COUNT,
   splitTradeCategoriesIntoChunks,
   planStage3Chunks,
+  resolveStage3ChunkCompletion,
   STAGE3_PER_CALL_TIMEOUT_MS,
   STAGE3_DEFAULT_CHUNK_COUNT,
   planStage6Chunks,
@@ -1461,6 +1462,85 @@ test('planStage3Chunks: never plans a call needing more than STAGE3_PER_CALL_TIM
   // more budget must never cause fewer, bigger chunks.
   const plan = planStage3Chunks(TRADES_13, 10_000_000, 150)
   assert.equal(plan.chunksToRunNow.length, STAGE3_DEFAULT_CHUNK_COUNT)
+})
+
+// ─── resolveStage3ChunkCompletion: checkpoint truthfulness ─────────────────
+// Regression coverage for the confirmed defect: stage3_completed_trade_ids
+// used to advance for a whole chunk regardless of whether the scope_items
+// upsert that was supposed to back it actually succeeded.
+
+test('resolveStage3ChunkCompletion: success case — every trade in the chunk is marked complete, unchanged from prior behaviour', () => {
+  const result = resolveStage3ChunkCompletion({
+    tradeChunkIds: [2, 5, 7],
+    attemptedTradeIds: [2, 5, 7],
+    persistSucceeded: true,
+  })
+  assert.deepEqual(result, [2, 5, 7])
+})
+
+test('resolveStage3ChunkCompletion: failure case — a trade whose scope_items persistence failed is excluded from the checkpoint entirely', () => {
+  const result = resolveStage3ChunkCompletion({
+    tradeChunkIds: [2, 5, 7],
+    attemptedTradeIds: [2, 5, 7],
+    persistSucceeded: false,
+  })
+  assert.deepEqual(result, [])
+})
+
+test('resolveStage3ChunkCompletion: a trade the model returned no scope for (never attempted) is still marked complete even when a sibling trade in the SAME chunk failed to persist', () => {
+  // Trade 9 was never part of the upsert (AI didn't return scope for it) --
+  // that is pre-existing, unrelated behaviour this fix must not change.
+  // Trades 2 and 5 WERE attempted and the upsert for them failed.
+  const result = resolveStage3ChunkCompletion({
+    tradeChunkIds: [2, 5, 9],
+    attemptedTradeIds: [2, 5],
+    persistSucceeded: false,
+  })
+  assert.deepEqual(result, [9])
+})
+
+test('resolveStage3ChunkCompletion: nothing was attempted (empty scope from the model) — succeeds trivially, all trades complete, matching pre-fix behaviour', () => {
+  const result = resolveStage3ChunkCompletion({
+    tradeChunkIds: [2, 5, 7],
+    attemptedTradeIds: [],
+    persistSucceeded: true,
+  })
+  assert.deepEqual(result, [2, 5, 7])
+})
+
+test('resolveStage3ChunkCompletion: retry case — a trade excluded after a failed persist becomes eligible again next invocation, and completes once the retry succeeds', () => {
+  // Invocation 1: persist fails, trade 5 is excluded.
+  const afterFailedAttempt = resolveStage3ChunkCompletion({
+    tradeChunkIds: [5],
+    attemptedTradeIds: [5],
+    persistSucceeded: false,
+  })
+  assert.deepEqual(afterFailedAttempt, [])
+
+  // Invocation 2 (a later retry, driven by planStage3Chunks re-offering
+  // trade 5 since it never entered stage3_completed_trade_ids): persist
+  // succeeds this time.
+  const afterRetrySuccess = resolveStage3ChunkCompletion({
+    tradeChunkIds: [5],
+    attemptedTradeIds: [5],
+    persistSucceeded: true,
+  })
+  assert.deepEqual(afterRetrySuccess, [5])
+})
+
+test('resolveStage3ChunkCompletion: already-completed trades from prior chunks are untouched — this function only ever returns THIS chunk\'s outcome, the caller merges it', () => {
+  // Documents the caller contract: completedTradeIds accumulates via
+  // Array.from(new Set([...completedTradeIds, ...resolveStage3ChunkCompletion(...)])),
+  // so a previously-completed trade not present in tradeChunkIds at all is
+  // never touched by this function — it has nothing to say about trades
+  // outside the current chunk.
+  const result = resolveStage3ChunkCompletion({
+    tradeChunkIds: [7],
+    attemptedTradeIds: [7],
+    persistSucceeded: true,
+  })
+  assert.deepEqual(result, [7])
+  assert.equal(result.includes(2), false)
 })
 
 // ─── planStage6Chunks: budget-aware Stage 6 (Estimate Generation) chunk planning ──
