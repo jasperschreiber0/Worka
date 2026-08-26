@@ -44,6 +44,7 @@ import {
   shouldSkipStage3Call, planStage3Chunks, STAGE3_PER_CALL_TIMEOUT_MS, shouldFailStage3RunImmediately,
   resolveStage3ChunkCompletion,
   resolveClassificationPersistResult, shouldSkipRedundantPersistRetry,
+  resolveCompletionWriteOutcome, type CompletionWriteAttempt,
   shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, STAGE6_MAX_PARALLEL_CHUNKS, STAGE6_MAX_TRADES_PER_CHUNK, isTruncatedResponseError,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
@@ -976,6 +977,56 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     }
   }
 
+  // ── Final completion write persistence truthfulness (Round 3 audit) ────
+  // Both "mark this file done" call sites (normal Stage 6 completion, and
+  // the all-duplicates/reuse-existing-quote early return) write
+  // files.quote_id + intake_stage/pct in one UPDATE. Previously unchecked:
+  // a failed write left files.quote_id null while
+  // document_processing_batches.quote_id (a separate write) still got set,
+  // so files.intake_status — a projection derived from the batches row,
+  // migration 052 — still read 'extracted', but the SSE poller's completion
+  // condition (intake_status === 'extracted' && quote_id) needs BOTH and
+  // could never fire: a fully correct, fully priced quote left permanently
+  // invisible to the builder, with no existing recovery mechanism able to
+  // detect it (every consumer that decides "is this batch terminal" reads
+  // intake_status, never files.quote_id directly).
+  //
+  // persistFileCompletion attempts the UPDATE, retries once immediately on
+  // failure (same invocation, single-row primary-key update — cheap, no
+  // pipeline re-entry), and reports whether it's now truthfully persisted.
+  // Callers must gate any write that would make files.intake_status derive
+  // as 'extracted' (document_processing_batches.quote_id +
+  // recompute_batch_file_intake_statuses, or the legacy path's direct
+  // intake_status='extracted' write) on this returning true — otherwise the
+  // exact inconsistency above recurs even after the retry. No new recovery
+  // architecture and no Stage 6 re-entry: on the residual both-attempts-fail
+  // case the file's row is simply left as it was, not flipped to a false
+  // terminal state.
+  const persistFileCompletion = async (
+    payload: Record<string, unknown>,
+    context: { quoteId: string }
+  ): Promise<boolean> => {
+    const attempt = async (): Promise<CompletionWriteAttempt> => {
+      const { error } = await supabase.from('files').update(payload).eq('id', fileId)
+      return { error: error ? error.message : null }
+    }
+    const first = await attempt()
+    const outcome = resolveCompletionWriteOutcome(first, first.error ? await attempt() : null)
+    if (outcome.persisted && outcome.recoveredByRetry) {
+      console.log(JSON.stringify({
+        event: 'files_completion_write_recovered_by_retry',
+        job_id: jobId, file_id: fileId, quote_id: context.quoteId,
+      }))
+    } else if (!outcome.persisted) {
+      console.error(JSON.stringify({
+        event: 'files_completion_write_failed',
+        job_id: jobId, file_id: fileId, quote_id: context.quoteId,
+        error: outcome.errorMessage,
+      }))
+    }
+    return outcome.persisted
+  }
+
   // ── Billing-halt: stop calling Anthropic for the REST of this run ───────
   // credit_exhausted / authentication_failed mean the account itself cannot
   // proceed — every subsequent call in this run (next batch, Stage 3, Stage
@@ -1310,19 +1361,30 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
             .maybeSingle()
 
           if (currentQuote?.id) {
-            await supabase.from('files').update({
-              intake_stage: 'complete', intake_pct: 100, pipeline_stage: 'complete',
-              quote_id: currentQuote.id, failure_stage: null, failure_reason: null,
-            }).eq('id', fileId)
-            if (parentJobId) {
-              await supabase.from('document_processing_batches').update({ quote_id: currentQuote.id, updated_at: new Date().toISOString() }).eq('id', parentJobId)
-              await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
-            } else {
-              await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
+            const completionPersisted = await persistFileCompletion(
+              {
+                intake_stage: 'complete', intake_pct: 100, pipeline_stage: 'complete',
+                quote_id: currentQuote.id, failure_stage: null, failure_reason: null,
+              },
+              { quoteId: currentQuote.id }
+            )
+            // Only let intake_status derive/flip to 'extracted' once the
+            // file's own completion write is confirmed persisted — otherwise
+            // the batch/derived state would say 'extracted' while
+            // files.quote_id stays null, the exact inconsistency this fix
+            // closes. See persistFileCompletion's own comment above.
+            if (completionPersisted) {
+              if (parentJobId) {
+                await supabase.from('document_processing_batches').update({ quote_id: currentQuote.id, updated_at: new Date().toISOString() }).eq('id', parentJobId)
+                await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+              } else {
+                await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
+              }
             }
             console.log(JSON.stringify({
               event: 'all_documents_duplicate_reused_existing_quote', job_id: jobId, parent_job_id: parentJobId,
               quote_id: currentQuote.id, duplicate_count: skippedDuplicates.length,
+              completion_persisted: completionPersisted,
             }))
             return
           }
@@ -3473,9 +3535,16 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     // file's row (app/api/intake/[fileId]/route.ts), so these stay scoped
     // to fileId, unlike intake_status which every consumer expects to be
     // accurate per-file.
-    await supabase
-      .from('files')
-      .update({
+    //
+    // This write is retried once on failure and gates the dependent
+    // document_processing_batches.quote_id / recompute_batch_file_intake_
+    // statuses (or the legacy path's direct intake_status='extracted')
+    // writes below — see persistFileCompletion's own comment. Without this,
+    // a failed write here left files.quote_id null while intake_status
+    // still derived to 'extracted', so the SSE poller's completion
+    // condition could never fire even though the quote was fully correct.
+    const completionPersisted = await persistFileCompletion(
+      {
         intake_stage: 'complete',
         intake_pct: 100,
         pipeline_stage: 'complete',
@@ -3495,18 +3564,21 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         // or unreadable document gave no indication that happened.
         skipped_sibling_filenames: skippedSiblings.length > 0 ? skippedSiblings : null,
         failed_sibling_filenames: failedToLoadSiblings.length > 0 ? failedToLoadSiblings : null,
-      })
-      .eq('id', fileId)
+      },
+      { quoteId }
+    )
 
-    if (parentJobId) {
-      await supabase.from('document_processing_batches').update({ quote_id: quoteId, updated_at: new Date().toISOString() }).eq('id', parentJobId)
-      // Every file in the batch, not just fileId (the primary/anchor) —
-      // recompute_file_intake_status resolves each to 'extracted' now that
-      // document_processing_batches.quote_id is set (migration 052).
-      await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
-    } else {
-      // Legacy direct-invocation path — no batch to derive from.
-      await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
+    if (completionPersisted) {
+      if (parentJobId) {
+        await supabase.from('document_processing_batches').update({ quote_id: quoteId, updated_at: new Date().toISOString() }).eq('id', parentJobId)
+        // Every file in the batch, not just fileId (the primary/anchor) —
+        // recompute_file_intake_status resolves each to 'extracted' now that
+        // document_processing_batches.quote_id is set (migration 052).
+        await supabase.rpc('recompute_batch_file_intake_statuses', { p_batch_id: parentJobId })
+      } else {
+        // Legacy direct-invocation path — no batch to derive from.
+        await supabase.from('files').update({ intake_status: 'extracted' }).eq('id', fileId)
+      }
     }
 
     console.log(JSON.stringify({
@@ -3515,6 +3587,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       documents_count: null, facts_count: facts.length,
       scope_items_count: (scopeForEstimate ?? []).length,
       quote_created: true, quote_id: quoteId, line_items_count: existingKeys.size,
+      completion_persisted: completionPersisted,
     }))
   } catch (err) {
     console.error('estimating-engine error:', err)

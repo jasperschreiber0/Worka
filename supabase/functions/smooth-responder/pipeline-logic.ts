@@ -1263,6 +1263,69 @@ export function shouldSkipRedundantPersistRetry(extractionStatus: string | null 
   return extractionStatus === 'complete'
 }
 
+// ─── Final completion write persistence truthfulness (Round 3 audit) ──────
+// smooth-responder's two "mark this file done" call sites (normal Stage 6
+// completion, and the all-documents-were-duplicates/reuse-existing-quote
+// early return) each write files.quote_id + intake_stage/pct in one
+// `files.update()` — previously unchecked. A failed write left
+// document_processing_batches.quote_id (a SEPARATE, independent write) set
+// while files.quote_id stayed null; files.intake_status is a projection
+// derived from the batches row (migration 052), so it would still read
+// 'extracted' — but the SSE poller's completion condition
+// (`intake_status === 'extracted' && quote_id`) needs BOTH, so it can never
+// fire. The quote is fully correct and priced; the builder is told the run
+// failed/timed out. No existing recovery mechanism repairs this: every
+// consumer that decides "is this batch terminal" reads intake_status, not
+// files.quote_id directly (app/api/cron/intake-recovery/route.ts's own
+// stale-lock reclaim explicitly treats intake_status='extracted' as
+// "nothing to resume").
+//
+// resolveCompletionWriteOutcome is the decision logic for a same-invocation,
+// immediate single retry of that one UPDATE — index.ts owns the two actual
+// Supabase calls (this function never touches the network) and gates the
+// dependent writes (document_processing_batches.quote_id +
+// recompute_batch_file_intake_statuses, or the legacy path's direct
+// intake_status='extracted' write) on `persisted` being true, so a
+// still-failing completion write can no longer produce a false 'extracted'
+// projection. No new retry architecture, no pipeline re-entry: on the
+// residual both-attempts-fail case, the file's row is simply left exactly
+// where it was (whatever stage it was mid-run), not flipped to a false
+// terminal state.
+
+export interface CompletionWriteAttempt {
+  /** The Postgres/PostgREST error message, or null if the write succeeded. */
+  error: string | null
+}
+
+export interface CompletionWriteOutcome {
+  persisted: boolean
+  /** true only if the first attempt failed and the retry succeeded. */
+  recoveredByRetry: boolean
+  errorMessage?: string
+}
+
+/**
+ * `second` is null only when the first attempt already succeeded (no retry
+ * needed) — index.ts's helper always retries once when the first attempt
+ * fails, so a real completion-write call site never passes
+ * `{ error: <something> }` as `first` with `second: null`.
+ */
+export function resolveCompletionWriteOutcome(
+  first: CompletionWriteAttempt,
+  second: CompletionWriteAttempt | null
+): CompletionWriteOutcome {
+  if (!first.error) {
+    return { persisted: true, recoveredByRetry: false }
+  }
+  if (!second) {
+    return { persisted: false, recoveredByRetry: false, errorMessage: first.error }
+  }
+  if (!second.error) {
+    return { persisted: true, recoveredByRetry: true }
+  }
+  return { persisted: false, recoveredByRetry: false, errorMessage: second.error }
+}
+
 // ─── Stage 6 (Estimate Generation) chunk planning ──────────────────────────
 // Reuses planStage3Chunks itself (the same budget-aware "how many right-
 // sized chunks fit THIS invocation's remaining wall-clock window" logic),

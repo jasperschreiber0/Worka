@@ -50,6 +50,7 @@ import {
   resolveStage3ChunkCompletion,
   resolveClassificationPersistResult,
   shouldSkipRedundantPersistRetry,
+  resolveCompletionWriteOutcome,
   STAGE3_PER_CALL_TIMEOUT_MS,
   STAGE3_DEFAULT_CHUNK_COUNT,
   planStage6Chunks,
@@ -1636,6 +1637,38 @@ test('shouldSkipRedundantPersistRetry: pending/invalidated/missing rows are genu
   assert.equal(shouldSkipRedundantPersistRetry('invalidated'), false)
   assert.equal(shouldSkipRedundantPersistRetry(null), false)
   assert.equal(shouldSkipRedundantPersistRetry(undefined), false)
+})
+
+// ─── resolveCompletionWriteOutcome: final files.update() completion write
+// persistence truthfulness (Round 3 audit) ─────────────────────────────────
+
+test('resolveCompletionWriteOutcome: first attempt succeeds — no retry needed, not reported as recovered', () => {
+  const result = resolveCompletionWriteOutcome({ error: null }, null)
+  assert.deepEqual(result, { persisted: true, recoveredByRetry: false })
+})
+
+test('resolveCompletionWriteOutcome: first attempt fails, retry succeeds — completion succeeds and is reported as retry-recovered', () => {
+  const result = resolveCompletionWriteOutcome(
+    { error: 'connection reset by peer' },
+    { error: null }
+  )
+  assert.deepEqual(result, { persisted: true, recoveredByRetry: true })
+})
+
+test('resolveCompletionWriteOutcome: both attempts fail — treated as failed, carries the SECOND attempt\'s error message, never falls back to success', () => {
+  const result = resolveCompletionWriteOutcome(
+    { error: 'connection reset by peer' },
+    { error: 'timeout' }
+  )
+  assert.deepEqual(result, { persisted: false, recoveredByRetry: false, errorMessage: 'timeout' })
+})
+
+test('resolveCompletionWriteOutcome: first attempt fails with no second attempt recorded — still reported as failed, carries the first error', () => {
+  // Documents the defensive branch: a real call site always retries once on
+  // failure, so this shape shouldn't occur in practice, but the function
+  // must never silently treat a missing retry as success.
+  const result = resolveCompletionWriteOutcome({ error: 'db unreachable' }, null)
+  assert.deepEqual(result, { persisted: false, recoveredByRetry: false, errorMessage: 'db unreachable' })
 })
 
 // ─── planStage6Chunks: budget-aware Stage 6 (Estimate Generation) chunk planning ──

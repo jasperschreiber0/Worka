@@ -341,6 +341,53 @@ async function main() {
       log('diagnostic_batch_state_failed', { job_id: jobId, error: diagErr instanceof Error ? diagErr.message : String(diagErr) })
     }
 
+    // Completion-write persistence-truthfulness verification (Round 3
+    // audit finding, smooth-responder's final files.update()): independent
+    // read of the primary file's own quote_id/intake_status, and a
+    // duplicate-quote/line-item check, logged BEFORE cleanup so this is a
+    // direct DB read, not an inference from the SSE response.
+    try {
+      const { data: primaryFileRow, error: primaryFileErr } = await supabase
+        .from('files')
+        .select('id, intake_status, quote_id, processing_batch_id')
+        .eq('id', fileRow.id)
+        .single()
+      if (primaryFileErr) throw primaryFileErr
+
+      const { data: allQuotesForJob } = await supabase
+        .from('quotes')
+        .select('id, status')
+        .eq('job_id', jobId)
+
+      let duplicateLineItems = []
+      if (result.quote?.quote_id) {
+        const { data: allLineItemsForQuote } = await supabase
+          .from('quote_line_items')
+          .select('trade_category_id, description')
+          .eq('quote_id', result.quote.quote_id)
+        const seen = new Map()
+        for (const li of allLineItemsForQuote ?? []) {
+          const key = `${li.trade_category_id}::${String(li.description).trim().toLowerCase()}`
+          seen.set(key, (seen.get(key) ?? 0) + 1)
+        }
+        duplicateLineItems = Array.from(seen.entries()).filter(([, count]) => count > 1)
+      }
+
+      log('completion_write_verification', {
+        job_id: jobId,
+        primary_file: primaryFileRow,
+        batch_quote_id: result.batch_id ? (await supabase.from('document_processing_batches').select('quote_id').eq('id', result.batch_id).single()).data?.quote_id : null,
+        quote_count_for_job: (allQuotesForJob ?? []).length,
+        quote_statuses_for_job: (allQuotesForJob ?? []).map((q) => q.status),
+        duplicate_line_item_keys: duplicateLineItems.map(([key]) => key),
+        // The invariant this fix targets, checked directly: intake_status
+        // must never read 'extracted' while quote_id is null.
+        completion_write_truthful: !(primaryFileRow.intake_status === 'extracted' && !primaryFileRow.quote_id),
+      })
+    } catch (verifyErr) {
+      log('completion_write_verification_failed', { job_id: jobId, error: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) })
+    }
+
     if (result.passed) {
       try {
         await supabase.from('files').delete().eq('job_id', jobId)
