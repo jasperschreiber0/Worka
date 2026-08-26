@@ -43,7 +43,7 @@ async function main() {
 
   const { data: mismatched, error: mismatchErr } = await supabase
     .from('files')
-    .select('id, job_id, filename, intake_status, quote_id, processing_batch_id, updated_at')
+    .select('id, job_id, filename, intake_status, quote_id, processing_batch_id, created_at')
     .eq('intake_status', 'extracted')
     .is('quote_id', null)
 
@@ -83,13 +83,13 @@ async function main() {
       confirmedQueueModelMismatches.push({
         file_id: row.id, job_id: row.job_id, filename: row.filename,
         processing_batch_id: row.processing_batch_id, batch_quote_id: batch.quote_id,
-        updated_at: row.updated_at,
+        created_at: row.created_at,
       })
     } else {
       otherMismatches.push({
         file_id: row.id, job_id: row.job_id, filename: row.filename,
         processing_batch_id: row.processing_batch_id, batch_quote_id: batch?.quote_id ?? null,
-        updated_at: row.updated_at,
+        created_at: row.created_at,
       })
     }
   }
