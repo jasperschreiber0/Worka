@@ -112,12 +112,12 @@ async function main() {
   quoteId = quote.id
   log('setup_complete', { job_id: jobId, quote_id: quoteId })
 
-  async function addUnpricedLineItem() {
+  async function addUnpricedLineItem(description) {
     const { data: item, error } = await supabase
       .from('quote_line_items')
       .insert({
         quote_id: quoteId, trade_category_id: 1,
-        description: MATCHED_DESCRIPTION, quantity: 10, unit: 'm2', rate: null, total: null,
+        description, quantity: 10, unit: 'm2', rate: null, total: null,
         confidence: 100, is_assumption: false,
       })
       .select('id')
@@ -128,7 +128,7 @@ async function main() {
   }
 
   // ── 1. Import: one matched row, one deliberately unmatched row ─────────
-  const item1Id = await addUnpricedLineItem()
+  const item1Id = await addUnpricedLineItem(MATCHED_DESCRIPTION)
 
   const importRes = await fetch(`${APP_URL.replace(/\/$/, '')}/api/rates/import`, {
     method: 'POST',
@@ -255,7 +255,10 @@ async function main() {
   }
 
   // A second, freshly-added unpriced line item must price at the UPDATED rate.
-  const item2Id = await addUnpricedLineItem()
+  // Distinct description (still fuzzy-matches the same 'site_slab' catalogue
+  // entry -- shares all its tokens) to avoid the quote_line_items unique
+  // index on (quote_id, trade_category_id, description) (migration 030).
+  const item2Id = await addUnpricedLineItem('Concrete slab on ground - second pour area')
   const priceRes2 = await fetch(`${APP_URL.replace(/\/$/, '')}/api/quotes/${quoteId}`, { headers: authHeaders })
   log('price_call_2', { http_status: priceRes2.status })
 
