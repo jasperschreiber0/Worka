@@ -125,6 +125,7 @@ async function main() {
   const runTag = new Date().toISOString()
   const storagePath = `known-good-estimate/${jobId}/bathroom-reno-brief.pdf`
   const result = { passed: false, job_id: jobId }
+  let primaryFileId = null
 
   try {
     log('run_started', { job_id: jobId })
@@ -156,6 +157,7 @@ async function main() {
       .select()
       .single()
     if (fileErr || !fileRow) throw new Error(`files insert failed: ${fileErr?.message ?? 'no row returned'}`)
+    primaryFileId = fileRow.id
     log('file_created', { job_id: jobId, file_id: fileRow.id })
 
     // ── Drive the REAL app route (not Supabase directly) — this is what
@@ -347,10 +349,11 @@ async function main() {
     // duplicate-quote/line-item check, logged BEFORE cleanup so this is a
     // direct DB read, not an inference from the SSE response.
     try {
+      if (!primaryFileId) throw new Error('no primary file was ever created for this run — nothing to verify')
       const { data: primaryFileRow, error: primaryFileErr } = await supabase
         .from('files')
         .select('id, intake_status, quote_id, processing_batch_id')
-        .eq('id', fileRow.id)
+        .eq('id', primaryFileId)
         .single()
       if (primaryFileErr) throw primaryFileErr
 
