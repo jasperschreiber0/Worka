@@ -194,14 +194,16 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: node scripts/run-multitrade-known-good-estimate.mjs
 
-      - name: Run manual estimate creation E2E check (real routes, incl. AI-pipeline interaction)
+      - name: Run manual estimate creation E2E check (real routes, incl. AI-pipeline interaction), plus ambiguous-current-quote diagnostic (Round 11 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_manual_estimate_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
-        run: node scripts/run-manual-estimate-e2e.mjs
+        run: |
+          node scripts/run-manual-estimate-e2e.mjs
+          node scripts/diagnose-ambiguous-current-quote.mjs
 
       - name: Run job costs (Financials v1) E2E check, plus supplier-rate-import persistence-truthfulness diagnostic + E2E (Round 10 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_job_costs_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
