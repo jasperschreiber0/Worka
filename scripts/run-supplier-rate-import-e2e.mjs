@@ -40,7 +40,7 @@ const APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL
 
 // Every single-byte 00...00f0-ff suffix and 0001f0 are already reserved by
 // other E2E scripts in this session's ledger; this uses the next free id.
-const BUILDER_ID = '00000000-0000-0000-0000-000000000001f1'
+const BUILDER_ID = '00000000-0000-0000-0000-0000000001f1'
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !APP_URL) {
   console.error(JSON.stringify({ event: 'config_error', message: 'NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, APP_URL must be set' }))
