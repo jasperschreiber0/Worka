@@ -265,13 +265,15 @@ jobs:
           JOB_ID: ${{ inputs.classification_persistence_job_id }}
         run: node scripts/diagnose-document-classification-persistence.mjs
 
-      - name: Run job activation reliability E2E check
+      - name: Run job activation reliability E2E check, plus zero-value invoice-schedule diagnostic (Round 9 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_job_activation_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           APP_URL: ${{ secrets.APP_URL }}
-        run: node scripts/run-job-activation-e2e.mjs
+        run: |
+          node scripts/diagnose-activation-zero-schedule.mjs
+          node scripts/run-job-activation-e2e.mjs
 
       - name: Reset circuit breaker if safe
         if: ${{ inputs.reset_circuit_breaker_if_safe == 'true' }}
