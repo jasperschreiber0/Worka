@@ -202,8 +202,8 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          node scripts/run-manual-estimate-e2e.mjs
           node scripts/diagnose-ambiguous-current-quote.mjs
+          node scripts/run-manual-estimate-e2e.mjs
 
       - name: Run job costs (Financials v1) E2E check, plus supplier-rate-import persistence-truthfulness diagnostic + E2E (Round 10 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_job_costs_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
