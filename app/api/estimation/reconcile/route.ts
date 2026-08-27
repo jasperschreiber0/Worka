@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import type { CostReconciliationEntry } from '@/lib/types/estimation.types'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { applyActualCostLearning, type ActualCostLearningSummary } from '@/lib/pricing'
+import { isValidTradeCategoryId } from '@/lib/trade-taxonomy'
 
 interface ReconcilePayload {
   job_id: string
@@ -32,6 +33,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { job_id, quote_id, entries, final_cost, final_margin_pct } = body
   if (!job_id || !entries?.length) {
     return NextResponse.json({ error: 'job_id and entries required' }, { status: 400 })
+  }
+
+  // Validate every entry's trade_category_id up front, before any write.
+  // entries[].trade_category_id flows straight from the client (CloseJobModal's
+  // grouping of quote_line_items.trade_category_id, never itself validated) and
+  // cost_reconciliation.trade_category_id is a NOT NULL FK to trade_categories —
+  // a bad id previously surfaced as a raw FK-violation 500 partway through the
+  // route, after project_memory.status had already been committed (see below).
+  const invalidTradeId = entries.find((e) => !isValidTradeCategoryId(e.trade_category_id))
+  if (invalidTradeId) {
+    return NextResponse.json(
+      { error: `Invalid trade_category_id: ${invalidTradeId.trade_category_id}` },
+      { status: 400 }
+    )
   }
 
   if (isDemoMode()) {
@@ -70,13 +85,33 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // browser tab must not double-count actual-cost learning weight or
     // duplicate cost_reconciliation rows. project_memory.job_id is unique,
     // so a prior successful reconciliation is detectable by its status alone.
+    //
+    // FIX (Round 7 reliability audit, persistence truthfulness): the guard
+    // used to trust project_memory.status='completed' alone. But that flag
+    // was the FIRST write in this route, ahead of the cost_reconciliation
+    // insert and the jobs.status update below — either of those failing left
+    // status='completed' durably committed with the job never actually
+    // closed and no reconciliation rows behind it. Every retry then hit this
+    // guard and returned a false "already closed out" success with no way to
+    // ever repair the state. The guard now also checks the job itself
+    // reached 'complete' — the same genuine-completion check
+    // planActivationRepair (lib/job-activation.ts) already uses for the
+    // identical class of problem in job activation — and a project_memory
+    // row that looks 'completed' but whose job isn't falls through to the
+    // repair path below instead of short-circuiting.
     const { data: existingMemory } = await supabase
       .from('project_memory')
       .select('id, status')
       .eq('job_id', job_id)
       .maybeSingle()
 
-    if (existingMemory?.status === 'completed') {
+    const { data: existingJobRow } = await supabase
+      .from('jobs')
+      .select('status')
+      .eq('id', job_id)
+      .single()
+
+    if (existingMemory?.status === 'completed' && existingJobRow?.status === 'complete') {
       const { data: existingEntries } = await supabase
         .from('cost_reconciliation')
         .select('trade_category_id, estimated_cost, actual_cost')
@@ -90,14 +125,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       })
     }
 
-    // Upsert project_memory record to completed status.
+    // Upsert project_memory's metadata WITHOUT the terminal 'completed'
+    // status — that status is now the LAST write in this route (below),
+    // once every consequence it gates has actually succeeded. Prior to this
+    // fix it was written here, first, which is what let a downstream
+    // failure leave a false 'completed' flag with nothing behind it (see
+    // the guard comment above).
     //
     // FIX (production incident, Job Closeout v1 E2E): this upsert's error
     // was never checked, so when it failed (see migration 100 — the prior
     // partial unique index on job_id couldn't serve as an ON CONFLICT
     // arbiter, Postgres 42P10) the route fell through the old
     // `if (memoryRow)` guard and returned ok:true having written nothing —
-    // a false-positive success. Now a failed write here is fatal: no
+    // a false-positive success. A failed write here is still fatal: no
     // partial-credit response, no silent no-op.
     const { data: memoryRow, error: memoryErr } = await supabase
       .from('project_memory')
@@ -105,7 +145,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         job_id,
         builder_id,
         quote_id,
-        status: 'completed',
         final_cost,
         final_margin_pct,
         completed_at: new Date().toISOString(),
@@ -115,6 +154,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     if (memoryErr || !memoryRow) {
       console.error('[estimation/reconcile] project_memory upsert failed', memoryErr)
+      return NextResponse.json({ error: 'Failed to record job closeout — please try again.' }, { status: 500 })
+    }
+
+    // Clear any cost_reconciliation rows a previous, partially-failed attempt
+    // already inserted for this project_memory_id before re-inserting below —
+    // there is no unique constraint on (project_memory_id, trade_category_id)
+    // to rely on, and without this a retry after a partial failure would
+    // duplicate rows rather than replace them.
+    const { error: reconClearErr } = await supabase
+      .from('cost_reconciliation')
+      .delete()
+      .eq('project_memory_id', memoryRow.id)
+
+    if (reconClearErr) {
+      console.error('[estimation/reconcile] cost_reconciliation clear failed', reconClearErr)
       return NextResponse.json({ error: 'Failed to record job closeout — please try again.' }, { status: 500 })
     }
 
@@ -154,6 +208,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (jobUpdateErr) {
       console.error('[estimation/reconcile] job status update failed', jobUpdateErr)
       return NextResponse.json({ error: 'Failed to finalize job status — please try again.' }, { status: 500 })
+    }
+
+    // Only now — with cost_reconciliation rows and jobs.status both
+    // genuinely committed — flip project_memory to 'completed'. This is the
+    // one write the idempotency guard above trusts, so it must be last.
+    const { error: statusFlipErr } = await supabase
+      .from('project_memory')
+      .update({ status: 'completed' })
+      .eq('id', memoryRow.id)
+
+    if (statusFlipErr) {
+      console.error('[estimation/reconcile] project_memory status flip failed', statusFlipErr)
+      return NextResponse.json({ error: 'Failed to finalize job closeout — please try again.' }, { status: 500 })
     }
 
     // Fold the ACTUAL cost per trade back into Tier 1 (builder_learned_rates)
