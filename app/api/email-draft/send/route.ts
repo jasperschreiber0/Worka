@@ -90,7 +90,14 @@ export async function POST(
       if (!resendRes.ok) {
         const resendErr = await resendRes.json() as { message?: string }
         console.error('[/api/email-draft/send] Resend error:', resendErr)
-        // Continue to log even if send fails — audit trail is non-negotiable
+        // Do not log to communication_history or record a WorkA Proof
+        // 'email_sent' event below — that would assert delivery that never
+        // happened. Fail loudly instead (matches confirm-send/route.ts and
+        // send-notification/route.ts's existing pattern for this exact case).
+        return NextResponse.json(
+          { error: resendErr.message ?? 'Failed to send email — please try again.' },
+          { status: 502 }
+        )
       }
     }
 
