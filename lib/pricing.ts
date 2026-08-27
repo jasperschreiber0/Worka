@@ -320,8 +320,16 @@ interface RetailCatalogueRow {
  * line_item_key at pricing time than at learning time, corrupting the
  * learned average under the wrong key. Fixed by making this the one place
  * the catalogue is assembled, called from all three sites below.
+ *
+ * Exported (Round 10 reliability audit) so app/api/rates/import/route.ts can
+ * resolve an imported supplier description against this SAME catalogue
+ * before persisting a line_item_key — a supplier rate stored under any key
+ * other than a real catalogue entry's own key is structurally unreachable by
+ * resolveRateForKey's Tier 3 (exact-key match only), since matchLineItemKey
+ * only ever returns keys drawn from this catalogue. No behavior change here;
+ * visibility only.
  */
-async function loadPricingCatalogue(supabase: SupabaseClient): Promise<CatalogueEntry[]> {
+export async function loadPricingCatalogue(supabase: SupabaseClient): Promise<CatalogueEntry[]> {
   const [platformRes, retailRes] = await Promise.all([
     supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, state').is('state', null),
     supabase.from('market_material_prices').select('line_item_key, trade_category_id, brand, product_name, unit'),
