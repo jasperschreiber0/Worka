@@ -211,13 +211,16 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
         run: node scripts/run-job-costs-e2e.mjs
 
-      - name: Run variations financial connection (Variations v1) E2E check
+      - name: Run variations financial connection (Variations v1) E2E check, plus quote-revise persistence-truthfulness diagnostic + E2E (Round 8 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_variations_financial_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           APP_URL: ${{ secrets.APP_URL }}
-        run: node scripts/run-variations-financial-e2e.mjs
+        run: |
+          node scripts/run-variations-financial-e2e.mjs
+          node scripts/diagnose-quote-revise-truthfulness.mjs
+          node scripts/run-quote-revise-truthfulness-e2e.mjs
 
       - name: Run invoicing financial (Invoicing v1) E2E check
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_invoicing_financial_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
