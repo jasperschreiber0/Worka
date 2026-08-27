@@ -19,9 +19,12 @@
 //      by the route, not silently persisted.
 //   3. Price a real, unpriced quote_line_item with that same description
 //      via the real GET /api/quotes/[quoteId] route (its existing lazy
-//      ensureQuotePriced backfill) and independently verify
-//      pricing_source='supplier' and the resolved rate/total reflect the
-//      imported price, not the platform default.
+//      ensureQuotePriced backfill) and independently verify the resolved
+//      rate/total reflect the imported supplier price, not the platform
+//      default (pricing_source='builder_rate' -- learned/preference/
+//      supplier all share that displayed label by design, so this also
+//      confirms no learned/preference rate exists for the same key that
+//      could otherwise explain the result).
 //   4. Re-import the same supplier with a CHANGED price for the same
 //      description and independently verify: no duplicate
 //      builder_supplier_rates row, the existing row's rate was updated,
@@ -205,9 +208,22 @@ async function main() {
     .single()
   log('priced_item_1_state', pricedItem1 ?? {})
 
-  if (pricedItem1?.pricing_source !== 'supplier') {
+  // learned/preference/supplier (Tiers 1-3) all display as the same
+  // quote_line_items.pricing_source value 'builder_rate' by design
+  // (RATE_SOURCE_TO_PRICING_SOURCE, lib/pricing.ts) -- so 'builder_rate'
+  // alone doesn't distinguish Tier 3 from Tiers 1-2. Independently confirm
+  // no learned/preference rate exists for this builder+key, so the ONLY
+  // tier that could have produced this rate is the supplier import.
+  const { data: learnedRows } = await supabase.from('builder_learned_rates').select('id').eq('builder_id', BUILDER_ID).eq('line_item_key', 'site_slab')
+  const { data: prefRows } = await supabase.from('builder_rate_preferences').select('id').eq('builder_id', BUILDER_ID).eq('line_item_key', 'site_slab')
+  if ((learnedRows?.length ?? 0) > 0 || (prefRows?.length ?? 0) > 0) {
     passed = false
-    failures.push(`expected pricing_source='supplier', got '${pricedItem1?.pricing_source}'`)
+    failures.push(`test invariant violated: unexpected learned/preference rate rows exist for this builder+key, so pricing_source='builder_rate' can't be attributed to the supplier import alone`)
+  }
+
+  if (pricedItem1?.pricing_source !== 'builder_rate') {
+    passed = false
+    failures.push(`expected pricing_source='builder_rate' (Tier 3 supplier import; learned/preference/supplier all share this displayed label), got '${pricedItem1?.pricing_source}'`)
   }
   if (Number(pricedItem1?.rate) !== 200 || Number(pricedItem1?.total) !== 2000) {
     passed = false
@@ -269,9 +285,9 @@ async function main() {
     .single()
   log('priced_item_2_state', pricedItem2 ?? {})
 
-  if (pricedItem2?.pricing_source !== 'supplier' || Number(pricedItem2?.rate) !== 250 || Number(pricedItem2?.total) !== 2500) {
+  if (pricedItem2?.pricing_source !== 'builder_rate' || Number(pricedItem2?.rate) !== 250 || Number(pricedItem2?.total) !== 2500) {
     passed = false
-    failures.push(`expected the new item to price at the UPDATED supplier rate (250/2500), got ${JSON.stringify(pricedItem2)}`)
+    failures.push(`expected the new item to price at the UPDATED supplier rate (250/2500, pricing_source='builder_rate'), got ${JSON.stringify(pricedItem2)}`)
   }
 
   // First item must remain unchanged by the re-import (pricing is a one-shot
