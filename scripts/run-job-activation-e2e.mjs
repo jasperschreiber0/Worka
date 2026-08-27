@@ -43,6 +43,20 @@
 // Cleanup: deletes every disposable job (cascades quotes/quote_line_items/
 // job_milestones/invoice_schedule) in a `finally` block regardless of
 // outcome.
+//
+// Scenarios H and I (Round 9 fix) extend this to the zero-value invoice-
+// schedule persistence-truthfulness defect: activate/route.ts's contract-
+// value read (quote_line_items -> calculateClientPrice) used to be
+// unchecked, so a transient failure silently computed a $0 contract value
+// and every invoice_schedule row generated from it was inserted at
+// amount:0 — and because the old repair check only counted rows, five real
+// $0 rows read as "already done," permanently hiding the poisoned state.
+// Scenario H constructs that exact state directly (not via a simulated
+// failure) and verifies activate/route.ts now detects and REPLACES it
+// (never duplicates alongside it, never touches milestones, converges to
+// the normal idempotent 409 afterward). Scenario I confirms the same
+// poisoned shape is left untouched if any of its rows is already linked to
+// a real invoice — the repair's own independent safety guard.
 // ============================================================
 
 import { createClient } from '@supabase/supabase-js'
@@ -145,6 +159,22 @@ async function main() {
     }))
     const { error } = await supabase.from('invoice_schedule').insert(rows)
     if (error) throw new Error(`seed schedule failed: ${error.message}`)
+    return rows.map((r) => r.id)
+  }
+
+  // Round 9 fix: constructs the EXACT poisoned state a transient failure of
+  // activate/route.ts's quote_line_items read used to leave behind — real
+  // schedule rows, correct count, but every amount $0 against a genuinely
+  // non-zero (120000) contract. Not a simulated failure; the DB state a
+  // real one would produce.
+  async function seedZeroSchedule(jobId, { linkedInvoiceId } = {}) {
+    const rows = INVOICE_LABELS.map((label, i) => ({
+      id: crypto.randomUUID(), job_id: jobId, builder_id: BUILDER_ID, label,
+      percentage: INVOICE_PERCENTAGES[i], amount: 0, due_trigger: 'test',
+      invoice_id: i === 0 ? (linkedInvoiceId ?? null) : null,
+    }))
+    const { error } = await supabase.from('invoice_schedule').insert(rows)
+    if (error) throw new Error(`seed zero schedule failed: ${error.message}`)
     return rows.map((r) => r.id)
   }
 
@@ -263,6 +293,56 @@ async function main() {
     check('non_current_quote_untouched', quoteFStaleRow?.status === 'sent', { row: quoteFStaleRow })
     void quoteFCurrent
 
+    // ── Scenario H (Round 9 fix): poisoned $0 schedule against a genuinely
+    // non-zero contract — must be REPLACED, not left alone, and not
+    // duplicated alongside. ─────────────────────────────────────────────
+    const jobH = await makeJob('poisoned-zero-schedule', 'active')
+    const quoteH = await makeQuote(jobH, { quoteStatus: 'approved', isCurrent: true }) // client price 120000
+    const msIdsH = await seedMilestones(jobH)
+    const poisonedSchedIdsH = await seedZeroSchedule(jobH)
+
+    const { data: poisonedRowsH } = await supabase.from('invoice_schedule').select('amount').eq('job_id', jobH)
+    check('poisoned_schedule_seeded_at_zero', (poisonedRowsH ?? []).every((r) => Number(r.amount) === 0), { rows: poisonedRowsH })
+
+    const resH = await apiFetch(`/api/jobs/${jobH}/activate`, { method: 'POST', body: JSON.stringify({ quote_id: quoteH }) })
+    check('poisoned_schedule_repair_ok', resH.ok, { status: resH.status, body: resH.json ?? resH.text })
+
+    const schedH = await countAndIds('invoice_schedule', jobH)
+    check('poisoned_schedule_repair_no_duplication', schedH.count === 5, { schedule_count: schedH.count })
+    check('poisoned_schedule_repair_replaced_not_appended', !setsEqual(schedH.ids, new Set(poisonedSchedIdsH)) && [...schedH.ids].every((id) => !poisonedSchedIdsH.includes(id)), {
+      old_ids: poisonedSchedIdsH, new_ids: [...schedH.ids],
+    })
+
+    const { data: scheduleAmountsH } = await supabase.from('invoice_schedule').select('amount').eq('job_id', jobH)
+    const scheduleSumH = (scheduleAmountsH ?? []).reduce((s, r) => s + Number(r.amount), 0)
+    check('poisoned_schedule_repaired_to_correct_contract_value', Math.round(scheduleSumH) === 120000, { expected: 120000, actual: scheduleSumH })
+
+    const msH = await countAndIds('job_milestones', jobH)
+    check('poisoned_schedule_repair_did_not_touch_milestones', msH.count === 8 && setsEqual(msH.ids, new Set(msIdsH)), { milestone_count: msH.count })
+
+    // Repeat call — the repaired schedule now reads as healthy, so this
+    // must converge to the unchanged idempotent 409, not repeat the repair.
+    const repeatH = await apiFetch(`/api/jobs/${jobH}/activate`, { method: 'POST', body: JSON.stringify({ quote_id: quoteH }) })
+    check('poisoned_schedule_repair_converges_to_409_on_retry', !repeatH.ok && repeatH.status === 409, { status: repeatH.status, body: repeatH.json })
+    const schedHAfterRepeat = await countAndIds('invoice_schedule', jobH)
+    check('poisoned_schedule_repair_idempotent_no_further_mutation', schedHAfterRepeat.count === 5 && setsEqual(schedHAfterRepeat.ids, schedH.ids), { schedule_count: schedHAfterRepeat.count })
+
+    // ── Scenario I (Round 9 fix): a $0 schedule row already linked to a
+    // real invoice must NEVER be repaired — declines, unchanged 409. ────
+    const jobI = await makeJob('poisoned-schedule-with-real-invoice', 'active')
+    const quoteI = await makeQuote(jobI, { quoteStatus: 'approved', isCurrent: true })
+    await seedMilestones(jobI)
+    const { data: realInvoiceI, error: realInvoiceIErr } = await supabase.from('invoices')
+      .insert({ job_id: jobI, builder_id: BUILDER_ID, amount: 500, status: 'draft' })
+      .select('id').single()
+    if (realInvoiceIErr || !realInvoiceI) throw new Error(`real invoice insert failed: ${realInvoiceIErr?.message}`)
+    const poisonedSchedIdsI = await seedZeroSchedule(jobI, { linkedInvoiceId: realInvoiceI.id })
+
+    const resI = await apiFetch(`/api/jobs/${jobI}/activate`, { method: 'POST', body: JSON.stringify({ quote_id: quoteI }) })
+    check('poisoned_schedule_with_linked_invoice_declines_repair', !resI.ok && resI.status === 409, { status: resI.status, body: resI.json })
+    const schedI = await countAndIds('invoice_schedule', jobI)
+    check('poisoned_schedule_with_linked_invoice_untouched', schedI.count === 5 && setsEqual(schedI.ids, new Set(poisonedSchedIdsI)), { schedule_count: schedI.count })
+
     // ── Scenario G: cross-builder access rejected ────────────────────────
     const crossAttempt = await otherFetch(`/api/jobs/${jobA}/activate`, { method: 'POST', body: JSON.stringify({ quote_id: quoteA }) })
     check('cross_builder_activate_blocked', !crossAttempt.ok && (crossAttempt.status === 404 || crossAttempt.status === 403), { status: crossAttempt.status, body: crossAttempt.json })
@@ -279,6 +359,16 @@ async function main() {
     log('cleanup_started', {})
     try {
       const ids = Object.values(jobIds)
+      if (ids.length) {
+        // Unlink + delete invoices FIRST — invoice_schedule.invoice_id has no
+        // ON DELETE clause (NO ACTION), so cascading the job delete straight
+        // through both invoice_schedule.job_id and invoices.job_id at once
+        // risks the exact FK-ordering hazard a prior audit round flagged in
+        // the app's own invoice DELETE route. Doing it explicitly here,
+        // correctly, sidesteps relying on unspecified cascade ordering.
+        await supabase.from('invoice_schedule').update({ invoice_id: null }).in('job_id', ids)
+        await supabase.from('invoices').delete().in('job_id', ids)
+      }
       if (ids.length) await supabase.from('jobs').delete().in('id', ids) // cascades quotes/quote_line_items/job_milestones/invoice_schedule
       const { count: jobsLeft } = await supabase.from('jobs').select('id', { count: 'exact', head: true }).in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000'])
       log((jobsLeft ?? 0) === 0 ? 'cleanup_complete' : 'cleanup_INCOMPLETE', { jobs_left: jobsLeft })

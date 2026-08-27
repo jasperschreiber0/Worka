@@ -297,6 +297,52 @@ async function handleLiveActivation(
 
   const job = jobRow as { id: string; address: string; status: string }
 
+  // 2b. Compute the client contract value up front — needed both to decide
+  // whether an already-active job's schedule needs repair (below) and to
+  // generate a fresh schedule later. The client pays cost + margin.
+  // quotes.total_cost is the builder's internal cost basis (see CLAUDE.md's
+  // Margin rule) — every client-facing figure must be marked up, and
+  // invoice-schedule amounts are exactly that: the progress claims the
+  // client will be billed.
+  //
+  // Canonical: sum of each line item's OWN margin_pct-marked-up total, never
+  // total_cost * quote.margin_pct — that blanket formula ignores provisional
+  // sums' 0% margin and disagreed with the client_price the builder actually
+  // reviewed in QuoteView before approving this quote. See calculateClientPrice
+  // (lib/pricing.ts) for the full reasoning. Invoice schedules must match the
+  // approved quote exactly, so this must be the same calculation, not a
+  // second, independently-derived one.
+  //
+  // GST: this value is GST-EXCLUSIVE, matching every other client-facing
+  // figure in the app (see lib/pricing.ts's PRICE_BASIS_LABEL/
+  // CLIENT_PRICE_DISCLAIMER for the product decision this reflects). If
+  // invoice_schedule amounts are ever surfaced to a builder or client
+  // without also surfacing that disclaimer, that surface needs the same
+  // labeling QuoteView/PDF export/send-quote already carry — do not assume
+  // it's implied.
+  //
+  // FIX (Round 9 reliability audit, persistence truthfulness): this read
+  // used to be unchecked, with `activationLineItems ?? []` silently
+  // substituting an empty array on a transient failure — calculateClientPrice
+  // then returned $0, and every invoice_schedule row generated from it was
+  // inserted at amount:0 as if activation had genuinely succeeded, with no
+  // recovery path (see lib/job-activation.ts's header comment). A failure
+  // here is now fatal, before any claim, quote-approval, milestone, or
+  // schedule write is attempted.
+  const { data: activationLineItems, error: lineItemsErr } = await supabase
+    .from('quote_line_items')
+    .select('total, margin_pct, assumption_status')
+    .eq('quote_id', quoteId)
+
+  if (lineItemsErr) {
+    console.error(JSON.stringify({
+      event: 'activate_line_items_fetch_failed', job_id: jobId, quote_id: quoteId, error: lineItemsErr.message,
+    }))
+    return NextResponse.json({ error: 'Activation failed while reading the quote — please try again.' }, { status: 500 })
+  }
+
+  const clientContractValue = calculateClientPrice(activationLineItems ?? [])
+
   // 3. Atomic forward-only activation claim. The .in('status', ...) filter is
   // the guard: a job already active (double-click, client retry, a second
   // sent quote for the same job) matches zero rows here, so the second call
@@ -337,27 +383,40 @@ async function handleLiveActivation(
     // canonical quote (quotes.is_current, migration 061) — a stray/
     // non-canonical quote_id gets the same unchanged 409 rather than an
     // invented repair for an ambiguous case.
+    //
+    // FIX (Round 9 reliability audit, persistence truthfulness): the
+    // schedule check used to be a bare row count. Fetching the actual rows
+    // (id, amount, invoice_id) lets planActivationRepair distinguish a
+    // healthy schedule from one this route's own $0-contract-value bug
+    // (see the clientContractValue check below) already zeroed out —
+    // scheduleCount alone treated five real $0 rows as "already done" and
+    // permanently hid the poisoned state from every future repair attempt.
     const [
       { count: milestoneCount, error: milestoneCountErr },
-      { count: scheduleCount, error: scheduleCountErr },
+      { data: existingScheduleRows, error: scheduleFetchErr },
     ] = await Promise.all([
       supabase.from('job_milestones').select('id', { count: 'exact', head: true }).eq('job_id', jobId),
-      supabase.from('invoice_schedule').select('id', { count: 'exact', head: true }).eq('job_id', jobId),
+      supabase.from('invoice_schedule').select('id, amount, invoice_id').eq('job_id', jobId),
     ])
 
-    if (milestoneCountErr || scheduleCountErr) {
+    if (milestoneCountErr || scheduleFetchErr) {
       console.error(JSON.stringify({
         event: 'activate_repair_state_check_failed', job_id: jobId, quote_id: quoteId,
-        milestone_error: milestoneCountErr?.message, schedule_error: scheduleCountErr?.message,
+        milestone_error: milestoneCountErr?.message, schedule_error: scheduleFetchErr?.message,
       }))
       return NextResponse.json({ error: 'Activation failed while checking job state — please try again.' }, { status: 500 })
     }
+
+    const scheduleRows = (existingScheduleRows ?? []) as { id: string; amount: number | null; invoice_id: string | null }[]
 
     const repairPlan = planActivationRepair({
       isCurrentQuote: quote.is_current,
       quoteApproved: quote.status === 'approved',
       milestoneCount: milestoneCount ?? 0,
-      scheduleCount: scheduleCount ?? 0,
+      scheduleCount: scheduleRows.length,
+      scheduleAmountTotal: scheduleRows.reduce((sum: number, row) => sum + (row.amount ?? 0), 0),
+      scheduleHasLinkedInvoice: scheduleRows.some((row) => row.invoice_id !== null),
+      contractValue: clientContractValue,
     })
 
     if (!repairPlan.allowRepair || repairPlan.fullyComplete) {
@@ -374,7 +433,7 @@ async function handleLiveActivation(
     // Fresh claim: the job was 'quoting'/'quoted' a moment ago, so nothing
     // downstream could possibly exist yet — every step runs, exactly as
     // before this fix, just now error-checked.
-    plan = { allowRepair: true, fullyComplete: false, needsQuoteApproval: true, needsMilestones: true, needsInvoiceSchedule: true }
+    plan = { allowRepair: true, fullyComplete: false, needsQuoteApproval: true, needsMilestones: true, needsInvoiceSchedule: true, needsInvoiceScheduleRepair: false }
   }
 
   // 4. Update quote status to approved (guarded the same way — never
@@ -408,34 +467,6 @@ async function handleLiveActivation(
       duration_ms: Date.now() - learnedRatesStartedAt,
     }))
   }
-
-  // The client pays cost + margin. quotes.total_cost is the builder's
-  // internal cost basis (see CLAUDE.md's Margin rule) — every client-facing
-  // figure must be marked up, and invoice-schedule amounts are exactly that:
-  // the progress claims the client will be billed. Generating them from raw
-  // total_cost (as this used to) meant every activated job invoiced the
-  // client at cost, silently forfeiting the builder's entire margin.
-  //
-  // Canonical: sum of each line item's OWN margin_pct-marked-up total, never
-  // total_cost * quote.margin_pct — that blanket formula ignores provisional
-  // sums' 0% margin and disagreed with the client_price the builder actually
-  // reviewed in QuoteView before approving this quote. See calculateClientPrice
-  // (lib/pricing.ts) for the full reasoning. Invoice schedules must match the
-  // approved quote exactly, so this must be the same calculation, not a
-  // second, independently-derived one.
-  //
-  // GST: this value is GST-EXCLUSIVE, matching every other client-facing
-  // figure in the app (see lib/pricing.ts's PRICE_BASIS_LABEL/
-  // CLIENT_PRICE_DISCLAIMER for the product decision this reflects). If
-  // invoice_schedule amounts are ever surfaced to a builder or client
-  // without also surfacing that disclaimer, that surface needs the same
-  // labeling QuoteView/PDF export/send-quote already carry — do not assume
-  // it's implied.
-  const { data: activationLineItems } = await supabase
-    .from('quote_line_items')
-    .select('total, margin_pct, assumption_status')
-    .eq('quote_id', quoteId)
-  const clientContractValue = calculateClientPrice(activationLineItems ?? [])
 
   // 5. Generate and insert milestones — checked, and skipped (reading back
   // what's already there instead) when a repair finds this already done.
@@ -491,10 +522,56 @@ async function handleLiveActivation(
   }
 
   // 6. Generate and insert invoice schedule — from the CLIENT contract value
-  // (cost + margin), never raw cost. See the margin note above step 5. Same
-  // checked-and-skip-if-already-persisted pattern as milestones.
+  // (cost + margin), never raw cost. See the contract-value comment at step
+  // 2b above. Same checked-and-skip-if-already-persisted pattern as
+  // milestones, plus a third path (Round 9 fix) for a schedule that exists
+  // but was poisoned to all-$0 by a prior failed read of that same
+  // contract value.
   let invoiceSchedule: ReturnType<typeof generateInvoiceSchedule>
-  if (plan.needsInvoiceSchedule) {
+  if (plan.needsInvoiceScheduleRepair) {
+    // Replace a poisoned $0 schedule: delete the existing, unlinked rows
+    // this bug left behind, then insert a fresh schedule from the
+    // now-verified contract value. Scoped to invoice_id IS NULL rows only
+    // — a $0 stage can never have been invoiced (POST
+    // /api/jobs/[jobId]/invoices rejects amount<=0), so this can never
+    // delete a row a real invoice depends on; planActivationRepair itself
+    // already refuses to flag a schedule for repair at all if any row has
+    // invoice_id set, as a second, independent guard against ever touching
+    // one.
+    const { error: scheduleDeleteErr } = await supabase
+      .from('invoice_schedule')
+      .delete()
+      .eq('job_id', jobId)
+      .is('invoice_id', null)
+
+    if (scheduleDeleteErr) {
+      console.error(JSON.stringify({
+        event: 'activate_invoice_schedule_repair_delete_failed', job_id: jobId, quote_id: quoteId, error: scheduleDeleteErr.message,
+      }))
+      return NextResponse.json({ error: 'Activation failed while repairing the invoice schedule — please try again.' }, { status: 500 })
+    }
+
+    invoiceSchedule = generateInvoiceSchedule(jobId, clientContractValue)
+    const { error: scheduleRepairInsertErr } = await supabase.from('invoice_schedule').insert(
+      invoiceSchedule.map((item) => ({
+        id: item.id,
+        job_id: item.job_id,
+        builder_id: builderId,
+        label: item.label,
+        percentage: item.percentage,
+        amount: item.amount,
+        due_trigger: item.due_trigger,
+        invoice_id: null,
+      }))
+    )
+
+    if (scheduleRepairInsertErr) {
+      console.error(JSON.stringify({
+        event: 'activate_invoice_schedule_repair_insert_failed', job_id: jobId, quote_id: quoteId, error: scheduleRepairInsertErr.message,
+      }))
+      return NextResponse.json({ error: 'Activation failed while repairing the invoice schedule — please try again.' }, { status: 500 })
+    }
+  } else if (plan.needsInvoiceSchedule) {
     invoiceSchedule = generateInvoiceSchedule(jobId, clientContractValue)
     const { error: scheduleInsertErr } = await supabase.from('invoice_schedule').insert(
       invoiceSchedule.map((item) => ({
