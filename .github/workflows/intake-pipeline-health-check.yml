@@ -128,6 +128,16 @@ on:
         required: false
         type: string
         default: 'false'
+      run_variation_contract_diagnostic:
+        description: "TEMPORARY diagnostic, not part of any milestone: Run scripts/diagnose-variation-contract-application.mjs -- read-only, platform-wide scan for variations.status='approved' with no matching quote_line_items.variation_id (the variation-approval persistence-truthfulness defect, Round 5 audit) -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
+      run_variation_approval_e2e:
+        description: "Run scripts/run-variation-approval-e2e.mjs -- live end-to-end check of the variation-approval persistence-truthfulness fix: raises and approves a real variation via the deployed routes, independently verifies quote_line_items/quotes.total_cost, then calls the new retry-contract-application route and confirms no duplicate line item is created -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
       run_assumption_resolution_e2e:
         description: "Run scripts/run-assumption-resolution-e2e.mjs -- live end-to-end check of the assumptions-resolve persistence-truthfulness fix (Round 4 audit): resolves a real assumption via the real route, independently verifies assumptions/quote_line_items/quotes state (total_cost, status, qa_report), resubmits the identical resolution and verifies no duplicate estimator_corrections row or total_cost drift, checks for duplicate quotes/line items -- type the literal word true to enable"
         required: false
@@ -314,8 +324,23 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
         run: node scripts/run-assumption-resolution-e2e.mjs
 
+      - name: Diagnose variation contract-application persistence truthfulness (TEMPORARY, not part of any milestone)
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_variation_contract_diagnostic == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/diagnose-variation-contract-application.mjs
+
+      - name: Run variation approval persistence E2E check
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_variation_approval_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/run-variation-approval-e2e.mjs
+
       - name: Run synthetic intake pipeline health check
-        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.run_project_memory_upsert_diagnostic != 'true' && inputs.stage3_checkpoint_job_id == '' && inputs.classification_persistence_job_id == '' && inputs.run_job_activation_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' && inputs.run_clarify_persistence_e2e != 'true' && inputs.run_completion_write_diagnostic != 'true' && inputs.run_assumption_resolution_diagnostic != 'true' && inputs.run_assumption_resolution_e2e != 'true' }}
+        if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate != 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.run_manual_estimate_e2e != 'true' && inputs.run_job_costs_e2e != 'true' && inputs.run_variations_financial_e2e != 'true' && inputs.run_invoicing_financial_e2e != 'true' && inputs.run_job_closeout_e2e != 'true' && inputs.run_project_memory_upsert_diagnostic != 'true' && inputs.stage3_checkpoint_job_id == '' && inputs.classification_persistence_job_id == '' && inputs.run_job_activation_e2e != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' && inputs.trigger_quote_pricing_qa == '' && inputs.probe_quote_total_cost_write == '' && inputs.run_postgrest_vs_direct_sql_test != 'true' && inputs.run_clarify_persistence_e2e != 'true' && inputs.run_completion_write_diagnostic != 'true' && inputs.run_assumption_resolution_diagnostic != 'true' && inputs.run_assumption_resolution_e2e != 'true' && inputs.run_variation_contract_diagnostic != 'true' && inputs.run_variation_approval_e2e != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

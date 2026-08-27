@@ -5,6 +5,7 @@ import { DEMO_VARIATIONS, demoVariationState, type DemoVariation } from '@/lib/v
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { recordProofEvent } from '@/lib/proof'
 import { applyApprovedVariationToQuote, type ApplyVariationResult } from '@/lib/variations'
+import { shouldLogContractApplicationFailure } from '@/lib/variation-approval'
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
@@ -257,6 +258,19 @@ export async function PATCH(
         trade_category_id: updated.trade_category_id,
       })
     : undefined
+
+  // The variation approval itself already committed (durably, forward-only —
+  // this client can never re-submit a decision for it), so a failure here
+  // must never be silently thrown away: it's the only trace that the
+  // contract price the client just agreed to hasn't actually landed yet.
+  if (shouldLogContractApplicationFailure(status, contractEffect)) {
+    console.error(JSON.stringify({
+      event: 'variation_contract_application_failed',
+      approval_source: 'client_portal',
+      variation_id: updated.id, job_id: updated.job_id,
+      reason: (contractEffect as { applied: false; reason: string }).reason,
+    }))
+  }
 
   const { data: job } = await sb.from('jobs').select('address').eq('id', updated.job_id).single()
   const jobAddress = (job as { address: string } | null)?.address ?? 'your job'

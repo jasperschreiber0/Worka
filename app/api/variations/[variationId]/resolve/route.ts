@@ -5,6 +5,7 @@ import { requirePermission } from '@/lib/auth/role-guard'
 import { recordProofEvent } from '@/lib/proof'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { applyApprovedVariationToQuote, type ApplyVariationResult } from '@/lib/variations'
+import { shouldLogContractApplicationFailure } from '@/lib/variation-approval'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,18 @@ export async function POST(
         trade_category_id: updatedRow.trade_category_id,
       })
     : null
+
+  // Same as the client-portal PATCH route: the approval itself already
+  // committed (forward-only — this can't be re-decided), so a failure here
+  // must be observable, not silently discarded.
+  if (shouldLogContractApplicationFailure(action, contractEffect)) {
+    console.error(JSON.stringify({
+      event: 'variation_contract_application_failed',
+      approval_source: 'builder_resolve',
+      variation_id: updatedRow.id, job_id: updatedRow.job_id,
+      reason: (contractEffect as { applied: false; reason: string }).reason,
+    }))
+  }
 
   return NextResponse.json({
     variation: updated,

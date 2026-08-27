@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
+import { describeApprovalOutcome, type ContractEffectLike } from '@/lib/variation-approval'
 
 interface VariationDetail {
   id: string
@@ -36,6 +37,7 @@ export default function VariationApprovalPage() {
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
   const [result, setResult] = useState<'approved' | 'rejected' | null>(null)
+  const [contractEffect, setContractEffect] = useState<ContractEffectLike | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [clientName, setClientName] = useState('')
   const [showNamePrompt, setShowNamePrompt] = useState(false)
@@ -66,10 +68,15 @@ export default function VariationApprovalPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: decision, approved_by: name || 'Client', t: shareToken }),
       })
+      const data = await res.json().catch(() => null) as { error?: string; contract_effect?: ContractEffectLike } | null
       if (!res.ok) {
-        const data = await res.json().catch(() => null) as { error?: string } | null
         throw new Error(data?.error ?? 'Failed')
       }
+      // Never claim the contract price has changed unless the response
+      // actually confirms it — data?.contract_effect is only present on an
+      // 'approved' decision (see the route), so this is naturally null/absent
+      // for a rejection.
+      setContractEffect(data?.contract_effect ?? null)
       setResult(decision)
       setShowNamePrompt(false)
     } catch (err) {
@@ -112,15 +119,21 @@ export default function VariationApprovalPage() {
 
   // ── Already actioned ─────────────────────────────────────────────────────────
   if (result) {
-    const isApproved = result === 'approved'
+    const outcome = describeApprovalOutcome(result, contractEffect)
+    const isApproved = outcome !== 'rejected'
+    const isPartial = outcome === 'approved_but_not_applied'
     return (
       <div className="min-h-screen flex items-center justify-center px-4" style={{ backgroundColor: '#0f1117' }}>
         <div className="w-full max-w-sm rounded-2xl p-8 text-center" style={{ backgroundColor: '#1a1f2e', border: '0.5px solid rgba(255,255,255,0.08)' }}>
           <div
             className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-5"
-            style={{ backgroundColor: isApproved ? 'rgba(76,175,80,0.15)' : 'rgba(244,67,54,0.1)' }}
+            style={{ backgroundColor: isPartial ? 'rgba(255,152,0,0.12)' : isApproved ? 'rgba(76,175,80,0.15)' : 'rgba(244,67,54,0.1)' }}
           >
-            {isApproved ? (
+            {isPartial ? (
+              <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ color: '#ff9800' }} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008ZM21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+              </svg>
+            ) : isApproved ? (
               <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ color: '#4caf50' }} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
               </svg>
@@ -131,12 +144,14 @@ export default function VariationApprovalPage() {
             )}
           </div>
           <h1 className="text-[18px] font-bold mb-2" style={{ color: '#f1f5f9' }}>
-            {isApproved ? 'Variation approved' : 'Variation rejected'}
+            {isPartial ? 'Approval recorded' : isApproved ? 'Variation approved' : 'Variation rejected'}
           </h1>
           <p className="text-[13px] leading-relaxed" style={{ color: '#94a3b8' }}>
-            {isApproved
-              ? 'Your builder has been notified. They will update the project schedule and invoice accordingly.'
-              : 'Your builder has been notified. They will follow up with you shortly.'}
+            {isPartial
+              ? "Your decision has been recorded, but there was an issue updating the contract on your builder's side. They'll need to confirm the final price with you directly."
+              : isApproved
+                ? 'Your builder has been notified. They will update the project schedule and invoice accordingly.'
+                : 'Your builder has been notified. They will follow up with you shortly.'}
           </p>
           <p className="text-[11px] mt-5 font-medium" style={{ color: '#ff6b2b' }}>Powered by WorkA</p>
         </div>
