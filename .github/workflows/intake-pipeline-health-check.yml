@@ -227,13 +227,16 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
         run: node scripts/run-invoicing-financial-e2e.mjs
 
-      - name: Run job closeout (Job Closeout v1) E2E check
+      - name: Run job closeout (Job Closeout v1) E2E check, plus job-closeout persistence-truthfulness diagnostic + E2E (Round 7 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_job_closeout_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           APP_URL: ${{ secrets.APP_URL }}
-        run: node scripts/run-job-closeout-e2e.mjs
+        run: |
+          node scripts/run-job-closeout-e2e.mjs
+          node scripts/diagnose-job-closeout-truthfulness.mjs
+          node scripts/run-job-closeout-truthfulness-e2e.mjs
 
       - name: Diagnose project_memory upsert (TEMPORARY, not part of any milestone)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_project_memory_upsert_diagnostic == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
