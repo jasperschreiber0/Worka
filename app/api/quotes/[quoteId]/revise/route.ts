@@ -65,6 +65,24 @@ export async function POST(
       return NextResponse.json({ error: 'Quote not found' }, { status: 404 })
     }
 
+    // FIX (Round 8 reliability audit, persistence truthfulness): this route
+    // used to accept a quote in ANY status. set_current_quote below then
+    // unconditionally flips is_current to the new draft — on an already
+    // sent/approved quote, that silently moves a live job's contract value
+    // (getContractValueForJob, snapshot route, applyApprovedVariationToQuote
+    // all resolve "the job's quote" as highest-version with no status
+    // filter) onto an unsent, freely-editable draft nobody has agreed to,
+    // and permanently disables planActivationRepair (lib/job-activation.ts),
+    // which refuses to act once isCurrentQuote is false. Once a quote has
+    // been sent to or approved by the client, further changes belong in the
+    // variation flow, not a silent revise.
+    if (existingQuote.status === 'sent' || existingQuote.status === 'approved') {
+      return NextResponse.json(
+        { error: `This quote has already been ${existingQuote.status === 'approved' ? 'approved' : 'sent'} to the client and can no longer be revised — raise a variation instead.` },
+        { status: 409 }
+      )
+    }
+
     const { data: existingItems, error: itemsErr } = await supabase
       .from('quote_line_items')
       .select('*')

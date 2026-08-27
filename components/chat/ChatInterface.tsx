@@ -764,11 +764,17 @@ export default function ChatInterface({
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])
-    } catch {
+    } catch (err) {
+      // Surface the route's own message when it has one (e.g. the Round 8
+      // 409 for an already-sent/approved quote) rather than a generic
+      // "try again" — that guard is permanent, not transient, and telling
+      // the builder to retry would be misleading.
       const assistantMessage: Message = {
         id: generateId(),
         role: 'assistant',
-        content: "Couldn't create a revised quote — please try again in a moment.",
+        content: err instanceof Error && err.message
+          ? err.message
+          : "Couldn't create a revised quote — please try again in a moment.",
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, assistantMessage])

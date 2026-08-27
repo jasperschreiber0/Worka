@@ -1581,13 +1581,19 @@ function CheckBeforeSending({ report, scopeConfidence }: { report: QAReportPaylo
 
 interface ActionBarProps {
   quoteId: string
+  quoteStatus: DemoQuote['status']
   summary: QuoteSummary
   onSend: (quoteId: string) => void
   onRevise: (quoteId: string) => void
   onExportPdf: (quoteId: string) => void
 }
 
-function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBarProps) {
+function ActionBar({ quoteId, quoteStatus, summary, onSend, onRevise, onExportPdf }: ActionBarProps) {
+  // Mirrors the server-side guard in app/api/quotes/[quoteId]/revise/route.ts
+  // (Round 8 reliability audit) — once a quote has been sent to or approved
+  // by the client, revising it would silently move the live job's contract
+  // value onto an unsent draft. Further changes belong in the variation flow.
+  const canRevise = quoteStatus !== 'sent' && quoteStatus !== 'approved'
   return (
     <div
       className="flex-shrink-0 px-4 py-3"
@@ -1638,9 +1644,12 @@ function ActionBar({ quoteId, summary, onSend, onRevise, onExportPdf }: ActionBa
         <button
           type="button"
           onClick={() => onRevise(quoteId)}
-          className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors flex-1 sm:flex-none"
+          disabled={!canRevise}
+          title={canRevise ? 'Create a new draft version' : 'Already sent to the client — raise a variation instead'}
+          className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors flex-1 sm:flex-none disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ color: 'var(--text-secondary)' }}
           onMouseEnter={e => {
+            if (!canRevise) return
             e.currentTarget.style.color = 'var(--text-primary)'
             e.currentTarget.style.backgroundColor = 'var(--bg-elevated)'
           }}
@@ -2149,6 +2158,7 @@ function QuoteViewInner({
         {!isLoading && !error && data && (
           <ActionBar
             quoteId={quoteId}
+            quoteStatus={data.quote.status}
             summary={data.summary}
             onSend={handleSendClick}
             onRevise={handleReviseClick}
