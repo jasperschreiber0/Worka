@@ -148,6 +148,16 @@ on:
         required: false
         type: string
         default: 'false'
+      verify_health_endpoint:
+        description: "Run scripts/verify-health-endpoint.mjs -- hits the real deployed GET /api/health and checks it returns 200, status:'ok', a non-empty commit_sha, a valid mode, a valid database field, and leaks no secret key names. Optionally set expected_commit_sha below to assert the exact deployed commit -- type the literal word true to enable"
+        required: false
+        type: string
+        default: 'false'
+      expected_commit_sha:
+        description: "Optional: full or short commit SHA verify_health_endpoint should assert /api/health's commit_sha matches (only used when verify_health_endpoint is true)"
+        required: false
+        type: string
+        default: ''
   # schedule:
   #   - cron: '17 */6 * * *' # every 6 hours, offset off the hour to avoid GH Actions' scheduling pile-up at :00
 
@@ -175,6 +185,13 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           BATCH_ID: ${{ inputs.diagnostic_batch_id }}
         run: node scripts/check-batch-recovery-state.mjs
+
+      - name: Verify /api/health endpoint
+        if: ${{ inputs.verify_health_endpoint == 'true' }}
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+        run: node scripts/verify-health-endpoint.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
