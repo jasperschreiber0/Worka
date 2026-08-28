@@ -7,6 +7,7 @@ import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { withTimeoutAndRetry } from '@/supabase/functions/smooth-responder/pipeline-logic'
 import { guardedClaudeCall } from '@/supabase/functions/smooth-responder/ai-gateway'
 import { gatewaySupabase } from '@/lib/ai-gateway-client'
+import { calculateClientPrice } from '@/lib/pricing'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,7 @@ const DEMO_BUILDER = {
 
 // ─── Job context loader ───────────────────────────────────────────────────────
 
-interface JobContext {
+export interface JobContext {
   job_id: string
   job_address: string
   client_name: string
@@ -65,7 +66,7 @@ interface JobContext {
   latest_variation_amount: number | null
 }
 
-function loadDemoJobContext(jobId: string): JobContext | null {
+export function loadDemoJobContext(jobId: string): JobContext | null {
   const snapshot = getDemoJobSnapshot(jobId)
   if (!snapshot) return null
 
@@ -89,7 +90,13 @@ function loadDemoJobContext(jobId: string): JobContext | null {
     invoice_amount: invoice?.amount ?? null,
     invoice_status: invoice?.status ?? null,
     invoice_days_overdue: invoiceDaysOverdue,
-    quote_amount: snapshot.quote?.total_cost ?? null,
+    // Round 12 reliability audit: this used to be snapshot.quote?.total_cost
+    // (the builder's internal cost basis) fed straight into an AI-drafted
+    // CLIENT-facing email as "Quote amount: $X" — snapshot.overview.contract_value
+    // is the same canonical client-facing price (calculateClientPrice) every
+    // other client-facing surface already uses, already computed on the
+    // demo snapshot itself.
+    quote_amount: snapshot.overview.contract_value,
     quote_sent_display: snapshot.quote?.sent_at ?? null,
     latest_variation_title: variation?.title ?? null,
     latest_variation_amount: variation?.amount ?? null,
@@ -120,7 +127,7 @@ async function loadBuilderIdentity(
   }
 }
 
-async function loadRealJobContext(
+export async function loadRealJobContext(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sb: any,
   jobId: string,
@@ -136,7 +143,7 @@ async function loadRealJobContext(
   if (!job) return null
 
   const [{ data: quotes }, { data: variations }, { data: invoices }] = await Promise.all([
-    sb.from('quotes').select('total_cost, sent_at, version, status').eq('job_id', jobId).order('version', { ascending: false }).limit(1),
+    sb.from('quotes').select('id, total_cost, sent_at, version, status').eq('job_id', jobId).order('version', { ascending: false }).limit(1),
     sb.from('variations').select('title, amount').eq('job_id', jobId).eq('status', 'pending').order('created_at', { ascending: false }).limit(1),
     sb.from('invoices').select('amount, status, due_date').eq('job_id', jobId).order('created_at', { ascending: false }).limit(1),
   ])
@@ -150,6 +157,23 @@ async function loadRealJobContext(
     invoiceDaysOverdue = Math.floor((Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24))
   }
 
+  // Round 12 reliability audit: quote_amount used to be quote.total_cost —
+  // the builder's internal cost basis — fed straight into an AI-drafted
+  // CLIENT-facing email as "Quote amount: $X". Every other client-facing
+  // surface (getContractValueForJob, the snapshot route,
+  // applyApprovedVariationToQuote, quote send, PDF export) derives the
+  // client-facing figure from calculateClientPrice over the quote's own
+  // line items — never total_cost directly. Only fetched when a quote
+  // exists, to avoid an unnecessary query on jobs with no quote yet.
+  let quoteAmount: number | null = null
+  if (quote) {
+    const { data: lineItems } = await sb
+      .from('quote_line_items')
+      .select('total, margin_pct, assumption_status')
+      .eq('quote_id', quote.id)
+    quoteAmount = calculateClientPrice(lineItems ?? [])
+  }
+
   return {
     job_id: jobId,
     job_address: job.address,
@@ -158,7 +182,7 @@ async function loadRealJobContext(
     invoice_amount: invoice?.amount ?? null,
     invoice_status: invoice?.status ?? null,
     invoice_days_overdue: invoiceDaysOverdue,
-    quote_amount: quote?.total_cost ?? null,
+    quote_amount: quoteAmount,
     quote_sent_display: quote?.sent_at ?? null,
     latest_variation_title: variation?.title ?? null,
     latest_variation_amount: variation?.amount ?? null,
