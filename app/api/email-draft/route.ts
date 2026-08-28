@@ -52,7 +52,7 @@ const DEMO_BUILDER = {
 
 // ─── Job context loader ───────────────────────────────────────────────────────
 
-export interface JobContext {
+interface JobContext {
   job_id: string
   job_address: string
   client_name: string
@@ -66,7 +66,7 @@ export interface JobContext {
   latest_variation_amount: number | null
 }
 
-export function loadDemoJobContext(jobId: string): JobContext | null {
+function loadDemoJobContext(jobId: string): JobContext | null {
   const snapshot = getDemoJobSnapshot(jobId)
   if (!snapshot) return null
 
@@ -127,7 +127,7 @@ async function loadBuilderIdentity(
   }
 }
 
-export async function loadRealJobContext(
+async function loadRealJobContext(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sb: any,
   jobId: string,
