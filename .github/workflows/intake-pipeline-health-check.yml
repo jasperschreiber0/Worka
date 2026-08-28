@@ -194,7 +194,7 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: node scripts/run-multitrade-known-good-estimate.mjs
 
-      - name: Run manual estimate creation E2E check (real routes, incl. AI-pipeline interaction), plus ambiguous-current-quote diagnostic + is_current-consumers fix E2E (Round 11 audit)
+      - name: Run manual estimate creation E2E check (real routes, incl. AI-pipeline interaction), plus ambiguous-current-quote diagnostic + is_current-consumers fix E2E (Round 11 audit) + email-draft cost-vs-price fix E2E (Round 12 audit)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_manual_estimate_e2e == 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
@@ -204,6 +204,7 @@ jobs:
         run: |
           node scripts/diagnose-ambiguous-current-quote.mjs
           node scripts/run-current-quote-consumers-e2e.mjs
+          node scripts/run-email-draft-cost-vs-price-e2e.mjs
           node scripts/run-manual-estimate-e2e.mjs
 
       - name: Run job costs (Financials v1) E2E check, plus supplier-rate-import persistence-truthfulness diagnostic + E2E (Round 10 audit)
