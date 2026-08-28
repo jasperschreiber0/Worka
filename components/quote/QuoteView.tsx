@@ -1594,6 +1594,38 @@ function ActionBar({ quoteId, quoteStatus, summary, onSend, onRevise, onExportPd
   // by the client, revising it would silently move the live job's contract
   // value onto an unsent draft. Further changes belong in the variation flow.
   const canRevise = quoteStatus !== 'sent' && quoteStatus !== 'approved'
+
+  // Client Quote Review & Approval (v1) — mirrors VariationCard.tsx's own
+  // "Send to client" / "Copy approval link" share-link pattern exactly. Only
+  // meaningful once the quote has actually been sent (or already approved,
+  // to let the builder re-copy the same link) — matches the approve route's
+  // own isQuoteViewableByClient gate server-side.
+  const [shareLink, setShareLink] = useState<string | null>(null)
+  const [shareCopied, setShareCopied] = useState(false)
+  const [shareLoading, setShareLoading] = useState(false)
+  const canShare = quoteStatus === 'sent' || quoteStatus === 'approved'
+
+  async function handleGetApprovalLink() {
+    if (shareLink) {
+      await navigator.clipboard.writeText(shareLink).catch(() => {})
+      setShareCopied(true)
+      setTimeout(() => setShareCopied(false), 2000)
+      return
+    }
+    setShareLoading(true)
+    try {
+      const res = await fetch(`/api/quotes/${quoteId}/share`, { method: 'POST' })
+      const data = await res.json() as { link?: string }
+      if (data.link) {
+        setShareLink(data.link)
+        await navigator.clipboard.writeText(data.link).catch(() => {})
+        setShareCopied(true)
+        setTimeout(() => setShareCopied(false), 2000)
+      }
+    } catch { /* ignore */ }
+    finally { setShareLoading(false) }
+  }
+
   return (
     <div
       className="flex-shrink-0 px-4 py-3"
@@ -1660,7 +1692,22 @@ function ActionBar({ quoteId, quoteStatus, summary, onSend, onRevise, onExportPd
         >
           Revise
         </button>
+        {canShare && (
+          <button
+            type="button"
+            onClick={() => void handleGetApprovalLink()}
+            disabled={shareLoading}
+            title="Copy a secure link the client can use to review and approve this quote"
+            className="px-4 py-2 text-[13px] font-medium rounded-lg transition-colors flex-1 sm:flex-none disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            {shareLoading ? 'Generating link…' : shareCopied ? '✓ Link copied!' : shareLink ? 'Copy approval link' : 'Get client approval link'}
+          </button>
+        )}
       </div>
+      {shareLink && (
+        <p className="text-[10px] break-all mt-1.5" style={{ color: 'var(--text-tertiary)' }}>{shareLink}</p>
+      )}
     </div>
   )
 }
