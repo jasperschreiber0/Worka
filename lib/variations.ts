@@ -129,22 +129,25 @@ export async function applyApprovedVariationToQuote(
       }
     }
 
-    // The job's current quote, resolved the exact same way the snapshot
-    // route (app/api/jobs/[jobId]/snapshot/route.ts) already does for
-    // Financials v1's own contract_value calculation: highest `version`,
-    // no status filter. A variation is raised on a job that's typically
-    // already under contract (its quote already 'approved'/'sent') — an
-    // earlier version of this lookup filtered to status IN
-    // ('draft','pending_review'), which meant an approved variation on a
-    // real, active job (the normal case) silently found no quote at all.
-    // Matching the snapshot route's own selection is what guarantees this
-    // line item lands on the exact quote contract_value is computed from.
+    // The job's canonical current quote — quotes.is_current (migration
+    // 061), the DB-enforced, exactly-one-per-job marker, matching the
+    // snapshot route (app/api/jobs/[jobId]/snapshot/route.ts) and
+    // getContractValueForJob (lib/invoices.ts). A variation is raised on a
+    // job that's typically already under contract (its quote already
+    // 'approved'/'sent') — an earlier version of this lookup filtered to
+    // status IN ('draft','pending_review'), which meant an approved
+    // variation on a real, active job (the normal case) silently found no
+    // quote at all. Round 11 reliability audit: this then moved to
+    // "highest version, no status filter, no tiebreak", which could
+    // disagree with is_current (and therefore with the other two
+    // consumers) whenever a job ended up with more than one quote sharing
+    // the top version — is_current is what actually guarantees this line
+    // item lands on the exact quote contract_value is computed from.
     const { data: quote } = await supabase
       .from('quotes')
       .select('id')
       .eq('job_id', variation.job_id)
-      .order('version', { ascending: false })
-      .limit(1)
+      .eq('is_current', true)
       .maybeSingle()
 
     if (!quote) {

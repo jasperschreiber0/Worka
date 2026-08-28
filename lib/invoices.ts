@@ -75,10 +75,15 @@ export function computeInvoiceTotals(invoices: InvoiceRow[]): InvoiceTotals {
 
 /**
  * The job's current contract value, via the same canonical calculation
- * (calculateClientPrice) and the same "highest version, no status filter"
- * quote lookup lib/variations.ts already established — so an approved
- * variation is reflected here identically to how it's reflected in the
- * snapshot route's own contract_value, with no second calculation.
+ * (calculateClientPrice) and the job's canonical current quote —
+ * quotes.is_current (migration 061), the DB-enforced, exactly-one-per-job
+ * marker every quote-creation call site (Stage 6, the estimate route,
+ * revise) already keeps in sync via set_current_quote(). Round 11
+ * reliability audit: this used to select "highest version, no status
+ * filter, no tiebreak" instead, which could pick a different quote than
+ * is_current — and therefore than the snapshot route and
+ * applyApprovedVariationToQuote (lib/variations.ts) — whenever a job ended
+ * up with more than one quote sharing the top version.
  */
 export async function getContractValueForJob(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -89,8 +94,7 @@ export async function getContractValueForJob(
     .from('quotes')
     .select('id')
     .eq('job_id', jobId)
-    .order('version', { ascending: false })
-    .limit(1)
+    .eq('is_current', true)
     .maybeSingle()
 
   if (!quote) return null

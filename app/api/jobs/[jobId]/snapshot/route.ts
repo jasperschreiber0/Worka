@@ -67,12 +67,16 @@ export async function GET(
       )
     }
 
-  // Quote
+  // Quote — the job's canonical current quote (quotes.is_current, migration
+  // 061), not "highest version": Round 11 reliability audit found the
+  // latter can disagree with is_current (and therefore with
+  // getContractValueForJob/applyApprovedVariationToQuote) whenever a job
+  // ends up with more than one quote sharing the top version.
   const { data: quotes } = await sb
     .from('quotes')
     .select('*')
     .eq('job_id', jobId)
-    .order('version', { ascending: false })
+    .eq('is_current', true)
     .limit(1)
 
   const quote = quotes?.[0] ?? null
