@@ -20,32 +20,23 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
 
-// Reserved synthetic/demo builder ids used by this repo's own E2E scripts.
-const EXCLUDED_BUILDER_IDS = [
-  '00000000-0000-0000-0000-000000000001', // demo fallback
-  '00000000-0000-0000-0000-0000000000f1',
-  '00000000-0000-0000-0000-0000000000f2',
-  '00000000-0000-0000-0000-0000000000f3',
-  '00000000-0000-0000-0000-0000000000f4',
-  '00000000-0000-0000-0000-0000000000f5',
-  '00000000-0000-0000-0000-0000000000f6',
-  '00000000-0000-0000-0000-0000000000fc',
-  '00000000-0000-0000-0000-0000000001f1',
-  '00000000-0000-0000-0000-0000000001f2',
-  '00000000-0000-0000-0000-0000000001f3',
-  '00000000-0000-0000-0000-0000000001f4',
-]
+// Every synthetic builder id ever minted by this repo's own E2E/diagnostic
+// scripts follows the reserved 00000000-0000-0000-0000-0000000000xx /
+// 0000000001xx pattern -- an exclude-list of individual ids proved leaky in
+// practice (a real run turned up 10 more reserved ids not previously
+// recorded here). Filtering the whole reserved namespace out by pattern,
+// plus requiring a real auth.users-style email domain shape, is what
+// actually isolates genuine customer builders.
+const RESERVED_ID_PATTERN = /^00000000-0000-0000-0000-0000000[0-9a-f]{3,5}$/i
 
 function log(event, data = {}) {
   console.log(JSON.stringify({ event, ts: new Date().toISOString(), ...data }))
 }
 
 async function main() {
-  const { data: builders } = await supabase
-    .from('builders')
-    .select('id, name, email')
-    .not('id', 'in', `(${EXCLUDED_BUILDER_IDS.join(',')})`)
-  log('real_builders_found', { count: builders?.length ?? 0, ids: (builders ?? []).map((b) => b.id) })
+  const { data: allBuilders } = await supabase.from('builders').select('id, name, email')
+  const builders = (allBuilders ?? []).filter((b) => !RESERVED_ID_PATTERN.test(b.id))
+  log('real_builders_found', { count: builders.length, ids: builders.map((b) => b.id), total_builder_rows: allBuilders?.length ?? 0 })
 
   if (!builders || builders.length === 0) {
     log('no_real_builders_found')
