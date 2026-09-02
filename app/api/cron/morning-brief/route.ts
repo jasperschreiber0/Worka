@@ -34,7 +34,7 @@ async function sendBriefEmail(resendApiKey: string, to: string, subject: string,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: 'WorkA <noreply@worka.app>',
+      from: `WorkA <${process.env.EMAIL_FROM_ADDRESS ?? 'hello@getworka.com'}>`,
       to: [to],
       subject,
       text,

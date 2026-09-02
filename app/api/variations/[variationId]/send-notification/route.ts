@@ -89,7 +89,7 @@ export async function POST(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: 'WorkA <noreply@worka.app>',
+          from: `WorkA <${process.env.EMAIL_FROM_ADDRESS ?? 'hello@getworka.com'}>`,
           to: [to],
           subject,
           text: emailBody,
