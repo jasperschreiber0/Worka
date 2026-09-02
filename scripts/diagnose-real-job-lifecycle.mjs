@@ -77,6 +77,25 @@ async function main() {
   const unpriced = (lineItems ?? []).filter((i) => i.assumption_status !== 'excluded' && i.total === null)
   const activeFacts = (facts ?? []).filter((f) => !f.superseded)
 
+  // Real observed AI spend for this exact job (scope_key is '<job_id>:<stage>'
+  // for pipeline calls) -- evidence for sizing ai_limits, not a guess.
+  const [{ data: jobOps }, { data: builderSpend }] = await Promise.all([
+    supabase.from('ai_operations').select('id, call_site, status, cost_cents, input_tokens, output_tokens, error_classification, created_at')
+      .like('scope_key', `${jobId}:%`).order('created_at', { ascending: true }),
+    supabase.from('ai_spend_daily').select('builder_id, day, cost_cents, call_count')
+      .eq('builder_id', quote.builder_id).order('day', { ascending: false }).limit(10),
+  ])
+  const jobOpsSucceeded = (jobOps ?? []).filter((o) => o.status === 'succeeded')
+  const jobOpsFailed = (jobOps ?? []).filter((o) => o.status !== 'succeeded')
+  const jobTotalCostCents = jobOpsSucceeded.reduce((sum, o) => sum + (Number(o.cost_cents) || 0), 0)
+  log('ai_operations_for_job', {
+    total_calls: jobOps?.length ?? 0, succeeded: jobOpsSucceeded.length, failed: jobOpsFailed.length,
+    total_cost_cents_succeeded: jobTotalCostCents,
+    failed_classifications: jobOpsFailed.map((o) => o.error_classification),
+    calls: (jobOps ?? []).map((o) => ({ call_site: o.call_site, status: o.status, cost_cents: o.cost_cents, error_classification: o.error_classification, created_at: o.created_at })),
+  })
+  log('ai_spend_daily_for_builder', { rows: builderSpend ?? [] })
+
   log('job_state', job ?? {})
   log('files_state', { count: files?.length ?? 0, files })
   log('project_documents_state', { count: docs?.length ?? 0, extraction_statuses: (docs ?? []).map((d) => d.extraction_status) })
