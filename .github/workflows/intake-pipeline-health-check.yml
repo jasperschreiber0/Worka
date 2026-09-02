@@ -189,7 +189,10 @@ jobs:
       # Traces a real (non-synthetic) builder's most-advanced job through
       # the full lifecycle for evidence-based confirmation, not just a
       # code-level audit. Runs unconditionally like the health check above.
+      # Independent of the health-check step above (a Railway deploy-lag
+      # commit_sha mismatch there must not block this DB-only diagnostic).
       - name: Diagnose real job lifecycle (read-only)
+        if: ${{ !cancelled() }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
