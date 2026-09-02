@@ -185,6 +185,16 @@ jobs:
           EXPECTED_COMMIT_SHA: ${{ github.sha }}
         run: node scripts/verify-health-endpoint.mjs
 
+      # Post-launch validation -- read-only, no Anthropic calls, no writes.
+      # Traces a real (non-synthetic) builder's most-advanced job through
+      # the full lifecycle for evidence-based confirmation, not just a
+      # code-level audit. Runs unconditionally like the health check above.
+      - name: Diagnose real job lifecycle (read-only)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/diagnose-real-job-lifecycle.mjs
+
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
