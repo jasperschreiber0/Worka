@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   splitIntoBatches,
+  shouldRouteSoloForVisionLoad,
+  SOLO_ROUTE_BYTES_FRACTION,
   mergeFacts,
   cosineSimilarity,
   shouldGiveUp,
@@ -170,6 +172,58 @@ test('splitIntoBatches: largest-first packing keeps the fact-richest documents i
   const { batches } = splitIntoBatches(files, 20 * 1024 * 1024, 5)
   assert.equal(batches.length, 1)
   assert.equal(batches[0][0].fileId, 'big', 'the largest file should be placed first')
+})
+
+// ─── shouldRouteSoloForVisionLoad ───────────────────────────────────────────
+// Production incident: 16 Alfred St Woonona DA-Mod PDF, ~18.64MB effective
+// vision payload (13,978,718 raw bytes), 19 pages, vision_only, no usable
+// text layer — fits under the 20MB per-batch cap, so it was always bundled
+// with other documents and only ever got the shorter multi-document
+// batchTimeoutMs, never a genuine solo attempt at the existing solo ceiling.
+
+const MAX_BYTES_PER_BATCH_TEST = 20 * 1024 * 1024
+
+test('shouldRouteSoloForVisionLoad: reproduces the DA-Mod production failure profile — routes solo', () => {
+  const approxBytes = Math.round(13_978_718 * (4 / 3)) // base64 expansion, no text supplement
+  assert.equal(shouldRouteSoloForVisionLoad(approxBytes, true, MAX_BYTES_PER_BATCH_TEST), true)
+})
+
+test('shouldRouteSoloForVisionLoad: a normal text-only document (large approxBytes, isPureVisionNoText=false) is NOT routed solo', () => {
+  // A large text-dense spec reduced to a text block is not vision-only —
+  // must not be swept into forced-solo just for being large.
+  assert.equal(shouldRouteSoloForVisionLoad(15 * 1024 * 1024, false, MAX_BYTES_PER_BATCH_TEST), false)
+})
+
+test('shouldRouteSoloForVisionLoad: a small vision-only document (e.g. a single elevation photo) is NOT routed solo', () => {
+  assert.equal(shouldRouteSoloForVisionLoad(400_000, true, MAX_BYTES_PER_BATCH_TEST), false)
+})
+
+test('shouldRouteSoloForVisionLoad: a vision document with a text supplement is NOT routed solo regardless of size', () => {
+  // hasUsableText === true (a text-layer supplement exists) means
+  // isPureVisionNoText is false — only the "nothing to fall back on" case
+  // qualifies, matching the actual failure profile exactly.
+  assert.equal(shouldRouteSoloForVisionLoad(18 * 1024 * 1024, false, MAX_BYTES_PER_BATCH_TEST), false)
+})
+
+test('shouldRouteSoloForVisionLoad: boundary — exactly at SOLO_ROUTE_BYTES_FRACTION of the cap routes solo', () => {
+  const approxBytes = MAX_BYTES_PER_BATCH_TEST * SOLO_ROUTE_BYTES_FRACTION
+  assert.equal(shouldRouteSoloForVisionLoad(approxBytes, true, MAX_BYTES_PER_BATCH_TEST), true)
+})
+
+test('shouldRouteSoloForVisionLoad: just under the fraction threshold does NOT route solo', () => {
+  const approxBytes = MAX_BYTES_PER_BATCH_TEST * SOLO_ROUTE_BYTES_FRACTION - 1
+  assert.equal(shouldRouteSoloForVisionLoad(approxBytes, true, MAX_BYTES_PER_BATCH_TEST), false)
+})
+
+test('shouldRouteSoloForVisionLoad: multiple qualifying documents each independently route solo (not combined)', () => {
+  const docA = { approxBytes: 15 * 1024 * 1024, isPureVisionNoText: true }
+  const docB = { approxBytes: 12 * 1024 * 1024, isPureVisionNoText: true }
+  assert.equal(shouldRouteSoloForVisionLoad(docA.approxBytes, docA.isPureVisionNoText, MAX_BYTES_PER_BATCH_TEST), true)
+  assert.equal(shouldRouteSoloForVisionLoad(docB.approxBytes, docB.isPureVisionNoText, MAX_BYTES_PER_BATCH_TEST), true)
+  // Each is evaluated independently — index.ts's forcedSoloInput/soloBatches
+  // machinery (unchanged by this fix) already places each forced-solo file
+  // into its OWN single-file batch, never combines two forced-solo files
+  // together.
 })
 
 // ─── mergeFacts ─────────────────────────────────────────────────────────────

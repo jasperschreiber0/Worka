@@ -35,7 +35,7 @@
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
-  splitIntoBatches, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
+  splitIntoBatches, shouldRouteSoloForVisionLoad, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
   SEMANTIC_DUPLICATE_THRESHOLD, MAX_FACTS_IN_PROMPT,
   withTimeoutAndRetry, classifyAnthropicError, isBillingHaltClassification, maxConsecutiveOccurrences,
   splitBatchForRetry, formatWallClockStallReason, shouldDeferStage6ToNextInvocation,
@@ -1565,6 +1565,14 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         approxBytes: JSON.stringify(f.block).length,
       }))
 
+      // A single, non-array block means no text-layer supplement was
+      // attached (see loadFileAsBlock/loadBlockFromExtractionResult) — the
+      // exact "vision_only, hasUsableText: false" signal, already available
+      // from data built above, no new field/query needed.
+      const isPureVisionNoTextById = new Map<string, boolean>(
+        expandedLoaded.map((f) => [f.fileId, !Array.isArray(f.block) && (f.block as DocBlock)?.type === 'document'])
+      )
+
       // ── Never resend an identical request that already timed out ────────
       // A file with exactly one prior AI failure (ai_failure_count === 1 —
       // two would already have been excluded above) is pulled out of the
@@ -1577,8 +1585,20 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // the persisted per-file history already tells the NEXT invocation to
       // start smaller. If a solo file still fails, ai_failure_count reaches
       // 2 and recordAiFailure permanently excludes it — no third attempt.
-      const forcedSoloInput = batchInput.filter((f) => (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) >= 1)
-      const freshInput = batchInput.filter((f) => (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) < 1)
+      //
+      // A document matching the disproportionately-large-vision-only-no-text
+      // profile (see shouldRouteSoloForVisionLoad's own comment) is routed
+      // solo the SAME way, but on its very FIRST attempt, not only after a
+      // prior failure — that's the actual fix: it would otherwise always be
+      // bundled first (since it fits under MAX_BYTES_PER_BATCH on its own)
+      // and never get a genuine, un-truncated shot at the existing solo
+      // timeout ceiling. No timeout constant changes; this only changes
+      // which batch a document lands in.
+      const isForcedSolo = (f: BatchableFile): boolean =>
+        (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) >= 1
+        || shouldRouteSoloForVisionLoad(f.approxBytes, isPureVisionNoTextById.get(f.fileId) ?? false, MAX_BYTES_PER_BATCH)
+      const forcedSoloInput = batchInput.filter(isForcedSolo)
+      const freshInput = batchInput.filter((f) => !isForcedSolo(f))
       const soloTaken = forcedSoloInput.slice(0, MAX_BATCHES)
       const soloOverflow = forcedSoloInput.slice(MAX_BATCHES)
       const soloBatches: BatchableFile[][] = soloTaken.map((f) => [f])
@@ -1586,7 +1606,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const { batches: freshBatches, excluded: freshExcluded } = splitIntoBatches(freshInput, MAX_BYTES_PER_BATCH, remainingBatchBudget)
       const fileBatches = [...soloBatches, ...freshBatches]
       const excluded = [
-        ...soloOverflow.map((f) => ({ fileId: f.fileId, filename: f.filename, reason: 'previously timed out — retrying alone once batch capacity allows' })),
+        ...soloOverflow.map((f) => ({ fileId: f.fileId, filename: f.filename, reason: 'requires a dedicated batch (large vision-only document or previous timeout) — retrying alone once batch capacity allows' })),
         ...freshExcluded,
       ]
       for (const ex of excluded) skippedSiblings.push(ex.filename)

@@ -35,6 +35,55 @@ export interface SplitResult {
   excluded: ExcludedFile[]
 }
 
+// ─── Solo-routing for a disproportionately large vision-only document ─────
+//
+// Root cause (production incident, 16 Alfred St Woonona DA-Mod PDF — 19
+// pages, ~18.64MB effective vision payload, no usable text layer): a
+// document whose vision payload alone consumes most of one batch's byte
+// budget still gets bin-packed by splitIntoBatches like any other file
+// (it fits under MAX_BYTES_PER_BATCH, so it's never excluded or chunked —
+// chunking only rescues a file that DOESN'T fit alone). That means its
+// FIRST Stage 1/2 attempt is a multi-document batch call, which only gets
+// the shorter multi-document batchTimeoutMs (150s) — and when that call
+// times out, the immediate in-run solo retry that follows is itself
+// wall-clock-capped to whatever invocation budget the failed bundled
+// attempt already spent, not the full solo timeout ceiling. So a document
+// with this exact profile can genuinely never get a fair, full-length solo
+// attempt, no matter how many times it's retried — every attempt is either
+// bundled or a truncated pseudo-solo.
+//
+// The fix routes a document matching this profile into its own batch on
+// the FIRST attempt of a fresh invocation, using the same forced-solo
+// mechanism index.ts already uses for a previously-failed file (see
+// forcedSoloInput) — no new timeout constant, no change to batchTimeoutMs,
+// MAX_SOLO_TIMEOUT_MS, WALL_CLOCK_SAFETY_MS, or any retry/classification
+// logic. Bounded the same way forced-solo-by-failure already is: capped at
+// MAX_BATCHES solo slots per invocation, overflow deferred to a later
+// invocation exactly like any other batch-capacity exclusion.
+//
+// Deliberately narrow on purpose (do not make more documents solo than
+// this exact failure profile requires): a document must be BOTH (a)
+// disproportionately large relative to the batch cap AND (b) have no
+// text-layer fallback at all. Byte size alone would also catch a large
+// but ordinary multi-document grouping opportunity; "no usable text"
+// alone would also catch a small single-page photo. Only their
+// combination reproduces the actual failure — a large-format architectural
+// or structural drawing set Claude must read purely visually, page by
+// page, with nothing to fall back on. `isPureVisionNoText` is derived from
+// the SAME data index.ts already has when building a document's content
+// block (a single, non-array vision block means no text supplement was
+// attached — see loadFileAsBlock/loadBlockFromExtractionResult) — no new
+// field, no new query, no new persisted state.
+export const SOLO_ROUTE_BYTES_FRACTION = 0.5
+
+export function shouldRouteSoloForVisionLoad(
+  approxBytes: number,
+  isPureVisionNoText: boolean,
+  maxBytesPerBatch: number,
+): boolean {
+  return isPureVisionNoText && approxBytes >= maxBytesPerBatch * SOLO_ROUTE_BYTES_FRACTION
+}
+
 export function splitIntoBatches(
   files: BatchableFile[],
   maxBytesPerBatch: number,
