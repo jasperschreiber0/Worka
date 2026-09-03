@@ -127,8 +127,14 @@ async function main() {
   const siblingIds = newFiles.filter((f) => f.newId !== primary.newId).map((f) => f.newId)
   log('reupload_complete', { primary_new_file_id: primary.newId, sibling_ids: siblingIds, da_mod_new_file_id: daModNew.newId })
 
-  // ── 2. Trigger the real pipeline via GET /api/intake/[fileId]?siblings=... ──
-  const intakeUrl = `${APP_URL}/api/intake/${primary.newId}?siblings=${siblingIds.join(',')}&started_at=${Date.now()}`
+  // ── 2. Trigger the real pipeline via GET /api/intake/[fileId]?job_id=...&siblings=... ──
+  // job_id is REQUIRED — route.ts reads it via searchParams.get('job_id') ?? ''
+  // with no validation/fallback (the real browser client, IntakeProgress.tsx,
+  // always includes it). Omitting it previously caused tryAcquireJobLock to
+  // insert job_id:'' , which Postgres rejects (22P02 invalid uuid), surfacing
+  // as an HTTP 400 that the route's fail-safe branch silently treated as
+  // "locked" forever — see the job_intake_locks investigation this fixes.
+  const intakeUrl = `${APP_URL}/api/intake/${primary.newId}?job_id=${JOB_ID}&siblings=${siblingIds.join(',')}&started_at=${Date.now()}`
   log('triggering_intake', { url: intakeUrl })
   const sseController = new AbortController()
   const ssePromise = (async () => {

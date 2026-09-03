@@ -38,7 +38,10 @@ async function main() {
   const { data: fileBefore } = await supabase.from('files').select('id, intake_status, processing_batch_id').eq('id', PRIMARY_FILE_ID).single()
   log('pre_trigger_state', { lock: lockBefore ?? null, primary_file: fileBefore })
 
-  const intakeUrl = `${APP_URL}/api/intake/${PRIMARY_FILE_ID}?siblings=${SIBLING_IDS.join(',')}&started_at=${Date.now()}`
+  // job_id is REQUIRED (route.ts:375, no validation/fallback) -- see the
+  // job_intake_locks investigation this fixes: omitting it produced
+  // job_id:'' -> Postgres 22P02 -> HTTP 400 -> silently masked as "locked".
+  const intakeUrl = `${APP_URL}/api/intake/${PRIMARY_FILE_ID}?job_id=${JOB_ID}&siblings=${SIBLING_IDS.join(',')}&started_at=${Date.now()}`
   const authHeaders = { Authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'x-worka-builder-id': builderId }
 
   log('triggering', { url: intakeUrl })
