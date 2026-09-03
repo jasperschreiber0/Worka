@@ -198,16 +198,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-real-job-lifecycle.mjs
 
-      # ONE-TIME, READ-ONLY: evaluates every individual clause of
-      # find_stuck_batches_needing_classification_retry (migration 088)
-      # against the real target batch, plus a live RPC call, to pinpoint
-      # EXACTLY which clause is excluding it before proposing any fix.
-      - name: ONE-TIME -- diagnose exact exclusion clause blocking batch recovery
+      # ONE-TIME, READ-ONLY: migration 102 passed in isolation (synthetic
+      # regression test) but the live RPC still excluded the real target
+      # batch -- investigates exactly why via per-document project_documents
+      # matching, rather than assuming the fix is broken.
+      - name: ONE-TIME -- diagnose predicate mismatch on real target batch
         if: ${{ !cancelled() }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node scripts/diagnose-stuck-batch-exclusion-clause.mjs
+        run: node scripts/diagnose-predicate-mismatch.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
