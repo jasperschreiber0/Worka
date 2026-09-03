@@ -213,6 +213,19 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
         run: node scripts/verify-stage12-batching-fix.mjs
 
+      # ONE-TIME, read-only follow-up: the verification run above stayed
+      # stuck at SSE stage "queued" for its whole 12-minute poll window and
+      # never created a document_processing_batches row at all -- diagnoses
+      # WHY (job_intake_locks state) before drawing any conclusion about the
+      # solo-routing fix itself, which was never actually exercised by that
+      # run.
+      - name: ONE-TIME -- check job_intake_locks state (read-only)
+        if: ${{ !cancelled() }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/check-job-intake-lock.mjs
+
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
