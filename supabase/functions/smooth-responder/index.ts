@@ -2912,7 +2912,20 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       // No room for even one chunk this invocation -- never start a call
       // that can't finish. Zero spend; everything deferred to a later
       // invocation with a fresh wall-clock window.
+      //
+      // Fired strictly AFTER bailForWallClockBudget's own checkpoint write
+      // (stall_stage/stall_reason/stalled_at persisted to
+      // document_processing_batches) has already completed -- same
+      // ordering guarantee as the Stage 3->Stage 6 handoff above. Reuses
+      // retriggerStage6 exactly as-is (same fetch, same never-throws
+      // failure handling that falls back to the recovery cron as backstop)
+      // -- this was the one wall-clock bail site inside Stage 6 itself that
+      // never got this self-retrigger, leaving a normal, healthy
+      // mid-Stage-6 yield to wait on the once-a-minute recovery cron
+      // instead of resuming within seconds like the Stage 3->6 boundary
+      // already does.
       await bailForWallClockBudget('generating_estimate', STAGE6_PER_CALL_TIMEOUT_MS)
+      await retriggerStage6()
       return
     }
 

@@ -1421,9 +1421,35 @@ const indexTsSource = readFileSync(
   'utf-8',
 )
 
-test('index.ts source: retriggerStage6() is called exactly once, only from the Stage 3 -> Stage 6 handoff block', () => {
+test('index.ts source: retriggerStage6() is called from exactly two call sites -- the Stage 3 -> Stage 6 handoff, and the Stage 6-internal wall-clock bail -- and no others', () => {
+  // As of the Stage-6-internal-bail fix: the Priority 1 handoff (Stage 3 ->
+  // Stage 6) already self-retriggered; a normal mid-Stage-6 yield (some
+  // chunks already run, remaining trades deferred for budget reasons) did
+  // not, leaving that path to wait on the once-a-minute recovery cron
+  // instead of resuming within seconds like the handoff already does. This
+  // reuses the exact same retriggerStage6() call, not a second mechanism.
   const callSites = indexTsSource.match(/(?<!async )\bretriggerStage6\(\)/g) ?? []
-  assert.equal(callSites.length, 1, 'retriggerStage6() must be invoked from exactly one call site')
+  assert.equal(callSites.length, 2, 'retriggerStage6() must be invoked from exactly two call sites (handoff + internal bail), never more')
+})
+
+test('index.ts source: the Stage 6-internal wall-clock bail call site is textually AFTER bailForWallClockBudget and BEFORE the return', () => {
+  const bailCallMarker = "await bailForWallClockBudget('generating_estimate', STAGE6_PER_CALL_TIMEOUT_MS)"
+  const bailBlockStart = indexTsSource.indexOf(bailCallMarker)
+  assert.ok(bailBlockStart > -1, 'the Stage 6-internal wall-clock bail call must exist')
+  const bailBlock = indexTsSource.slice(bailBlockStart, bailBlockStart + 400)
+
+  const retriggerCallIdx = bailBlock.indexOf('await retriggerStage6()')
+  const returnIdx = bailBlock.indexOf('return', retriggerCallIdx)
+
+  assert.ok(retriggerCallIdx > -1, 'retriggerStage6() must be called from the Stage 6-internal bail block')
+  assert.ok(returnIdx > retriggerCallIdx, 'the return must come AFTER the retrigger call, never before it')
+  // The checkpoint (stall_stage/stall_reason/stalled_at) is written INSIDE
+  // bailForWallClockBudget itself, which this block already awaits before
+  // reaching retriggerStage6() -- same ordering guarantee as the handoff
+  // site (checkpoint persisted, then retrigger fired, then return), just
+  // expressed via awaiting bailForWallClockBudget rather than a bare field
+  // write, since that function IS the checkpoint write.
+  assert.ok(bailBlock.indexOf('await retriggerStage6()') > bailBlock.indexOf(bailCallMarker), 'retrigger must be called AFTER the wall-clock checkpoint write (bailForWallClockBudget)')
 })
 
 test('index.ts source: Test 1/3 — the retrigger call site is textually AFTER scope_reasoning_completed_at is persisted and BEFORE the handoff return', () => {
