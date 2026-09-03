@@ -27,7 +27,7 @@ function log(event, data = {}) {
 async function main() {
   const { data: fileRow, error: fileErr } = await supabase
     .from('files')
-    .select('id, filename, intake_status, intake_stage, intake_pct, ai_failure_classification, ai_failure_count, failure_stage, failure_reason, processing_batch_id, created_at, updated_at')
+    .select('id, filename, intake_status, intake_stage, intake_pct, ai_failure_classification, ai_failure_count, failure_stage, failure_reason, processing_batch_id, created_at')
     .eq('id', TARGET_FILE_ID)
     .maybeSingle()
   log('target_file_state', { found: !!fileRow, error: fileErr?.message ?? null, row: fileRow ?? null })
@@ -58,7 +58,7 @@ async function main() {
 
   const { data: projectDoc } = await supabase
     .from('project_documents')
-    .select('id, file_id, extraction_status, document_type, created_at, updated_at')
+    .select('id, file_id, extraction_status, document_type, created_at')
     .eq('job_id', JOB_ID)
     .eq('file_id', TARGET_FILE_ID)
     .maybeSingle()
