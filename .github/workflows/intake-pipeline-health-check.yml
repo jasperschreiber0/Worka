@@ -229,6 +229,20 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/check-job-intake-lock.mjs
 
+      # ONE-TIME, follow-up to the follow-up: job_intake_locks came back
+      # empty, so the stall wasn't a stuck lock. Re-triggers intake for the
+      # SAME already-uploaded files (no re-upload needed) with raw HTTP
+      # response logging + raw SSE chunk logging + tight 3s DB polling to
+      # catch exactly where this stalls.
+      - name: ONE-TIME -- retrigger and trace intake stall
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/retrigger-and-trace-intake.mjs
+
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
