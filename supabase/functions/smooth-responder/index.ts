@@ -1968,7 +1968,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           .filter((f): f is LoadedFile => Boolean(f))
 
         // A solo batch (forced by a prior AI failure — see forcedSoloInput
-        // above) gets the wider 220s budget: confirmed in production that a
+        // above) gets the wider 280s budget: confirmed in production that a
         // genuinely large/complex document (a full structural drawing set)
         // can still exceed the standard 150s even completely alone, and
         // retrying it identically at the same 150s ceiling is guaranteed to
@@ -1977,19 +1977,25 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         // invocation can attempt, and widening every batch risks the same
         // wall-clock exhaustion this budget guard exists to prevent.
         //
-        // A solo batch whose single file's persisted history is exactly one
-        // prior truncated_response failure gets the wider still 280s/20000-
-        // token truncation-recovery budget instead of the default 220s —
-        // see isTruncationRecoveryEligible's own comment (pipeline-logic.ts)
-        // for the measured-throughput math this is derived from. Computed
-        // here (not inside classifyBatch) so the wall-clock budget check
-        // just below sees the TRUE timeout this batch will use, not the
-        // default 220s — otherwise a 280s call could be approved against a
-        // budget check that only verified 220s was available.
+        // Was 220s until production evidence (job 1f12de7f, 2026-09-03) showed
+        // this ceiling was itself too tight for a genuinely large solo
+        // document: two of its own successful solo attempts completed at
+        // 212335ms/218293ms — within seconds of the old 220_000ms ceiling,
+        // not a comfortable margin — while several other attempts on the
+        // same document aborted at exactly ~150s (bundled) or the old 220s
+        // solo ceiling. Raised to reuse TRUNCATION_RECOVERY_TIMEOUT_MS
+        // (280s) — already the established, measured-throughput-derived
+        // ceiling for exactly this class of large-document solo attempt
+        // (see isTruncationRecoveryEligible's own comment for the math),
+        // so every solo batch now gets the same wider budget regardless of
+        // whether it also qualifies for the raised truncation-recovery
+        // token budget. Computed here (not inside classifyBatch) so the
+        // wall-clock budget check just below sees the TRUE timeout this
+        // batch will use.
         const soloTruncationRecovery = batchFiles.length === 1
           && isTruncationRecoveryEligible(priorFailureCounts.get(realFileId(batchFiles[0].fileId)))
         const batchTimeoutMs = batchFiles.length === 1
-          ? (soloTruncationRecovery ? TRUNCATION_RECOVERY_TIMEOUT_MS : 220_000)
+          ? TRUNCATION_RECOVERY_TIMEOUT_MS
           : 150_000
         const batchMaxTokens = soloTruncationRecovery ? TRUNCATION_RECOVERY_MAX_TOKENS : 16000
 
@@ -2085,19 +2091,22 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         // recording a failure once per chunk would inflate one real
         // failure into several counted occurrences.
         //
-        // Adaptive timeout, not a flat 220s requirement — confirmed live
+        // Adaptive timeout, not a flat requirement — confirmed live
         // (52 Bendio Street, 23 Jul 2026): a 6-document batch's shared call
         // genuinely needed more than 150s and was aborted by our own
         // timeout at 150003ms, leaving only ~190s of the 340s total budget.
-        // Requiring the full 220s per solo attempt meant EVERY document in
+        // Requiring the full solo ceiling per attempt meant EVERY document in
         // that batch was skipped as "insufficient budget" — not attempted,
         // not failed — even though 190s was real, usable room. Each solo
         // attempt now gets whatever budget actually remains (capped at
-        // 220s, the same ceiling a genuinely large solo document needs),
-        // only skipping once what's left drops below a floor too small to
-        // be worth attempting even a small document.
+        // TRUNCATION_RECOVERY_TIMEOUT_MS, 280s — the same ceiling the
+        // primary solo-batch path above now uses for genuinely large solo
+        // documents, kept in sync so this same-invocation fallback can't
+        // regress to a stale, tighter ceiling), only skipping once what's
+        // left drops below a floor too small to be worth attempting even a
+        // small document.
         const MIN_SOLO_RETRY_BUDGET_MS = 60_000
-        const MAX_SOLO_TIMEOUT_MS = 220_000
+        const MAX_SOLO_TIMEOUT_MS = TRUNCATION_RECOVERY_TIMEOUT_MS
         const recordedFailedRealIds = new Set<string>()
         for (const soloFile of batchFiles) {
           const remainingMs = WALL_CLOCK_SAFETY_MS - (Date.now() - startedAt)

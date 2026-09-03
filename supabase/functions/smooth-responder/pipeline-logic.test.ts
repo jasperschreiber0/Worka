@@ -312,6 +312,34 @@ test('truncation recovery: budget/timeout constants fit the measured-throughput 
   assert.ok(WALL_CLOCK_SAFETY_MS - TRUNCATION_RECOVERY_TIMEOUT_MS >= 30_000, 'margin under the invocation ceiling must be meaningfully non-zero')
 })
 
+test('Stage 1/2 solo-batch classification timeout (index.ts) reuses TRUNCATION_RECOVERY_TIMEOUT_MS, with real margin against the measured production outliers that motivated raising it from 220s', () => {
+  // Real production evidence (job 1f12de7f, 2026-09-03): two successful
+  // solo stage_document_intelligence calls on a genuinely large document
+  // completed at 212335ms and 218293ms -- within seconds of the OLD 220s
+  // solo-batch ceiling, not a comfortable margin. index.ts's solo
+  // batchTimeoutMs (the primary per-batch classification loop) and
+  // MAX_SOLO_TIMEOUT_MS (the same-invocation adaptive per-document
+  // fallback) were both raised to reuse TRUNCATION_RECOVERY_TIMEOUT_MS
+  // (280s) -- already the established, measured-throughput-derived ceiling
+  // for exactly this class of large-document solo attempt -- rather than
+  // introduce a second, independent timeout value. This asserts both the
+  // measured outliers now fit with real margin, and that a solo batch at
+  // this new ceiling still fits inside one invocation's wall-clock budget
+  // when it is the first batch attempted.
+  const WALL_CLOCK_SAFETY_MS = 340_000
+  const measuredOutlierDurationsMs = [212_335, 218_293]
+  for (const measured of measuredOutlierDurationsMs) {
+    assert.ok(
+      TRUNCATION_RECOVERY_TIMEOUT_MS - measured >= 30_000,
+      `solo ceiling must leave real margin over the measured ${measured}ms outlier`,
+    )
+  }
+  assert.ok(
+    TRUNCATION_RECOVERY_TIMEOUT_MS <= WALL_CLOCK_SAFETY_MS,
+    'a solo batch at the new ceiling must still fit inside one invocation when it is the first batch attempted',
+  )
+})
+
 test('truncation recovery: existing batching/solo-routing behaviour is unaffected by these additions', () => {
   // Regression guard: adding truncated_response to the classification
   // taxonomy must not change shouldRouteSoloForVisionLoad's own, unrelated
