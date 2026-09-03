@@ -198,6 +198,18 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-real-job-lifecycle.mjs
 
+      # ONE-TIME, read-only -- resolves the chunking-vs-wider-timeout
+      # question for the stage_document_intelligence application_timeout
+      # failures on job 1f12de7f. Zero writes, zero Anthropic calls. Remove
+      # this step once that evidence has been captured (see
+      # scripts/diagnose-stage12-timeout-evidence.mjs's own header).
+      - name: ONE-TIME -- diagnose Stage 1/2 timeout evidence (read-only)
+        if: ${{ !cancelled() }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/diagnose-stage12-timeout-evidence.mjs
+
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
         env:
