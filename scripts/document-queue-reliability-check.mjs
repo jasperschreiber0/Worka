@@ -473,6 +473,108 @@ async function main() {
       })
     }
 
+    // ── Scenario 9: enforce_estimate_deadlines' own extension-eligibility
+    //    check must carry the SAME extraction_status='complete' exemption
+    //    migration 102 already proved correct in scenario 8 above (migration
+    //    103). Root cause this guards against, found live on job
+    //    1f12de7f-47b5-442e-9581-1f813796eb70 immediately after migration
+    //    102 deployed: the target document recovered (extraction_status=
+    //    complete at 04:54:28), yet the deadline watchdog still finalized
+    //    the run NEEDS_REVIEW at 05:13:00 because its OWN, separate copy of
+    //    the ai_failure_count>0 eligibility check (migration 089) had no
+    //    such exemption — migration 102 fixed one of two live copies and
+    //    left this one stale. Three cases in one call to enforce_estimate_
+    //    deadlines(), matching this fix's exact required proof points:
+    //    (A) a run whose only failing document has since completed Stage
+    //        1/2 must receive the bounded extension, not finalize;
+    //    (B) a run with a genuinely unresolved AI failure must still
+    //        finalize NEEDS_REVIEW, exactly as before — the fix must not
+    //        broaden eligibility beyond the recovered case;
+    //    (C) an already-terminal run (builder_status already set) must
+    //        never be touched again — the finalize-once invariant this fix
+    //        deliberately does not change.
+    //    NOTE: enforce_estimate_deadlines() is NOT read-only — unlike
+    //    find_stuck_batches_needing_classification_retry, it mutates any
+    //    REAL estimate_runs row whose deadline has already passed with
+    //    builder_status still NULL. This is judged an acceptable, bounded
+    //    side effect: it only ever does exactly what the next scheduled
+    //    pg_cron tick (every 60s) would do to that same row regardless —
+    //    never a destructive or irreversible action, and the function's
+    //    own FOR UPDATE SKIP LOCKED design already assumes concurrent/
+    //    repeated invocation is safe. ─────────────────────────────────────
+    {
+      const staleDeadline = new Date(Date.now() - 60_000).toISOString()
+
+      // Case A: recovered document — must receive the extension.
+      const deadlineRecoveredJobId = crypto.randomUUID()
+      createdJobIds.push(deadlineRecoveredJobId)
+      const [deadlineRecoveredFile] = await makeJobAndFiles(supabase, deadlineRecoveredJobId, ['deadline-recovered.pdf'])
+      const { batchRow: deadlineRecoveredBatch } = await makeBatch(supabase, deadlineRecoveredJobId, deadlineRecoveredFile.id, [deadlineRecoveredFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', deadlineRecoveredBatch.id)
+      await supabase.from('document_processing_batches').update({ status: 'failed', classification_triggered: true }).eq('id', deadlineRecoveredBatch.id)
+      await supabase.from('files').update({ ai_failure_count: 1, ai_failure_classification: 'truncated_response' }).eq('id', deadlineRecoveredFile.id)
+      const { error: drPdErr } = await supabase.from('project_documents').insert({
+        job_id: deadlineRecoveredJobId, file_id: deadlineRecoveredFile.id, extraction_status: 'complete', document_type: 'architectural_plan',
+      })
+      if (drPdErr) throw new Error(`project_documents insert failed (deadline recovered case): ${drPdErr.message}`)
+      const { data: recoveredRun, error: recoveredRunErr } = await supabase.from('estimate_runs').insert({
+        job_id: deadlineRecoveredJobId, builder_id: BUILDER_ID, batch_id: deadlineRecoveredBatch.id,
+        status: 'reasoning', deadline_at: staleDeadline, builder_status: null,
+      }).select().single()
+      if (recoveredRunErr || !recoveredRun) throw new Error(`estimate_runs insert failed (deadline recovered case): ${recoveredRunErr?.message}`)
+
+      // Case B: unresolved failure — must still finalize NEEDS_REVIEW.
+      const deadlineUnresolvedJobId = crypto.randomUUID()
+      createdJobIds.push(deadlineUnresolvedJobId)
+      const [deadlineUnresolvedFile] = await makeJobAndFiles(supabase, deadlineUnresolvedJobId, ['deadline-unresolved.pdf'])
+      const { batchRow: deadlineUnresolvedBatch } = await makeBatch(supabase, deadlineUnresolvedJobId, deadlineUnresolvedFile.id, [deadlineUnresolvedFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', deadlineUnresolvedBatch.id)
+      await supabase.from('document_processing_batches').update({ status: 'failed', classification_triggered: true }).eq('id', deadlineUnresolvedBatch.id)
+      await supabase.from('files').update({ ai_failure_count: 1, ai_failure_classification: 'truncated_response' }).eq('id', deadlineUnresolvedFile.id)
+      const { data: unresolvedRun, error: unresolvedRunErr } = await supabase.from('estimate_runs').insert({
+        job_id: deadlineUnresolvedJobId, builder_id: BUILDER_ID, batch_id: deadlineUnresolvedBatch.id,
+        status: 'reasoning', deadline_at: staleDeadline, builder_status: null,
+      }).select().single()
+      if (unresolvedRunErr || !unresolvedRun) throw new Error(`estimate_runs insert failed (deadline unresolved case): ${unresolvedRunErr?.message}`)
+
+      // Case C: already-terminal run — must never be touched again.
+      const deadlineTerminalJobId = crypto.randomUUID()
+      createdJobIds.push(deadlineTerminalJobId)
+      const [deadlineTerminalFile] = await makeJobAndFiles(supabase, deadlineTerminalJobId, ['deadline-terminal.pdf'])
+      const { batchRow: deadlineTerminalBatch } = await makeBatch(supabase, deadlineTerminalJobId, deadlineTerminalFile.id, [deadlineTerminalFile.id])
+      const { data: terminalRun, error: terminalRunErr } = await supabase.from('estimate_runs').insert({
+        job_id: deadlineTerminalJobId, builder_id: BUILDER_ID, batch_id: deadlineTerminalBatch.id,
+        status: 'complete', deadline_at: staleDeadline, builder_status: 'ESTIMATE_READY', needs_review_reason: null,
+      }).select().single()
+      if (terminalRunErr || !terminalRun) throw new Error(`estimate_runs insert failed (deadline terminal case): ${terminalRunErr?.message}`)
+
+      const { data: enforcedRows, error: enforceErr } = await supabase.rpc('enforce_estimate_deadlines')
+      if (enforceErr) throw new Error(`enforce_estimate_deadlines failed: ${enforceErr.message}`)
+      const enforcedRunIds = (enforcedRows ?? []).map((r) => r.estimate_run_id)
+
+      assert(!enforcedRunIds.includes(recoveredRun.id), 'a run whose only failing document has since completed Stage 1/2 must NOT be finalized by the deadline watchdog -- it must receive the extension instead')
+      const { data: recoveredAfter } = await supabase.from('estimate_runs').select('builder_status, deadline_extensions_used, deadline_at').eq('id', recoveredRun.id).single()
+      assert(recoveredAfter.builder_status === null, 'recovered-document run must still be builder_status=NULL (extended, not finalized)')
+      assert(recoveredAfter.deadline_extensions_used === 1, `recovered-document run must have deadline_extensions_used=1, got ${recoveredAfter.deadline_extensions_used}`)
+      assert(new Date(recoveredAfter.deadline_at).getTime() > Date.now(), 'recovered-document run must have deadline_at pushed into the future')
+
+      assert(enforcedRunIds.includes(unresolvedRun.id), 'a run with a genuinely unresolved AI failure must still be finalized by the deadline watchdog')
+      const { data: unresolvedAfter } = await supabase.from('estimate_runs').select('builder_status, deadline_extensions_used').eq('id', unresolvedRun.id).single()
+      assert(unresolvedAfter.builder_status === 'NEEDS_REVIEW', `unresolved-failure run must finalize NEEDS_REVIEW, got ${unresolvedAfter.builder_status}`)
+      assert(unresolvedAfter.deadline_extensions_used === 0, 'unresolved-failure run must NOT receive an extension')
+
+      assert(!enforcedRunIds.includes(terminalRun.id), 'an already-terminal run must never be touched by the deadline watchdog again')
+      const { data: terminalAfter } = await supabase.from('estimate_runs').select('builder_status, needs_review_reason').eq('id', terminalRun.id).single()
+      assert(terminalAfter.builder_status === 'ESTIMATE_READY', 'already-terminal builder_status must remain unchanged')
+      assert(terminalAfter.needs_review_reason === null, 'already-terminal run must not gain a needs_review_reason')
+
+      results.scenarios.enforce_estimate_deadlines_extension_matches_migration_102_semantics = true
+      log('scenario_passed', {
+        scenario: 'enforce_estimate_deadlines_extension_matches_migration_102_semantics',
+        recovered_run_id: recoveredRun.id, unresolved_run_id: unresolvedRun.id, terminal_run_id: terminalRun.id,
+      })
+    }
+
     results.passed = true
     log('queue_check_passed', results)
   } catch (err) {
