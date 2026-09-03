@@ -778,6 +778,16 @@ export type AnthropicFailureClassification =
   | 'context_window_exceeded'  // 400 whose message identifies the request as too large for the model's context window
   | 'validation_error'         // 422 / validation_error — Anthropic accepted the request but rejected the tool/schema shape
   | 'unknown'                  // anything not matched above — deliberately NOT auto-retried; see isRetryableClassification
+  | 'truncated_response'       // callTool's own stop_reason:'max_tokens' throw (TRUNCATED_RESPONSE_PREFIX) — Claude's call
+                                // SUCCEEDED and returned a valid, structurally sound response that was cut off before
+                                // completion. Distinct from every classification above: those describe a request that
+                                // never got a usable response at all (a network/billing/format problem); this one is a
+                                // request that WORKED, just needed more room. classifyAnthropicError (below) cannot
+                                // detect this on its own — it only ever sees an already-rethrown error, by which point
+                                // withTimeoutAndRetry has already (mis)classified it 'unknown' — callers MUST check
+                                // isTruncatedResponseError(err) directly, before trusting any pre-attached
+                                // `.classification`, exactly as Stage 6's own truncation handling already does (see
+                                // isTruncatedResponseError below, and its call site in index.ts's Stage 6 chunk catch).
   | 'persistence_failed'       // NOT an Anthropic-call failure at all — Claude's extraction succeeded, but the atomic
                                 // persist_document_classification DB write (migration 050) that saves it failed. Reuses
                                 // this same taxonomy/state machine (recordAiFailure, maxConsecutiveOccurrences,
@@ -896,8 +906,14 @@ export function isBillingHaltClassification(classification: AnthropicFailureClas
 // (splitBatchForRetry / forcedSoloInput) unreachable for exactly the
 // classification the original incident exhibited. This set exists so that
 // question is answered independently of the single-call retry question.
+// truncated_response joins this set for the same reason application_timeout
+// does: the failure is a property of the request's SIZE (here, the
+// response's length), not its content, so exactly one more attempt at a
+// genuinely larger token budget (see TRUNCATION_RECOVERY_MAX_TOKENS below)
+// is worth trying, but a second identical truncation must not be retried a
+// third time — see maxConsecutiveOccurrences.
 const ONE_MORE_ATTEMPT_CLASSIFICATIONS = new Set<AnthropicFailureClassification>([
-  'application_timeout', 'context_window_exceeded',
+  'application_timeout', 'context_window_exceeded', 'truncated_response',
 ])
 
 /**
@@ -2628,6 +2644,65 @@ export const TRUNCATED_RESPONSE_PREFIX = 'Response truncated at max_tokens='
 /** True only for the specific "the model's response was cut off before a complete tool call was returned" failure — never true for a genuine API error (billing, validation, timeout), which must not be retried the same way. */
 export function isTruncatedResponseError(err: unknown): boolean {
   return err instanceof Error && err.message.startsWith(TRUNCATED_RESPONSE_PREFIX)
+}
+
+// ─── Stage 1/2 truncation recovery: one bounded attempt at a larger budget ──
+//
+// Distinct from the Stage 6 trade-recovery mechanism directly below (which
+// regenerates a single missing trade at a small, fixed budget) — this is
+// for Stage 1/2's own document-classification call, which was hitting
+// `stop_reason: 'max_tokens'` at its default 16000-token budget on a real,
+// genuinely dense document (16 Alfred Street DA-Mod PDF, 19 pages) once the
+// disproportionate-vision-load solo-routing fix (shouldRouteSoloForVisionLoad)
+// let it run alone for the first time, un-truncated by being crammed into a
+// shared batch call. Before this, that truncation was mis-thrown as a
+// generic 'unknown' failure (see classifyBatch's catch site in index.ts) and
+// permanently excluded the document after one attempt — 'unknown' has a
+// maxConsecutiveOccurrences of 0, so it was never even eligible for the
+// existing forced-solo-retry mechanism a genuinely retryable classification
+// gets.
+//
+// The exact budget below is derived from real measured throughput, not a
+// guess: the production call that truncated produced 16000 output tokens in
+// 212335ms (~75.3 tokens/sec for this document). 20000 tokens needs ~267s to
+// generate at that rate — comfortably inside the 280s timeout below, leaving
+// ~60s of margin under WALL_CLOCK_SAFETY_MS (340s, index.ts) for a solo
+// attempt that starts at the top of an invocation. A larger jump (e.g.
+// doubling to 32000, ~427s) was deliberately rejected: it would not fit
+// inside one invocation's wall-clock ceiling even running completely alone,
+// so it could never actually complete rather than merely being slower.
+//
+// This only ever applies to a file whose PERSISTED per-file history
+// (files.ai_failure_classification/ai_failure_count, loaded into
+// priorFailureCounts at the top of runPipeline) already shows exactly one
+// prior truncated_response failure — i.e. only on a later, fresh invocation
+// via the existing forced-solo-retry mechanism (isForcedSolo/forcedSoloInput
+// in index.ts), never as part of the same-invocation multi-document-batch
+// isolation retry a few hundred lines below that in index.ts, since a file
+// with this history is always routed into its own solo batch up front and
+// can therefore never appear inside a multi-document batch to begin with.
+
+/** Raised token budget for the ONE Stage 1/2 recovery attempt after a first truncated_response failure — see the comment above for the throughput math this is derived from. */
+export const TRUNCATION_RECOVERY_MAX_TOKENS = 20_000
+
+/** Timeout paired with TRUNCATION_RECOVERY_MAX_TOKENS — sized so the raised budget can actually finish generating (see the comment above), not an arbitrary round number. */
+export const TRUNCATION_RECOVERY_TIMEOUT_MS = 280_000
+
+/**
+ * True only for a file whose persisted history is EXACTLY one prior
+ * truncated_response failure — the single, bounded condition under which
+ * Stage 1/2 attempts a document again at the raised budget/timeout above.
+ * A second truncation (count already >= 2, which record_ai_failure/
+ * maxConsecutiveOccurrences would have already permanently failed the file
+ * for) or any other classification never qualifies — this is intentionally
+ * narrower than "has a prior failure," which is what routes a file solo in
+ * the first place (see isForcedSolo in index.ts); this only decides whether
+ * that solo attempt additionally gets the raised budget/timeout.
+ */
+export function isTruncationRecoveryEligible(
+  history: { classification: AnthropicFailureClassification | null; count: number } | undefined,
+): boolean {
+  return history?.classification === 'truncated_response' && history?.count === 1
 }
 
 /**

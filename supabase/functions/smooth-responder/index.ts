@@ -46,6 +46,7 @@ import {
   resolveClassificationPersistResult, shouldSkipRedundantPersistRetry,
   resolveCompletionWriteOutcome, type CompletionWriteAttempt,
   shouldSkipStage6Call, STAGE6_PER_CALL_TIMEOUT_MS, planStage6Chunks, STAGE6_MAX_PARALLEL_CHUNKS, STAGE6_MAX_TRADES_PER_CHUNK, isTruncatedResponseError,
+  isTruncationRecoveryEligible, TRUNCATION_RECOVERY_MAX_TOKENS, TRUNCATION_RECOVERY_TIMEOUT_MS,
   partitionCompletedJobsForClassification,
   buildConservativeAssumption, capConfidenceForBlockingTrade, conservativeAssumptionAppliesToTrade,
   buildProjectModel, viewsForTradeCategory, formatTradeViewsForPrompt,
@@ -1653,6 +1654,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const classifyBatch = async (
         batchFiles: LoadedFile[],
         batchTimeoutMs: number,
+        maxTokens: number = 16000,
       ): Promise<
         | { ok: true; factsFound: number; documentsClassified: number }
         | { ok: false; billingHalt: boolean; classification: AnthropicFailureClassification; errMessage: string }
@@ -1708,7 +1710,11 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           // plus supporting documents (confirmed via the stop_reason=max_tokens
           // log added above). Match ESTIMATE_GENERATION_TOOL's already-proven
           // 16000 for this same model/API rather than guessing at another cap.
-          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, 16000, batchTimeoutMs)
+          // `maxTokens` defaults to that 16000, but is raised to
+          // TRUNCATION_RECOVERY_MAX_TOKENS (with batchTimeoutMs raised to
+          // match, by the caller) for the one bounded recovery attempt after
+          // a prior truncated_response failure — see isTruncationRecoveryEligible.
+          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, maxTokens, batchTimeoutMs)
         } catch (err) {
           // A batch's Claude call failing (a transient API error, a
           // truncated/malformed response) is a genuinely catchable,
@@ -1719,8 +1725,23 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           // authentication_failed): every remaining call in this run would
           // fail identically, so the caller must stop the whole run rather
           // than isolate-and-retry (see haltForBilling).
-          const classification = (err as { classification?: AnthropicFailureClassification })?.classification
-            ?? classifyAnthropicError(err)
+          //
+          // isTruncatedResponseError is checked FIRST, ahead of any
+          // pre-attached `.classification` — withTimeoutAndRetry
+          // (pipeline-logic.ts) runs classifyAnthropicError on every
+          // thrown error, including callTool's own stop_reason:'max_tokens'
+          // throw, and classifyAnthropicError has no way to recognise that
+          // message shape, so it always attaches 'unknown' to a truncation
+          // before it ever reaches this catch. Trusting that pre-attached
+          // value here is exactly what silently mis-filed a genuine
+          // truncation as a permanent, non-retryable 'unknown' failure —
+          // the same reason Stage 6's own truncation handling (below,
+          // `isTruncatedResponseError(err)` at its chunk catch site) never
+          // trusts a pre-attached classification either.
+          const classification: AnthropicFailureClassification = isTruncatedResponseError(err)
+            ? 'truncated_response'
+            : (err as { classification?: AnthropicFailureClassification })?.classification
+              ?? classifyAnthropicError(err)
           const errMessage = err instanceof Error ? err.message : String(err)
           console.log(JSON.stringify({
             documents: batchFiles.map((f) => f.filename), status: 'failed',
@@ -1955,7 +1976,22 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         // at 150s — MAX_BATCHES already bounds how many of these one
         // invocation can attempt, and widening every batch risks the same
         // wall-clock exhaustion this budget guard exists to prevent.
-        const batchTimeoutMs = batchFiles.length === 1 ? 220_000 : 150_000
+        //
+        // A solo batch whose single file's persisted history is exactly one
+        // prior truncated_response failure gets the wider still 280s/20000-
+        // token truncation-recovery budget instead of the default 220s —
+        // see isTruncationRecoveryEligible's own comment (pipeline-logic.ts)
+        // for the measured-throughput math this is derived from. Computed
+        // here (not inside classifyBatch) so the wall-clock budget check
+        // just below sees the TRUE timeout this batch will use, not the
+        // default 220s — otherwise a 280s call could be approved against a
+        // budget check that only verified 220s was available.
+        const soloTruncationRecovery = batchFiles.length === 1
+          && isTruncationRecoveryEligible(priorFailureCounts.get(realFileId(batchFiles[0].fileId)))
+        const batchTimeoutMs = batchFiles.length === 1
+          ? (soloTruncationRecovery ? TRUNCATION_RECOVERY_TIMEOUT_MS : 220_000)
+          : 150_000
+        const batchMaxTokens = soloTruncationRecovery ? TRUNCATION_RECOVERY_MAX_TOKENS : 16000
 
         // ── Reserve room for Stage 3, don't let classification spend the
         // whole invocation ─────────────────────────────────────────────────
@@ -1992,7 +2028,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         await touchLockProgress()
         await setStage('classifying_documents')
 
-        const result = await classifyBatch(batchFiles, batchTimeoutMs)
+        const result = await classifyBatch(batchFiles, batchTimeoutMs, batchMaxTokens)
 
         if (result.ok) {
           console.log(JSON.stringify({

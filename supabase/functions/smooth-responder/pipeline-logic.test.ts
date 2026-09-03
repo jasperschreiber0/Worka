@@ -95,6 +95,10 @@ import {
   TRUNCATED_RESPONSE_PREFIX,
   TRADE_RECOVERY_INITIAL_MAX_TOKENS,
   TRADE_RECOVERY_RETRY_MAX_TOKENS,
+  isTruncationRecoveryEligible,
+  TRUNCATION_RECOVERY_MAX_TOKENS,
+  TRUNCATION_RECOVERY_TIMEOUT_MS,
+  type AnthropicFailureClassification,
   type TradeViewName,
   type BatchableFile,
   type FactRow,
@@ -224,6 +228,104 @@ test('shouldRouteSoloForVisionLoad: multiple qualifying documents each independe
   // machinery (unchanged by this fix) already places each forced-solo file
   // into its OWN single-file batch, never combines two forced-solo files
   // together.
+})
+
+// ─── Stage 1/2 truncation recovery ──────────────────────────────────────────
+// Production incident, downstream of the fix above: once the DA-Mod PDF
+// finally got a genuine solo attempt, the real Claude call SUCCEEDED
+// (no application_timeout) but was cut off at the 16000-token ceiling
+// (stop_reason: 'max_tokens') — and was misclassified 'unknown' (permanently
+// non-retryable) instead of the already-modeled truncated_response
+// condition, because withTimeoutAndRetry's own classifyAnthropicError has no
+// way to recognise callTool's truncation throw and attaches 'unknown' before
+// classifyBatch's catch site ever runs. These tests cover the classification
+// fix (isTruncatedResponseError checked first) and the bounded, throughput-
+// derived recovery attempt (isTruncationRecoveryEligible).
+
+test('truncation recovery: a callTool truncation throw is classified truncated_response, not unknown', () => {
+  // Mirrors classifyBatch's own catch-site logic in index.ts: check
+  // isTruncatedResponseError(err) BEFORE falling back to any pre-attached
+  // `.classification` or classifyAnthropicError(err).
+  const err = Object.assign(new Error(`${TRUNCATED_RESPONSE_PREFIX}16000 — increase the token budget for this stage`), {
+    classification: 'unknown' as AnthropicFailureClassification, // what withTimeoutAndRetry pre-attaches today
+  })
+  const classification: AnthropicFailureClassification = isTruncatedResponseError(err)
+    ? 'truncated_response'
+    : (err as { classification?: AnthropicFailureClassification }).classification ?? classifyAnthropicError(err)
+  assert.equal(classification, 'truncated_response')
+})
+
+test('truncation recovery: a genuinely unknown failure is unaffected — stays unknown, non-retryable', () => {
+  const err = new Error('Something Claude-shaped but unrecognised')
+  const classification: AnthropicFailureClassification = isTruncatedResponseError(err)
+    ? 'truncated_response'
+    : classifyAnthropicError(err)
+  assert.equal(classification, 'unknown')
+  assert.equal(maxConsecutiveOccurrences(classification), 0)
+  assert.equal(isRetryableClassification(classification), false)
+})
+
+test('truncation recovery: maxConsecutiveOccurrences allows exactly one more attempt after a first truncated_response', () => {
+  assert.equal(maxConsecutiveOccurrences('truncated_response'), 1)
+})
+
+test('truncation recovery: first truncation (count 1) is eligible for exactly one recovery attempt', () => {
+  assert.equal(isTruncationRecoveryEligible({ classification: 'truncated_response', count: 1 }), true)
+})
+
+test('truncation recovery: a second truncation (count 2, already past maxConsecutiveOccurrences) is NOT eligible for a further attempt', () => {
+  assert.equal(isTruncationRecoveryEligible({ classification: 'truncated_response', count: 2 }), false)
+})
+
+test('truncation recovery: no prior history is not eligible (first attempt uses the default budget, not the recovery one)', () => {
+  assert.equal(isTruncationRecoveryEligible(undefined), false)
+  assert.equal(isTruncationRecoveryEligible({ classification: null, count: 0 }), false)
+})
+
+test('truncation recovery: a different prior classification (e.g. application_timeout) is NOT eligible, even at count 1', () => {
+  assert.equal(isTruncationRecoveryEligible({ classification: 'application_timeout', count: 1 }), false)
+})
+
+test('truncation recovery: shouldStopRetrying gives up after a second consecutive truncated_response', () => {
+  // First occurrence (no prior history): not stopped — worth exactly one
+  // more attempt at the raised budget (matches maxConsecutiveOccurrences('truncated_response') === 1).
+  assert.equal(shouldStopRetrying(null, 0, 'truncated_response'), false)
+  const first = nextFailureHistory({ classification: null, count: 0 }, 'truncated_response')
+  assert.deepEqual(first, { classification: 'truncated_response', count: 1 })
+  // Second consecutive occurrence (the recovery attempt also truncated):
+  // tolerance exhausted — stop, no third attempt.
+  assert.equal(shouldStopRetrying(first.classification, first.count, 'truncated_response'), true)
+})
+
+test('truncation recovery: budget/timeout constants fit the measured-throughput safety margin used to derive them', () => {
+  // Real production evidence: 16000 output tokens took 212335ms for the
+  // DA-Mod document (~75.3 tokens/sec). The raised budget must (a) actually
+  // be larger than the default that truncated, and (b) leave real margin
+  // under WALL_CLOCK_SAFETY_MS (340_000ms, index.ts) rather than exhausting
+  // it outright — this is what rules out a naive "just double maxTokens".
+  const WALL_CLOCK_SAFETY_MS = 340_000
+  const measuredTokensPerSecond = 16000 / (212335 / 1000)
+  const projectedGenerationMs = (TRUNCATION_RECOVERY_MAX_TOKENS / measuredTokensPerSecond) * 1000
+  assert.ok(TRUNCATION_RECOVERY_MAX_TOKENS > 16000, 'recovery budget must exceed the default that truncated')
+  assert.ok(projectedGenerationMs < TRUNCATION_RECOVERY_TIMEOUT_MS, 'projected generation time must fit inside the recovery timeout')
+  assert.ok(TRUNCATION_RECOVERY_TIMEOUT_MS < WALL_CLOCK_SAFETY_MS, 'recovery timeout must leave real margin under the invocation ceiling')
+  assert.ok(WALL_CLOCK_SAFETY_MS - TRUNCATION_RECOVERY_TIMEOUT_MS >= 30_000, 'margin under the invocation ceiling must be meaningfully non-zero')
+})
+
+test('truncation recovery: existing batching/solo-routing behaviour is unaffected by these additions', () => {
+  // Regression guard: adding truncated_response to the classification
+  // taxonomy must not change shouldRouteSoloForVisionLoad's own, unrelated
+  // decision (byte/vision-load driven, not failure-history driven).
+  const approxBytes = Math.round(13_978_718 * (4 / 3))
+  assert.equal(shouldRouteSoloForVisionLoad(approxBytes, true, MAX_BYTES_PER_BATCH_TEST), true)
+  assert.equal(shouldRouteSoloForVisionLoad(400_000, true, MAX_BYTES_PER_BATCH_TEST), false)
+})
+
+test('truncation recovery: existing Stage 6 truncation handling (isTruncatedResponseError, shouldRetryTradeRecovery) is unaffected', () => {
+  const err = new Error(`${TRUNCATED_RESPONSE_PREFIX}8000 — increase the token budget for this stage`)
+  assert.equal(isTruncatedResponseError(err), true)
+  assert.equal(shouldRetryTradeRecovery(err, false), true)
+  assert.equal(shouldRetryTradeRecovery(err, true), false) // already retried once — Stage 6's own one-shot ceiling, untouched
 })
 
 // ─── mergeFacts ─────────────────────────────────────────────────────────────
