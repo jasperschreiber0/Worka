@@ -198,17 +198,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-real-job-lifecycle.mjs
 
-      # ONE-TIME production verification of the Stage 1/2 solo-routing fix
-      # (shouldRouteSoloForVisionLoad), re-run with the job_id harness fix.
-      # Real Anthropic spend. Remove once verification is complete.
-      - name: ONE-TIME -- verify Stage 1/2 batching fix in production
+      # ONE-TIME, read-only forensic: recovers the raw persisted Claude
+      # response (ai_operations.result) for the DA-Mod stage_document_
+      # intelligence call that succeeded at the API level but produced
+      # classification:'unknown' downstream. No Anthropic calls.
+      - name: ONE-TIME -- forensic Stage 1/2 unknown-response investigation
         if: ${{ !cancelled() }}
-        timeout-minutes: 20
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          APP_URL: ${{ secrets.APP_URL }}
-        run: node scripts/verify-stage12-batching-fix.mjs
+        run: node scripts/forensic-stage12-unknown-response.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
