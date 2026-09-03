@@ -198,16 +198,24 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-real-job-lifecycle.mjs
 
-      # ONE-TIME, read-only: pre-verification state check for the Stage 1/2
-      # truncation-recovery fix (commit f9b0233) -- confirms the target
-      # file's CURRENT persisted ai_failure_classification/count before any
-      # retrigger. No Anthropic calls, no writes.
-      - name: ONE-TIME -- truncation recovery pre-verification state check
+      # ONE-TIME production verification of the Stage 1/2 truncation-recovery
+      # fix (commit f9b0233) -- approved via AskUserQuestion after a
+      # read-only pre-state check proved the target file was already
+      # permanently excluded (intake_status='failed' from the pre-fix
+      # 'unknown' misclassification) and could not otherwise be retriggered.
+      # Applies ONE scoped correction write (ai_failure_classification:
+      # 'unknown' -> 'truncated_response', matching what the already-
+      # recovered raw ai_operations.result evidence proved actually
+      # happened; ai_failure_count left unchanged at 1; intake_status/
+      # failure_stage/failure_reason cleared) then retriggers via the real
+      # GET /api/intake/[fileId] route and traces the run to completion.
+      - name: ONE-TIME -- Stage 1/2 truncation recovery production verification
         if: ${{ !cancelled() }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node scripts/check-truncation-recovery-pre-state.mjs
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/verify-truncation-recovery.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
