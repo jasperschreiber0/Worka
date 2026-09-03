@@ -198,16 +198,18 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-real-job-lifecycle.mjs
 
-      # ONE-TIME, READ-ONLY: migration 102 passed in isolation (synthetic
-      # regression test) but the live RPC still excluded the real target
-      # batch -- investigates exactly why via per-document project_documents
-      # matching, rather than assuming the fix is broken.
+      # ONE-TIME, READ-ONLY: re-evaluates EVERY clause of the migration-102
+      # predicate (all 8, including job_intake_locks/estimate_runs) against
+      # the real target batch in one pass, since document_detail alone
+      # (previous step) showed the extraction_status exemption correctly
+      # satisfied yet the live RPC still excluded the batch -- something
+      # else must be the blocker; re-checking every clause at once finds it.
       - name: ONE-TIME -- diagnose predicate mismatch on real target batch
         if: ${{ !cancelled() }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node scripts/diagnose-predicate-mismatch.mjs
+        run: node scripts/diagnose-stuck-batch-exclusion-clause.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}

@@ -43,15 +43,21 @@ async function main() {
   // Clause 7: NOT EXISTS estimate_runs with builder_status IS NOT NULL for this batch_id
   const { data: estimateRuns } = await supabase.from('estimate_runs').select('id, batch_id, builder_status, created_at, updated_at').eq('batch_id', batchId)
   const clauseNoFinalizedEstimateRun = !(estimateRuns ?? []).some((r) => r.builder_status != null)
-  // Clause 8: NOT EXISTS a document_processing_jobs row joined to a file with ai_failure_count > 0
+  // Clause 8 (migration 102): NOT EXISTS a document_processing_jobs row
+  // joined to a file with ai_failure_count > 0 AND no project_documents
+  // row with extraction_status='complete' for that same file.
   const { data: jobsForBatch } = await supabase.from('document_processing_jobs').select('id, document_id, status, attempts').eq('parent_job_id', batchId)
   let clauseNoFailedDoc = true
   const failedDocs = []
   for (const j of jobsForBatch ?? []) {
     const { data: f } = await supabase.from('files').select('id, ai_failure_count, ai_failure_classification').eq('id', j.document_id).maybeSingle()
     if (f && f.ai_failure_count > 0) {
-      clauseNoFailedDoc = false
-      failedDocs.push({ document_id: j.document_id, ai_failure_count: f.ai_failure_count, ai_failure_classification: f.ai_failure_classification })
+      const { data: pd } = await supabase.from('project_documents').select('id, extraction_status').eq('file_id', f.id).eq('extraction_status', 'complete')
+      const hasCompleted = (pd ?? []).length > 0
+      if (!hasCompleted) {
+        clauseNoFailedDoc = false
+        failedDocs.push({ document_id: j.document_id, ai_failure_count: f.ai_failure_count, ai_failure_classification: f.ai_failure_classification, has_completed_project_documents_row: hasCompleted })
+      }
     }
   }
 
