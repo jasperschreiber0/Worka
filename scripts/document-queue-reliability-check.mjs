@@ -575,6 +575,62 @@ async function main() {
       })
     }
 
+    // ── Scenario 10: find_stuck_batches_needing_classification_retry must
+    //    return eligible batches oldest-stalled-first, so its caller's
+    //    per-tick cap (MAX_STUCK_FILES_PER_RUN, route.ts) drains a backlog
+    //    fairly instead of an unordered scan risking starving a newer batch
+    //    behind an unbounded, unstable set of older ones. Root cause this
+    //    guards against, found live (job 4f8824d2, 2026-09-03): a fresh
+    //    batch stalled mid-Stage-6, cleared its 3-minute grace period, and
+    //    satisfied every clause of this predicate -- yet GET /api/cron/
+    //    intake-recovery reported batches_resumed=0 on ~9 consecutive
+    //    one-minute ticks before it was finally retried, consistent with a
+    //    backlog of older stalled batches (this session's own extensive
+    //    testing) crowding it out of an unordered SELECT under the 10-per-
+    //    tick cap. Creates two eligible batches with distinct, out-of-
+    //    insertion-order updated_at values and asserts the older one is
+    //    returned first. ─────────────────────────────────────────────────
+    {
+      const olderUpdatedAt = new Date(Date.now() - 10 * 60_000).toISOString() // past grace, older
+      const newerUpdatedAt = new Date(Date.now() - 4 * 60_000).toISOString()  // past grace, newer
+
+      // Created (and made eligible) in reverse order deliberately -- if the
+      // fix merely relied on insertion/physical order this would still
+      // pass by accident; only an explicit ORDER BY guarantees it.
+      const newerJobId = crypto.randomUUID()
+      createdJobIds.push(newerJobId)
+      const [newerFile] = await makeJobAndFiles(supabase, newerJobId, ['newer-stalled.pdf'])
+      const { batchRow: newerBatch } = await makeBatch(supabase, newerJobId, newerFile.id, [newerFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', newerBatch.id)
+      await supabase.from('document_processing_batches').update({
+        status: 'completed', classification_triggered: true, updated_at: newerUpdatedAt,
+      }).eq('id', newerBatch.id)
+
+      const olderJobId = crypto.randomUUID()
+      createdJobIds.push(olderJobId)
+      const [olderFile] = await makeJobAndFiles(supabase, olderJobId, ['older-stalled.pdf'])
+      const { batchRow: olderBatch } = await makeBatch(supabase, olderJobId, olderFile.id, [olderFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', olderBatch.id)
+      await supabase.from('document_processing_batches').update({
+        status: 'completed', classification_triggered: true, updated_at: olderUpdatedAt,
+      }).eq('id', olderBatch.id)
+
+      const { data: orderedBatches, error: orderedErr } = await supabase.rpc('find_stuck_batches_needing_classification_retry')
+      if (orderedErr) throw new Error(`find_stuck_batches_needing_classification_retry failed: ${orderedErr.message}`)
+      const orderedIds = (orderedBatches ?? []).map((b) => b.batch_id)
+      const olderIdx = orderedIds.indexOf(olderBatch.id)
+      const newerIdx = orderedIds.indexOf(newerBatch.id)
+      assert(olderIdx !== -1, 'the older stalled batch must be present in the result')
+      assert(newerIdx !== -1, 'the newer stalled batch must be present in the result')
+      assert(olderIdx < newerIdx, `the older-stalled batch (updated_at ${olderUpdatedAt}) must be returned before the newer one (updated_at ${newerUpdatedAt}), got indexes ${olderIdx} and ${newerIdx}`)
+
+      results.scenarios.stuck_batches_returned_oldest_first = true
+      log('scenario_passed', {
+        scenario: 'stuck_batches_returned_oldest_first',
+        older_batch_id: olderBatch.id, newer_batch_id: newerBatch.id,
+      })
+    }
+
     results.passed = true
     log('queue_check_passed', results)
   } catch (err) {
