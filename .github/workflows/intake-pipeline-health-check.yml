@@ -234,14 +234,26 @@ jobs:
       # SAME already-uploaded files (no re-upload needed) with raw HTTP
       # response logging + raw SSE chunk logging + tight 3s DB polling to
       # catch exactly where this stalls.
-      - name: ONE-TIME -- retrigger and trace intake stall
+      # - name: ONE-TIME -- retrigger and trace intake stall
+      #   if: ${{ !cancelled() }}
+      #   timeout-minutes: 15
+      #   env:
+      #     NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      #     SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      #     APP_URL: ${{ secrets.APP_URL }}
+      #   run: node scripts/retrigger-and-trace-intake.mjs
+
+      # ONE-TIME, read-only (one intentional test insert, immediately
+      # cleaned up): the intake route's POST to job_intake_locks keeps
+      # getting a 409 conflict, but a plain SELECT filtered by job_id finds
+      # nothing. Dumps the whole table + attempts the identical insert
+      # directly to see the real conflict.
+      - name: ONE-TIME -- dump job_intake_locks table directly
         if: ${{ !cancelled() }}
-        timeout-minutes: 15
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          APP_URL: ${{ secrets.APP_URL }}
-        run: node scripts/retrigger-and-trace-intake.mjs
+        run: node scripts/dump-job-intake-locks-table.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
