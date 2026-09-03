@@ -198,16 +198,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/diagnose-real-job-lifecycle.mjs
 
-      # ONE-TIME, read-only forensic: recovers the raw persisted Claude
-      # response (ai_operations.result) for the DA-Mod stage_document_
-      # intelligence call that succeeded at the API level but produced
-      # classification:'unknown' downstream. No Anthropic calls.
-      - name: ONE-TIME -- forensic Stage 1/2 unknown-response investigation
+      # ONE-TIME, read-only: pre-verification state check for the Stage 1/2
+      # truncation-recovery fix (commit f9b0233) -- confirms the target
+      # file's CURRENT persisted ai_failure_classification/count before any
+      # retrigger. No Anthropic calls, no writes.
+      - name: ONE-TIME -- truncation recovery pre-verification state check
         if: ${{ !cancelled() }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node scripts/forensic-stage12-unknown-response.mjs
+        run: node scripts/check-truncation-recovery-pre-state.mjs
 
       - name: Run known-good estimate (real /api/intake route, pricing + QA)
         if: ${{ inputs.diagnostic_batch_id == '' && inputs.run_known_good_estimate == 'true' && inputs.run_multitrade_known_good_estimate != 'true' && inputs.reset_circuit_breaker_if_safe != 'true' }}
