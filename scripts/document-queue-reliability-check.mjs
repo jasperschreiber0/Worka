@@ -393,6 +393,86 @@ async function main() {
       })
     }
 
+    // ── Scenario 8: a document that FAILED Stage 1/2 once but has SINCE
+    //    genuinely succeeded (project_documents.extraction_status='complete'
+    //    — the one atomic, authoritative "Stage 1/2 done" signal, migration
+    //    050) must NOT permanently exclude its batch. Root cause this
+    //    guards against, found live on job 1f12de7f-47b5-442e-9581-
+    //    1f813796eb70 immediately after the Stage 1/2 truncation-recovery
+    //    fix (commit f9b0233) started working: the target document failed
+    //    once (ai_failure_count=1), then genuinely recovered and completed
+    //    classification (97 facts persisted, stop_reason='tool_use') — but
+    //    scenario 7's own exclusion (migration 088) tests ai_failure_count
+    //    > 0 unconditionally, with no way to tell "still broken" apart from
+    //    "recovered since." Confirmed live via 4 consecutive autonomous
+    //    pg_cron ticks each reporting zero recovery action, and a direct
+    //    RPC call returning batch_id absent. files.ai_failure_count is
+    //    deliberately left non-zero here and never reset — it must remain
+    //    accurate historical telemetry; the fix reads project_documents
+    //    instead, not the counter. Also includes the inverse (still-
+    //    unresolved) case explicitly, distinct from scenario 7's own
+    //    coverage, colocated here for a single clear before/after
+    //    comparison. ───────────────────────────────────────────────────────
+    {
+      const staleUpdatedAt = new Date(Date.now() - 5 * 60_000).toISOString() // past the 3-minute grace
+
+      // Recovered batch: document failed once, but Stage 1/2 has SINCE
+      // durably completed for it (extraction_status='complete'). Must be
+      // eligible — this is the exact case migration 088 wrongly excluded.
+      const recoveredJobId = crypto.randomUUID()
+      createdJobIds.push(recoveredJobId)
+      const [recoveredFile] = await makeJobAndFiles(supabase, recoveredJobId, ['recovered.pdf'])
+      const { batchRow: recoveredBatch } = await makeBatch(supabase, recoveredJobId, recoveredFile.id, [recoveredFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', recoveredBatch.id)
+      await supabase.from('document_processing_batches').update({
+        status: 'failed', classification_triggered: true, updated_at: staleUpdatedAt,
+      }).eq('id', recoveredBatch.id)
+      // Historical failure signal — left in place, never cleared, exactly
+      // as record_ai_failure would have left it after a genuine first
+      // failure that was later recovered from on a subsequent attempt.
+      await supabase.from('files').update({ ai_failure_count: 1, ai_failure_classification: 'truncated_response' }).eq('id', recoveredFile.id)
+      // The one atomic signal that Stage 1/2 has SINCE genuinely succeeded
+      // for this document (migration 050) — set directly here since this
+      // test exercises the recovery predicate in isolation, not the full
+      // persist_document_classification RPC (already covered elsewhere).
+      const { error: pdErr } = await supabase.from('project_documents').insert({
+        job_id: recoveredJobId, file_id: recoveredFile.id, extraction_status: 'complete', document_type: 'architectural_plan',
+      })
+      if (pdErr) throw new Error(`project_documents insert failed: ${pdErr.message}`)
+
+      // Unresolved batch: document failed once, and Stage 1/2 has NOT since
+      // completed for it (no project_documents row at all) — must remain
+      // excluded, proving the fix doesn't over-include a still-broken
+      // document just because SOME batch nearby recovered.
+      const unresolvedJobId = crypto.randomUUID()
+      createdJobIds.push(unresolvedJobId)
+      const [unresolvedFile] = await makeJobAndFiles(supabase, unresolvedJobId, ['unresolved.pdf'])
+      const { batchRow: unresolvedBatch } = await makeBatch(supabase, unresolvedJobId, unresolvedFile.id, [unresolvedFile.id])
+      await supabase.from('document_processing_jobs').update({ status: 'completed' }).eq('parent_job_id', unresolvedBatch.id)
+      await supabase.from('document_processing_batches').update({
+        status: 'failed', classification_triggered: true, updated_at: staleUpdatedAt,
+      }).eq('id', unresolvedBatch.id)
+      await supabase.from('files').update({ ai_failure_count: 1, ai_failure_classification: 'truncated_response' }).eq('id', unresolvedFile.id)
+
+      const { data: stuckBatches2, error: stuckErr2 } = await supabase.rpc('find_stuck_batches_needing_classification_retry')
+      if (stuckErr2) throw new Error(`find_stuck_batches_needing_classification_retry failed: ${stuckErr2.message}`)
+      const ids2 = (stuckBatches2 ?? []).map((b) => b.batch_id)
+      assert(ids2.includes(recoveredBatch.id), 'a batch whose document failed once but has since durably completed Stage 1/2 (extraction_status=complete) must become eligible for classification retry again')
+      assert(!ids2.includes(unresolvedBatch.id), 'a batch whose document failed and has NOT since completed Stage 1/2 must remain excluded from classification retry')
+
+      // ai_failure_count must remain untouched historical telemetry — the
+      // fix must never reset it merely to make the predicate work.
+      const { data: recoveredFileAfter } = await supabase.from('files').select('ai_failure_count, ai_failure_classification').eq('id', recoveredFile.id).single()
+      assert(recoveredFileAfter?.ai_failure_count === 1, `ai_failure_count must remain historically accurate (1), got ${recoveredFileAfter?.ai_failure_count}`)
+      assert(recoveredFileAfter?.ai_failure_classification === 'truncated_response', 'ai_failure_classification must remain historically accurate, not cleared')
+
+      results.scenarios.recovered_document_batch_becomes_eligible_unresolved_stays_excluded = true
+      log('scenario_passed', {
+        scenario: 'recovered_document_batch_becomes_eligible_unresolved_stays_excluded',
+        recovered_batch_id: recoveredBatch.id, unresolved_batch_id: unresolvedBatch.id,
+      })
+    }
+
     results.passed = true
     log('queue_check_passed', results)
   } catch (err) {
