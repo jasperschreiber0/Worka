@@ -1,0 +1,28 @@
+name: Client document validation (one-off)
+
+# Manual-only, throwaway workflow: runs scripts/run-client-documents-estimate.mjs
+# against a real client's document set (checked in temporarily under
+# scripts/tmp-client-docs/ on a throwaway branch) to validate the pipeline
+# end-to-end on real content. Not part of the standing CI suite — delete
+# this file and the branch once the run is done.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - name: Run client document set through the real /api/intake route
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/run-client-documents-estimate.mjs
