@@ -17,3 +17,11 @@ test('dense schedules are isolated before a predictably oversized grouped call',
  assert.equal(hasDenseText({type:'text',text:'short'}),false)
  assert.equal(hasDenseText({type:'document',source:{data:'x'.repeat(20000)}}),false)
 })
+
+test('qualitative confidence is conservatively normalized without losing valid rows',()=>{
+ const r=expandCompactFacts([[0,'materials','tile','Tile A; price unknown','p2','Row A','high'],[0,'materials','paint','Paint B',null,'Row B','medium']],1)
+ assert.equal(r.length,2)
+ assert.equal(r[0].confidence,80)
+ assert.equal(r[1].confidence,50)
+ assert.throws(()=>expandCompactFacts([[0,'materials','x','x',null,'row','certain']],1))
+})
