@@ -1,3 +1,4 @@
+import { expandCompactFacts } from './compact-facts.ts'
 import { pendingDocumentIds } from './document-checkpoint.ts'
 import { withExecutionLease } from './execution-lease.ts'
 /**
@@ -441,23 +442,8 @@ const DOCUMENT_INTELLIGENCE_TOOL = {
       },
       facts: {
         type: 'array',
-        description: 'Every concrete, evidence-backed fact about the project. Do NOT include a fact you cannot point to evidence for — leave it out instead.',
-        items: {
-          type: 'object',
-          properties: {
-            category: {
-              type: 'string',
-              enum: ['project_type', 'building_type', 'construction_method', 'storeys', 'rooms', 'wet_areas', 'kitchens', 'laundries', 'external_works', 'structural_system', 'finishes', 'fixtures', 'materials', 'services', 'trades_involved'],
-            },
-            key: { type: 'string', description: 'Short label, e.g. "floor_area_m2", "roof_type", "ensuite_count".' },
-            value: { type: 'string' },
-            source_file_index: { type: ['integer', 'null'] },
-            page_reference: { type: ['string', 'null'] },
-            evidence: { type: 'string', description: 'The specific observation that supports this fact, e.g. a dimension, a note, a schedule row.' },
-            confidence: { type: 'integer', minimum: 0, maximum: 100 },
-          },
-          required: ['category', 'key', 'value', 'evidence', 'confidence'],
-        },
+        description: 'One compact row per evidenced fact: [source_file_index, category, key, value, page_reference, evidence, confidence]. Source index is mandatory. Category: project_type, building_type, construction_method, storeys, rooms, wet_areas, kitchens, laundries, external_works, structural_system, finishes, fixtures, materials, services, or trades_involved. Preserve every distinct schedule product, quantity, stated price and subtotal. Unknown prices stay unknown.',
+        items: { type: 'array', minItems: 7, maxItems: 7, items: { type: ['string', 'number', 'null'] } },
       },
     },
     required: ['documents', 'facts'],
@@ -1684,6 +1670,8 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         // approach the Stage 3 decomposition fix used.
         const docSystemPrompt = `You are a senior document controller and quantity surveyor reviewing construction documents for an Australian residential project. Classify every document precisely and extract only facts you can point to direct evidence for. Never invent a fact — if something is not shown or stated, simply omit it. Unknown must remain unknown.
 
+Return facts as seven-element rows in the tool schema, not repeated verbose objects. Keep values concise (aim for 35 words) and evidence as a page/row reference plus a short quotation (aim for 15 words); preserve all product codes, quantities, units and prices. Do not restate prior-document facts or legal boilerplate. Never omit a product to shorten output.
+
 When a document is a structured, tabular selection/fixture/finishes schedule (an FF&E schedule, a materials and finishes schedule, a fixture schedule with one named product per row) — extract EVERY distinct named product as its own fact under category 'fixtures' or 'materials', never a single summarizing fact per category. For each one, encode in the fact's value: the product name/brand, the quantity or location it applies to, and its price if the document states one (a unit RRP, a client-confirmed total, or "$0.00 / not yet priced" if that's what's shown — a $0.00 or blank price in a selection schedule is evidence the item is design-intent-only, not evidence it costs nothing, so say so explicitly rather than omitting the fact). Cite the specific row as the evidence. If a schedule has a printed category subtotal (e.g. "Showers+Tapware: $27,043"), extract that subtotal as its own fact too, so a later check can confirm the sum of the individual product facts is consistent with it.${existingDocsNote}${memoryContext}`
 
         // A document's block is an array when it has a supplementary text
@@ -1711,6 +1699,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           // match, by the caller) for the one bounded recovery attempt after
           // a prior truncated_response failure — see isTruncationRecoveryEligible.
           docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, maxTokens, batchTimeoutMs)
+          if (docResult) docResult.facts = expandCompactFacts(docResult.facts, batchFiles.length)
         } catch (err) {
           // A batch's Claude call failing (a transient API error, a
           // truncated/malformed response) is a genuinely catchable,
