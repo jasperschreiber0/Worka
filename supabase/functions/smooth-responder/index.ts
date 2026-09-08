@@ -1,3 +1,4 @@
+import { splitTextParts, combinePartResults } from './text-parts.ts'
 import { expandCompactFacts, hasDenseText } from './compact-facts.ts'
 import { pendingDocumentIds } from './document-checkpoint.ts'
 import { withExecutionLease } from './execution-lease.ts'
@@ -1512,8 +1513,23 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // project_documents row; the last chunk processed wins its
       // classification metadata, but every chunk's facts are captured
       // regardless, since facts aren't gated by that row.
+      const textPartsById = new Map<string, {fileId:string; sourceHash:string; index:number; total:number}>()
       const expandedLoaded: LoadedFile[] = []
       for (const f of allLoaded) {
+        const blocks = Array.isArray(f.block) ? f.block : [f.block]
+        if (blocks.every(b => b.type === 'text') && hasDenseText(f.block)) {
+          const source = blocks.map(b => (b as {text:string}).text).join('\n')
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('text-parts-v1:12000:300:' + source))
+          const sourceHash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('')
+          const parts = splitTextParts(source)
+          if (parts.length > 20) throw new Error('Document exceeds bounded text-part capacity')
+          parts.forEach((text,index) => {
+            const partId = f.fileId + '#text' + index
+            textPartsById.set(partId,{fileId:f.fileId,sourceHash,index,total:parts.length})
+            expandedLoaded.push({...f,fileId:partId,block:{type:'text',text:'Source: '+f.filename+'; text part '+(index+1)+' of '+parts.length+'. Extract only this part. Cite original page/row when shown, otherwise this part number.\n'+text}})
+          })
+          continue
+        }
         const approxBytes = JSON.stringify(f.block).length
         if (approxBytes > MAX_BYTES_PER_BATCH && f.rawPdfBytes) {
           try {
@@ -1542,7 +1558,14 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
         expandedLoaded.push(f)
       }
 
-      const batchInput: BatchableFile[] = expandedLoaded.map((f) => ({
+      const {data: savedParts, error: savedPartsError} = await supabase.from('document_analysis_parts').select('file_id,source_hash,part_index').eq('job_id',jobId)
+      if (savedPartsError) throw new Error('Unable to read document part checkpoints')
+      const savedKeys = new Set((savedParts ?? []).map((p: any) => p.file_id+':'+p.source_hash+':'+p.part_index))
+      const batchInput: BatchableFile[] = expandedLoaded.filter(f => {
+        const p=textPartsById.get(f.fileId)
+        // Keep the last part until atomic full-document persistence succeeds.
+        return !p || p.index===p.total-1 || !savedKeys.has(p.fileId+':'+p.sourceHash+':'+p.index)
+      }).map((f) => ({
         fileId: f.fileId,
         filename: f.filename,
         approxBytes: JSON.stringify(f.block).length,
@@ -1580,7 +1603,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       const denseTextIds = new Set(expandedLoaded.filter(f => hasDenseText(f.block)).map(f => f.fileId))
       const isForcedSolo = (f: BatchableFile): boolean =>
         (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) >= 1
-        || denseTextIds.has(f.fileId)
+        || denseTextIds.has(f.fileId) || textPartsById.has(f.fileId)
         || shouldRouteSoloForVisionLoad(f.approxBytes, isPureVisionNoTextById.get(f.fileId) ?? false, MAX_BYTES_PER_BATCH)
       const forcedSoloInput = batchInput.filter(isForcedSolo)
       const freshInput = batchInput.filter((f) => !isForcedSolo(f))
@@ -1700,8 +1723,31 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           // TRUNCATION_RECOVERY_MAX_TOKENS (with batchTimeoutMs raised to
           // match, by the caller) for the one bounded recovery attempt after
           // a prior truncated_response failure — see isTruncationRecoveryEligible.
+          const part = batchFiles.length===1 ? textPartsById.get(batchFiles[0].fileId) : undefined
+          let cachedPart: any = null
+          if (part) {
+            const read = await supabase.from('document_analysis_parts').select('payload').eq('job_id',jobId).eq('file_id',part.fileId).eq('source_hash',part.sourceHash).eq('part_index',part.index).maybeSingle()
+            if(read.error) throw new Error('Unable to read saved analysis part')
+            cachedPart=read.data
+          }
+          if(cachedPart) docResult=cachedPart.payload
+          else {
           docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, maxTokens, batchTimeoutMs)
           if (docResult) docResult.facts = expandCompactFacts(docResult.facts, batchFiles.length)
+          }
+          if(part && docResult) {
+            if(!cachedPart) {
+              const write=await supabase.from('document_analysis_parts').upsert({job_id:jobId,file_id:part.fileId,source_hash:part.sourceHash,part_index:part.index,part_count:part.total,payload:docResult},{onConflict:'job_id,file_id,source_hash,part_index'})
+              if(write.error) throw new Error('Unable to save document analysis part')
+              classificationProgress=true
+              if(parentJobId) await supabase.from('document_processing_batches').update({stall_count:0}).eq('id',parentJobId)
+            }
+            const read=await supabase.from('document_analysis_parts').select('part_index,payload').eq('job_id',jobId).eq('file_id',part.fileId).eq('source_hash',part.sourceHash).order('part_index')
+            if(read.error) throw new Error('Unable to verify document part coverage')
+            const combined=combinePartResults(read.data??[],part.total)
+            if(!combined) return {ok:true,factsFound:0,documentsClassified:0}
+            docResult=combined
+          }
         } catch (err) {
           // A batch's Claude call failing (a transient API error, a
           // truncated/malformed response) is a genuinely catchable,
