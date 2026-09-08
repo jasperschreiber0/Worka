@@ -341,3 +341,14 @@ test('a rule that throws does not take down evaluation of the others', () => {
   })
   assert.ok(findings.find((f) => f.id === 'kitchen_completeness'))
 })
+
+test('legacy document price is accepted only when quantity times document price agrees', () => {
+  for (const total of [17000, 12000]) {
+    const findings = evaluateConstructionSanity({
+      lineItems: [item({ trade_category_id: 8, description: 'Toto Neorest smart toilet suite - ensuite', quantity: 2, unit: 'each', pricing_source: 'document', total })],
+      scopeItems: [],
+      documentSelections: [{ fact_id: 'f1', category: 'fixtures', key: 'toilet', value: 'Toto Neorest smart toilet suite, ensuite, $8,500', confidence: 90, source_document_id: 'doc1', created_at: '2026-07-01T00:00:00Z' }],
+    })
+    assert.equal(Boolean(findings.find(f => f.id === 'document_price_overridden')), total !== 17000)
+  }
+})

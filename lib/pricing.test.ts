@@ -681,3 +681,13 @@ test('assignDocumentSelections: two distinct facts each go to their own best-mat
   assert.equal(assignment.get(0)?.price, 8500)
   assert.equal(assignment.get(1)?.price, 27043)
 })
+
+test('sell totals round half cents consistently with decimal database amounts', () => {
+  assert.equal(calculateSellTotal({ total: 6162.50, margin_pct: 0.15 }), 7086.88)
+  assert.equal(calculateSellTotal({ total: 382.50, margin_pct: 0.15 }), 439.88)
+  assert.equal(calculateClientPrice([
+    { total: 6162.50, margin_pct: 0.15, assumption_status: null },
+    { total: 382.50, margin_pct: 0.15, assumption_status: null },
+    { total: 8500, margin_pct: 0, assumption_status: 'excluded' },
+  ]), 7526.76)
+})

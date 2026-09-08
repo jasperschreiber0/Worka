@@ -643,7 +643,7 @@ async function resolveAiMeasuredRates(
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 function round2(n: number): number {
-  return Math.round(n * 100) / 100
+  return Math.round((n + Number.EPSILON * Math.abs(n)) * 100) / 100
 }
 
 /** Human-readable "as of" suffix for a rate's own last-updated/set/imported/

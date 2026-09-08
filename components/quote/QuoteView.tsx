@@ -443,7 +443,7 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
   // function the quote summary API, PDF export, and invoice schedule now all
   // call too, so this row and the header total can no longer drift apart.
   const sellTotalExact = calculateSellTotal(item)
-  const sellTotal = sellTotalExact !== null ? Math.round(sellTotalExact) : null
+  const sellTotal = sellTotalExact
 
   return (
     <div
@@ -731,8 +731,8 @@ interface PcPsRegisterProps {
 }
 
 function PcPsRegister({ items }: PcPsRegisterProps) {
-  const pcItems = items.filter(i => i.pricing_type === 'pc_allowance')
-  const psItems = items.filter(i => i.pricing_type === 'provisional_sum')
+  const pcItems = items.filter(i => i.assumption_status !== 'excluded' && i.pricing_type === 'pc_allowance')
+  const psItems = items.filter(i => i.assumption_status !== 'excluded' && i.pricing_type === 'provisional_sum')
 
   if (pcItems.length === 0 && psItems.length === 0) return null
 

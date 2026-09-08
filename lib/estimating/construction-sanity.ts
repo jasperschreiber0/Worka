@@ -344,6 +344,9 @@ const documentPriceOverridden: ConstructionSanityRule = {
       if (item.pricing_source === 'document_selection') continue
       const match = assignment.get(i)
       if (!match) continue
+      // Legacy extraction stores document prices under 'document'. Validate the amount too.
+      if (item.pricing_source === 'document' && item.total != null && item.quantity != null &&
+          Math.abs(item.total - match.price * item.quantity) < 0.01) continue
       return {
         id: 'document_price_overridden',
         severity: 'red',
