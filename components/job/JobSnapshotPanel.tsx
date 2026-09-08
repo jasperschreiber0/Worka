@@ -683,7 +683,7 @@ export default function JobSnapshotPanel({
       ? (() => {
           if (displayStatus === 'quoting') {
             if (!snapshot?.quote) {
-              return { label: 'Upload plans to start', timing: null, isUploadCta: true }
+              return snapshot?.files.length ? { label: 'Plans saved — estimate not yet ready', timing: null, isUploadCta: false } : { label: 'Upload plans to start', timing: null, isUploadCta: true }
             }
             return { label: 'Send quote', timing: snapshot?.job.quote_deadline ?? null, isUploadCta: false }
           }

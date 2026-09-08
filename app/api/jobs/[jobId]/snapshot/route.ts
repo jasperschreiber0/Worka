@@ -261,10 +261,13 @@ export async function GET(
     risks.push({ level: 'medium', message: `WorkA assumed ${n} thing${n > 1 ? 's' : ''} it couldn't confirm from your documents — review before sending.` })
   }
 
-  const typedFiles = (files ?? []) as Array<{ intake_status: string }>
-  const unprocessed = typedFiles.filter(f => f.intake_status === 'uploaded' || f.intake_status === 'failed')
+  const { data: analysedDocuments, error: coverageError } = await sb.from('project_documents').select('file_id').eq('job_id', jobId).eq('extraction_status', 'complete')
+  if (coverageError) return NextResponse.json({ error: 'Could not verify document progress.' }, { status: 503 })
+  const analysedIds = new Set((analysedDocuments ?? []).map((d: { file_id: string }) => d.file_id))
+  const typedFiles = (files ?? []) as Array<{ id: string; intake_status: string }>
+  const unprocessed = typedFiles.filter(f => !analysedIds.has(f.id))
   if (unprocessed.length > 0) {
-    risks.push({ level: 'medium', message: `${unprocessed.length} plan${unprocessed.length > 1 ? 's' : ''} uploaded but not yet processed.` })
+    risks.push({ level: 'medium', message: `${unprocessed.length} plan${unprocessed.length > 1 ? 's' : ''} saved; analysis not yet complete.` })
   }
 
   if (job.budget_estimate && typedFiles.length === 0) {
