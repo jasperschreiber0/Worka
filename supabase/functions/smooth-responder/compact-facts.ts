@@ -3,11 +3,12 @@ export function expandCompactFacts(rows: unknown, documentCount: number) {
   return rows.map((r: unknown) => {
     if (!Array.isArray(r) || r.length !== 7) throw new Error('Incomplete compact fact')
     const [source_file_index, category, key, value, page_reference, evidence, rawConfidence] = r
-    const confidence = typeof rawConfidence === 'string' ? ({ high: 80, medium: 50, low: 20 } as Record<string, number>)[rawConfidence.toLowerCase()] : rawConfidence
+    const parsedConfidence = typeof rawConfidence === 'string' ? (/^\d+(\.\d+)?$/.test(rawConfidence) ? Number(rawConfidence) : ({ high: 80, medium: 50, low: 20 } as Record<string, number>)[rawConfidence.toLowerCase()]) : rawConfidence
+    const confidence = typeof parsedConfidence === 'number' && parsedConfidence > 0 && parsedConfidence < 1 ? parsedConfidence * 100 : parsedConfidence
     if (!Number.isInteger(source_file_index) || source_file_index < 0 || source_file_index >= documentCount ||
         ![category,key,value,evidence].every(v => typeof v === 'string' && v.length > 0) ||
         !(page_reference === null || typeof page_reference === 'string') ||
-        !Number.isInteger(confidence) || confidence < 0 || confidence > 100) throw new Error('Invalid compact fact attribution or value')
+        !Number.isFinite(confidence) || confidence < 0 || confidence > 100) throw new Error('Invalid compact fact attribution or value')
     return { source_file_index, category, key, value, page_reference, evidence, confidence }
   })
 }

@@ -25,3 +25,8 @@ test('qualitative confidence is conservatively normalized without losing valid r
  assert.equal(r[1].confidence,50)
  assert.throws(()=>expandCompactFacts([[0,'materials','x','x',null,'row','certain']],1))
 })
+
+test('fractional and percentage confidence are normalized without accepting out-of-range values',()=>{
+ for(const [input,expected] of [[0.98,98],['0.95',95],[85,85],['80',80]]) assert.equal(expandCompactFacts([[0,'fixtures','tap','x',null,'row',input]],1)[0].confidence,expected)
+ for(const input of [-1,101,null,'certain']) assert.throws(()=>expandCompactFacts([[0,'fixtures','tap','x',null,'row',input]],1))
+})
