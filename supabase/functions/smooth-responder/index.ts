@@ -1,4 +1,4 @@
-import { expandCompactFacts } from './compact-facts.ts'
+import { expandCompactFacts, hasDenseText } from './compact-facts.ts'
 import { pendingDocumentIds } from './document-checkpoint.ts'
 import { withExecutionLease } from './execution-lease.ts'
 /**
@@ -1577,8 +1577,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
       // and never get a genuine, un-truncated shot at the existing solo
       // timeout ceiling. No timeout constant changes; this only changes
       // which batch a document lands in.
+      const denseTextIds = new Set(expandedLoaded.filter(f => hasDenseText(f.block)).map(f => f.fileId))
       const isForcedSolo = (f: BatchableFile): boolean =>
         (priorFailureCounts.get(f.fileId.split('#')[0])?.count ?? 0) >= 1
+        || denseTextIds.has(f.fileId)
         || shouldRouteSoloForVisionLoad(f.approxBytes, isPureVisionNoTextById.get(f.fileId) ?? false, MAX_BYTES_PER_BATCH)
       const forcedSoloInput = batchInput.filter(isForcedSolo)
       const freshInput = batchInput.filter((f) => !isForcedSolo(f))

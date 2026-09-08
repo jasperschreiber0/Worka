@@ -10,3 +10,10 @@ export function expandCompactFacts(rows: unknown, documentCount: number) {
     return { source_file_index, category, key, value, page_reference, evidence, confidence }
   })
 }
+
+// Dense text schedules can demand long row-by-row output despite tiny PDF bytes.
+export function hasDenseText(block: unknown): boolean {
+  const blocks = Array.isArray(block) ? block : [block]
+  const chars = blocks.reduce((n: number, b: any) => n + (b?.type === 'text' && typeof b.text === 'string' ? b.text.length : 0), 0)
+  return chars >= 16000
+}
