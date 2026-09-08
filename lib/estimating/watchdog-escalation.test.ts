@@ -133,7 +133,7 @@ test('Test D/E: escalate_watchdog_finalize never runs its UPDATE/INSERT writes i
   assert.doesNotMatch(notFoundBlock, /UPDATE estimate_runs/)
   assert.doesNotMatch(notFoundBlock, /INSERT INTO/)
 
-  const updateIdx = migration096.indexOf('UPDATE estimate_runs\n  SET builder_status')
+  const updateIdx = migration096.search(/UPDATE estimate_runs\r?\n  SET builder_status/)
   assert.ok(updateIdx > endIfIdx, 'the finalize UPDATE must come after the not-found short-circuit, never before it')
 })
 

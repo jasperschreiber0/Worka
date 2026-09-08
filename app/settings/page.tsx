@@ -8,6 +8,12 @@ export const metadata: Metadata = {
 
 const SETTINGS_SECTIONS = [
   {
+    href: '/settings/xero',
+    label: 'Xero connection',
+    description: 'Connect the Xero organisation for your building business.',
+    icon: <span className="text-sm font-bold" style={{ color: 'var(--orange-primary)' }}>X</span>,
+  },
+  {
     href: '/settings/rates',
     label: 'Rates & pricing',
     description: 'Import your historical rates so WorkA quotes accurately from day one.',

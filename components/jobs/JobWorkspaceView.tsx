@@ -7,6 +7,9 @@ import UploadPanel, { type UploadPanelJob } from '@/components/chat/UploadPanel'
 import QuoteView from '@/components/quote/QuoteView'
 import AddVariationDrawer from '@/components/variations/AddVariationDrawer'
 import CloseOutJobDrawer, { type CloseOutResult } from '@/components/jobs/CloseOutJobDrawer'
+import SitePanel from '@/components/jobs/SitePanel'
+import ProgrammePanel from '@/components/jobs/ProgrammePanel'
+import LabourMoneySummary from '@/components/jobs/LabourMoneySummary'
 
 function formatAud(amount: number): string {
   return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(amount)
@@ -43,6 +46,7 @@ interface Toast {
 }
 
 export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewProps) {
+  const [section, setSection] = useState<'overview' | 'money' | 'files' | 'site'>('overview')
   const router = useRouter()
   const searchParams = useSearchParams()
   const [job, setJob] = useState<ActiveJob | null>(null)
@@ -75,7 +79,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
         if (!cancelled) setNotFound(true)
       })
     return () => { cancelled = true }
-  }, [jobId])
+  }, [jobId, router, searchParams])
 
   const refetchJob = useCallback(() => {
     fetch(`/api/jobs/${jobId}`)
@@ -98,6 +102,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
       const data = await res.json()
       if (!res.ok || !data.quote_id) throw new Error()
       setRefreshKey((k) => k + 1)
+      setSection('money')
       setViewingQuoteId(data.quote_id)
     } catch {
       setToast({ tone: 'error', message: "Couldn't create the estimate — try again." })
@@ -105,6 +110,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
   }, [jobId])
 
   const handleIntakeComplete = useCallback(() => {
+    setSection('money')
     setUploadOpen(false)
     // JobSnapshotPanel only refetches when job.id changes — force a remount
     // to pick up the freshly-generated estimate (detected scope, line items)
@@ -142,7 +148,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
   if (notFound) {
     return (
       <div className="max-w-3xl mx-auto px-6 py-16 text-center">
-        <p style={{ color: 'var(--text-secondary)' }}>Job not found, or you don't have access to it.</p>
+        <p style={{ color: 'var(--text-secondary)' }}>Job not found, or you don’t have access to it.</p>
         <button className="btn-secondary px-4 py-2 text-sm mt-4" onClick={() => router.push('/jobs')}>Back to Jobs</button>
       </div>
     )
@@ -155,9 +161,9 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
           Jobs
         </button>
-        {job && (
+        {job && section === 'money' && (
           <div className="flex items-center gap-2">
-            <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => setVariationDrawerOpen(true)}>+ Raise variation</button>
+            <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => { setSection('money'); setVariationDrawerOpen(true) }}>+ Raise variation</button>
             {job.status === 'active' && (
               <button className="btn-secondary px-3 py-1.5 text-sm" onClick={() => setCloseOutOpen(true)}>Close out job</button>
             )}
@@ -176,8 +182,11 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
         </div>
       )}
 
+      {job && <nav aria-label="Job sections" className="grid grid-cols-4 gap-2 mb-4">{(['overview', 'money', 'site', 'files'] as const).map(item => <button key={item} type="button" aria-pressed={section === item} onClick={() => setSection(item)} className="px-2 sm:px-4 py-3 text-sm rounded-md" style={{ background: section === item ? 'var(--bg-elevated)' : 'transparent', color: section === item ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: section === item ? 600 : 400 }}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>}
+      {job && section === 'money' && <LabourMoneySummary jobId={jobId} />}
       {job ? (
-        <JobSnapshotPanel
+        section === 'site' ? <><ProgrammePanel jobId={jobId} /><SitePanel jobId={jobId} builderId={builderId} /></> : <JobSnapshotPanel
+          workspaceSection={section}
           key={refreshKey}
           job={job}
           builderId={builderId}
@@ -202,7 +211,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
         />
       )}
 
-      {job && (
+      {job && variationDrawerOpen && (
         <AddVariationDrawer
           open={variationDrawerOpen}
           jobId={job.id}
@@ -215,7 +224,7 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
         />
       )}
 
-      {job && (
+      {job && closeOutOpen && (
         <CloseOutJobDrawer
           open={closeOutOpen}
           jobId={job.id}

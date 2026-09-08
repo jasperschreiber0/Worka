@@ -19,6 +19,7 @@ interface CreateBody {
   description?: string
   amount?: number
   incurred_on?: string
+  cost_kind?: 'incurred' | 'committed' | 'remaining'
 }
 
 function round2(n: number): number {
@@ -70,7 +71,7 @@ export async function GET(
 
     const { data, error } = await supabase
       .from('job_cost_entries')
-      .select('id, trade_category_id, description, amount, incurred_on, created_at')
+      .select('id, trade_category_id, description, amount, incurred_on, cost_kind, created_at')
       .eq('job_id', jobId)
       .order('incurred_on', { ascending: false })
       .order('created_at', { ascending: false })
@@ -116,6 +117,10 @@ export async function POST(
     return NextResponse.json({ error: 'Amount must be a number greater than or equal to 0' }, { status: 400 })
   }
   const amount = round2(body.amount)
+  const costKind = body.cost_kind ?? 'incurred'
+  if (costKind !== 'incurred' && costKind !== 'committed' && costKind !== 'remaining') {
+    return NextResponse.json({ error: 'Choose incurred, committed or remaining costs' }, { status: 400 })
+  }
 
   let incurredOn: string
   if (body.incurred_on !== undefined) {
@@ -154,6 +159,7 @@ export async function POST(
         description,
         amount,
         incurred_on: incurredOn,
+        cost_kind: costKind,
       })
       .select('id')
       .single()
@@ -168,3 +174,4 @@ export async function POST(
     return NextResponse.json({ error: 'Failed to log cost — please try again.' }, { status: 500 })
   }
 }
+

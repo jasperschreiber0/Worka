@@ -36,7 +36,7 @@ export default function SignupPage() {
 
     try {
       if (!supabaseUrl) {
-        router.push('/chat')
+        router.push('/today')
         return
       }
 

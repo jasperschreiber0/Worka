@@ -24,7 +24,7 @@ function jobMeta(overrides: Partial<SimilarProject> = {}): SimilarProject {
     id: 'job-x', job_type: 'rear_extension', project_summary: '',
     floor_area_m2: 100, storeys: 1, wet_areas: 1, finish_level: 'standard', region: 'NSW', suburb: null,
     quoted_cost: null, final_cost: null, quoted_margin_pct: null, final_margin_pct: null,
-    completed_at: null, similarity_score: 0,
+    completed_at: null, similarity_score: 0, similarity_reasons: [],
     ...overrides,
   }
 }
@@ -64,7 +64,7 @@ test('retrieveRelevantCorrections: sorts by similarity, most similar first', () 
   const mostSimilar = candidate({ id: 'corr-high', job_metadata: jobMeta() })
   const result = retrieveRelevantCorrections([lessSimilar, mostSimilar], metadata(), 4)
   assert.equal(result[0].id, 'corr-high')
-  assert.ok(result[0].similarity_score >= result[1]?.similarity_score ?? 0)
+  assert.ok(result[0].similarity_score >= (result[1]?.similarity_score ?? 0))
 })
 
 test('retrieveRelevantCorrections: respects the limit', () => {

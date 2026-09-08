@@ -68,6 +68,8 @@ export interface JobSnapshot {
     contract_value: number | null
     /** SUM of job_cost_entries.amount — the costs the builder has actually logged. 0, never null, when nothing's been logged. */
     actual_cost: number
+    committed_cost: number
+    forecast_final_cost: number | null
     /** contract_value - actual_cost. Null only when contract_value is null (no quote). */
     current_margin: number | null
     /** current_margin / contract_value * 100, rounded. Null when contract_value is null or 0. */
@@ -223,7 +225,7 @@ const JOB_1_FITZROY: Omit<JobSnapshot, 'job_health'> = {
     last_activity: '2 days ago',
     notes: null,
     contract_value: 163300,
-    actual_cost: 112000,
+    actual_cost: 112000, committed_cost: 0, forecast_final_cost: 112000,
     current_margin: 51300,
     current_margin_pct: 31,
     invoiced: 28000,
@@ -367,7 +369,7 @@ const JOB_2_TOORAK: Omit<JobSnapshot, 'job_health'> = {
     last_activity: '5 days ago',
     notes: null,
     contract_value: 146625,
-    actual_cost: 0,
+    actual_cost: 0, committed_cost: 0, forecast_final_cost: 0,
     current_margin: 146625,
     current_margin_pct: 100,
     invoiced: 0,
@@ -469,7 +471,7 @@ const JOB_3_BRUNSWICK: Omit<JobSnapshot, 'job_health'> = {
     last_activity: 'today',
     notes: null,
     contract_value: 146625,
-    actual_cost: 0,
+    actual_cost: 0, committed_cost: 0, forecast_final_cost: 0,
     current_margin: 146625,
     current_margin_pct: 100,
     invoiced: 0,

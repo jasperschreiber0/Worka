@@ -79,30 +79,22 @@ export default function TasksTab({
     }
   }
 
-  async function handleComplete(taskId: string) {
+  async function changeStatus(taskId: string, status: 'open' | 'done') {
     setCompleting(taskId)
-    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: 'done' } : t))
-    setCompleting(null)
+    setSaveError(null)
     try {
-      await fetch(`/api/jobs/${jobId}/tasks`, {
+      const response = await fetch(`/api/jobs/${jobId}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'complete', task_id: taskId, builder_id: builderId }),
+        body: JSON.stringify({ action: status === 'done' ? 'complete' : 'reopen', task_id: taskId }),
       })
-    } catch { /* optimistic */ }
+      if (!response.ok) throw new Error('Task update failed')
+      setTasks(current => current.map(task => task.id === taskId ? { ...task, status } : task))
+    } catch { setSaveError("Couldn't update the task. Please try again.") }
+    finally { setCompleting(null) }
   }
-
-  async function handleReopen(taskId: string) {
-    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: 'open' } : t))
-    try {
-      await fetch(`/api/jobs/${jobId}/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reopen', task_id: taskId, builder_id: builderId }),
-      })
-    } catch { /* optimistic */ }
-  }
-
+  const handleComplete = (taskId: string) => changeStatus(taskId, 'done')
+  const handleReopen = (taskId: string) => changeStatus(taskId, 'open')
   return (
     <div style={{ padding: '16px' }} className="space-y-4">
 
@@ -254,3 +246,4 @@ export default function TasksTab({
     </div>
   )
 }
+

@@ -7,6 +7,7 @@ import { daysAgo } from '@/lib/job-activity'
 import { persistProjectUnderstanding } from '@/lib/project-context'
 import { calculateClientPrice } from '@/lib/pricing'
 import { computeInvoiceTotals, deriveInvoiceStatus } from '@/lib/invoices'
+import { calculateJobProfit } from '@/lib/job-profit'
 
 // ─── GET /api/jobs/[jobId]/snapshot ──────────────────────────────────────────
 
@@ -49,8 +50,6 @@ export async function GET(
       .single()
 
     if (jobErr || !job) {
-      const snapshot = getDemoJobSnapshot(jobId)
-      if (snapshot) return NextResponse.json({ snapshot })
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
 
@@ -99,13 +98,19 @@ export async function GET(
   // Actual cost: SUM of the costs the builder has actually logged — see
   // migration 097. 0 (never null) when nothing has been logged yet, since
   // that's a real, known state, not an unknown one.
-  const { data: costRows } = await sb
+  const { data: costRows, error: costError } = await sb
     .from('job_cost_entries')
-    .select('amount')
+    .select('amount, cost_kind')
     .eq('job_id', jobId)
+  if (costError) return NextResponse.json({ error: 'Could not load job costs. Please try again.' }, { status: 503 })
   const actualCost = Math.round(
-    (costRows ?? []).reduce((sum: number, r: { amount: number }) => sum + r.amount, 0) * 100
+    (costRows ?? []).filter((r: { cost_kind?: string }) => (r.cost_kind ?? 'incurred') === 'incurred').reduce((sum: number, r: { amount: number }) => sum + r.amount, 0) * 100
   ) / 100
+  const committedCost = Math.round((costRows ?? []).filter((r: { cost_kind?: string }) => r.cost_kind === 'committed').reduce((sum: number, r: { amount: number }) => sum + r.amount, 0) * 100) / 100
+  const remainingCost = (costRows ?? []).filter((r: { cost_kind?: string }) => r.cost_kind === 'remaining').reduce((sum: number, r: { amount: number }) => sum + Number(r.amount), 0)
+  // This remains a known-cost subtotal until all costs have been reconciled.
+  const profitCheck = calculateJobProfit({ contract: contractValue, approvedVariations: 0, actual: actualCost, outstandingCommitments: committedCost, remaining: remainingCost, uncostedHours: 0, reconciled: false })
+  const forecastFinalCost = contractValue !== null ? profitCheck.knownCost : null
 
   const currentMargin = contractValue !== null ? Math.round((contractValue - actualCost) * 100) / 100 : null
   const currentMarginPct =
@@ -297,6 +302,8 @@ export async function GET(
       notes: job.notes ?? null,
       contract_value: contractValue,
       actual_cost: actualCost,
+      committed_cost: committedCost,
+      forecast_final_cost: forecastFinalCost,
       current_margin: currentMargin,
       current_margin_pct: currentMarginPct,
       invoiced: invoiceTotals.invoiced,
@@ -395,9 +402,6 @@ export async function GET(
 
   return NextResponse.json({ snapshot })
   } catch {
-    // DB unavailable — fall back to in-memory demo snapshot
-    const snapshot = getDemoJobSnapshot(jobId)
-    if (!snapshot) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
-    return NextResponse.json({ snapshot })
+    return NextResponse.json({ error: 'Could not load the job. Please try again.' }, { status: 503 })
   }
 }

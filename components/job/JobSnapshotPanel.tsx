@@ -23,6 +23,7 @@ export interface ActiveJob {
 }
 
 export interface JobSnapshotPanelProps {
+  workspaceSection?: 'overview' | 'money' | 'files'
   job: ActiveJob | null
   onClose: () => void
   userRole?: PermissionRole
@@ -49,6 +50,7 @@ interface CostEntry {
   description: string
   amount: number
   incurred_on: string
+  cost_kind?: 'incurred' | 'committed' | 'remaining'
   created_at: string
 }
 
@@ -124,10 +126,21 @@ const CARD_STYLE: React.CSSProperties = {
   padding: '10px 12px',
 }
 
+const WorkspaceSection = React.createContext<'overview' | 'money' | 'files' | undefined>(undefined)
+const MONEY_SECTIONS = ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Needs your input', 'Worth knowing', 'Pending']
+
 function SectionGroup({ label, children }: { label: string; children?: React.ReactNode }) {
+  const section = React.useContext(WorkspaceSection)
+  if (section === 'files' || (section === 'money' && !MONEY_SECTIONS.includes(label)) || (section === 'overview' && ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Worth knowing'].includes(label))) return null
+  if (section === 'overview' && ['Client', 'Timeline', 'Crew on site', 'Comms', 'Proof trail'].includes(label)) {
+    return <details className="mb-4 rounded-md" style={{ background: 'var(--bg-elevated)' }}>
+      <summary className="p-4 cursor-pointer text-sm font-medium">{label === 'Comms' ? 'Messages' : label === 'Proof trail' ? 'Activity record' : label}</summary>
+      <div className="px-4 pb-4">{children}</div>
+    </details>
+  }
   return (
     <div style={{ marginBottom: 24 }}>
-      <div style={SECTION_LABEL_STYLE}>{label}</div>
+      <div style={section ? { fontSize: 14, fontWeight: 600, marginBottom: 12, color: 'var(--text-primary)' } : SECTION_LABEL_STYLE}>{label}</div>
       {children}
     </div>
   )
@@ -162,6 +175,7 @@ interface AggregatePulse {
 
 export default function JobSnapshotPanel({
   job,
+  workspaceSection,
   onClose,
   onViewQuote,
   onCreateEstimate,
@@ -247,6 +261,7 @@ export default function JobSnapshotPanel({
     description: '',
     amount: '',
     incurred_on: todayIso(),
+    cost_kind: 'incurred' as 'incurred' | 'committed' | 'remaining',
   })
 
   const fetchCosts = useCallback((jobId: string) => {
@@ -284,6 +299,7 @@ export default function JobSnapshotPanel({
           description: logCostFields.description.trim(),
           amount: amountNum,
           incurred_on: logCostFields.incurred_on,
+          cost_kind: logCostFields.cost_kind,
         }),
       })
       const json = await res.json().catch(() => ({}))
@@ -291,7 +307,7 @@ export default function JobSnapshotPanel({
         setLogCostError(json.error ?? 'Failed to log cost — please try again.')
         return
       }
-      setLogCostFields({ trade_category_id: '', description: '', amount: '', incurred_on: todayIso() })
+      setLogCostFields({ trade_category_id: '', description: '', amount: '', incurred_on: todayIso(), cost_kind: 'incurred' })
       setLogCostOpen(false)
       // Reload both — the entry list (for the itemised list) and the
       // snapshot (the authoritative source for Actual Cost/Margin/Margin%,
@@ -642,9 +658,10 @@ export default function JobSnapshotPanel({
   const invoicedPct =
     contractValue && contractValue > 0 ? Math.min(100, Math.round((invoicedTotal / contractValue) * 100)) : null
   const actualCostLogged = snapshot?.overview.actual_cost ?? 0
+  const committedCost = snapshot?.overview.committed_cost ?? 0
+  const forecastFinalCost = snapshot?.overview.forecast_final_cost ?? null
   const currentMargin = snapshot?.overview.current_margin ?? null
   const currentMarginPct = snapshot?.overview.current_margin_pct ?? null
-  const marginColorFor = (pct: number) => (pct >= 15 ? 'var(--status-green)' : pct >= 8 ? 'var(--status-amber)' : 'var(--status-red)')
 
   const animatedBudget = useCountUp(budgetEstimate)
   const animatedEstimatedCost = useCountUp(estimatedCost)
@@ -825,6 +842,7 @@ export default function JobSnapshotPanel({
       </div>
 
       {/* ── SCROLLABLE BODY ─────────────────────────────────────────────────── */}
+      <WorkspaceSection.Provider value={workspaceSection}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px', paddingBottom: 0 }}>
         {!job ? (
           <div style={{ padding: '8px 0' }}>
@@ -875,6 +893,17 @@ export default function JobSnapshotPanel({
           </div>
         ) : (
           <>
+            {workspaceSection === 'money' && <div className="mb-6 text-sm" style={{ color: 'var(--text-secondary)' }}>
+              <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Expected profit is not available yet</p>
+              <p className="mt-2">These figures show your estimate and recorded costs. Outstanding commitments and costs to finish are not included in a final-profit forecast.</p>
+              {onViewQuote && snapshot.quote?.id && <button className="btn-secondary px-4 py-3 mt-3" onClick={() => onViewQuote(snapshot.quote!.id!)}>Review estimate</button>}
+              {!snapshot.quote?.id && onCreateEstimate && job && <button className="btn-primary px-4 py-3 mt-3" onClick={() => onCreateEstimate(job)}>Create estimate</button>}
+            </div>}
+            {workspaceSection === 'files' && <div>
+              <div className="flex items-center justify-between gap-3 mb-4"><h2 className="font-semibold">Job files</h2>{onUploadPlans && job && <button className="btn-primary px-4 py-3 text-sm" onClick={() => onUploadPlans(job)}>Upload plans</button>}</div>
+              {snapshot.files.length === 0 && <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>No files uploaded yet. Add your plans to keep them with this job.</p>}
+              <ul className="space-y-3">{snapshot.files.map(file => <li key={file.id} className="card p-4"><a className="underline break-all" href={`/api/jobs/${job!.id}/files/${file.id}`} target="_blank" rel="noopener noreferrer">{file.filename}</a><p className="text-sm mt-2" style={{ color: 'var(--text-secondary)' }}>Uploaded {file.uploaded_at}</p></li>)}</ul>
+            </div>}
             {/* ── 1. CLIENT ───────────────────────────────────────────────── */}
             {snapshot.job.client_name && (
               <SectionGroup label="Client">
@@ -961,7 +990,7 @@ export default function JobSnapshotPanel({
               <div style={CARD_STYLE}>
                 {/* Value row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Value</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Estimated cost</span>
                   <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedContract)}</span>
                 </div>
                 {/* Last activity row */}
@@ -969,13 +998,15 @@ export default function JobSnapshotPanel({
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Last activity</span>
                   <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{snapshot.overview.last_activity || '—'}</span>
                 </div>
-                {/* Confidence row */}
+                {/* Confidence is retained in the assistant panel, not the builder overview. */}
+                {!workspaceSection && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Confidence</span>
                   <span style={{ fontSize: 12, fontWeight: 500, color: confidenceColor }}>
                     {confidenceScore != null ? `${confidenceScore}%` : '—'}
                   </span>
                 </div>
+                )}
                 {/* Missing information row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Missing information</span>
@@ -1043,6 +1074,10 @@ export default function JobSnapshotPanel({
                     <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedEstimatedCost)}</span>
                   </div>
                 )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Committed costs</span>
+                  <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(committedCost)}</span>
+                </div>
                 {contractValue != null && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                     <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Contract value</span>
@@ -1053,34 +1088,41 @@ export default function JobSnapshotPanel({
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Actual costs logged</span>
                   <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(animatedActualCost)}</span>
                 </div>
+                {forecastFinalCost != null && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Logged costs and remaining allowances</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{formatAUD(forecastFinalCost)}</span>
+                  </div>
+                )}
+                <p className="text-xs mb-3" style={{ color: 'var(--text-secondary)' }}>Forecast incomplete until remaining work, labour and outstanding commitments are reconciled. Only enter remaining allowances for work not already included in actual or committed costs.</p>
                 {/* Current margin — the headline figure of this whole section */}
                 {currentMargin != null && (
                   <div
                     style={{
                       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                       padding: '10px 12px', borderRadius: 8,
-                      backgroundColor: currentMarginPct != null ? `color-mix(in srgb, ${marginColorFor(currentMarginPct)} 12%, transparent)` : 'var(--bg-elevated)',
+                      backgroundColor: 'var(--bg-elevated)',
                     }}
                   >
-                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Current margin</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Contract less logged costs</span>
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-                      <span className="animate-number-in" style={{ fontSize: 16, fontWeight: 700, color: currentMarginPct != null ? marginColorFor(currentMarginPct) : 'var(--text-primary)' }}>
+                      <span className="animate-number-in" style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
                         {formatAUD(animatedCurrentMargin)}
                       </span>
                       {currentMarginPct != null && (
-                        <span style={{ fontSize: 12, fontWeight: 600, color: marginColorFor(currentMarginPct) }}>{currentMarginPct}%</span>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentMarginPct}%</span>
                       )}
                     </div>
                   </div>
                 )}
                 {currentMargin == null && (
-                  <p style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: 0 }}>Margin appears once this job has an estimate.</p>
+                  <p style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: 0 }}>Create an estimate to see the job’s starting figures.</p>
                 )}
                 {/* Job Closeout v1 — only while the job is active (forward-only:
                     hidden for quoting/quoted/complete/archived, and doubles as
                     the UI-level guard against a duplicate close attempt once
                     the snapshot refresh brings status back as 'complete'). */}
-                {job && snapshot.job.status === 'active' && (
+                {!workspaceSection && job && snapshot.job.status === 'active' && (
                   <button
                     type="button"
                     onClick={() => setCloseJobModalOpen(true)}
@@ -1357,7 +1399,7 @@ export default function JobSnapshotPanel({
                           <div style={{ fontSize: 12, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {c.trade_category_id != null ? `${tradeCategoryName(c.trade_category_id)} — ` : ''}{c.description}
                           </div>
-                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatShortDate(c.incurred_on)}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{c.cost_kind === 'remaining' ? 'Remaining · ' : c.cost_kind === 'committed' ? 'Committed · ' : 'Incurred · '}{formatShortDate(c.incurred_on)}</div>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 8 }}>
                           <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(c.amount)}</span>
@@ -1389,6 +1431,15 @@ export default function JobSnapshotPanel({
                   </button>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <select
+                      aria-label="Cost type"
+                      value={logCostFields.cost_kind}
+                      onChange={(e) => setLogCostFields((f) => ({ ...f, cost_kind: e.target.value as 'incurred' | 'committed' | 'remaining' }))}
+                      style={{ fontSize: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)' }}
+                    >
+                      <option value="incurred">Already paid or incurred</option>
+                      <option value="committed">Committed, not yet incurred</option><option value="remaining">Remaining work, not yet committed</option>
+                    </select>
                     <select
                       value={logCostFields.trade_category_id}
                       onChange={(e) => setLogCostFields((f) => ({ ...f, trade_category_id: e.target.value === '' ? '' : Number(e.target.value) }))}
@@ -1662,8 +1713,9 @@ export default function JobSnapshotPanel({
         )}
       </div>
 
+      </WorkspaceSection.Provider>
       {/* ── STICKY FOOTER ACTIONS ────────────────────────────────────────────── */}
-      {job && actions.length > 0 && (
+      {!workspaceSection && job && actions.length > 0 && (
         <div
           style={{
             flexShrink: 0,
@@ -1773,3 +1825,4 @@ export default function JobSnapshotPanel({
     </div>
   )
 }
+

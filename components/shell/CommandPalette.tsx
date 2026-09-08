@@ -19,6 +19,8 @@ interface CommandItem {
 
 const STATIC_ITEMS: Omit<CommandItem, 'onSelect'>[] = [
   { id: 'new-job', label: '+ New job', group: 'action' },
+  { id: 'nav-today', label: 'Today', group: 'nav' },
+  { id: 'nav-business', label: 'Business', group: 'nav' },
   { id: 'nav-jobs', label: 'Jobs', group: 'nav' },
   { id: 'nav-team', label: 'Team', group: 'nav' },
   { id: 'nav-suppliers', label: 'Suppliers', group: 'nav' },
@@ -78,6 +80,8 @@ export default function CommandPalette() {
     ...item,
     onSelect: () => {
       if (item.id === 'new-job') go('/jobs?new=1')
+      else if (item.id === 'nav-today') go('/today')
+      else if (item.id === 'nav-business') go('/business')
       else if (item.id === 'nav-jobs') go('/jobs')
       else if (item.id === 'nav-team') go('/team')
       else if (item.id === 'nav-suppliers') go('/suppliers')

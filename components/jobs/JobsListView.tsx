@@ -18,7 +18,7 @@ const STATUS_LABEL: Record<string, string> = {
   archived: 'Archived',
 }
 
-const STATUS_ORDER = ['quoting', 'quoted', 'active', 'complete']
+const STATUS_ORDER = ['active', 'quoting', 'quoted', 'complete', 'archived']
 
 function StatusPill({ status }: { status: string }) {
   const color =
@@ -37,6 +37,7 @@ function StatusPill({ status }: { status: string }) {
 }
 
 export default function JobsListView() {
+  const [search, setSearch] = useState('')
   const router = useRouter()
   const searchParams = useSearchParams()
   const [jobs, setJobs] = useState<JobListItem[] | null>(null)
@@ -51,7 +52,7 @@ export default function JobsListView() {
       const data = await res.json()
       setJobs(data.jobs ?? [])
     } catch {
-      setError("Couldn't refresh your jobs — showing your last known state.")
+      setError("Couldn't refresh your jobs — please try again.")
     }
   }, [])
 
@@ -79,7 +80,7 @@ export default function JobsListView() {
   }
 
   const grouped = STATUS_ORDER
-    .map((status) => ({ status, items: (jobs ?? []).filter((j) => j.status === status) }))
+    .map((status) => ({ status, items: (jobs ?? []).filter((j) => j.status === status && j.address.toLowerCase().includes(search.trim().toLowerCase())) }))
     .filter((g) => g.items.length > 0)
 
   return (
@@ -89,8 +90,13 @@ export default function JobsListView() {
         <button className="btn-primary px-4 py-2 text-sm" onClick={() => setDrawerOpen(true)}>+ New Job</button>
       </div>
 
+      <label className="block mb-6 text-sm" style={{ color: 'var(--text-secondary)' }}>
+        Find a job
+        <input type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by address" className="block w-full mt-2 p-3 rounded-md" style={{ background: 'var(--bg-elevated)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }} />
+      </label>
+      {jobs && jobs.length > 0 && grouped.length === 0 && <p className="py-6">No jobs match your search.</p>}
       {error && (
-        <div className="text-sm px-3 py-2 rounded-[6px] mb-4" style={{ background: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' }}>{error}</div>
+        <div className="text-sm px-3 py-2 rounded-[6px] mb-4" style={{ background: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)' }}>{error} <button className="underline ml-2" onClick={load}>Try again</button></div>
       )}
 
       {jobs === null && !error && (
@@ -126,7 +132,7 @@ export default function JobsListView() {
         </div>
       ))}
 
-      <NewJobDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onCreated={handleCreated} />
+      {drawerOpen && <NewJobDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onCreated={handleCreated} />}
     </div>
   )
 }

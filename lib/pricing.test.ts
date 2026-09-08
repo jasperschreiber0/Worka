@@ -403,7 +403,7 @@ test('matchLineItemKey: no match on zero token overlap — normalization does no
 // ─── resolveCategoryFallbackRate — tier 3, same-trade/unit average ──────────
 
 function fakeRateContext(platform: RateContext['platform']): RateContext {
-  return { learned: [], preferences: [], supplier: [], platform, network: [], catalogue: [], builderState: null }
+  return { learned: [], preferences: [], supplier: [], platform, network: [], catalogue: [], retailMaterial: [], labourBenchmarks: [], builderState: null }
 }
 
 test('resolveCategoryFallbackRate: averages national rates within the same trade + unit', () => {
