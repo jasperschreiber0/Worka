@@ -1,3 +1,4 @@
+import { pendingDocumentIds } from './document-checkpoint.ts'
 import { withExecutionLease } from './execution-lease.ts'
 /**
  * estimating-engine — Layer 2 Decision (Backend)
@@ -1318,6 +1319,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     // builder's new answers (already written as project_facts by the caller).
     const skippedSiblings: string[] = []
     const failedToLoadSiblings: string[] = []
+    let classificationProgress = false
     if (!resume) {
       let allLoaded: LoadedFile[]
 
@@ -1913,6 +1915,10 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
             const result = persistResult as { documents: Array<{ file_id: string; project_document_id: string }>; fact_ids: string[] }
             const fileIdToDocId = new Map((result.documents ?? []).map((d) => [d.file_id, d.project_document_id]))
             const insertedIds = result.fact_ids ?? []
+            if ((result.documents ?? []).length > 0) {
+              classificationProgress = true
+              if (parentJobId) await supabase.from('document_processing_batches').update({ stall_count: 0, stall_stage: null, stall_reason: null }).eq('id', parentJobId)
+            }
 
             facts = [
               ...facts.filter((f) => !merge.supersededKeys.includes(`${f.category}::${f.key}`)),
@@ -1951,6 +1957,11 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
             stall_count: currentStallCount, max_stall_count: MAX_CLASSIFICATION_STALL_COUNT,
           }))
         }
+      }
+
+      if (classificationStallCapReached) {
+        await fail('Document analysis stopped after repeated scheduling failures. Saved documents require a controlled retry; a partial estimate has not been generated.', true)
+        return
       }
 
       for (let batchIdx = 0; !classificationStallCapReached && batchIdx < fileBatches.length; batchIdx++) {
@@ -2171,6 +2182,20 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
       // load failures, not batch-classification failures, to the builder.
       if (failedToLoadSiblings.length > 0) {
         await supabase.from('files').update({ failed_sibling_filenames: failedToLoadSiblings }).eq('id', fileId)
+      }
+    }
+
+    // All queued documents must have durable classification before scope reasoning.
+    // Continue only after actual progress; a no-progress run cannot self-loop.
+    if (parentJobId && !resume) {
+      const { data: queued, error: queueError } = await supabase.from('document_processing_jobs').select('document_id').eq('parent_job_id', parentJobId)
+      const { data: classified, error: classifiedError } = await supabase.from('project_documents').select('file_id').eq('job_id', jobId).eq('extraction_status', 'complete')
+      if (queueError || classifiedError) throw new Error('Unable to verify complete document coverage')
+      const pending = pendingDocumentIds((queued ?? []).map((d: { document_id: string }) => d.document_id), (classified ?? []).map((d: { file_id: string }) => d.file_id))
+      if (pending.length > 0) {
+        await bailForWallClockBudget('classifying_documents', TRUNCATION_RECOVERY_TIMEOUT_MS)
+        if (classificationProgress) args.onHandoff?.(retriggerStage6)
+        return
       }
     }
 

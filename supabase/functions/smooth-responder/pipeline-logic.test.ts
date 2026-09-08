@@ -1421,7 +1421,7 @@ const indexTsSource = readFileSync(
   'utf-8',
 )
 
-test('index.ts source: retriggerStage6() is called from exactly two call sites -- the Stage 3 -> Stage 6 handoff, and the Stage 6-internal wall-clock bail -- and no others', () => {
+test('index.ts source: retriggerStage6() is called from exactly three bounded continuation sites, including persisted document progress', () => {
   // As of the Stage-6-internal-bail fix: the Priority 1 handoff (Stage 3 ->
   // Stage 6) already self-retriggered; a normal mid-Stage-6 yield (some
   // chunks already run, remaining trades deferred for budget reasons) did
@@ -1429,7 +1429,7 @@ test('index.ts source: retriggerStage6() is called from exactly two call sites -
   // instead of resuming within seconds like the handoff already does. This
   // reuses the exact same retriggerStage6() call, not a second mechanism.
   const callSites = indexTsSource.match(/args\.onHandoff\?\.\(retriggerStage6\)/g) ?? []
-  assert.equal(callSites.length, 2, 'retriggerStage6() must be invoked from exactly two call sites (handoff + internal bail), never more')
+  assert.equal(callSites.length, 3, 'continuations are document progress, scope handoff and estimate yield')
 })
 
 test('index.ts source: the Stage 6-internal wall-clock bail call site is textually AFTER bailForWallClockBudget and BEFORE the return', () => {
