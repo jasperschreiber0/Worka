@@ -54,6 +54,8 @@ import {
 // known entry so a new model can never silently bypass the budget by being
 // priced at zero.
 export const AI_PRICING_CENTS_PER_MTOK: Record<string, { input: number; output: number }> = {
+  // Conservative long-context rate; normal-context requests cost less.
+  'gpt-5.4-2026-03-05': { input: 500, output: 2250 },
   'claude-sonnet-4-6': { input: 300, output: 1500 },
 }
 const FALLBACK_PRICING = { input: 500, output: 2500 }

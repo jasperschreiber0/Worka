@@ -1,3 +1,5 @@
+import { approvedAttemptCeiling } from './approved-attempt-budget.ts'
+import { OpenAIEstimationClient, ESTIMATION_MODEL } from './openai-provider.ts'
 import { splitTextParts, combinePartResults } from './text-parts.ts'
 import { expandCompactFacts, hasDenseText } from './compact-facts.ts'
 import { pendingDocumentIds } from './document-checkpoint.ts'
@@ -36,7 +38,7 @@ import { withExecutionLease } from './execution-lease.ts'
  * boundary — no cosmetic fake-progress timers.
  */
 
-import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.0'
+
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
   splitIntoBatches, shouldRouteSoloForVisionLoad, mergeFacts, selectFactsForPrompt, selectFactsBalancedBySource, summarizeFactSelection,
@@ -592,7 +594,7 @@ const MAX_TOTAL_AI_ATTEMPTS_PER_BATCH = 20
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function callTool(
-  anthropic: Anthropic,
+  anthropic: OpenAIEstimationClient,
   gw: StageGatewayCtx,
   system: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -646,7 +648,7 @@ async function callTool(
   const CHARS_PER_TOKEN_ESTIMATE = 3.5
   const approxInputTokens = Math.ceil((systemChars + userContentChars + toolSchemaChars) / CHARS_PER_TOKEN_ESTIMATE)
   console.log(JSON.stringify({
-    event: 'claude_call_request', tool: tool.name, model: 'claude-sonnet-4-6',
+    event: 'estimation_call_request', tool: tool.name, model: ESTIMATION_MODEL,
     max_tokens: maxTokens, tool_choice: tool.name,
     system_chars: systemChars, user_text_chars: userContentChars, tool_schema_chars: toolSchemaChars,
     non_text_block_types: nonTextBlockTypes, non_text_block_count: nonTextBlockTypes.length,
@@ -666,13 +668,16 @@ async function callTool(
       supabase: gw.supabase,
       attribution: { kind: 'builder', builderId: gw.builderId },
       callSite: gw.stage,
-      model: 'claude-sonnet-4-6',
+      model: ESTIMATION_MODEL,
       scopeKey: `${gw.jobId}:${gw.stage}`,
       beforeProviderAttempt: async () => {
         if (gw.parentJobId) {
+          const control = await gw.supabase.from('system_status').select('value').eq('key', 'ai_processing_scope').maybeSingle()
+          if (control.error) throw new Error('Unable to verify approved batch allowance')
+          const approvedMax = approvedAttemptCeiling(control.data?.value, gw.jobId, gw.parentJobId)
           const { data: ceilingData, error: ceilingErr } = await gw.supabase.rpc('increment_batch_ai_attempts', {
             p_batch_id: gw.parentJobId,
-            p_max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
+            p_max_attempts: approvedMax,
           })
           if (ceilingErr) {
             // A failed reservation must not permit an unmetered provider call.
@@ -683,10 +688,10 @@ async function callTool(
             if (ceilingResult.exceeded) {
               console.log(JSON.stringify({
                 event: 'batch_ai_ceiling_exceeded', batch_id: gw.parentJobId, job_id: gw.jobId, stage: gw.stage,
-                total_ai_call_attempts: ceilingResult.attempts, max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
+                total_ai_call_attempts: ceilingResult.attempts, max_attempts: approvedMax,
               }))
               throw Object.assign(
-                new Error(`Batch exceeded ${MAX_TOTAL_AI_ATTEMPTS_PER_BATCH} total AI call attempts — stopped before calling Anthropic to prevent a non-convergent retry loop from spending further.`),
+                new Error(`Batch exceeded ${approvedMax} total AI call attempts — stopped before calling OpenAI to prevent a non-convergent retry loop from spending further.`),
                 { classification: 'unknown' as AnthropicFailureClassification }
               )
             }
@@ -694,11 +699,11 @@ async function callTool(
         }
 
       },
-      inputParts: [system, content, tool.name, maxTokens],
+      inputParts: [ESTIMATION_MODEL, system, content, tool, maxTokens],
     },
     (signal) => anthropic.messages.create(
       {
-        model: 'claude-sonnet-4-6',
+        model: ESTIMATION_MODEL,
         max_tokens: maxTokens,
         system,
         tools: [tool],
@@ -723,7 +728,7 @@ async function callTool(
         // which field Anthropic actually rejected.
         const err = info.error as { status?: number; error?: unknown; message?: string } | undefined
         console.log(JSON.stringify({
-          event: 'claude_call_attempt_failed', tool: tool.name, attempt: info.attempt,
+          event: 'estimation_call_attempt_failed', tool: tool.name, attempt: info.attempt,
           duration_ms: info.durationMs, retryable: info.retryable,
           skipped_for_budget: info.skippedForBudget,
           classification: info.classification,
@@ -735,7 +740,7 @@ async function callTool(
     }
   )
   console.log(JSON.stringify({
-    event: 'claude_call_complete', tool: tool.name, stop_reason: response.stop_reason,
+    event: 'estimation_call_complete', tool: tool.name, stop_reason: response.stop_reason,
     usage: response.usage, duration_ms: Date.now() - startedAt,
     reused_from_operation: reusedFromOperation,
   }))
@@ -748,7 +753,8 @@ async function callTool(
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const block = response.content.find((b: any) => b.type === 'tool_use' && b.name === tool.name)
-  return block?.input ?? null
+  if (!block) throw new Error('Estimation provider returned no valid tool result')
+  return block.input
 }
 
 // ─── Validation gates (mirrors lib/estimating/gates.ts — Deno cannot import
@@ -915,7 +921,7 @@ interface RunArgs {
   onHandoff?: (continuation: () => Promise<void>) => void
 }
 
-async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: Anthropic) {
+async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: OpenAIEstimationClient) {
   const { fileId, jobId, builderId, siblingFileIds, resume, parentJobId } = args
 
   // Touches job_intake_locks.last_progress_at alongside the files row on
@@ -1023,7 +1029,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   const haltForBilling = async (classification: AnthropicFailureClassification, reason: string) => {
     console.log(JSON.stringify({ event: 'ai_billing_halt', classification, reason, file_id: fileId, job_id: jobId }))
     await fail(
-      `AI processing stopped: ${classification === 'credit_exhausted' ? 'Anthropic account credit balance is too low' : 'Anthropic API authentication failed'} — ${reason}`.slice(0, 500)
+      `AI processing stopped: ${classification === 'credit_exhausted' ? 'OpenAI account credit balance is too low' : 'OpenAI API authentication failed'} — ${reason}`.slice(0, 500)
     )
   }
 
@@ -3781,7 +3787,7 @@ const SHADOW_SECTION_BUDGET_MS = 300_000
 
 async function runProjectModelShadowEstimate(
   supabase: SupabaseClient,
-  anthropic: Anthropic,
+  anthropic: OpenAIEstimationClient,
   builderId: string,
   jobId: string,
   batchId: string | null,
@@ -3905,7 +3911,7 @@ const SHADOW_SCOPE_SYSTEM_PROMPT = 'You are a senior Australian residential cons
 
 const SHADOW_ESTIMATE_SYSTEM_PROMPT = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project model and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured, pc_allowance, or provisional_sum.'
 
-async function runOwnedPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: Anthropic) {
+async function runOwnedPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: OpenAIEstimationClient) {
   let continuation: (() => Promise<void>) | undefined
   await withExecutionLease(supabase, args.jobId, args.fileId, args.builderId, () =>
     runPipeline({ ...args, onHandoff: next => { continuation = next } }, supabase, anthropic))
@@ -3925,7 +3931,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
   // Trim so a secret stored with a trailing newline/whitespace doesn't produce
   // a spurious `401 invalid x-api-key` from Anthropic.
-  const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY')?.trim()
+  const anthropicKey = Deno.env.get('OPENAI_API_KEY')?.trim()
 
   if (!supabaseUrl || !supabaseKey || !anthropicKey) {
     return new Response(JSON.stringify({ error: 'Missing environment variables' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3939,7 +3945,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey)
-  const anthropic = new Anthropic({ apiKey: anthropicKey })
+  const anthropic = new OpenAIEstimationClient(anthropicKey)
 
   // Document-worker mode: every document in this batch was already
   // downloaded and extracted in its own invocation (see
