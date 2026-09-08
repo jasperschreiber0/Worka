@@ -1,3 +1,4 @@
+import { pricingIntegrityIssues, type ReviewLine } from './pricing-integrity.ts'
 // ─── Quote readiness — the one builder-facing trust signal ────────────────────
 // Maps the quote's internal safety signals (unresolved assumptions, unpriced
 // line items, QA risks, extraction confidence) into exactly three states a
@@ -74,6 +75,7 @@ export interface ReadinessSignals {
    * (there is no line item for that check to even see), so without this a
    * quote missing a whole trade could look completely priced and sendable.
    */
+  pricingErrors?: string[]
   missingTradeCount: number
 }
 
@@ -90,7 +92,7 @@ function plural(n: number, singular: string, pluralWord?: string): string {
 }
 
 export function deriveQuoteReadiness(signals: ReadinessSignals): ReadinessResult {
-  const blockedReasons: string[] = []
+  const blockedReasons: string[] = [...(signals.pricingErrors ?? [])]
   const reviewReasons: string[] = []
 
   if (signals.unresolvedAssumptions > 0) {
@@ -226,11 +228,12 @@ export async function getUnresolvedConservativeAssumptionRows(
 }
 
 export function getSendBlockingReasons(input: {
-  lineItems: SendBlockingLineItem[]
+  totalCost?: number | null
+  lineItems: (SendBlockingLineItem & Partial<ReviewLine>)[]
   missingTrades: SendBlockingMissingTrade[]
   unresolvedConservativeAssumptionCount: number
 }): string[] {
-  const reasons: string[] = []
+  const reasons: string[] = pricingIntegrityIssues(input.lineItems, input.totalCost)
 
   const unpriced = input.lineItems.filter((li) => isSilentlyUnpriced(li))
   if (unpriced.length > 0) {

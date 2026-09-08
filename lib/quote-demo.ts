@@ -10,6 +10,7 @@ export interface DemoQuoteLineItem {
   quote_id: string
   trade_category_id: number
   trade_category_name: string
+  notes?: string | null
   description: string
   quantity: number | null
   unit: string | null

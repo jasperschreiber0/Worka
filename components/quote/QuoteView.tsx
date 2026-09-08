@@ -43,6 +43,9 @@ interface QuoteSummary {
   total_cost: number
   margin_pct: number
   /** total_cost marked up by margin_pct — what the client is quoted */
+  gst_amount?: number | null
+  grand_total?: number | null
+  gst_pct?: number | null
   client_price: number
   /** "excl. GST" — from the API; see lib/pricing.ts PRICE_BASIS_LABEL. Optional for older cached responses. */
   price_basis?: string
@@ -492,6 +495,7 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
             {item.pricing_basis ? ` — ${item.pricing_basis}` : ''}
           </span>
         )}
+        {item.notes && <p className="text-[12px] mt-1">{isExcluded ? "Reviewed exclusion: " : isUnresolved ? "Needs review: " : "Review note: "}{item.notes.replace(/\[pricing-review\]/g, "")}</p>}
         {/* Unpriced fix actions — the builder's way through the send gate */}
         {isUnpriced && canEdit && !editing && (
           <div className="flex items-center gap-2 mt-1.5">
@@ -1092,12 +1096,12 @@ function SummaryCard({ summary }: SummaryCardProps) {
           </span>
         </div>
         <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)' }}>
-          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Margin</span>
+          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Default markup (line overrides apply)</span>
           <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{summary.margin_pct}%</span>
         </div>
         <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '1px solid var(--bg-border)', backgroundColor: 'var(--bg-elevated)' }}>
           <span className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-            Client price
+            {summary.readiness === 'ready' ? 'Client price' : 'Priced portion - incomplete until reviewed'}
             <span className="ml-1.5 text-[11px] font-normal" style={{ color: 'var(--text-tertiary)' }}>
               ({summary.price_basis ?? 'excl. GST'})
             </span>
@@ -1106,6 +1110,11 @@ function SummaryCard({ summary }: SummaryCardProps) {
             {formatCurrency(summary.client_price ?? summary.total_cost)}
           </span>
         </div>
+        {summary.gst_amount != null && <div className="px-4 py-2.5 text-[13px]">
+          <div className="flex justify-between"><span>GST ({summary.gst_pct}%) on priced portion</span><span>{formatCurrency(summary.gst_amount)}</span></div>
+          <div className="flex justify-between font-semibold"><span>Including GST - priced portion</span><span>{formatCurrency(summary.grand_total ?? 0)}</span></div>
+          {summary.readiness !== 'ready' && <p>Unresolved prices are excluded from these figures. This is not a final contract price.</p>}
+        </div>}
         <div
           className="flex items-center justify-between px-4 py-2.5"
           style={{ borderBottom: summary.unresolved_count > 0 || summary.assumption_count > 0 ? '1px solid var(--bg-border)' : undefined }}

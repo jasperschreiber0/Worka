@@ -1,3 +1,4 @@
+import { pricingIntegrityIssues } from './pricing-integrity.ts'
 // ─── Stage 8: Quality Assurance ────────────────────────────────────────────────
 // Runs once, Next.js-side, immediately after pricing resolves rates and totals
 // (lib/pricing.ts ensureQuotePriced) and before the estimate is rendered to the
@@ -352,32 +353,11 @@ export async function runQualityAssurance(
       topRisks.push(`Completeness recovery could not generate line items for: ${details.join(', ')} — still missing after a targeted retry.`)
     }
 
-    // ── Financial reconciliation — the canonical client price (sum of each
-    // line item's OWN margin_pct) must never diverge from what the old
-    // blanket total_cost * quote.margin_pct formula would have produced.
-    // That blanket formula is what every client-facing surface used to call
-    // independently (quote summary API, PDF export, invoice schedule) before
-    // this was unified — comparing against it here is a live regression
-    // detector: if anything ever bypasses calculateClientPrice again (a new
-    // call site, a reverted fix), this is what catches it before a quote
-    // goes out, not after a builder notices the numbers don't match.
-    // High severity: pushed first among financial checks, and — unlike
-    // price coverage/pricing match rate below — never conditional on a
-    // threshold, since ANY divergence beyond rounding means two different
-    // dollar figures exist for the same quote.
-    if (quote?.total_cost !== null && quote?.total_cost !== undefined && quote?.margin_pct !== null && quote?.margin_pct !== undefined) {
-      const canonicalClientPrice = calculateClientPrice(included)
-      const legacyBlanketClientPrice = applyMargin(quote.total_cost, quote.margin_pct)
-      const reconciliationDrift = Math.round(Math.abs(canonicalClientPrice - legacyBlanketClientPrice) * 100) / 100
-      if (reconciliationDrift > 1) {
-        // unshift, not push: this is the highest-severity financial check in
-        // the report and must survive `topRisks.slice(0, 5)` below even when
-        // several other lower-stakes risks were already queued ahead of it.
-        topRisks.unshift(
-          `FINANCIAL_RECONCILIATION_FAILED — the sum of line-item sell prices ($${canonicalClientPrice.toLocaleString('en-AU')}) does not match total_cost marked up by the quote's blanket margin ($${legacyBlanketClientPrice.toLocaleString('en-AU')}), a difference of $${reconciliationDrift.toLocaleString('en-AU')}. This usually means provisional-sum items (0% margin) or a per-item margin different from the quote's blanket rate are present — the line-item total is the correct one; do not treat the blanket figure as authoritative.`
-        )
-        recommendedActions.unshift('Do not send this quote until the financial reconciliation discrepancy above is understood — the client-facing total must come from each line item\'s own margin, never a blanket quote-level rate.')
-      }
+    // Compare persisted cost with included costs; per-line markups legitimately differ.
+    const moneyIssues = pricingIntegrityIssues(included, quote?.total_cost)
+    if (moneyIssues.length) {
+      topRisks.unshift(...moneyIssues)
+      recommendedActions.unshift('Resolve pricing and amount reconciliation errors before client issue.')
     }
 
     // ── Price coverage — a top risk, not a footnote, below 90% ──

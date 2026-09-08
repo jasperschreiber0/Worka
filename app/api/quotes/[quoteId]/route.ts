@@ -1,3 +1,4 @@
+import { pricingIntegrityIssues } from '@/lib/estimating/pricing-integrity'
 import { NextRequest, NextResponse } from 'next/server'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
@@ -38,6 +39,9 @@ interface QuoteSummary {
   total_cost: number
   margin_pct: number
   /** total_cost marked up by margin_pct — what the client is quoted */
+  gst_amount?: number | null
+  grand_total?: number | null
+  gst_pct?: number | null
   client_price: number
   /** "excl. GST" — see lib/pricing.ts PRICE_BASIS_LABEL for the product decision this reflects. */
   price_basis: string
@@ -123,7 +127,7 @@ function groupByCategory(items: DemoQuoteLineItem[]): LineItemsByCategory[] {
 // ─── Helper: compute summary ──────────────────────────────────────────────────
 
 function computeSummary(
-  quote: DemoQuote,
+  quote: DemoQuote & { gst_pct?: number | null },
   items: DemoQuoteLineItem[],
   qaReport: QAReport | null,
   criticalAssumptions: CriticalAssumption[] = [],
@@ -139,6 +143,7 @@ function computeSummary(
   const unresolvedConservativeAssumptions = criticalAssumptions.filter((a) => !a.resolved).length
 
   const { readiness, blockedReasons, reviewReasons } = deriveQuoteReadiness({
+    pricingErrors: pricingIntegrityIssues(items, quote.total_cost),
     unresolvedAssumptions: unresolved_count,
     unpricedItems: unpriced_count,
     topRiskCount: qaReport?.top_risks?.length ?? 0,
@@ -156,6 +161,9 @@ function computeSummary(
     // comment (lib/pricing.ts) for why that blanket formula disagreed with
     // what this same response's line items display.
     client_price: calculateClientPrice(items),
+    gst_pct: quote.gst_pct ?? null,
+    gst_amount: quote.gst_pct == null ? null : Math.round(calculateClientPrice(items) * quote.gst_pct) / 100,
+    grand_total: quote.gst_pct == null ? null : Math.round(calculateClientPrice(items) * (100 + quote.gst_pct)) / 100,
     price_basis: PRICE_BASIS_LABEL,
     price_disclaimer: CLIENT_PRICE_DISCLAIMER,
     confidence_score: quote.confidence_score,
@@ -223,6 +231,7 @@ export async function GET(
         status,
         total_cost,
         margin_pct,
+        gst_pct,
         confidence_score,
         version,
         created_at,
@@ -290,6 +299,7 @@ export async function GET(
         quote_id,
         trade_category_id,
         description,
+        notes,
         quantity,
         unit,
         rate,
@@ -308,6 +318,7 @@ export async function GET(
         quote_id,
         trade_category_id,
         description,
+        notes,
         quantity,
         unit,
         rate,
@@ -361,13 +372,14 @@ export async function GET(
 
     const jobRow = (quoteRow as typeof quoteRow & { jobs: { address: string } | null }).jobs
 
-    const quote: DemoQuote = {
+    const quote: DemoQuote & { gst_pct?: number | null } = {
       id: quoteRow.id,
       job_id: quoteRow.job_id,
       job_address: jobRow?.address ?? 'Unknown address',
       builder_id: quoteRow.builder_id,
       status: quoteRow.status as DemoQuote['status'],
       total_cost: quoteRow.total_cost ?? 0,
+      gst_pct: quoteRow.gst_pct,
       margin_pct: quoteRow.margin_pct ?? 0,
       confidence_score: quoteRow.confidence_score ?? 0,
       version: quoteRow.version ?? 1,
@@ -382,6 +394,7 @@ export async function GET(
         trade_category_id: row.trade_category_id,
         trade_category_name: tc?.name ?? 'Unknown',
         description: row.description,
+        notes: row.notes,
         quantity: row.quantity ?? null,
         unit: row.unit ?? null,
         rate: row.rate ?? null,

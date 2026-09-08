@@ -364,14 +364,12 @@ test('matchLineItemKey: full token containment classifies as exact', () => {
   assert.equal(match?.strength, 'exact')
 })
 
-test('matchLineItemKey: partial token overlap classifies as normalized', () => {
+test('matchLineItemKey: a skylight cannot use the price of its flashing', () => {
   const catalogue = [entry('skylight roof flashing', 3, 'each')]
-  // VELUX Solar Powered Skylight — the other branded example from the task —
-  // only shares ONE of the catalogue entry's three tokens (skylight), not
-  // roof/flashing. Real signal, but a plausible match, not a confirmed one.
-  const match = matchLineItemKey({ trade_category_id: 3, description: 'VELUX Solar Powered Skylight', quantity: 2, unit: 'each' }, catalogue)
-  assert.ok(match)
-  assert.equal(match?.strength, 'normalized')
+  assert.equal(matchLineItemKey({ trade_category_id: 3, description: 'VELUX Solar Powered Skylight', quantity: 2, unit: 'each' }, catalogue), null)
+})
+test('matchLineItemKey: location words cannot turn wall framing into floor framing', () => {
+  assert.equal(matchLineItemKey({trade_category_id:2,description:'Timber wall framing to first floor addition',quantity:108.2,unit:'m2'},[entry('Floor framing',2,'m2')]),null)
 })
 
 test('matchLineItemKey: token synonyms feed into the same exact/normalized classification (colourbond -> colorbond)', () => {

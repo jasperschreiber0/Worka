@@ -150,7 +150,7 @@ export async function POST(
     // send-time re-checks.
     const [{ data: lineItems }, { data: openConservativeAssumptions }, { data: scopeRows }] = await Promise.all([
       sb.from('quote_line_items')
-        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status, margin_pct')
+        .select('id, trade_category_id, description, quantity, unit, rate, total, is_assumption, assumption_status, margin_pct, pricing_source')
         .eq('quote_id', quoteId),
       // Conservative assumptions: assumptions.gate IS NULL AND line_item_id
       // IS NULL is what distinguishes a non-blocking-estimation default
@@ -190,6 +190,7 @@ export async function POST(
       (lineItems ?? []) as Array<{ trade_category_id: number; assumption_status: string | null }>,
     ).map((tradeId) => ({ trade_name: TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}` }))
     const blockingReasons = getSendBlockingReasons({
+      totalCost: quoteRow.total_cost,
       lineItems: (lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>,
       missingTrades,
       unresolvedConservativeAssumptionCount: (openConservativeAssumptions ?? []).length,

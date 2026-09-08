@@ -123,7 +123,7 @@ export async function POST(
   // 1. Verify quote exists and belongs to this builder
   const { data: quoteRow, error: fetchErr } = await supabase
     .from('quotes')
-    .select('id, status, job_id')
+    .select('id, status, job_id, total_cost')
     .eq('id', quoteId)
     .eq('builder_id', sessionBuilderId)
     .single()
@@ -161,7 +161,7 @@ export async function POST(
     const [{ data: lineItems }, { data: openConservativeAssumptions }, { data: scopeRows }] = await Promise.all([
       supabase
         .from('quote_line_items')
-        .select('description, total, is_assumption, assumption_status, trade_category_id')
+        .select('description, total, is_assumption, assumption_status, trade_category_id, quantity, rate, margin_pct, pricing_source')
         .eq('quote_id', quoteId),
       getUnresolvedConservativeAssumptions(supabase, quoteId),
       supabase
@@ -174,6 +174,7 @@ export async function POST(
       (lineItems ?? []) as Array<{ trade_category_id: number; assumption_status: string | null }>,
     ).map((tradeId) => ({ trade_name: TRADE_CATEGORIES.find((t) => t.id === tradeId)?.name ?? `Trade ${tradeId}` }))
     const blockingReasons = getSendBlockingReasons({
+      totalCost: quoteRow.total_cost,
       lineItems: (lineItems ?? []) as Array<{ description: string; total: number | null; is_assumption: boolean; assumption_status: string | null }>,
       missingTrades,
       unresolvedConservativeAssumptionCount: (openConservativeAssumptions ?? []).length,

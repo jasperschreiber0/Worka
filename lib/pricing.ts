@@ -1,3 +1,4 @@
+import { shouldSavePrice } from './estimating/pricing-integrity.ts'
 // ─── WorkA Estimation Engine ───────────────────────────────────────────────────
 // Resolves a rate for each extracted quote line item using the 5-tier rate
 // hierarchy (first match wins):
@@ -211,11 +212,13 @@ export function matchLineItemKey(
     // A rate in a different unit cannot price this quantity
     if (itemUnit && normalizeUnit(entry.unit) !== itemUnit) continue
 
+    if (/wall framing/i.test(item.description) && /floor framing|roof framing/i.test(entry.description)) continue
+    if (/propping|damp.proof membrane/i.test(item.description) && !/propping|membrane/i.test(entry.description)) continue
     let score = 0
     entry.tokens.forEach((token) => {
       if (itemTokens.has(token)) score++
     })
-    if (score > bestScore) {
+    if (score === entry.tokens.size && score > bestScore) {
       bestScore = score
       bestKey = entry.line_item_key
       bestEntryTokenCount = entry.tokens.size
@@ -981,20 +984,8 @@ export async function priceLineItems<T extends PriceableItem>(
   // Tier 3b: category fallback — same trade, same unit, no item-specific
   // match required. Cheap (in-memory average over already-loaded rates), no
   // external call, so still run synchronously before the AI tier.
-  const afterCategory = afterCatalogue.map((r) => {
-    if (r.matched || !r.item.unit) return r
-    const fallback = resolveCategoryFallbackRate(r.item.trade_category_id, normalizeUnit(r.item.unit), ctx)
-    if (!fallback) return r
-    const total = r.item.quantity !== null && r.item.quantity > 0 ? round2(r.item.quantity * fallback.rate) : null
-    const tradeName = tradeCategoryName(r.item.trade_category_id)
-    return {
-      ...r,
-      rate: fallback.rate, total,
-      pricing_source: 'category_rate' as MeasuredPricingSource,
-      pricing_basis: `No exact cost rate match. Used ${tradeName} category average (${fallback.sampleCount} comparable rate${fallback.sampleCount === 1 ? '' : 's'}).`,
-      matched: true,
-    }
-  })
+  const afterCategory = afterCatalogue // No unrelated category-average substitution.
+
 
   // Tier 4: AI measured-rate — only items that are still unmatched AND have
   // a real quantity+unit (guarantees this is a "measured but unpriceable"
@@ -1022,7 +1013,7 @@ export async function priceLineItems<T extends PriceableItem>(
   // subsequent quote read, so candidates past the cap are simply picked up
   // by the next call, never silently dropped.
   const boundedAiCandidates = aiCandidates.slice(0, MAX_AI_MEASURED_RATE_CANDIDATES_PER_PASS)
-  const aiResults = await resolveAiMeasuredRates(supabase, builderId, boundedAiCandidates)
+  const aiResults = new Map<number, AiRateEstimate>() // Quote review never initiates a paid AI request.
 
   const final = afterCategory.map((r, index) => {
     if (r.matched) return r
@@ -1135,7 +1126,7 @@ export async function ensureQuotePriced(
 
     const { data: items } = await supabase
       .from('quote_line_items')
-      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status, pricing_source')
+      .select('id, trade_category_id, description, quantity, unit, rate, total, confidence, assumption_status, pricing_source, notes')
       .eq('quote_id', quoteId)
     if (!items || items.length === 0) return false
 
@@ -1157,7 +1148,7 @@ export async function ensureQuotePriced(
     // corrupted). Confirmed on a real run: 147/171 items actually had a
     // persisted total, but price_coverage_pct read back as 18% (≈31/171)
     // because 116 AI Allowance items got re-swept and nulled here.
-    const unpriced = items.filter((i) => i.total === null)
+    const unpriced = items.filter((i) => i.total === null && i.assumption_status !== 'excluded' && !i.notes?.includes('[pricing-review]'))
     if (unpriced.length === 0) {
       // Every item already carries a total, but the quote-level cache
       // (quotes.total_cost) was never successfully written -- confirmed live
@@ -1172,7 +1163,7 @@ export async function ensureQuotePriced(
       // cover this case too: recompute and write the totals from the
       // already-priced items, skip only when there is truly nothing left to
       // do (no new items to price AND totals already cached).
-      if (quote.total_cost !== null) return false
+      // Reconcile even when a stale cached total already exists.
       const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(items)
       const { error: totalsUpdateErr } = await supabase
         .from('quotes')
@@ -1237,16 +1228,16 @@ export async function ensureQuotePriced(
         pricing_source: p.pricing_source, pricing_basis: p.pricing_basis, confidence: p.confidence,
         material_cost: p.material_cost ?? null, labour_cost: p.labour_cost ?? null,
       }))
-      .filter((row) => row.rate !== null)
+      .filter(shouldSavePrice)
 
     if (rowsToUpdate.length > 0) {
       const { error: batchUpdateErr } = await supabase.from('quote_line_items').upsert(rowsToUpdate)
-      if (batchUpdateErr) console.error('ensureQuotePriced: batch update failed:', batchUpdateErr.message)
+      if (batchUpdateErr) throw new Error('Line prices could not be saved; totals were not updated')
     }
 
-    // Merge priced values back for the totals computation
-    const pricedById = new Map(priced.map((p, i) => [unpriced[i].id, p]))
-    const finalItems = items.map((item) => pricedById.get(item.id) ?? item)
+    // Calculate only from committed rows, never from proposed updates.
+    const { data: finalItems, error: readBackError } = await supabase.from('quote_line_items').select('total, confidence, assumption_status, pricing_source').eq('quote_id', quoteId)
+    if (readBackError || !finalItems) throw new Error('Unable to verify saved line amounts')
     const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(finalItems)
 
     const { error: quoteUpdateErr } = await supabase
