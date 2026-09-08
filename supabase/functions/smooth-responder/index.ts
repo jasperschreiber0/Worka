@@ -1,3 +1,4 @@
+import { withExecutionLease } from './execution-lease.ts'
 /**
  * estimating-engine — Layer 2 Decision (Backend)
  *
@@ -665,43 +666,6 @@ async function callTool(
     tool_schema: tool.input_schema,
   }))
 
-  // Defense-in-depth ceiling (migration 077): checked here, the one shared
-  // call site every stage (1/2, 3, 6, trade recovery) already routes
-  // through, so it applies uniformly without four separate implementations
-  // and independent of whether any single stage's own escalation counter
-  // (e.g. Stage 3's shouldSkipStage3Call) is working correctly — the
-  // confirmed 2026-07-25 incident showed a per-stage-only design can still
-  // loop if the cron path that decides whether to retrigger an invocation
-  // at all doesn't consult those counters. Fails closed: never calls
-  // Anthropic once a batch crosses the ceiling, and trips the global
-  // circuit breaker so the condition is visible platform-wide, not just
-  // silently absorbed by this one batch refusing further calls.
-  if (gw.parentJobId) {
-    const { data: ceilingData, error: ceilingErr } = await gw.supabase.rpc('increment_batch_ai_attempts', {
-      p_batch_id: gw.parentJobId,
-      p_max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
-    })
-    if (ceilingErr) {
-      // Best-effort in the sense that a failure to CHECK the ceiling must
-      // never itself throw and mask an otherwise-healthy call — but it is
-      // logged loudly, since a silently-failing gate here is exactly the
-      // kind of gap this migration exists to close.
-      console.error('increment_batch_ai_attempts RPC failed (proceeding without the ceiling check for this call):', ceilingErr)
-    } else {
-      const ceilingResult = (ceilingData as Array<{ attempts: number; exceeded: boolean }> | null)?.[0]
-      if (ceilingResult?.exceeded) {
-        console.log(JSON.stringify({
-          event: 'batch_ai_ceiling_exceeded', batch_id: gw.parentJobId, job_id: gw.jobId, stage: gw.stage,
-          total_ai_call_attempts: ceilingResult.attempts, max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
-        }))
-        throw Object.assign(
-          new Error(`Batch exceeded ${MAX_TOTAL_AI_ATTEMPTS_PER_BATCH} total AI call attempts — stopped before calling Anthropic to prevent a non-convergent retry loop from spending further.`),
-          { classification: 'unknown' as AnthropicFailureClassification }
-        )
-      }
-    }
-  }
-
   // Routed through the shared AI gateway (ai-gateway.ts): budget/breaker
   // check before the call (fails closed — an over-limit run stops with a
   // clear reason and zero spend), idempotent reuse of a prior identical
@@ -716,6 +680,32 @@ async function callTool(
       callSite: gw.stage,
       model: 'claude-sonnet-4-6',
       scopeKey: `${gw.jobId}:${gw.stage}`,
+      beforeProviderAttempt: async () => {
+        if (gw.parentJobId) {
+          const { data: ceilingData, error: ceilingErr } = await gw.supabase.rpc('increment_batch_ai_attempts', {
+            p_batch_id: gw.parentJobId,
+            p_max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
+          })
+          if (ceilingErr) {
+            // A failed reservation must not permit an unmetered provider call.
+            throw new Error('Unable to verify batch AI attempt budget; no provider call made')
+          } else {
+            const ceilingResult = (ceilingData as Array<{ attempts: number; exceeded: boolean }> | null)?.[0]
+            if (!ceilingResult) throw new Error('Batch AI attempt budget returned no result')
+            if (ceilingResult.exceeded) {
+              console.log(JSON.stringify({
+                event: 'batch_ai_ceiling_exceeded', batch_id: gw.parentJobId, job_id: gw.jobId, stage: gw.stage,
+                total_ai_call_attempts: ceilingResult.attempts, max_attempts: MAX_TOTAL_AI_ATTEMPTS_PER_BATCH,
+              }))
+              throw Object.assign(
+                new Error(`Batch exceeded ${MAX_TOTAL_AI_ATTEMPTS_PER_BATCH} total AI call attempts — stopped before calling Anthropic to prevent a non-convergent retry loop from spending further.`),
+                { classification: 'unknown' as AnthropicFailureClassification }
+              )
+            }
+          }
+        }
+
+      },
       inputParts: [system, content, tool.name, maxTokens],
     },
     (signal) => anthropic.messages.create(
@@ -934,6 +924,7 @@ interface RunArgs {
   // re-extracting inline. See the "document processing queue" note above
   // loadFileAsBlock for why that isolation exists.
   parentJobId?: string
+  onHandoff?: (continuation: () => Promise<void>) => void
 }
 
 async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: Anthropic) {
@@ -956,13 +947,13 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
     await touchLockProgress()
   }
 
-  const fail = async (reason: string) => {
+  const fail = async (reason: string, systemBlocked = false) => {
     await supabase
       .from('files')
       .update({ intake_stage: 'failed', intake_pct: 0, failure_stage: 'AI_REASONING_FAILED', failure_reason: reason.slice(0, 500) })
       .eq('id', fileId)
     if (parentJobId) {
-      await supabase.from('document_processing_batches').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', parentJobId)
+      await supabase.from('document_processing_batches').update({ status: 'failed', updated_at: new Date().toISOString(), ...(systemBlocked ? { stall_stage: 'AI_PROCESSING_BLOCKED', stall_reason: reason } : {}) }).eq('id', parentJobId)
       // Derives every file in the batch's intake_status from the batch
       // outcome just written (migration 052) — not only fileId (the
       // primary/anchor), so a sibling whose own extraction succeeded but
@@ -2045,6 +2036,10 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           continue
         }
 
+        if (result.classification === 'budget_refused') {
+          await fail(`AI processing is paused by spending protection. All uploaded files are saved. ${result.errMessage}`, true)
+          return
+        }
         if (result.billingHalt) {
           await haltForBilling(result.classification, result.errMessage)
           return
@@ -2773,7 +2768,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       // returned earlier). Never throws; a failure only logs
       // stage_boundary_retrigger_failed and leaves the recovery cron as
       // the intact backstop — see retriggerStage6's own comment.
-      await retriggerStage6()
+      args.onHandoff?.(retriggerStage6)
       return
     }
 
@@ -2925,7 +2920,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       // instead of resuming within seconds like the Stage 3->6 boundary
       // already does.
       await bailForWallClockBudget('generating_estimate', STAGE6_PER_CALL_TIMEOUT_MS)
-      await retriggerStage6()
+      args.onHandoff?.(retriggerStage6)
       return
     }
 
@@ -3845,6 +3840,14 @@ const SHADOW_SCOPE_SYSTEM_PROMPT = 'You are a senior Australian residential cons
 
 const SHADOW_ESTIMATE_SYSTEM_PROMPT = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project model and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured, pc_allowance, or provisional_sum.'
 
+async function runOwnedPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: Anthropic) {
+  let continuation: (() => Promise<void>) | undefined
+  await withExecutionLease(supabase, args.jobId, args.fileId, args.builderId, () =>
+    runPipeline({ ...args, onHandoff: next => { continuation = next } }, supabase, anthropic))
+  // Release execution ownership before a successor is dispatched.
+  if (continuation) await continuation()
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -3902,7 +3905,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // stall) so the next poll surfaces it. Remove once the actual cause is
     // found and fixed.
     EdgeRuntime.waitUntil(
-      runPipeline(
+      runOwnedPipeline(
         { fileId: batch.primary_file_id, jobId: batch.job_id, builderId: batch.builder_id, siblingFileIds: [], resume: false, parentJobId: batch.id },
         supabase,
         anthropic
@@ -3923,7 +3926,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   EdgeRuntime.waitUntil(
-    runPipeline(
+    runOwnedPipeline(
       { fileId: file_id, jobId: job_id, builderId: builder_id, siblingFileIds: Array.isArray(sibling_file_ids) ? sibling_file_ids : [], resume: resume === true },
       supabase,
       anthropic

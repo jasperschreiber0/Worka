@@ -6,10 +6,9 @@ name: Deploy Supabase migrations
 # live in the database — this closes that gap.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'supabase/migrations/**'
+  # Production history uses timestamped versions for 105 onward. Schema
+  # rollout is reviewed and applied explicitly before application release;
+  # a code push must not replay old numeric files or monitoring grants.
   workflow_dispatch:
     inputs:
       include_all:

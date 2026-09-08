@@ -281,6 +281,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const supabase = createClient(supabaseUrl, supabaseKey)
 
+  // A controlled recovery must not wake unrelated jobs through any sweep.
+  const { data: recoveryScope, error: scopeError } = await supabase.from('system_status')
+    .select('value').eq('key', 'ai_processing_scope').maybeSingle()
+  if (scopeError) return NextResponse.json({ error: 'Recovery scope unavailable' }, { status: 503 })
+  if (recoveryScope) return NextResponse.json({ ran: false, skipped: 'Controlled job recovery in progress' })
+
   // ── 0. Enforce the 15-minute estimate SLA (migration 078) — independent of
   // DOCUMENT_RECOVERY_DISABLED/AI_RECOVERY_DISABLED, deliberately: finalizing
   // a builder_status makes no Anthropic call and triggers no worker, so

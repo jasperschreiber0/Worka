@@ -225,6 +225,82 @@ function makeGatewayStub() {
 
 const FAKE_RESPONSE = { id: 'msg_x', usage: { input_tokens: 1000, output_tokens: 100 }, content: [] }
 
+test('gateway: cached success costs no attempt even while breaker is tripped', async () => {
+  const { stub, db } = makeGatewayStub()
+  db.system_status[0].value = { tripped: true, reason: null }
+  const original = stub.from.bind(stub)
+  const cached = { ...stub, from(table: string) {
+    if (table !== 'ai_operations') return original(table)
+    const chain = { eq: () => chain, order: () => chain, limit: () => chain,
+      maybeSingle: async () => ({ data: { id: 'cached', result: FAKE_RESPONSE } }) }
+    return { select: () => chain }
+  } }
+  let attempts = 0
+  const result = await guardedClaudeCall({ supabase: cached,
+    attribution: { kind: 'builder', builderId: 'builder' }, callSite: 'test', model: 'claude-sonnet-4-6',
+    scopeKey: 'job:test', inputParts: ['same input'], beforeProviderAttempt: async () => { attempts++ },
+  }, async () => { throw new Error('must reuse') })
+  assert.equal(result.reusedFromOperation, true)
+  assert.equal(attempts, 0)
+})
+
+test('gateway: controlled recovery rejects unrelated jobs and unscoped chat before provider', async () => {
+  const { stub } = makeGatewayStub()
+  const original = stub.from.bind(stub)
+  const scoped = { ...stub, from(table: string) {
+    if (table !== 'system_status') return original(table)
+    return { select: () => ({ in: async () => ({ data: [
+      { key: 'ai_circuit_breaker', value: { tripped: false } },
+      { key: 'ai_processing_scope', value: { job_id: 'allowed' } },
+    ] }) }) }
+  } }
+  let calls = 0
+  for (const scopeKey of ['other:stage', undefined]) {
+    await assert.rejects(guardedClaudeCall({ supabase: scoped,
+      attribution: { kind: 'builder', builderId: 'builder' }, callSite: 'test', model: 'claude-sonnet-4-6', scopeKey,
+    }, async () => { calls++; return FAKE_RESPONSE }), /authorised recovery/)
+  }
+  await guardedClaudeCall({ supabase: scoped,
+    attribution: { kind: 'builder', builderId: 'builder' }, callSite: 'test', model: 'claude-sonnet-4-6', scopeKey:'allowed:stage',
+  }, async () => { calls++; return FAKE_RESPONSE })
+  assert.equal(calls, 1)
+})
+
+test('gateway: budget refusal does not consume a provider attempt', async () => {
+  const { stub, db } = makeGatewayStub()
+  db.system_status[0].value = { tripped: true, reason: null }
+  let attempts = 0
+  let calls = 0
+  await assert.rejects(guardedClaudeCall({ supabase: stub,
+    attribution: { kind: 'builder', builderId: 'builder' }, callSite: 'test', model: 'claude-sonnet-4-6',
+    beforeProviderAttempt: async () => { attempts++ },
+  }, async () => { calls++; return FAKE_RESPONSE }), /circuit breaker/)
+  assert.equal(attempts, 0)
+  assert.equal(calls, 0)
+})
+
+test('gateway: failed attempt reservation fails closed', async () => {
+  const { stub } = makeGatewayStub()
+  let calls = 0
+  await assert.rejects(guardedClaudeCall({ supabase: stub,
+    attribution: { kind: 'builder', builderId: 'builder' }, callSite: 'test', model: 'claude-sonnet-4-6',
+    beforeProviderAttempt: async () => { throw new Error('reservation unavailable') },
+  }, async () => { calls++; return FAKE_RESPONSE }), /reservation unavailable/)
+  assert.equal(calls, 0)
+})
+
+test('gateway: each real transient retry reserves its own attempt', async () => {
+  const { stub } = makeGatewayStub()
+  let attempts = 0
+  let calls = 0
+  await guardedClaudeCall({ supabase: stub,
+    attribution: { kind: 'builder', builderId: 'builder' }, callSite: 'test', model: 'claude-sonnet-4-6',
+    beforeProviderAttempt: async () => { attempts++ },
+  }, async () => { if (++calls === 1) throw { status: 503 }; return FAKE_RESPONSE }, { maxRetries: 1 })
+  assert.equal(attempts, 2)
+  assert.equal(calls, 2)
+})
+
 test('gateway: builder-attributed call records builder_id and attribution=builder', async () => {
   const { stub, db } = makeGatewayStub()
   const builderId = '00000000-0000-0000-0000-000000000001'

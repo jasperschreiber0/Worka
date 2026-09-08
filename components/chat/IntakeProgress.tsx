@@ -479,11 +479,11 @@ export default function IntakeProgress({
             {documents_analyzed}/{documents_uploaded} documents analysed ({coverage_percentage}%).
             {isWarning
               ? ' A draft estimate was created from what WorkA could read — review the missing items below before sending.'
-              : ' Insufficient document coverage to produce a reliable estimate.'}
+              : ` ${estimateStatus.needs_review_reason || 'Analysis is incomplete. Your uploaded documents are saved.'}`}
           </p>
           {missing_documents.length > 0 && (
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color }}>Missing</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color }}>Not yet analysed</p>
               <ul className="text-sm space-y-0.5" style={{ color }}>
                 {missing_documents.map((d) => <li key={d.file_id}>⚠ {d.filename}</li>)}
               </ul>

@@ -100,7 +100,7 @@ export async function GET(
       // added — same root cause already fixed once in this codebase, see
       // getUnresolvedConservativeAssumptions in lib/estimating/readiness.ts).
       .select(
-        'builder_status, needs_review_reason, needs_review_reason_code, quote_id, started_at, deadline_at, completed_at, coverage_documents_uploaded, coverage_documents_analyzed, coverage_percentage, confidence_level, contributing_documents, missing_documents'
+        'batch_id, builder_status, needs_review_reason, needs_review_reason_code, quote_id, started_at, deadline_at, completed_at, coverage_documents_uploaded, coverage_documents_analyzed, coverage_percentage, confidence_level, contributing_documents, missing_documents'
       )
       .eq('job_id', jobId)
       .order('started_at', { ascending: false })
@@ -111,16 +111,22 @@ export async function GET(
       return NextResponse.json(NO_RUN_RESPONSE)
     }
 
+    // Read current queue membership, including siblings without the SSE anchor.
+    const { data: coverage, error: coverageError } = await sb.rpc('compute_document_coverage', { p_batch_id: run.batch_id })
+    if (coverageError) throw new Error('Document coverage unavailable')
+    const { data: breaker } = await sb.from('system_status').select('value').eq('key', 'ai_circuit_breaker').maybeSingle()
+    const blocked = !run.quote_id && breaker?.value?.tripped === true
+
     const response: EstimateStatusResponse = {
       has_run: true,
       builder_status: (run.builder_status as EstimateStatusResponse['builder_status']) ?? null,
-      needs_review_reason: run.needs_review_reason ?? null,
+      needs_review_reason: blocked ? 'AI processing is paused by the spending protection system. All uploaded files are saved; this is not a problem with an individual PDF.' : (run.needs_review_reason ?? null),
       needs_review_reason_code: run.needs_review_reason_code ?? null,
       quote_id: run.quote_id ?? null,
       started_at: run.started_at ?? null,
       deadline_at: run.deadline_at ?? null,
       completed_at: run.completed_at ?? null,
-      coverage: run.coverage_documents_uploaded === null ? null : {
+      coverage: coverage ? coverage as EstimateStatusResponse['coverage'] : run.coverage_documents_uploaded === null ? null : {
         documents_uploaded: run.coverage_documents_uploaded ?? 0,
         documents_analyzed: run.coverage_documents_analyzed ?? 0,
         documents_failed_or_pending: (run.coverage_documents_uploaded ?? 0) - (run.coverage_documents_analyzed ?? 0),

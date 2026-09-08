@@ -67,6 +67,8 @@ export function estimateCostCents(model: string, inputTokens: number, outputToke
 // ─── Budget decision (pure — unit-tested without a database) ─────────────────
 
 export interface BudgetState {
+  /** Optional maintenance scope: other jobs remain blocked during a controlled recovery. */
+  allowedJobId?: string | null
   breakerTripped: boolean
   breakerReason: string | null
   /** null when the read failed — treated as tripped (fail closed). */
@@ -225,6 +227,8 @@ export interface GuardedCallContext {
   scopeKey?: string
   /** Prompt parts to hash for the idempotency check. Required with scopeKey. */
   inputParts?: unknown[]
+  /** Runs only for real provider attempts, after cache/budget gates, including retries. */
+  beforeProviderAttempt?: () => Promise<void>
 }
 
 export interface GuardedCallResult<T> {
@@ -251,7 +255,7 @@ async function readBudgetState(ctx: GuardedCallContext): Promise<BudgetState> {
   }
   try {
     const [{ data: statusRows }, { data: spendRows }] = await Promise.all([
-      ctx.supabase.from('system_status').select('key, value').in('key', ['ai_circuit_breaker', 'ai_limits']),
+      ctx.supabase.from('system_status').select('key, value').in('key', ['ai_circuit_breaker', 'ai_limits', 'ai_processing_scope']),
       ctx.supabase.from('ai_spend_daily')
         .select('builder_id, cost_cents')
         .eq('day', new Date().toISOString().slice(0, 10)),
@@ -259,6 +263,7 @@ async function readBudgetState(ctx: GuardedCallContext): Promise<BudgetState> {
     const byKey = new Map((statusRows ?? []).map((r: { key: string; value: unknown }) => [r.key, r.value]))
     const breaker = byKey.get('ai_circuit_breaker') as { tripped?: boolean; reason?: string | null } | undefined
     const limits = byKey.get('ai_limits') as { global_daily_cents?: number; builder_daily_cents?: number } | undefined
+    const scope = byKey.get('ai_processing_scope') as { job_id?: string } | undefined
     if (!breaker) {
       // The row should always exist (seeded by migration 054). Its absence
       // means the migration hasn't applied or the schema cache is stale —
@@ -272,6 +277,7 @@ async function readBudgetState(ctx: GuardedCallContext): Promise<BudgetState> {
       else if (builderId && row.builder_id === builderId) builderDay = Number(row.cost_cents) || 0
     }
     return {
+      allowedJobId: scope ? (scope.job_id || '__invalid_scope__') : null,
       breakerTripped: breaker.tripped === true,
       breakerReason: breaker.reason ?? null,
       breakerKnown: true,
@@ -337,6 +343,9 @@ export async function guardedClaudeCall<T>(
   }
 
   const budget = await readBudgetState(ctx)
+  if (budget.allowedJobId && !ctx.scopeKey?.startsWith(`${budget.allowedJobId}:`)) {
+    throw new AiBudgetError('AI processing is limited to an authorised recovery job')
+  }
   const decision = decideBudget(budget)
   if (!decision.allowed) {
     console.log(JSON.stringify({
@@ -363,7 +372,10 @@ export async function guardedClaudeCall<T>(
 
   const startedAt = Date.now()
   try {
-    const response = await withTimeoutAndRetry(call, options)
+    const response = await withTimeoutAndRetry(async signal => {
+      await ctx.beforeProviderAttempt?.()
+      return call(signal)
+    }, options)
 
     // The SDK's Message shape carries usage/id; typed structurally here so
     // the generic stays unconstrained (a constrained generic collapsed to

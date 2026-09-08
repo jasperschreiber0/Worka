@@ -1428,7 +1428,7 @@ test('index.ts source: retriggerStage6() is called from exactly two call sites -
   // not, leaving that path to wait on the once-a-minute recovery cron
   // instead of resuming within seconds like the handoff already does. This
   // reuses the exact same retriggerStage6() call, not a second mechanism.
-  const callSites = indexTsSource.match(/(?<!async )\bretriggerStage6\(\)/g) ?? []
+  const callSites = indexTsSource.match(/args\.onHandoff\?\.\(retriggerStage6\)/g) ?? []
   assert.equal(callSites.length, 2, 'retriggerStage6() must be invoked from exactly two call sites (handoff + internal bail), never more')
 })
 
@@ -1438,7 +1438,7 @@ test('index.ts source: the Stage 6-internal wall-clock bail call site is textual
   assert.ok(bailBlockStart > -1, 'the Stage 6-internal wall-clock bail call must exist')
   const bailBlock = indexTsSource.slice(bailBlockStart, bailBlockStart + 400)
 
-  const retriggerCallIdx = bailBlock.indexOf('await retriggerStage6()')
+  const retriggerCallIdx = bailBlock.indexOf('args.onHandoff?.(retriggerStage6)')
   const returnIdx = bailBlock.indexOf('return', retriggerCallIdx)
 
   assert.ok(retriggerCallIdx > -1, 'retriggerStage6() must be called from the Stage 6-internal bail block')
@@ -1449,7 +1449,7 @@ test('index.ts source: the Stage 6-internal wall-clock bail call site is textual
   // site (checkpoint persisted, then retrigger fired, then return), just
   // expressed via awaiting bailForWallClockBudget rather than a bare field
   // write, since that function IS the checkpoint write.
-  assert.ok(bailBlock.indexOf('await retriggerStage6()') > bailBlock.indexOf(bailCallMarker), 'retrigger must be called AFTER the wall-clock checkpoint write (bailForWallClockBudget)')
+  assert.ok(bailBlock.indexOf('args.onHandoff?.(retriggerStage6)') > bailBlock.indexOf(bailCallMarker), 'retrigger must be called AFTER the wall-clock checkpoint write (bailForWallClockBudget)')
 })
 
 test('index.ts source: Test 1/3 — the retrigger call site is textually AFTER scope_reasoning_completed_at is persisted and BEFORE the handoff return', () => {
@@ -1458,7 +1458,7 @@ test('index.ts source: Test 1/3 — the retrigger call site is textually AFTER s
   const handoffBlock = indexTsSource.slice(handoffBlockStart, handoffBlockStart + 6000)
 
   const checkpointIdx = handoffBlock.lastIndexOf('scope_reasoning_completed_at')
-  const retriggerCallIdx = handoffBlock.indexOf('await retriggerStage6()')
+  const retriggerCallIdx = handoffBlock.indexOf('args.onHandoff?.(retriggerStage6)')
   const returnIdx = handoffBlock.indexOf('return', retriggerCallIdx)
 
   assert.ok(checkpointIdx > -1 && retriggerCallIdx > -1 && returnIdx > -1, 'all three markers must be present in the handoff block')
