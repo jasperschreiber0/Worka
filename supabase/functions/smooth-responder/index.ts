@@ -1145,7 +1145,10 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: A
   // 042): this is a scheduling condition (ran out of safe room to attempt a
   // call), not a content or model failure, and must not consume the
   // Anthropic-failure retry budget that exists for actually-bad documents.
+  let schedulingPauseRecorded = false
   const bailForWallClockBudget = async (stage: string, neededMs: number) => {
+    if (schedulingPauseRecorded) return
+    schedulingPauseRecorded = true
     const elapsedMs = Date.now() - startedAt
     const reason = formatWallClockStallReason(stage, neededMs, elapsedMs, WALL_CLOCK_SAFETY_MS)
     console.log(JSON.stringify({
