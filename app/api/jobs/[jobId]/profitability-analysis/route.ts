@@ -68,6 +68,7 @@ export async function POST(_req: NextRequest, { params }: { params: { jobId: str
     ]
     const ai = await intelligenceAI(
       builder,
+      params.jobId,
       'postmortem',
       'You are a profitability analyst. Select the most useful evidence cards in order, at most eight. Return only existing card IDs. All numbers and wording are already verified; do not calculate or invent explanations. Always include outcome, margin, scope and limits.',
       { facts },

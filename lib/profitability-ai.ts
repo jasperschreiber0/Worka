@@ -22,6 +22,7 @@ export interface AccountingProvider {
 }
 export async function intelligenceAI(
   builder: string,
+  jobId: string,
   task: string,
   system: string,
   input: unknown,
@@ -42,6 +43,7 @@ export async function intelligenceAI(
       supabase: gatewaySupabase(),
       attribution: { kind: 'builder', builderId: builder },
       callSite: `profitability_${task}`,
+      scopeKey: `${jobId}:profitability_${task}`,
       model,
     },
     (signal) =>

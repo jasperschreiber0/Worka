@@ -1,6 +1,6 @@
 # Tuesday profitability intelligence — release candidate
 
-Status: implemented and verified locally. **Not deployed; no production schema or customer records changed.**
+Status: deployed to production on 14 September 2026 (Australia/Sydney), initial release commit `546ba4c`. Additive migration applied successfully. Synthetic live financial checks passed; existing customer records were not modified. AI correspondence/post-mortems remain restricted by the existing single-job AI processing scope.
 
 ## What is included
 
@@ -24,12 +24,13 @@ Status: implemented and verified locally. **Not deployed; no production schema o
 - Type-check and production build passed. Browser verified profile save/recalculation, job review, mobile-width layout and target-price/Healthy transition.
 - Existing estimating worker, recovery, pricing and QA execution code was not rewritten. No estimate extraction, outbound messages, Xero exchange or paid AI validation calls were run.
 
-## Exact remaining release steps
+## Production validation
 
-1. Approve controlled production release and synthetic validation. Automatic approval review denied reading production database credentials for testing. Do not extract those credentials through another path. Prefer deployment smoke tests that use the application's existing server credentials without retrieving them.
-2. Apply only `supabase/migrations/20260913105546_profitability_intelligence.sql` to verified Supabase project `nfyuhsqvmmcdgbedhsxd`; do not replay previous migrations. Verify policies, privileges, function signatures and runtime behavior against an isolated synthetic builder/job. Run Supabase advisors.
-3. Commit only the files in `tuesday-release-manifest.json`, push the verified main branch, and verify the exact deployed commit. Existing Railway: project `37df23dc-967b-41d9-8f29-72bf8419cb2e`, service `554b1557-ee25-4b3d-891d-abb200f8facd`, production environment `c569dfba-ef1a-434a-97cb-f5bd3387a400`. Domain was reverified through Railway: `worka-production.up.railway.app`.
-4. With approved synthetic records only, verify authenticated saving, CSV/XLSX import, correspondence draft, completed review and next-estimate adjustment in the live app. Real AI generation still requires a bounded provider smoke test. Remove only recorded synthetic fixtures and revoke their sessions. Never touch customer jobs or global recovery.
+- User approved deployment and synthetic validation. Production service-secret export was rejected by automatic approval review; no production service credential was exported. Tests used an isolated synthetic account and a public API key with server credentials kept on the server.
+- Applied only the new profitability migration to Supabase `nfyuhsqvmmcdgbedhsxd`. Verified RLS on all six new tables, no anonymous reads/browser writes, and no browser execution of privileged financial RPCs. Advisors reported existing legacy warnings; none named the new profitability objects.
+- Railway production: project `37df23dc-967b-41d9-8f29-72bf8419cb2e`, service `554b1557-ee25-4b3d-891d-abb200f8facd`, environment `c569dfba-ef1a-434a-97cb-f5bd3387a400`, domain `worka-production.up.railway.app`.
+- Live authenticated checks passed: profile save, original baseline/GST reconciliation, XLSX import (68,310 including GST → 62,100 excluding GST), 13,900 framing variance, mapping-confirmed completion, comparable-job recommendation, explicit 130-dollar allowance application, and repeat-application rejection. Sessions were signed out and synthetic account/jobs removed.
+- Both real AI requests were rejected before provider execution by `ai_processing_scope`, which still restricts processing to the previously authorised friend-test job. Global recovery controls were preserved. New AI calls now carry their actual job scope. Provider output validation remains pending a separately authorised change to that restriction.
 
 ## Known boundaries
 
