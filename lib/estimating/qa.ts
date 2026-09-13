@@ -17,7 +17,7 @@ import { isSilentlyUnpriced, getUnresolvedConservativeAssumptions } from './read
 import { applyMargin, calculateClientPrice } from '../pricing.ts'
 import { evaluateConstructionSanity, evaluateConstructionCoverage, type ConstructionSanityFinding } from './construction-sanity.ts'
 import { applyBuilderKnowledgeDefaults } from './builder-knowledge.ts'
-import { recomputeQuoteTotals } from '../pricing.ts'
+
 
 const UNIT_SANITY_MAX: Record<string, number> = {
   m2: 2000,
@@ -50,19 +50,8 @@ export async function runQualityAssurance(
 ): Promise<QAReport | null> {
   const startedAt = Date.now()
   try {
-    // ── Builder Knowledge Defaults — applied BEFORE the rest of QA reads
-    // line items, so missing-trade/coverage/construction-sanity checks all
-    // see the same, already-topped-up scope rather than flagging something
-    // this step just added. Deterministic, sourced, never LLM-generated —
-    // see lib/estimating/builder-knowledge.ts's own header for why this is
-    // a table lookup, not a prompt instruction. recomputeQuoteTotals is the
-    // existing, documented function for "call this after any line-item
-    // mutation" (lib/pricing.ts) — reused as-is, not modified, so this adds
-    // new scope without touching rate resolution at all.
+    // Generic compliance defaults are advisory; review must not add billable scope.
     const appliedDefaults = await applyBuilderKnowledgeDefaults(supabase, quoteId, jobId)
-    if (appliedDefaults.length > 0) {
-      await recomputeQuoteTotals(supabase, quoteId)
-    }
 
     const { data: items } = await supabase
       .from('quote_line_items')
