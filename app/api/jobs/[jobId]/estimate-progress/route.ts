@@ -8,15 +8,17 @@ async function context(jobId:string) {
  const db=createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.SUPABASE_SERVICE_ROLE_KEY!)
  const {data:job}=await db.from('jobs').select('id').eq('id',jobId).eq('builder_id',builderId).maybeSingle()
  if(!job) return null
- const {data:batch}=await db.from('document_processing_batches').select('id,quote_id,total_ai_call_attempts,stage6_completed_trade_ids').eq('job_id',jobId).eq('builder_id',builderId).order('created_at',{ascending:false}).limit(1).maybeSingle()
+ const {data:batch}=await db.from('document_processing_batches').select('id,quote_id,created_at,total_ai_call_attempts,stage6_completed_trade_ids').eq('job_id',jobId).eq('builder_id',builderId).order('created_at',{ascending:false}).limit(1).maybeSingle()
  return {db,builderId,batch}
 }
 export async function GET(_req:NextRequest,{params}:{params:{jobId:string}}) {
  const c=await context(params.jobId);if(!c) return NextResponse.json({error:'Job not found'},{status:404})
  if(!c.batch) return NextResponse.json({workflow:null})
- const {data:workflow,error}=await c.db.from('estimate_workflow').select('state,reason,attempt_limit,cost_limit_cents').eq('batch_id',c.batch.id).eq('builder_id',c.builderId).maybeSingle()
+ const {data:workflow,error}=await c.db.from('estimate_workflow').select('state,reason,attempt_limit,cost_limit_cents,updated_at,deadline_at').eq('batch_id',c.batch.id).eq('builder_id',c.builderId).maybeSingle()
  if(error) return NextResponse.json({error:'Progress unavailable'},{status:503})
- return NextResponse.json({workflow,attempts:c.batch.total_ai_call_attempts,completed_trades:c.batch.stage6_completed_trade_ids?.length??0,quote_id:c.batch.quote_id})
+ const {data:documents,error:documentError}=await c.db.from('document_processing_jobs').select('status').eq('parent_job_id',c.batch.id)
+ if(documentError)return NextResponse.json({error:'Document progress unavailable'},{status:503})
+ return NextResponse.json({workflow,started_at:workflow?.deadline_at?new Date(Date.parse(workflow.deadline_at)-300000).toISOString():c.batch.created_at,documents:{total:documents?.length??0,completed:documents?.filter(d=>d.status==='completed').length??0,failed:documents?.filter(d=>d.status==='failed').length??0},attempts:c.batch.total_ai_call_attempts,completed_trades:c.batch.stage6_completed_trade_ids?.length??0,quote_id:c.batch.quote_id})
 }
 export async function POST(req:NextRequest,{params}:{params:{jobId:string}}) {
  const c=await context(params.jobId);if(!c?.batch) return NextResponse.json({error:'Estimate not found'},{status:404})

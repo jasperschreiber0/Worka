@@ -384,7 +384,7 @@ function NeedsInputList({ groups, onUpdated, canEdit, onSetRate, onExclude, onEd
   return (
     <section className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }} aria-label="Needs input">
       <button type="button" className="w-full px-4 py-3 flex justify-between text-left font-semibold" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="estimate-needs-input-list">
-        <span>Needs input <span aria-live="polite">({entries.length})</span></span><span>{open ? 'Hide' : 'Show'}</span>
+        <span className="flex items-center gap-2">{entries.length?'Needs input':'Line-item inputs saved'} <span aria-live="polite" className="px-2 py-1 rounded-full text-xs" style={{color:entries.length?'var(--status-amber)':'var(--status-green)',background:entries.length?'var(--pill-awaiting-bg)':'rgba(76,175,80,0.15)'}}>{entries.length||'✓'}</span></span><span>{open ? 'Hide' : 'Show'}</span>
       </button>
       {open && <div id="estimate-needs-input-list">
         <p className="px-4 pb-3 text-sm" style={{ color: 'var(--text-secondary)' }}>

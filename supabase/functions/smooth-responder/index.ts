@@ -3981,6 +3981,10 @@ async function runOwnedPipeline(args: RunArgs, supabase: SupabaseClient, anthrop
   })
   // Queue state survives a lost handoff; scheduler retries after lease expiry.
   if (continuation) await continuation()
+  if (managed) {
+    const {data:finished}=await supabase.from('estimate_workflow').select('state').eq('batch_id',args.parentJobId).maybeSingle()
+    if (finished && !['queued','running'].includes(finished.state)) await supabase.rpc('stop_estimate_continuation',{p_batch_id:args.parentJobId})
+  }
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────

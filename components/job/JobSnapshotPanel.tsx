@@ -899,7 +899,7 @@ export default function JobSnapshotPanel({
           </div>
         ) : (
           <>
-            {workspaceSection === 'money' && job && <EstimateProgress jobId={job.id} />}
+            {workspaceSection === 'money' && job && <EstimateProgress jobId={job.id} onReview={onViewQuote} />}
             {workspaceSection === 'money' && <div className="mb-6 text-sm" style={{ color: 'var(--text-secondary)' }}>
               <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Expected profit is not available yet</p>
               <p className="mt-2">These figures show your estimate and recorded costs. Outstanding commitments and costs to finish are not included in a final-profit forecast.</p>

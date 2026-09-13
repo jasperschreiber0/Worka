@@ -1,12 +1,15 @@
+import { requestedEstimateBatch } from '@/lib/estimating/continuation'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 export const dynamic='force-dynamic'
 export async function GET(req:NextRequest) {
  const secret=process.env.CRON_SECRET
  if(!secret || req.headers.get('authorization')!==`Bearer ${secret}`) return NextResponse.json({error:'Unauthorized'},{status:401})
+ const batchId=requestedEstimateBatch(req.nextUrl.searchParams.get('batch_id'))
+ if(!batchId)return NextResponse.json({error:'One estimate batch is required'},{status:400})
  const url=process.env.NEXT_PUBLIC_SUPABASE_URL!, key=process.env.SUPABASE_SERVICE_ROLE_KEY!
  const db=createClient(url,key)
- const {data,error}=await db.rpc('claim_estimate_continuations')
+ const {data,error}=await db.rpc('claim_estimate_continuation',{p_batch_id:batchId})
  if(error) return NextResponse.json({error:'Unable to claim queued estimates'},{status:503})
  const results=await Promise.all((data??[]).map(async (row:{batch_id:string;builder_id:string})=>{
   const {data:documents,error:documentsError}=await db.from('document_processing_jobs').select('status').eq('parent_job_id',row.batch_id)
