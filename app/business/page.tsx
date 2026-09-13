@@ -1,7 +1,7 @@
 import AppShell from '@/components/shell/AppShell'
-import BuilderHome from '@/components/dashboard/BuilderHome'
+import BusinessControl from '@/components/profitability/BusinessControl'
 
 export const metadata = { title: 'Worka — Business' }
 export default function BusinessPage() {
-  return <AppShell><BuilderHome business /></AppShell>
+  return <AppShell><BusinessControl /></AppShell>
 }

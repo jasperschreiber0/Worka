@@ -8,6 +8,7 @@ import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
 import ConfirmedRates from './ConfirmedRates'
 import SendQuoteModal from './SendQuoteModal'
 import { estimateInputReason } from '@/lib/estimate-input-review'
+import EstimateMarginGate from '@/components/profitability/EstimateMarginGate'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -2140,6 +2141,7 @@ function QuoteViewInner({
 
         {/* ── Body (scrollable) ─────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto">
+          {data && <div className="mx-4"><EstimateMarginGate jobId={data.quote.job_id} quoteId={data.quote.id} refreshKey={data.quote.total_cost} /></div>}
           {/* Loading state */}
           {isLoading && (
             <div className="pt-4">

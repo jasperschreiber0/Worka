@@ -5,9 +5,9 @@ import QuotesPipeline from '@/components/home/QuotesPipeline'
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export const metadata = {
-  title: 'WorkA — AI Operations Manager for Australian Builders',
+  title: 'WorkA — Profitability Intelligence for Australian Builders',
   description:
-    'Upload plans and get a builder-ready draft quote in minutes. Built for Australian residential builders.',
+    'Price work properly, protect margin and learn from every completed job. Built for Australian residential builders.',
 }
 
 export default function HomePage() {
@@ -55,14 +55,14 @@ export default function HomePage() {
 
           {/* Headline */}
           <h1 className="text-5xl sm:text-6xl font-bold text-slate-900 leading-tight max-w-2xl">
-            The AI operations manager for builders
+            Know whether the job will make money before you win it.
           </h1>
 
           {/* Subheadline */}
           <p className="mt-5 text-xl text-slate-500 max-w-xl leading-relaxed">
-            Upload plans. Get a quote in minutes.{' '}
+            Know where the money went after you build it.{' '}
             <span className="text-slate-700 font-medium">
-              You review everything before it goes anywhere.
+              WorkA learns from every job. AI drafts. You approve.
             </span>
           </p>
 
