@@ -212,6 +212,7 @@ function makeGatewayStub() {
           } }),
         }
       }
+      if(table==='estimating_access') return {select:()=>({eq:()=>({maybeSingle:async()=>({data:null,error:null})})})}
       throw new Error(`unexpected table ${table}`)
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

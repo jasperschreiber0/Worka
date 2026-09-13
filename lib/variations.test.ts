@@ -20,6 +20,11 @@ function makeFakeSupabase(seed: { quotes: Record<string, unknown>[]; quote_line_
   let nextId = 1
   return {
     tables,
+    async rpc(name: string, args: { p_quote_id: string }) {
+      assert.equal(name, 'refresh_estimate_totals')
+      assert.ok(tables.quotes.some(q => q.id === args.p_quote_id))
+      return { error: null }
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     from(table: 'quotes' | 'quote_line_items'): any {
       let rows = tables[table]

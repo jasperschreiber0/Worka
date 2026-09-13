@@ -1,8 +1,9 @@
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 import { approvedAttemptCeiling } from './approved-attempt-budget.ts'
 import { OpenAIEstimationClient, ESTIMATION_MODEL } from './openai-provider.ts'
 import { splitTextParts, combinePartResults } from './text-parts.ts'
 import { expandCompactFacts, hasDenseText } from './compact-facts.ts'
-import { pendingDocumentIds } from './document-checkpoint.ts'
+import { pendingDocumentIds, classificationBudgetRequired } from './document-checkpoint.ts'
 import { withExecutionLease } from './execution-lease.ts'
 /**
  * estimating-engine — Layer 2 Decision (Backend)
@@ -64,7 +65,7 @@ import {
   type ConservativeAssumption, type BucketableFact, type ProjectModelSections,
   type TradeRecoveryResult,
 } from './pipeline-logic.ts'
-import { guardedClaudeCall, hashAiInput } from './ai-gateway.ts'
+import { guardedClaudeCall, hashAiInput, estimateCostCents, AiBudgetError } from './ai-gateway.ts'
 import { extractPdfTextGated, hasUsableText, isTextDense, buildTextOnlyBlock, buildTextLayerBlock } from './pdf-text.ts'
 import { getPdfPageCount, splitPdfIntoChunks } from './pdf-chunk.ts'
 
@@ -561,6 +562,7 @@ const ESTIMATE_GENERATION_TOOL = {
 // same stage with a byte-identical prompt reuses the stored result instead of
 // paying for the call again — the Phase 0 duplicate-work protection.
 interface StageGatewayCtx {
+  onProviderAttempt?: () => void
   supabase: SupabaseClient
   builderId: string
   jobId: string
@@ -663,6 +665,8 @@ async function callTool(
   // ai_spend_daily usage ledger. Retry/timeout semantics are unchanged —
   // the gateway wraps the exact same withTimeoutAndRetry this call used
   // directly before.
+  const reservations: string[] = []
+  const { data: workflow } = gw.parentJobId ? await gw.supabase.from('estimate_workflow').select('batch_id').eq('batch_id', gw.parentJobId).maybeSingle() : { data: null }
   const { response, reusedFromOperation } = await guardedClaudeCall(
     {
       supabase: gw.supabase,
@@ -671,6 +675,16 @@ async function callTool(
       model: ESTIMATION_MODEL,
       scopeKey: `${gw.jobId}:${gw.stage}`,
       beforeProviderAttempt: async () => {
+        gw.onProviderAttempt?.()
+        if (gw.parentJobId && workflow) {
+          // Reserve a conservative request bound; uncertain failures retain their reservation.
+          const cents = Math.max(1, estimateCostCents(ESTIMATION_MODEL, systemChars + userContentChars + toolSchemaChars + 4096, maxTokens))
+          const { data, error } = await gw.supabase.rpc('reserve_estimate_attempt', { p_batch_id: gw.parentJobId, p_cost_cents: cents })
+          if (error) throw new Error('Unable to reserve processing allowance')
+          if (!data?.allowed) throw new WorkflowPause(data?.reason ?? 'Processing is paused')
+          reservations.push(data.reservation_id)
+          return
+        }
         if (gw.parentJobId) {
           const control = await gw.supabase.from('system_status').select('value').eq('key', 'ai_processing_scope').maybeSingle()
           if (control.error) throw new Error('Unable to verify approved batch allowance')
@@ -699,6 +713,14 @@ async function callTool(
         }
 
       },
+      onUsageRecorded: async cost => {
+        // Failed attempts keep their reservations because their billed usage is unknown.
+        const last = reservations.at(-1)
+        if (last) {
+          const result = await gw.supabase.rpc('settle_estimate_reservation',{p_reservation_id:last,p_actual_cents:cost})
+          if (result.error) throw result.error
+        }
+      },
       inputParts: [ESTIMATION_MODEL, system, content, tool, maxTokens],
     },
     (signal) => anthropic.messages.create(
@@ -708,7 +730,7 @@ async function callTool(
         system,
         tools: [tool],
         tool_choice: { type: 'tool', name: tool.name },
-        messages: [{ role: 'user', content }],
+        messages: [{ content }],
       },
       { signal }
     ),
@@ -738,7 +760,14 @@ async function callTool(
         }))
       },
     }
-  )
+  ).catch(async err => {
+    if (workflow && err instanceof AiBudgetError) {
+      const state = /circuit breaker|protection|state could not/.test(err.message) ? 'paused_service' : 'paused_daily'
+      await gw.supabase.from('estimate_workflow').update({state,reason:err.message,updated_at:new Date().toISOString()}).eq('batch_id',gw.parentJobId)
+      throw new WorkflowPause(err.message)
+    }
+    throw err
+  })
   console.log(JSON.stringify({
     event: 'estimation_call_complete', tool: tool.name, stop_reason: response.stop_reason,
     usage: response.usage, duration_ms: Date.now() - startedAt,
@@ -841,7 +870,7 @@ function validateStage6Items(
     .map((item) => {
       const docPrice = deriveDocPrice(item.document_rate, item.document_total, (item.quantity as number) ?? null)
       const allowanceValueRaw = item.allowance_value
-      const allowanceValue = typeof allowanceValueRaw === 'number' && isFinite(allowanceValueRaw) && allowanceValueRaw > 0 ? allowanceValueRaw : null
+      const allowanceValue = (item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum') && typeof allowanceValueRaw === 'number' && isFinite(allowanceValueRaw) && allowanceValueRaw > 0 ? allowanceValueRaw : null
       const gateItem: GateableItem = {
         description: String(item.description ?? ''),
         quantity: (item.quantity as number) ?? null,
@@ -863,7 +892,7 @@ function validateStage6Items(
             ? 'unresolved'
             : null
       return {
-        ...item, ...gateResult,
+        ...item, ...gateResult, trade_category_id: item.trade_category_id as number, description: gateItem.description,
         _docRate: docPrice.rate, _docTotal: docPrice.total,
         _pricingSource: pricingSource,
         _pricingBasis: typeof item.pricing_basis === 'string' ? item.pricing_basis : null,
@@ -1163,6 +1192,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
           updated_at: new Date().toISOString(),
         }).eq('id', parentJobId)
       } catch (err) {
+    if (err instanceof WorkflowPause) throw err
         console.error('Failed to persist wall-clock stall state to document_processing_batches:', err)
       }
     }
@@ -1175,6 +1205,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
         failure_reason: reason.slice(0, 500),
       }).eq('id', fileId)
     } catch (err) {
+    if (err instanceof WorkflowPause) throw err
       console.error('Failed to persist wall-clock stall state to files:', err)
     }
   }
@@ -1198,7 +1229,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
   // schedule, and the grace period are all UNCHANGED by this fix.
   const retriggerStage6 = async () => {
     const retriggerSupabaseUrl = Deno.env.get('SUPABASE_URL')
-    const retriggerAnonKey = Deno.env.get('SUPABASE_ANON_KEY')
+    const retriggerAnonKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
     if (!parentJobId) return // only the queue-model handoff ever calls this
     if (!retriggerSupabaseUrl || !retriggerAnonKey) {
       console.error(JSON.stringify({
@@ -1224,6 +1255,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
         }))
       }
     } catch (err) {
+    if (err instanceof WorkflowPause) throw err
       const detail = err instanceof Error ? err.message : String(err)
       console.error(JSON.stringify({
         event: 'stage_boundary_retrigger_failed', job_id: jobId, batch_id: parentJobId,
@@ -1316,6 +1348,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
     const skippedSiblings: string[] = []
     const failedToLoadSiblings: string[] = []
     let classificationProgress = false
+    let classificationCallThisRun = false
     if (!resume) {
       let allLoaded: LoadedFile[]
 
@@ -1555,6 +1588,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
               continue
             }
           } catch (err) {
+    if (err instanceof WorkflowPause) throw err
             console.log(JSON.stringify({ document: f.filename, status: 'chunk_failed', error: err instanceof Error ? err.message : String(err) }))
             // Fall through — keep the original oversized entry below;
             // splitIntoBatches will exclude it with a clear reason rather
@@ -1738,7 +1772,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           }
           if(cachedPart) docResult=cachedPart.payload
           else {
-          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, maxTokens, batchTimeoutMs)
+          docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', onProviderAttempt: () => { classificationCallThisRun = true }, parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, maxTokens, batchTimeoutMs)
           if (docResult) docResult.facts = expandCompactFacts(docResult.facts, batchFiles.length)
           }
           if(part && docResult) {
@@ -1755,6 +1789,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
             docResult=combined
           }
         } catch (err) {
+    if (err instanceof WorkflowPause) throw err
           // A batch's Claude call failing (a transient API error, a
           // truncated/malformed response) is a genuinely catchable,
           // in-band failure (unlike the CPU-governor kill this pipeline
@@ -1892,7 +1927,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         const voyageApiKey = Deno.env.get('VOYAGE_API_KEY')
         const factTexts = factInsertsBase.map((f) => `[${f.category}] ${f.key}: ${f.value}`)
         const embeddings = factInsertsBase.length > 0 ? await embedTexts(factTexts, voyageApiKey) : []
-        type FactInsertWithSourceFile = Omit<FactRow, 'source_document_id'> & { source_file_id: string | null }
+        type FactInsertWithSourceFile = Omit<FactRow, 'source_document_id'> & { source_file_id: string | null; page_reference?: string | null }
         const factInserts: FactInsertWithSourceFile[] = factInsertsBase.map((f, i) => ({ ...f, embedding: embeddings[i] ?? null }))
 
         // Auto-supersede: a new fact for the same job_id + category + key
@@ -2069,10 +2104,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
         // invocation exactly like a wall-clock deferral anywhere else in
         // this pipeline) and adds no new retry — it only changes when the
         // EXISTING deferral triggers.
-        const hasClassifiedAnyBatchThisRun = batchIdx > 0
-        const budgetNeededNow = hasClassifiedAnyBatchThisRun
-          ? batchTimeoutMs + STAGE3_PER_CALL_TIMEOUT_MS
-          : batchTimeoutMs
+        const budgetNeededNow = classificationBudgetRequired(batchTimeoutMs, STAGE3_PER_CALL_TIMEOUT_MS, classificationCallThisRun)
         if (!hasWallClockBudget(budgetNeededNow)) {
           await bailForWallClockBudget('classifying_documents', batchTimeoutMs)
           break
@@ -2093,7 +2125,7 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           continue
         }
 
-        if (result.classification === 'budget_refused') {
+        if (String(result.classification) === 'budget_refused') {
           await fail(`AI processing is paused by spending protection. All uploaded files are saved. ${result.errMessage}`, true)
           return
         }
@@ -2613,6 +2645,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
             // every chunk exactly as before; only the early exit is gone.
           }
         } catch (err) {
+    if (err instanceof WorkflowPause) throw err
           const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
           const errMessage = err instanceof Error ? err.message : String(err)
           console.log(JSON.stringify({ stage: 'reasoning_scope', status: 'failed', durationMs: Date.now() - scopeStartedAt, factsInPrompt: factsForPrompt.length, chunkCount: plan.chunksToRunNow.length, classification, error: errMessage }))
@@ -2742,6 +2775,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
               stalled_at: new Date().toISOString(),
             }).eq('id', parentJobId)
           }
+          args.onHandoff?.(retriggerStage6)
           return
         }
 
@@ -3119,6 +3153,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         }
         return { items: (rawItems ?? []) as Array<Record<string, unknown>>, failedTradeIds: [] }
       } catch (err) {
+    if (err instanceof WorkflowPause) throw err
         if (isTruncatedResponseError(err)) {
           // splitBatchForRetry itself already returns null for a
           // single-trade chunk (nothing left to split), so no separate
@@ -3244,6 +3279,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
         try {
           await supabase.rpc('release_stage6_slot', { p_batch_id: parentJobId, p_call_id: callId })
         } catch (err) {
+    if (err instanceof WorkflowPause) throw err
           console.error('release_stage6_slot RPC failed:', err)
         }
       }
@@ -3363,6 +3399,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       // exactly as it would have if that chunk had run sequentially.
       if (firstRejection) throw firstRejection
     } catch (err) {
+    if (err instanceof WorkflowPause) throw err
       const classification = (err as { classification?: AnthropicFailureClassification })?.classification ?? classifyAnthropicError(err)
       const errMessage = err instanceof Error ? err.message : String(err)
       console.log(JSON.stringify({ stage: 'generating_estimate', status: 'failed', durationMs: Date.now() - estimateStartedAt, classification, error: errMessage }))
@@ -3422,6 +3459,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
           stalled_at: new Date().toISOString(),
         }).eq('id', parentJobId)
       }
+      args.onHandoff?.(retriggerStage6)
       return
     }
 
@@ -3734,6 +3772,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       completion_persisted: completionPersisted,
     }))
   } catch (err) {
+    if (err instanceof WorkflowPause) throw err
     console.error('estimating-engine error:', err)
     await fail(err instanceof Error ? err.message : String(err))
   } finally {
@@ -3831,6 +3870,7 @@ async function runProjectModelShadowEstimate(
       chunkResults.push(chunkResult)
       tradesReasoned.push(...tradeChunk.map((t) => t.id))
     } catch (err) {
+    if (err instanceof WorkflowPause) throw err
       console.log(JSON.stringify({ event: 'project_model_shadow_scope_call_failed', job_id: jobId, error: err instanceof Error ? err.message : String(err) }))
       break
     }
@@ -3861,6 +3901,7 @@ async function runProjectModelShadowEstimate(
       shadowLineItemCount = items.length
       shadowConfidences = items.map((i) => i.confidence ?? 0)
     } catch (err) {
+    if (err instanceof WorkflowPause) throw err
       console.log(JSON.stringify({ event: 'project_model_shadow_estimate_call_failed', job_id: jobId, error: err instanceof Error ? err.message : String(err) }))
     }
   }
@@ -3911,11 +3952,33 @@ const SHADOW_SCOPE_SYSTEM_PROMPT = 'You are a senior Australian residential cons
 
 const SHADOW_ESTIMATE_SYSTEM_PROMPT = 'You are a senior Australian residential quantity surveyor producing a full construction cost takeoff. Base every quantity on the project model and scope below — never invent a quantity or a material. When a quantity cannot be derived from anything provided, set manual_input_required = true and leave quantity/unit null rather than guessing. Use Australian units only (m2, lm, m3, each, lot, weeks, hours). Descriptions must be specific ("Concrete slab — 125mm ground floor", not "Concrete"). Set pricing_type: measured, pc_allowance, or provisional_sum.'
 
+class WorkflowPause extends Error {}
+
 async function runOwnedPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: OpenAIEstimationClient) {
   let continuation: (() => Promise<void>) | undefined
-  await withExecutionLease(supabase, args.jobId, args.fileId, args.builderId, () =>
-    runPipeline({ ...args, onHandoff: next => { continuation = next } }, supabase, anthropic))
-  // Release execution ownership before a successor is dispatched.
+  const enrolled = args.parentJobId ? await supabase.rpc('enqueue_estimate_workflow', { p_batch_id: args.parentJobId, p_builder_id: args.builderId }) : { data: false }
+  const managed = enrolled.data === true
+  await withExecutionLease(supabase, args.jobId, args.fileId, args.builderId, async () => {
+    if (managed) {
+      const { data: workflow } = await supabase.from('estimate_workflow').select('state').eq('batch_id', args.parentJobId).single()
+      if (!workflow || !['queued','running'].includes(workflow.state)) return
+      await supabase.from('estimate_workflow').update({ state: 'running', next_attempt_at: new Date(Date.now()+660000).toISOString(), updated_at: new Date().toISOString() }).eq('batch_id',args.parentJobId)
+    }
+    try {
+      await runPipeline({ ...args, onHandoff: next => { continuation = next } }, supabase, anthropic)
+    } catch (err) {
+      if (!(err instanceof WorkflowPause)) throw err
+      if (managed) await supabase.from('estimate_workflow').update({ reason: err.message }).eq('batch_id',args.parentJobId)
+      return
+    }
+    if (managed) {
+      const { data: batch } = await supabase.from('document_processing_batches').select('quote_id').eq('id',args.parentJobId).single()
+      const { data: file } = await supabase.from('files').select('intake_stage,failure_reason').eq('id',args.fileId).single()
+      const state = batch?.quote_id ? 'complete' : file?.intake_stage === 'failed' ? 'needs_attention' : 'queued'
+      await supabase.from('estimate_workflow').update({state,reason:state==='needs_attention'?file?.failure_reason:null,next_attempt_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('batch_id',args.parentJobId)
+    }
+  })
+  // Queue state survives a lost handoff; scheduler retries after lease expiry.
   if (continuation) await continuation()
 }
 
@@ -3946,6 +4009,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const supabase = createClient(supabaseUrl, supabaseKey)
   const anthropic = new OpenAIEstimationClient(anthropicKey)
+  const bearer = req.headers.get('authorization')?.replace(/^Bearer /i, '') ?? ''
+  const internal = bearer === supabaseKey
+  const { data: identity } = internal ? { data: { user: null } } : await supabase.auth.getUser(bearer)
+  if (!internal && !identity?.user) return new Response(JSON.stringify({error:'Unauthorized'}),{status:401,headers:CORS})
 
   // Document-worker mode: every document in this batch was already
   // downloaded and extracted in its own invocation (see
@@ -3960,7 +4027,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('id, job_id, builder_id, primary_file_id')
       .eq('id', body.parent_job_id)
       .single()
-    if (!batch) {
+    if (!batch || (!internal && batch.builder_id !== identity?.user?.id)) {
       return new Response(JSON.stringify({ error: 'Unknown parent_job_id' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -3992,7 +4059,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const { file_id, job_id, builder_id, sibling_file_ids, resume } = body
-  if (!file_id || !job_id || !builder_id) {
+  if (!file_id || !job_id || !builder_id || (!internal && builder_id !== identity?.user?.id)) {
     return new Response(JSON.stringify({ error: 'file_id, job_id, builder_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
 

@@ -157,7 +157,7 @@ export interface JobSnapshot {
   // Non-blocking open questions — informational, never pause estimating.
   // Previously never surfaced in any builder UI; see JobSnapshotPanel's
   // "Worth knowing" section.
-  pending_non_blocking_questions: Array<{ id: string; question: string; reason: string }>
+  pending_non_blocking_questions: Array<{ id: string; question: string; reason: string; answer?: string | null; answer_review?: {id:string;quote_id:string;resolution_type:string|null}|null }>
   clarify_file_id: string | null
 }
 

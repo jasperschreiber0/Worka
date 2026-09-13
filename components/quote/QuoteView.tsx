@@ -5,7 +5,9 @@ import { createPortal } from 'react-dom'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { calculateSellTotal, calculateClientPrice } from '@/lib/pricing'
 import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
+import ConfirmedRates from './ConfirmedRates'
 import SendQuoteModal from './SendQuoteModal'
+import { estimateInputReason } from '@/lib/estimate-input-review'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -367,7 +369,48 @@ interface LineItemRowProps {
   onDeleteItem?: (itemId: string) => Promise<string | null>
 }
 
+function NeedsInputList({ groups, onUpdated, canEdit, onSetRate, onExclude, onEditItem, onDeleteItem }: {
+  onUpdated: () => Promise<void>
+  groups: LineItemsByCategory[]
+} & Omit<LineItemRowProps, 'item'>) {
+  const [reviewError,setReviewError]=useState('')
+  const [reviewBusy,setReviewBusy]=useState(false)
+  async function review(item:DemoQuoteLineItem,action:string){setReviewBusy(true);setReviewError('');try{const res=await fetch('/api/quotes/'+item.quote_id+'/line-items/'+item.id+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const result=await res.json();if(!res.ok)throw Error(result.error);await onUpdated()}catch(e){setReviewError(e instanceof Error?e.message:'Review could not be saved')}finally{setReviewBusy(false)}}
+  const [open, setOpen] = useState(true)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const entries = groups.flatMap(group => group.items.map(item => ({ item, trade: group.category_name, reason: estimateInputReason(item) })))
+    .filter(entry => entry.reason !== null)
+    .sort((a, b) => Number(b.reason === 'Price needed') - Number(a.reason === 'Price needed'))
+  return (
+    <section className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }} aria-label="Needs input">
+      <button type="button" className="w-full px-4 py-3 flex justify-between text-left font-semibold" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="estimate-needs-input-list">
+        <span>Needs input <span aria-live="polite">({entries.length})</span></span><span>{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open && <div id="estimate-needs-input-list">
+        <p className="px-4 pb-3 text-sm" style={{ color: 'var(--text-secondary)' }}>
+          {entries.length ? 'Start with missing prices, then check assumptions and allowances. Open an item to edit it. Other scope and quality checks still apply below.' : 'No line-item input outstanding. Check the scope and quality findings below before sending.'}
+        </p>
+        {reviewError && <p role="alert" className="px-4 pb-2 text-sm">{reviewError}</p>}
+        <div className="max-h-96 overflow-y-auto">
+          {entries.map(({ item, trade, reason }) => <div key={item.id} style={{ borderTop: '1px solid var(--bg-border)' }}>
+            <button type="button" className="w-full px-4 py-3 text-left" aria-expanded={selectedId === item.id} onClick={() => setSelectedId(selectedId === item.id ? null : item.id)}>
+              <span className="block text-xs font-semibold" style={{ color: 'var(--status-amber)' }}>{reason} · {trade}</span>
+              <span className="block text-sm mt-1">{item.description}</span>
+              <span className="block text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>{selectedId === item.id ? 'Close item' : canEdit ? 'Review / edit' : 'View item'}</span>
+            </button>
+            {selectedId === item.id && canEdit && <div className="px-4 pb-2 flex gap-2"><button type="button" className="btn-secondary px-3 py-2 text-xs" disabled={reviewBusy} onClick={()=>review(item,'awaiting_quote')}>Awaiting supplier quote</button><button type="button" className="btn-secondary px-3 py-2 text-xs" disabled={reviewBusy || item.total===null || item.total<=0} onClick={()=>review(item,'reviewed')}>Confirm reviewed</button></div>}
+            {selectedId === item.id && <LineItemRow item={item} canEdit={canEdit} onSetRate={onSetRate} onExclude={onExclude} onEditItem={onEditItem} onDeleteItem={onDeleteItem} />}
+          </div>)}
+        </div>
+      </div>}
+    </section>
+  )
+}
+
 function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDeleteItem }: LineItemRowProps) {
+  const [rateSaveMessage,setRateSaveMessage] = useState('')
+  const [savingRateMemory,setSavingRateMemory] = useState(false)
+  async function saveMyRate(){setSavingRateMemory(true);try{const res=await fetch('/api/quotes/'+item.quote_id+'/line-items/'+item.id+'/save-rate',{method:'POST'});const result=await res.json();setRateSaveMessage(res.ok?'Saved to your rates for matching future work.':result.error)}catch{setRateSaveMessage('Could not save your rate. Please retry.')}finally{setSavingRateMemory(false)}}
   const isExcluded = item.assumption_status === 'excluded'
   const isUnresolved = item.is_assumption && item.assumption_status === 'unresolved'
   const isAllowance = item.pricing_type === 'pc_allowance' || item.pricing_type === 'provisional_sum'
@@ -521,7 +564,7 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
         {isUnpriced && canEdit && editing && (
           <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
             <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-              {item.quantity !== null && item.unit ? `$ per ${item.unit}` : '$ total for this item'}
+              {!isAllowance && item.quantity !== null && item.unit ? `$ per ${item.unit}` : '$ total for this item'}
             </span>
             <input
               type="number"
@@ -555,6 +598,7 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
           </div>
         )}
 
+        {canEdit && !isExcluded && item.assumption_status !== 'unresolved' && item.pricing_source === 'manual' && item.pricing_type === 'measured' && item.rate !== null && item.rate > 0 && item.quantity !== null && item.quantity > 0 && <div className="mt-2 text-xs"><button type="button" className="btn-secondary px-3 py-2" disabled={savingRateMemory} onClick={saveMyRate}>{savingRateMemory?'Saving…':'Save as my rate'}</button><p>Optional: reuse this unit price for the same scope in your future estimates.</p><p role="status">{rateSaveMessage}</p></div>}
         {/* Edit / Delete — any line item, not just unpriced ones */}
         {canEdit && !editing && !editingItem && (onEditItem || onDeleteItem) && (
           <div className="flex items-center gap-2 mt-1.5">
@@ -629,10 +673,10 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
                 type="number" inputMode="decimal" min="0"
                 value={editFields.rate}
                 onChange={(e) => setEditFields((f) => ({ ...f, rate: e.target.value }))}
-                placeholder="Rate $"
+                placeholder={isAllowance ? 'Total allowance (AUD)' : 'Rate (AUD)'}
                 className="w-24 px-2 py-1 rounded text-[12px] tabular-nums"
                 style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--bg-border)' }}
-                aria-label="Rate"
+                aria-label={isAllowance ? 'Total allowance' : 'Rate'}
               />
             </div>
             {editError && <p className="text-[11px]" style={{ color: 'var(--status-red)' }}>{editError}</p>}
@@ -643,7 +687,7 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
                 disabled={editSaving}
                 className="btn-primary text-[11px] px-2.5 py-1 disabled:opacity-40"
               >
-                {editSaving ? 'Saving…' : 'Save'}
+                {editSaving ? 'Saving…' : 'Save inputs & update total'}
               </button>
               <button
                 type="button"
@@ -1933,7 +1977,7 @@ function QuoteViewInner({
           description: fields.description.trim(),
           quantity: fields.quantity.trim() === '' ? null : Number(fields.quantity),
           unit: fields.unit.trim() === '' ? null : fields.unit.trim(),
-          rate: fields.rate.trim() === '' ? undefined : Number(fields.rate),
+          rate: fields.rate.trim() === '' ? null : Number(fields.rate),
         }),
       })
       const json = await res.json().catch(() => ({}))
@@ -2164,6 +2208,10 @@ function QuoteViewInner({
               {data.summary.critical_assumptions && data.summary.critical_assumptions.length > 0 && (
                 <AssumptionsMade assumptions={data.summary.critical_assumptions} />
               )}
+
+              <NeedsInputList onUpdated={loadQuote} groups={data.line_items_by_category} canEdit={canEditItems} onSetRate={handleSetRate} onExclude={handleExclude} onEditItem={handleEditItem} onDeleteItem={handleDeleteItem} />
+
+              <ConfirmedRates />
 
               {/* What should I check? — QA output, shown before the numbers */}
               {data.qa_report && <CheckBeforeSending report={data.qa_report} scopeConfidence={data.summary.scope_confidence} />}

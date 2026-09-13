@@ -283,6 +283,8 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
 
       const uploaded = files.map((sf) => merged[sf.id]).filter((f): f is DBFile => Boolean(f))
 
+      const start = await fetch('/api/jobs/'+job.id+'/start-estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_batch_id:batchId,file_ids:uploaded.map(f=>f.id)})})
+      if(!start.ok) {const result=await start.json();throw new Error(result.error??'Your documents are saved, but processing could not start. Please retry.')}
       // Primary file drives the intake pipeline; the rest are siblings
       const [primary, ...siblings] = uploaded
       setSiblingFileIds(siblings.map(f => f.id))
@@ -294,7 +296,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
     } finally {
       setUploading(false)
     }
-  }, [files, uploading, uploadSingleFile, uploadedById])
+  }, [files, uploading, uploadSingleFile, uploadedById, job.id])
 
   // ── Intake complete handler ────────────────────────────────────────────────
 

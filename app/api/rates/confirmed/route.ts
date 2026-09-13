@@ -1,0 +1,6 @@
+import {NextResponse} from 'next/server'
+import {createClient} from '@supabase/supabase-js'
+import {getAuthenticatedBuilderId,isDemoMode} from '@/lib/auth/api-auth'
+async function ctx(){const id=await getAuthenticatedBuilderId();if(!id||isDemoMode())return null;return {id,db:createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.SUPABASE_SERVICE_ROLE_KEY!)}}
+export async function GET(){const c=await ctx();if(!c)return NextResponse.json({error:'Unauthorized'},{status:401});const {data,error}=await c.db.from('builder_confirmed_rates').select('id,description,rate,unit,confirmed_at').eq('builder_id',c.id).eq('active',true).order('confirmed_at',{ascending:false}).limit(200);return error?NextResponse.json({error:'Rates unavailable'},{status:503}):NextResponse.json({rates:data})}
+export async function DELETE(req:Request){const c=await ctx();if(!c)return NextResponse.json({error:'Unauthorized'},{status:401});let body;try{body=await req.json()}catch{return NextResponse.json({error:'Invalid request'},{status:400})}const {data,error}=await c.db.rpc('retire_confirmed_builder_rate',{p_builder_id:c.id,p_rate_id:body.id});return error||!data?NextResponse.json({error:'Rate not found'},{status:404}):NextResponse.json({retired:true})}

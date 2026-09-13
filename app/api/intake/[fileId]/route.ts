@@ -610,7 +610,7 @@ export async function GET(
             // created at all; there is nothing for one to track.
             const triggerRes = await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
               body: JSON.stringify({ file_id: fileId, job_id, builder_id, resume: true }),
             })
             if (!triggerRes.ok) {
@@ -655,7 +655,7 @@ export async function GET(
               Array.from({ length: WORKER_CONCURRENCY }, () =>
                 fetch(`${supabaseUrl}/functions/v1/document-worker`, {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+                  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
                   body: JSON.stringify({ parent_job_id: batchId, builder_id }),
                 }).catch((err) => console.error('document-worker trigger failed', err))
               )

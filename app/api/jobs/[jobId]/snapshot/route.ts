@@ -222,10 +222,10 @@ export async function GET(
   // separate from pending_clarifying_questions above rather than merged in.
   const { data: openNonBlockingQuestions } = await sb
     .from('clarifying_questions')
-    .select('id, question, reason')
+    .select('id, question, reason, answer, answer_review:assumptions!answer_review_id(id, quote_id, resolution_type)')
     .eq('job_id', jobId)
     .eq('blocking', false)
-    .eq('status', 'open')
+    .in('status', ['open', 'answered'])
     .order('created_at', { ascending: true })
 
   // Last activity: most recent of comms, files, or job.updated_at
@@ -395,6 +395,8 @@ export async function GET(
       id: q.id,
       question: q.question,
       reason: q.reason,
+      answer: q.answer,
+      answer_review: q.answer_review,
     })),
     // A valid file id for this job to answer against — /clarify only needs
     // one belonging to the job (it resolves everything else via job_id), so

@@ -28,6 +28,7 @@ export interface DemoQuoteLineItem {
     subcontract_cost: number | null
     plant_cost: number | null
     pricing_source?: string | null
+    review_state?: string | null
     pricing_basis?: string | null
 }
 

@@ -1,0 +1,36 @@
+{
+  "version": "5",
+  "redirects": {
+    "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.116.0"
+  },
+  "remote": {
+    "https://esm.sh/@supabase/supabase-js@2.116.0": "a38014743786a06c7dbf095a99e9ef3b38c0ec16bff076fc7cd403991192b34e",
+    "https://esm.sh/pdf-lib@1.17.1": "cf7c5527829cb9bbb3aa20d339c530067441c10eb98880360aea9e77c3c87ff8",
+    "https://esm.sh/unpdf@0.12.1": "fbffa8cb0799e760249fb47326cc2134abda5e15d1f71e2dc20c1594217aaad6"
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@anthropic-ai/sdk@0.24",
+        "npm:@supabase/auth-helpers-nextjs@0.10",
+        "npm:@supabase/supabase-js@^2.43.0",
+        "npm:@types/node@^20.12.7",
+        "npm:@types/react-dom@^18.3.0",
+        "npm:@types/react@^18.3.1",
+        "npm:autoprefixer@^10.4.19",
+        "npm:eslint-config-next@14.2.3",
+        "npm:eslint@^8.57.0",
+        "npm:framer-motion@^12.42.2",
+        "npm:lucide-react@^1.24.0",
+        "npm:next@^14.2.35",
+        "npm:postcss@^8.4.38",
+        "npm:react-dom@^18.3.1",
+        "npm:react@^18.3.1",
+        "npm:resend@^3.5.0",
+        "npm:tailwindcss@^3.4.3",
+        "npm:typescript@^5.4.5",
+        "npm:unpdf@~0.12.1"
+      ]
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import { compatibleConfirmedRate, incompatiblePackageSelection } from './confirmed-rate-policy.ts'
 import { shouldSavePrice } from './estimating/pricing-integrity.ts'
 // ─── WorkA Estimation Engine ───────────────────────────────────────────────────
 // Resolves a rate for each extracted quote line item using the 5-tier rate
@@ -805,6 +806,7 @@ export function matchDocumentSelection(
   let bestOverlap = 0
   for (const fact of facts) {
     if (fact.category !== 'fixtures' && fact.category !== 'materials') continue
+    if (incompatiblePackageSelection(item.description, fact.key+' '+fact.value)) continue
     const priced = extractSelectionPrice(fact.value)
     if (!priced) continue
     const factTokens = tokenize(`${fact.key} ${fact.value}`)
@@ -914,6 +916,7 @@ export async function priceLineItems<T extends PriceableItem>(
     return items.map((item) => ({ ...item, rate: null, total: null, pricing_source: null, pricing_basis: null, confidence: item.confidence ?? null }))
   }
 
+  const { data: confirmedRates } = await supabase.from('builder_confirmed_rates').select('id,description,unit,trade_category_id,rate,state,active,confirmed_at').eq('builder_id',builderId).eq('active',true)
   const withMinConfidence = (item: T, tierConfidence: number | null): number | null => {
     if (item.confidence == null) return tierConfidence
     if (tierConfidence == null) return item.confidence
@@ -957,6 +960,8 @@ export async function priceLineItems<T extends PriceableItem>(
       return { item, rate: null as number | null, total: null as number | null, pricing_source: null as MeasuredPricingSource | null, pricing_basis: null as string | null, material_cost: null as number | null, labour_cost: null as number | null, matched: false }
     }
 
+    const confirmed = (confirmedRates??[]).find(rate=>compatibleConfirmedRate(item,rate,builderState))
+    if (confirmed && item.quantity !== null && item.quantity > 0) return { item, rate:Number(confirmed.rate), total:round2(item.quantity*Number(confirmed.rate)),pricing_source:'builder_rate' as MeasuredPricingSource,pricing_basis:'Your explicitly confirmed rate from '+new Date(confirmed.confirmed_at).toLocaleDateString('en-AU'),material_cost:null,labour_cost:null,matched:true }
     const match = matchLineItemKey(item, ctx.catalogue)
     const resolved = match ? resolveRateForKey(match.key, normalizeUnit(item.unit), ctx) : null
 
@@ -1277,36 +1282,8 @@ export async function recomputeQuoteTotals(
   supabase: SupabaseClient,
   quoteId: string
 ): Promise<void> {
-  try {
-    const { data: items } = await supabase
-      .from('quote_line_items')
-      .select('total, confidence, assumption_status, pricing_source')
-      .eq('quote_id', quoteId)
-
-    if (!items) return
-
-    const { total_cost, confidence_score, price_coverage_pct, pricing_match_rate_pct, allowance_pct } = computeQuoteTotals(items)
-
-    const { data: quote } = await supabase
-      .from('quotes')
-      .select('margin_pct')
-      .eq('id', quoteId)
-      .single()
-
-    await supabase
-      .from('quotes')
-      .update({
-        total_cost,
-        confidence_score,
-        price_coverage_pct,
-        pricing_match_rate_pct,
-        allowance_pct,
-        margin_pct: quote?.margin_pct ?? DEFAULT_MARGIN_PCT,
-      })
-      .eq('id', quoteId)
-  } catch (err) {
-    console.error('recomputeQuoteTotals failed:', err)
-  }
+  const { error } = await supabase.rpc('refresh_estimate_totals', { p_quote_id: quoteId })
+  if (error) throw new Error('Could not refresh estimate totals. Please retry.')
 }
 
 /** Bounded concurrency for captureLearnedRates below — see its own comment. */
@@ -1317,73 +1294,8 @@ const LEARNED_RATE_BATCH_SIZE = 25
  * builder_learned_rates (running average keyed by line_item_key).
  * Best-effort: never throws — learning must not break the approval action.
  */
-export async function captureLearnedRates(
-  supabase: SupabaseClient,
-  quoteId: string
-): Promise<void> {
-  try {
-    const { data: quote } = await supabase
-      .from('quotes')
-      .select('builder_id')
-      .eq('id', quoteId)
-      .single()
-    if (!quote) return
-
-    const { data: items } = await supabase
-      .from('quote_line_items')
-      .select('trade_category_id, description, unit, rate, assumption_status, pricing_type')
-      .eq('quote_id', quoteId)
-    if (!items) return
-
-    // The SAME shared catalogue priceLineItems() matched this quote's items
-    // against — using a narrower cost_rates-only catalogue here (as this used
-    // to) let a retail-matched item (e.g. a specific branded product) learn
-    // under a different, more generic key than it was actually priced under.
-    const catalogue = await loadPricingCatalogue(supabase)
-
-    // Atomic per-item upsert (running average computed inside the DB, see
-    // migration 023) — safe to run concurrently since each RPC call is a
-    // single atomic statement, unlike the old select-then-branch which could
-    // lose an update between two concurrent quote approvals.
-    //
-    // Bounded concurrency: this used to be one unbounded Promise.all firing
-    // an RPC per measured line item — a quote with hundreds of lines (a
-    // large commercial job) would fan out hundreds of simultaneous
-    // connections to the same builder_id's learned-rate rows at once, all
-    // contending on the same upsert. Chunked into fixed-size batches
-    // (LEARNED_RATE_BATCH_SIZE = 25, within the reliability-refactor's
-    // approved 20-50 range) run sequentially, each batch itself still
-    // parallel — bounds peak concurrency without changing what gets
-    // learned or losing any item's contribution.
-    const eligibleItems = items.filter((item) => {
-      if (item.rate === null || item.assumption_status === 'excluded') return false
-      // PC allowances and provisional sums are placeholders by definition —
-      // a nominal PS figure entered to unblock a quote is not a market
-      // rate, and folding it into the learned average would poison Tier 1
-      // pricing for every future quote. Only measured lines teach.
-      const pricingType = (item as { pricing_type?: string | null }).pricing_type
-      return !pricingType || pricingType === 'measured'
-    })
-    for (let i = 0; i < eligibleItems.length; i += LEARNED_RATE_BATCH_SIZE) {
-      const batch = eligibleItems.slice(i, i + LEARNED_RATE_BATCH_SIZE)
-      await Promise.all(
-        batch.map(async (item) => {
-          const match = matchLineItemKey({ ...item, quantity: null }, catalogue)
-          if (!match || !item.unit) return
-
-          const { error: rpcError } = await supabase.rpc('upsert_learned_rate', {
-            p_builder_id: quote.builder_id,
-            p_line_item_key: match.key,
-            p_rate: item.rate,
-            p_unit: item.unit,
-          })
-          if (rpcError) console.error('upsert_learned_rate failed:', rpcError.message)
-        })
-      )
-    }
-  } catch (err) {
-    console.error('captureLearnedRates failed:', err)
-  }
+export async function captureLearnedRates(_supabase: SupabaseClient,_quoteId: string): Promise<void> {
+  // Job activation is not consent to reuse a price. Use the explicit save-rate action.
 }
 
 /**

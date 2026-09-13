@@ -191,7 +191,7 @@ export async function POST(
     const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
     const triggerRes = await fetch(edgeFnUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anonKey}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
       body: JSON.stringify({ file_id: fileId, job_id, builder_id: builderId, resume: true }),
     })
 

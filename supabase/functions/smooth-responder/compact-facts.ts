@@ -1,6 +1,9 @@
 export function expandCompactFacts(rows: unknown, documentCount: number) {
   if (!Array.isArray(rows)) throw new Error('Missing compact facts')
   return rows.map((r: unknown) => {
+    // Some saved responses omit the short key. Reuse the full fact text as its
+    // label without inventing or dropping content; attribution is validated below.
+    if (Array.isArray(r) && r.length === 6) r = [r[0], r[1], r[2], r[2], r[3], r[4], r[5]]
     if (!Array.isArray(r) || r.length !== 7) throw new Error('Incomplete compact fact')
     const [source_file_index, category, key, value, page_reference, evidence, rawConfidence] = r
     const parsedConfidence = typeof rawConfidence === 'string' ? (/^\d+(\.\d+)?$/.test(rawConfidence) ? Number(rawConfidence) : ({ high: 80, medium: 50, low: 20 } as Record<string, number>)[rawConfidence.toLowerCase()]) : rawConfidence

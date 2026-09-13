@@ -1,4 +1,6 @@
 'use client'
+import MoneyQuestion from './MoneyQuestion'
+import EstimateProgress from './EstimateProgress'
 import React from 'react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { JobSnapshot } from '@/lib/job-snapshot-demo'
@@ -127,7 +129,7 @@ const CARD_STYLE: React.CSSProperties = {
 }
 
 const WorkspaceSection = React.createContext<'overview' | 'money' | 'files' | undefined>(undefined)
-const MONEY_SECTIONS = ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Needs your input', 'Worth knowing', 'Pending']
+const MONEY_SECTIONS = ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Needs your input', 'Worth knowing', 'Questions & answers', 'Pending']
 
 function SectionGroup({ label, children }: { label: string; children?: React.ReactNode }) {
   const section = React.useContext(WorkspaceSection)
@@ -187,6 +189,7 @@ export default function JobSnapshotPanel({
 }: JobSnapshotPanelProps) {
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
+  const [snapshotError, setSnapshotError] = useState('')
   const [activationModal, setActivationModal] = useState<ActivationModalState>({ isOpen: false, quote: null })
   const [closeJobModalOpen, setCloseJobModalOpen] = useState(false)
   const [closeJobSuccess, setCloseJobSuccess] = useState<CloseJobResult | null>(null)
@@ -227,8 +230,9 @@ export default function JobSnapshotPanel({
 
   const fetchSnapshot = useCallback((jobId: string) => {
     setLoading(true)
+    setSnapshotError('')
     return fetch(`/api/jobs/${jobId}/snapshot`)
-      .then((r) => r.json())
+      .then((r) => { if (!r.ok) throw new Error('Could not load job details. Please retry.'); return r.json() })
       .then((data: { snapshot: JobSnapshot }) => {
         setSnapshot(data.snapshot)
         setLoading(false)
@@ -236,6 +240,7 @@ export default function JobSnapshotPanel({
       })
       .catch(() => {
         setLoading(false)
+        setSnapshotError('Could not load job details. Please retry.')
         return null
       })
   }, [])
@@ -889,10 +894,12 @@ export default function JobSnapshotPanel({
           <SkeletonPanel />
         ) : !snapshot ? (
           <div style={{ textAlign: 'center', padding: '48px 16px', color: 'var(--text-tertiary)', fontSize: 13 }}>
-            Job details not available yet.
+            {snapshotError || 'Job details not available yet.'}
+            <button type="button" className="btn-secondary m-2" onClick={() => fetchSnapshot(job.id)}>Retry</button>
           </div>
         ) : (
           <>
+            {workspaceSection === 'money' && job && <EstimateProgress jobId={job.id} />}
             {workspaceSection === 'money' && <div className="mb-6 text-sm" style={{ color: 'var(--text-secondary)' }}>
               <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Expected profit is not available yet</p>
               <p className="mt-2">These figures show your estimate and recorded costs. Outstanding commitments and costs to finish are not included in a final-profit forecast.</p>
@@ -1549,32 +1556,7 @@ export default function JobSnapshotPanel({
               </SectionGroup>
             )}
 
-            {/* ── 3.6. NON-BLOCKING OPEN QUESTIONS — Stage 4/5 raised these but
-                 they never pause estimating; a quote can already exist. Previously
-                 invisible anywhere in the builder UI (the estimating engine's own
-                 clarifying_questions table always had them, but no route ever
-                 surfaced non-blocking ones — see GET /api/jobs/[jobId]/snapshot's
-                 pending_non_blocking_questions). Deliberately informational only,
-                 no answer form: answering these doesn't change pipeline behavior
-                 today, so a form implying otherwise would be misleading. ── */}
-            {nonBlockingQuestions.length > 0 && (
-              <SectionGroup label="Worth knowing">
-                <div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>
-                  {nonBlockingQuestions.map((q, idx) => (
-                    <div
-                      key={q.id}
-                      style={{
-                        padding: '10px 14px',
-                        borderTop: idx > 0 ? '1px solid var(--bg-border)' : 'none',
-                      }}
-                    >
-                      <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{q.question}</p>
-                      <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{q.reason}</p>
-                    </div>
-                  ))}
-                </div>
-              </SectionGroup>
-            )}
+            {nonBlockingQuestions.length > 0 && <SectionGroup label="Questions & answers"><div style={{ ...CARD_STYLE, padding: 0, overflow: 'hidden' }}>{nonBlockingQuestions.map(q => <MoneyQuestion key={job.id+q.id} jobId={job.id} question={q}/>)}</div></SectionGroup>}
 
             {/* ── 4. PENDING ACTIONS ──────────────────────────────────────── */}
             {hasPending && (

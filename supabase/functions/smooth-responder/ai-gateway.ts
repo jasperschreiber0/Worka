@@ -231,6 +231,7 @@ export interface GuardedCallContext {
   inputParts?: unknown[]
   /** Runs only for real provider attempts, after cache/budget gates, including retries. */
   beforeProviderAttempt?: () => Promise<void>
+  onUsageRecorded?: (costCents: number) => Promise<void>
 }
 
 export interface GuardedCallResult<T> {
@@ -345,6 +346,8 @@ export async function guardedClaudeCall<T>(
   }
 
   const budget = await readBudgetState(ctx)
+  const access = ctx.supabase && ctx.attribution.kind === 'builder' ? await ctx.supabase.from('estimating_access').select('enabled').eq('builder_id',ctx.attribution.builderId).maybeSingle() : {data:null}
+  if (access.data?.enabled === true && ctx.callSite.startsWith('stage_')) budget.allowedJobId = null
   if (budget.allowedJobId && !ctx.scopeKey?.startsWith(`${budget.allowedJobId}:`)) {
     throw new AiBudgetError('AI processing is limited to an authorised recovery job')
   }
@@ -410,9 +413,11 @@ export async function guardedClaudeCall<T>(
             result: ctx.scopeKey ? (response as unknown as object) : null,
           }).eq('id', operationId)
         }
-        const { data: spendRow } = await ctx.supabase.rpc('record_ai_spend', {
+        const { data: spendRow, error: spendError } = await ctx.supabase.rpc('record_ai_spend', {
           p_builder_id: builderId, p_cost_cents: costCents,
         })
+        if (spendError) throw spendError
+        await ctx.onUsageRecorded?.(costCents)
         const spend = (spendRow as Array<{
           builder_day_cents: number; global_day_cents: number
           builder_limit_cents: number; global_limit_cents: number

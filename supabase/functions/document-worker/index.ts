@@ -1,3 +1,4 @@
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 /**
  * document-worker — one Edge Function invocation, one document.
  *
@@ -429,11 +430,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL')
   const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
+  const anonKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
   if (!supabaseUrl || !supabaseKey) {
     return new Response(JSON.stringify({ error: 'Missing environment variables' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
 
+  if (req.headers.get('authorization') !== 'Bearer '+supabaseKey) return new Response(JSON.stringify({error:'Unauthorized'}),{status:401,headers:CORS})
   let body: { parent_job_id: string; builder_id: string }
   try {
     body = await req.json()

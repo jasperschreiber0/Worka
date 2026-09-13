@@ -1,3 +1,4 @@
+import { savedInputPricing } from '@/lib/saved-estimate-input'
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { runInBackground } from '@/lib/run-background'
@@ -28,7 +29,7 @@ import { isValidTradeCategoryId } from '@/lib/trade-taxonomy'
 // sent, its line items are what the client saw and must stay auditable.
 
 interface PatchBody {
-  rate?: number
+  rate?: number | null
   excluded?: boolean
   description?: string
   trade_category_id?: number
@@ -74,7 +75,7 @@ export async function PATCH(
   if (!wantsExclude && !wantsEdit && !wantsRate) {
     return NextResponse.json({ error: 'Provide rate, excluded, or fields to edit' }, { status: 400 })
   }
-  if (wantsRate && (typeof body.rate !== 'number' || !Number.isFinite(body.rate) || body.rate <= 0)) {
+  if (wantsRate && body.rate !== null && (typeof body.rate !== 'number' || !Number.isFinite(body.rate) || body.rate <= 0)) {
     return NextResponse.json({ error: 'rate must be a positive number' }, { status: 400 })
   }
   if (wantsEdit) {
@@ -90,7 +91,7 @@ export async function PATCH(
     if (body.unit !== undefined && body.unit !== null && (typeof body.unit !== 'string' || !body.unit.trim())) {
       return NextResponse.json({ error: 'unit cannot be empty' }, { status: 400 })
     }
-    if (body.rate !== undefined && (typeof body.rate !== 'number' || !Number.isFinite(body.rate) || body.rate <= 0)) {
+    if (body.rate !== undefined && body.rate !== null && (typeof body.rate !== 'number' || !Number.isFinite(body.rate) || body.rate <= 0)) {
       return NextResponse.json({ error: 'rate must be a positive number' }, { status: 400 })
     }
   }
@@ -124,7 +125,7 @@ export async function PATCH(
 
     const { data: itemRow } = await supabase
       .from('quote_line_items')
-      .select('id, description, trade_category_id, quantity, unit, rate')
+      .select('id, description, trade_category_id, quantity, unit, rate, total, pricing_type, assumption_status')
       .eq('id', itemId)
       .eq('quote_id', quoteId)
       .single()
@@ -176,11 +177,9 @@ export async function PATCH(
       }
     }
 
-    const { error: updateErr } = await supabase
-      .from('quote_line_items')
-      .update(update)
-      .eq('id', itemId)
-      .eq('quote_id', quoteId)
+    if (!wantsExclude) Object.assign(update, savedInputPricing(itemRow, body))
+
+    const { error: updateErr } = await supabase.rpc('save_estimate_input', {p_builder_id:builderId,p_quote_id:quoteId,p_item_id:itemId,p_expected:itemRow,p_patch:update})
     if (updateErr) {
       // quote_line_items_unique_per_quote (migration 030) — an edit that
       // changes description/trade into a combination that collides with
@@ -191,7 +190,7 @@ export async function PATCH(
           { status: 409 }
         )
       }
-      return NextResponse.json({ error: updateErr.message }, { status: 500 })
+      return NextResponse.json({ error: updateErr.message }, { status: updateErr.code === '40001' ? 409 : 500 })
     }
 
     // Totals must be correct before this response returns — the response

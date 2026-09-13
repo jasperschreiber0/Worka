@@ -30,3 +30,9 @@ test('fractional and percentage confidence are normalized without accepting out-
  for(const [input,expected] of [[0.98,98],['0.95',95],[85,85],['80',80]]) assert.equal(expandCompactFacts([[0,'fixtures','tap','x',null,'row',input]],1)[0].confidence,expected)
  for(const input of [-1,101,null,'certain']) assert.throws(()=>expandCompactFacts([[0,'fixtures','tap','x',null,'row',input]],1))
 })
+
+test('six-field saved facts preserve full text and provenance as both label and value',()=>{
+ const [fact]=expandCompactFacts([[0,'materials','Laminate; price unknown','part 2','Exact source row','medium']],1)
+ assert.deepEqual(fact,{source_file_index:0,category:'materials',key:'Laminate; price unknown',value:'Laminate; price unknown',page_reference:'part 2',evidence:'Exact source row',confidence:50})
+ for(const row of [[2,'materials','x',null,'row',50],[0,'materials','x',null,'',50],[0,'materials','x',{},'row',50],[0,'materials','x',null,'row','certain']]) assert.throws(()=>expandCompactFacts([row],1))
+})

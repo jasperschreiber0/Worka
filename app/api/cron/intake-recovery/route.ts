@@ -495,7 +495,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         toResume.map((b) =>
           fetch(`${supabaseUrl}/functions/v1/document-worker`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
             body: JSON.stringify({ parent_job_id: b.parent_job_id, builder_id: b.builder_id }),
           })
         )
@@ -785,7 +785,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
             await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
               body: JSON.stringify(triggerBody),
             }).catch((fetchErr) => {
               log('recovery_smooth_responder_trigger_failed', { job_id: candidate.job_id, error: String(fetchErr) })
@@ -892,7 +892,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           try {
             const retriggerRes = await fetch(`${supabaseUrl}/functions/v1/smooth-responder`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
               body: JSON.stringify({ parent_job_id: b.batch_id }),
             })
             retriggerOk = retriggerRes.ok
