@@ -1,3 +1,4 @@
+import { isServiceRoleRequest } from './service-auth.ts'
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 import { approvedAttemptCeiling } from './approved-attempt-budget.ts'
 import { OpenAIEstimationClient, ESTIMATION_MODEL } from './openai-provider.ts'
@@ -4010,7 +4011,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const supabase = createClient(supabaseUrl, supabaseKey)
   const anthropic = new OpenAIEstimationClient(anthropicKey)
   const bearer = req.headers.get('authorization')?.replace(/^Bearer /i, '') ?? ''
-  const internal = bearer === supabaseKey
+  const internal = await isServiceRoleRequest(req.headers.get('authorization'), supabaseKey, supabaseUrl)
   const { data: identity } = internal ? { data: { user: null } } : await supabase.auth.getUser(bearer)
   if (!internal && !identity?.user) return new Response(JSON.stringify({error:'Unauthorized'}),{status:401,headers:CORS})
 

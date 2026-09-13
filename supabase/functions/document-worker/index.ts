@@ -1,3 +1,4 @@
+import { isServiceRoleRequest } from '../smooth-responder/service-auth.ts'
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 /**
  * document-worker — one Edge Function invocation, one document.
@@ -435,7 +436,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response(JSON.stringify({ error: 'Missing environment variables' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
 
-  if (req.headers.get('authorization') !== 'Bearer '+supabaseKey) return new Response(JSON.stringify({error:'Unauthorized'}),{status:401,headers:CORS})
+  if (!await isServiceRoleRequest(req.headers.get('authorization'), supabaseKey, supabaseUrl)) return new Response(JSON.stringify({error:'Unauthorized'}),{status:401,headers:CORS})
   let body: { parent_job_id: string; builder_id: string }
   try {
     body = await req.json()
