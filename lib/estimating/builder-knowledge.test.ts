@@ -79,3 +79,30 @@ test('the real NSW seed set (8 items) all carry a non-empty citation', () => {
     assert.ok(d.citation.length > 0, `${description} must have a citation`)
   }
 })
+
+test('default insertion uses live quote columns and zero PS markup', async () => {
+  const { applyBuilderKnowledgeDefaults } = await import('./builder-knowledge.ts')
+  let inserted: Record<string, unknown>[] = []
+  const client = {
+    from(table: string) {
+      return {
+        select() { return this },
+        eq() { return this },
+        limit() { return this },
+        then(resolve: (result: unknown) => void) {
+          resolve({ data: table === 'builder_knowledge_defaults' ? [def()] : [], error: null })
+        },
+        insert(rows: Record<string, unknown>[]) {
+          inserted = rows
+          return Promise.resolve({ error: null })
+        },
+      }
+    },
+  }
+  const result = await applyBuilderKnowledgeDefaults(client as never, 'synthetic-quote', 'synthetic-job')
+  assert.equal(result.length, 1)
+  assert.equal(inserted[0].total, 1000)
+  assert.equal(inserted[0].margin_pct, 0)
+  assert.equal(inserted[0].assumption_status, 'unresolved')
+  assert.equal(Object.hasOwn(inserted[0], 'allowance_value'), false)
+})

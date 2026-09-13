@@ -177,9 +177,8 @@ export async function applyBuilderKnowledgeDefaults(
       is_assumption: true,
       assumption_status: 'unresolved',
       pricing_type: 'provisional_sum',
-      allowance_value: d.allowance_value,
       pricing_basis: `${d.pricing_basis} Source: ${d.citation}.`,
-      margin_pct: 0.15,
+      margin_pct: 0,
     }))
   )
   if (error) {
