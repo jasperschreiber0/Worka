@@ -67,10 +67,10 @@ export function jobExceptions(job: { id: string; address: string }, control: Ret
     detail: [...control.reasons, ...(!control.taxReconciled ? ['Confirm GST basis in Financial gate'] : []),
       ...(!control.baselineComplete ? ['Capture the original priced estimate'] : [])].join('. '), href, action: 'Review costs to finish' })
   if (control.leakage !== null && control.leakage > 0) rows.push({ id: `${job.id}:leakage`, priority: 1,
-    title: `${job.address}: margin leakage`, detail: `$${control.leakage.toLocaleString('en-AU')} less gross profit than the original estimate.`, href, action: 'Review trade variances and scope changes' })
+    title: `${job.address}: margin leakage`, detail: `$${control.leakage.toLocaleString('en-AU')} less forecast gross profit than the original estimate.`, href: `${href}#review`, action: 'Review profit movement' })
   if (target !== null && control.margin !== null && control.margin < target) rows.push({ id: `${job.id}:margin`, priority: 1,
     title: `${job.address}: below required margin`, detail: `Forecast ${control.margin.toFixed(1)}%; business target ${target.toFixed(1)}%.`, href, action: 'Review remaining costs and variation recovery' })
   if (control.unbilled > 0) rows.push({ id: `${job.id}:unbilled`, priority: 2, title: `${job.address}: unbilled change costs`,
-    detail: `$${control.unbilled.toLocaleString('en-AU')} of recorded change costs remain unbilled. Check entitlement and approval before invoicing.`, href, action: 'Review scope and variations' })
+    detail: `$${control.unbilled.toLocaleString('en-AU')} of recorded change costs remain unbilled. Check entitlement and approval before invoicing.`, href: `${href}#scope`, action: 'Review scope and variations' })
   return rows
 }

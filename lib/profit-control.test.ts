@@ -22,7 +22,9 @@ test('zero remaining cost is valid only when explicitly confirmed; losses are re
 test('tracking costs do not double count ledger costs; non-changes do not create unbilled exposure',()=>{
  const candidate={id:'c',title:'Change',trade_category_id:2,estimated_cost:1000,proposed_charge:2000,status:'potential',incurred:1000,billed:200,recovered:0,evidence:'Site instruction'}
  const c=jobControl({...input,candidates:[candidate,{...candidate,id:'not',status:'not_a_change'}]});assert.equal(c.unbilled,800);assert.equal(c.forecastCost,85000)
- const e=jobExceptions({id:'job',address:'Example'},c,25);assert.equal(e.length,3);assert.ok(e.every(r=>r.href==='/jobs/job/profitability'))
+ const e=jobExceptions({id:'job',address:'Example'},c,25);assert.equal(e.length,3);assert.ok(e.every(r=>r.href.startsWith('/jobs/job/profitability')))
+ assert.equal(e.find(r=>r.id==='job:leakage')?.href,'/jobs/job/profitability#review')
+ assert.equal(e.find(r=>r.id==='job:unbilled')?.href,'/jobs/job/profitability#scope')
 })
 test('capacity overlap includes shared dates and excludes unrelated workers and incomplete plans',()=>{
  assert.equal(capacityConflicts([plan,{...plan,job_id:'two',start_on:'2026-10-31'}]).length,1)

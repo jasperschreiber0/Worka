@@ -180,6 +180,7 @@ interface ChatInterfaceProps {
   autoMessage?: string | null
   onAutoMessageConsumed?: () => void
   pendingFillInput?: string | null
+  suppressInitialBrief?: boolean
   onFillInputConsumed?: () => void
   activeJobAddress?: string | null
   pendingFiles?: File[] | null
@@ -305,6 +306,7 @@ export default function ChatInterface({
   autoMessage,
   onAutoMessageConsumed,
   pendingFillInput,
+  suppressInitialBrief = false,
   onFillInputConsumed,
   activeJobAddress,
   pendingFiles,
@@ -1282,6 +1284,7 @@ export default function ChatInterface({
   useEffect(() => {
     if (!hasSentInitial) {
       setHasSentInitial(true)
+      if (suppressInitialBrief) return
       if (autoMessage) {
         onAutoMessageConsumed?.()
         sendMessage(autoMessage)

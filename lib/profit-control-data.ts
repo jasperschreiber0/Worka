@@ -1,16 +1,20 @@
 import { intelligenceDB, allRows } from './profitability-data'
 import { jobControl, jobExceptions, capacityConflicts, type ControlPlan, type ControlException } from './profit-control'
 import { financialProfile, EMPTY_PROFILE, cashForecast, sumMoney, type ActualRow } from './profitability'
+import { todayOperations, rankTodayExceptions } from './today'
 
 export async function loadProfitControl(builder: string) {
   const db = intelligenceDB()
   const query = (table: string, order = 'id') => allRows(() => db.from(table).select('*').eq('builder_id', builder).order(order))
-  const [jobs, settings, costs, labour, variations, candidates, plansRaw, reviews, profiles, workers, compliance] = await Promise.all([
+  const [jobs, settings, costs, labour, variations, candidates, plansRaw, reviews, profiles, workers, compliance, invoices, quotes, claims] = await Promise.all([
     query('jobs'), query('job_profitability_settings', 'job_id'), query('job_cost_entries'), query('job_labour_hours'),
     query('variations'), query('profitability_candidates'), query('job_control_plans', 'job_id'),
     query('profitability_reviews','job_id'), query('business_financial_profiles','builder_id'),
     allRows(() => db.from('workers').select('id,name,status').eq('builder_id',builder).order('id')),
     query('worker_compliance_records'),
+    allRows(() => db.from('invoices').select('id,job_id,amount,status,due_date').eq('builder_id',builder).order('id')),
+    allRows(() => db.from('quotes').select('id,job_id,status,sent_at,version').eq('builder_id',builder).order('id')),
+    allRows(() => db.from('invoice_schedule').select('id,job_id,invoice_id,label').eq('builder_id',builder).order('id')),
   ])
   const plans = plansRaw as ControlPlan[], profile = profiles[0] ?? null
   const business = profile ? financialProfile({ ...EMPTY_PROFILE,...profile.profile }) : null
@@ -33,7 +37,8 @@ export async function loadProfitControl(builder: string) {
     return { id:job.id,address:job.address,status:job.status,revision:job.profitability_revision,control,plan,
       learned:reviews.some(r=>r.job_id===job.id && r.evidence?.taxReconciled===true && r.evidence?.mappingsConfirmed===true), live }
   })
-  const today = new Date().toISOString().slice(0,10)
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date())
+  const operations = todayOperations(jobs, invoices, variations, today, quotes, claims)
   const conflicts = capacityConflicts(plans.filter(p => rows.some(j=>j.id===p.job_id && j.live) && p.finish_on && p.finish_on >= today))
   for (const c of conflicts) exceptions.push({id:`capacity:${c.jobIds.join(':')}`,priority:2,title:'Supervisor booking overlaps',
     detail:`${workers.find(w=>w.id===c.workerId)?.name ?? 'Assigned worker'} is assigned to ${c.jobIds.map(id=>rows.find(j=>j.id===id)?.address).join(' and ')}.`,href:'/business',action:'Review planned dates and supervisor'})
@@ -52,13 +57,15 @@ export async function loadProfitControl(builder: string) {
   const latest = await allRows(() => db.from('jobs').select('id,profitability_revision').eq('builder_id',builder).order('id'))
   if (latest.length !== jobs.length || latest.some(j => !jobs.some(old => old.id === j.id && Number(old.profitability_revision) === Number(j.profitability_revision))))
     throw new Error('Financial records changed while loading; refresh to review the latest figures')
-  return {jobs:rows,workers,compliance,conflicts,business,cash,
+  return {jobs:rows,workers,compliance,conflicts,business,cash,operations,
     totals:{active:active.length,confirmed:covered.length,forecastProfit:covered.length ? sumMoney(covered.map(j=>j.control.profit!)) : null,
       contractRevenue:covered.length ? sumMoney(covered.map(j=>j.control.revenue!)) : null,
       leakage:covered.length ? sumMoney(covered.map(j=>j.control.leakage ?? 0)) : null,
       unbilled:sumMoney(active.map(j=>j.control.unbilled))},
     memory:learnedReviews.map(r=>({jobId:r.job_id,address:rows.find(j=>j.id===r.job_id)?.address ?? 'Completed job',confirmedAt:r.confirmed_at,
       context:r.context,trades:r.review.trades,expectedMargin:r.review.expectedMargin,actualMargin:r.review.actualMargin})),
-    exceptions:exceptions.sort((a,b)=>a.priority-b.priority || a.id.localeCompare(b.id)),
+    exceptions:rankTodayExceptions([...exceptions.map(e => ({...e,
+      href:e.id.startsWith('cash:')?'/business#cash-flow':e.id==='business:profile'?'/business#financial-profile':e.href,
+      impact:e.id.endsWith(':leakage') ? rows.find(j=>e.id===`${j.id}:leakage`)?.control.leakage ?? undefined : e.id==='cash:deficit' && cash ? Math.abs(cash.lowest) : undefined})), ...operations.exceptions]),
     generatedAt:new Date().toISOString(),demo:false}
 }

@@ -50,6 +50,10 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
   const [section, setSection] = useState<'overview' | 'money' | 'files' | 'site'>('overview')
   const router = useRouter()
   const searchParams = useSearchParams()
+  useEffect(() => {
+    const requested = searchParams.get('section')
+    if (requested === 'money' || requested === 'overview' || requested === 'site' || requested === 'files') setSection(requested)
+  }, [searchParams])
   const [job, setJob] = useState<ActiveJob | null>(null)
   const [notFound, setNotFound] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)

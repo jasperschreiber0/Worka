@@ -167,6 +167,11 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
     [cards, setCards] = useState<{ section: string; text: string; evidence: string }[]>([]),
     [adjustments, setAdjustments] = useState<Record<number, number>>({})
   const url = `/api/jobs/${jobId}/intelligence`
+  useEffect(() => {
+    const select = () => { if (location.hash === '#review') setTab('Review'); else if (location.hash === '#scope') setTab('Correspondence & risks') }
+    select(); window.addEventListener('hashchange', select)
+    return () => window.removeEventListener('hashchange', select)
+  }, [])
   const load = useCallback(async () => {
     try {
       const data: Data = await api(url)

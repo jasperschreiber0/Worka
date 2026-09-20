@@ -51,6 +51,7 @@ interface ChatShellProps {
 export default function ChatShell({ builderId, userName, userInitials, isDemo }: ChatShellProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const draftEntry = useRef(searchParams.get('action') === 'today_question')
 
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
@@ -87,6 +88,17 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
     if (consumedRef.current) return
     const action = searchParams.get('action')
     const jobId = searchParams.get('job')
+
+    if (action === 'today_question') {
+      consumedRef.current = true
+      try {
+        const draft = sessionStorage.getItem('worka_today_question')
+        sessionStorage.removeItem('worka_today_question')
+        if (draft) setPendingFillInput(draft.slice(0, 2000))
+      } catch { /* Chat remains available when browser storage is disabled. */ }
+      router.replace('/chat')
+      return
+    }
 
     if (action === 'upload_plans') {
       consumedRef.current = true
@@ -269,6 +281,7 @@ export default function ChatShell({ builderId, userName, userInitials, isDemo }:
           autoMessage={autoMessage}
           onAutoMessageConsumed={handleAutoMessageConsumed}
           pendingFillInput={pendingFillInput}
+          suppressInitialBrief={draftEntry.current}
           onFillInputConsumed={() => setPendingFillInput(null)}
           activeJobAddress={activeJob?.address ?? null}
           pendingFiles={pendingFiles}

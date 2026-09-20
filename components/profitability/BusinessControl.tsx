@@ -28,6 +28,11 @@ export default function BusinessControl() {
     [tab, setTab] = useState('Overview'),
     [risk, setRisk] = useState<number | null>(null)
   useEffect(() => {
+    const select = () => { if (location.hash === '#financial-profile') setTab('Financial profile'); else if (location.hash === '#cash-flow') setTab('13-week cash flow') }
+    select(); window.addEventListener('hashchange', select)
+    return () => window.removeEventListener('hashchange', select)
+  }, [])
+  useEffect(() => {
     api('/api/business/financial-profile')
       .then((d) => {
         setProfile({ ...EMPTY_PROFILE, ...d.profile })
