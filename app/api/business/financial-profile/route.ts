@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { intelligenceDB, allRows } from '@/lib/profitability-data'
 import { EMPTY_PROFILE, financialProfile, cashForecast } from '@/lib/profitability'
+import { dateOnly } from '@/lib/profit-control'
 export async function GET() {
   const builder = await getAuthenticatedBuilderId()
   if (!builder) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -52,7 +53,11 @@ export async function PUT(req: NextRequest) {
   try {
     const body = await req.json()
     if (body.profile) financialProfile(body.profile)
-    if (body.cash_flow) cashForecast(body.cash_flow.opening, body.cash_flow.weeks)
+    if (body.cash_flow) {
+      cashForecast(body.cash_flow.opening, body.cash_flow.weeks)
+      if (!dateOnly(body.cash_flow.startOn, 'Forecast start')) throw new Error('Enter the forecast start date')
+      if (typeof body.cash_flow.complete !== 'boolean') throw new Error('Confirm whether forecast inputs are complete')
+    }
     if (!body.profile && !body.cash_flow) throw new Error('No changes supplied')
     const payload = {
       builder_id: builder,

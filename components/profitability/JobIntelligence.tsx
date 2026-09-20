@@ -6,6 +6,7 @@ import { financialProfile, marginGate, waterfallLayout, type Candidate } from '@
 import { TRADE_CATEGORIES, tradeCategoryName } from '@/lib/trade-taxonomy'
 import { Card, Field, TextField, Metrics, api, money, pct } from './ui'
 import CostImport from './CostImport'
+import JobControl from './JobControl'
 import './profitability.css'
 type Data = Awaited<ReturnType<typeof loadIntelligence>>
 const tradeName = (id: number | null) => (id === null ? 'Unclassified' : tradeCategoryName(id))
@@ -140,7 +141,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
     [busy, setBusy] = useState(false),
-    [tab, setTab] = useState('Review'),
+    [tab, setTab] = useState('Forecast & cash'),
     [price, setPrice] = useState(0),
     [target, setTarget] = useState<number | null>(null),
     [contingency, setContingency] = useState(0),
@@ -325,6 +326,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
           <nav className="pi-tabs" aria-label="Profitability views">
             {[
               'Review',
+              'Forecast & cash',
               'Financial gate',
               'Correspondence & risks',
               'Actual costs',
@@ -336,6 +338,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
               </button>
             ))}
           </nav>
+          {tab === 'Forecast & cash' && <JobControl jobId={jobId} />}
           {tab === 'Review' && (
             <>
               <Card title="Job profitability review">

@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import type { DashboardData } from '@/app/api/dashboard/route'
+import ProfitControl from '@/components/profitability/ProfitControl'
 
 const money = (value: number) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD', maximumFractionDigits: 0 }).format(value)
 
@@ -25,6 +26,7 @@ export default function BuilderHome({ business = false }: { business?: boolean }
         <p className="mt-2 text-sm" style={{ color: 'var(--text-secondary)' }}>{business ? 'Your jobs and money at a glance.' : 'See what needs your attention, then get on with the job.'}</p></div>
       <Link href="/jobs?new=1" className="btn-primary px-4 py-3 text-sm">+ New job</Link>
     </div>
+    {!data?.demo && <ProfitControl compact />}
     {data?.demo && <p className="mb-6 text-sm" style={{ color: 'var(--status-amber)' }}>Sample jobs — these figures are for demonstration.</p>}
     {error && <div role="alert" className="card p-4 mb-6"><p>Couldn’t refresh your job summary.{data ? ' The figures below may be out of date.' : ''}</p><button onClick={load} className="btn-secondary px-4 py-3 mt-3">Try again</button></div>}
     {!data && !error && <p role="status">Loading your jobs…</p>}

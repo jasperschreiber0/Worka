@@ -86,6 +86,9 @@ const items = [
   },
 ]
 const db = {
+  job_control_plans: [],
+  worker_compliance_records: [],
+  workers: [{id:'70000000-0000-4000-8000-000000000001',builder_id:builder,name:'Sample supervisor',status:'active'}],
   builders: [{ ...user, name: 'Tuesday Preview' }],
   jobs: [
     {
@@ -93,6 +96,7 @@ const db = {
       builder_id: builder,
       address: 'Sample renovation · 24 Banksia Street',
       status: 'active',
+      profitability_revision: 0,
       job_type: 'renovation',
       created_at: now,
     },
@@ -135,6 +139,7 @@ const db = {
         constructionVolume: null,
       },
       cash_flow: {
+        startOn: now.slice(0,10),
         opening: 30000,
         weeks: Array.from({ length: 13 }, (_, i) => ({
           inflow: i % 3 === 0 ? 28000 : 5000,
@@ -255,6 +260,17 @@ const server = http.createServer(async (req, res) => {
   const name = url.pathname.slice('/rest/v1/'.length)
   if (name.startsWith('rpc/')) {
     const rpc = name.slice(4)
+    if(rpc==='save_job_control_plan'){
+      if(body.p_builder!==builder||body.p_job!==job)return json(res,400,{message:'Job not found'})
+      if(body.p_revision!==0)return json(res,400,{message:'Financial records changed. Refresh and review again'})
+      db.job_control_plans=[{job_id:job,builder_id:builder,...body.p_plan,confirmed_revision:body.p_confirm?0:null,confirmed_at:body.p_confirm?now:null}]
+      return json(res,200,null)
+    }
+    if(rpc==='record_worker_compliance'){
+      if(!db.workers.some(w=>w.id===body.p_worker&&w.builder_id===body.p_builder))return json(res,400,{message:'Worker not found'})
+      db.worker_compliance_records=[{id:crypto.randomUUID(),builder_id:builder,worker_id:body.p_worker,kind:body.p_kind,evidence:body.p_evidence,expires_on:body.p_expires,reviewed_at:now}]
+      return json(res,200,null)
+    }
     if(rpc==='confirm_profitability_review'){
       db.profitability_reviews=[{job_id:body.p_job,builder_id:body.p_builder,context:body.p_context,review:body.p_review,evidence:body.p_evidence}]
       return json(res,200,null)

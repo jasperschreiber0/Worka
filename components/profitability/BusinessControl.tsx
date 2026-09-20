@@ -10,6 +10,7 @@ import {
 } from '@/lib/profitability'
 import { Card, Field, Metrics, money, pct, api } from './ui'
 import './profitability.css'
+import ProfitControl from './ProfitControl'
 export default function BusinessControl() {
   const [profile, setProfile] = useState<FinancialProfile>(EMPTY_PROFILE),
     [jobs, setJobs] = useState<{ id: string; address: string; status: string }[]>([]),
@@ -17,6 +18,7 @@ export default function BusinessControl() {
       opening: 0,
       weeks: Array.from({ length: 13 }, () => ({ inflow: 0, outflow: 0 })),
       complete: false,
+      startOn: new Date().toISOString().slice(0, 10),
     }),
     [demo, setDemo] = useState(false),
     [error, setError] = useState(''),
@@ -30,7 +32,7 @@ export default function BusinessControl() {
       .then((d) => {
         setProfile({ ...EMPTY_PROFILE, ...d.profile })
         setJobs(d.jobs)
-        if (d.cash_flow?.weeks?.length === 13) setCash(d.cash_flow)
+        if (d.cash_flow?.weeks?.length === 13) setCash({ startOn: '', ...d.cash_flow })
         setDemo(d.demo)
         setRisk(
           (d.risks ?? [])
@@ -107,6 +109,7 @@ export default function BusinessControl() {
       </nav>
       {tab === 'Overview' && (
         <>
+          <ProfitControl />
           <div className="pi-hero">
             <Metrics
               values={[
@@ -284,6 +287,7 @@ export default function BusinessControl() {
       )}
       {tab === '13-week cash flow' && (
         <Card title="13-week cash-flow forecast">
+          <label className="pi-field"><span>Forecast starts on</span><input type="date" value={cash.startOn} onChange={e => setCash({ ...cash, startOn: e.target.value })} /></label>
           <p className="muted">
             Enter expected bank movements, including GST where applicable. Inflows can include
             claims, receivables and approved changes. Outflows should include suppliers,
@@ -308,7 +312,7 @@ export default function BusinessControl() {
               <tbody>
                 {cash.weeks.map((w, i) => (
                   <tr key={i}>
-                    <td>Week {i + 1}</td>
+                    <td>Week {i + 1}{cash.startOn && <p className="muted">{new Date(Date.parse(cash.startOn) + i * 7 * 86400000).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' })}</p>}</td>
                     <td>
                       <input
                         aria-label={`Week ${i + 1} inflows`}
@@ -365,7 +369,7 @@ export default function BusinessControl() {
           </p>
           <button
             className="primary"
-            disabled={busy || !forecast}
+            disabled={busy || !forecast || !cash.startOn}
             onClick={() => save('cash_flow')}
           >
             Save cash forecast
