@@ -6,6 +6,7 @@ import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { calculateSellTotal, calculateClientPrice } from '@/lib/pricing'
 import { TRADE_CATEGORIES } from '@/lib/trade-taxonomy'
 import ConfirmedRates from './ConfirmedRates'
+import SaveRatesReview from './SaveRatesReview'
 import SendQuoteModal from './SendQuoteModal'
 import { estimateInputReason } from '@/lib/estimate-input-review'
 import EstimateMarginGate from '@/components/profitability/EstimateMarginGate'
@@ -1782,6 +1783,7 @@ function QuoteViewInner({
   onExportPdf,
 }: QuoteViewProps) {
   const [data, setData] = useState<QuoteApiResponse | null>(null)
+  const [ratesRevision, setRatesRevision] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [visible, setVisible] = useState(false)
@@ -2213,7 +2215,8 @@ function QuoteViewInner({
 
               <NeedsInputList onUpdated={loadQuote} groups={data.line_items_by_category} canEdit={canEditItems} onSetRate={handleSetRate} onExclude={handleExclude} onEditItem={handleEditItem} onDeleteItem={handleDeleteItem} />
 
-              <ConfirmedRates />
+              {canEditItems && <SaveRatesReview key={data.quote.id} items={data.line_items_by_category.flatMap(group => group.items)} onSaved={() => setRatesRevision(value => value + 1)} />}
+              <ConfirmedRates key={ratesRevision} />
 
               {/* What should I check? — QA output, shown before the numbers */}
               {data.qa_report && <CheckBeforeSending report={data.qa_report} scopeConfidence={data.summary.scope_confidence} />}
