@@ -1413,8 +1413,9 @@ export default function JobSnapshotPanel({
                           <button
                             type="button"
                             onClick={() => handleDeleteCost(c.id)}
-                            disabled={costDeletingId === c.id}
-                            aria-label={`Delete ${c.description}`}
+                            disabled={costDeletingId === c.id || c.amount === 0}
+                            aria-label={`Void ${c.description}; retain history`}
+                            title="Set this cost to zero and retain its history"
                             style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--status-red)', opacity: costDeletingId === c.id ? 0.4 : 1 }}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">

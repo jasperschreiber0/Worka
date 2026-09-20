@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { quoteSendReview } from '@/lib/quote-send-review'
 import { DEMO_QUOTE, DEMO_LINE_ITEMS } from '@/lib/quote-demo'
 import type { DemoQuote, DemoQuoteLineItem } from '@/lib/quote-demo'
 import { getAuthenticatedBuilderId } from '@/lib/auth/api-auth'
@@ -208,7 +209,7 @@ export async function POST(
     type LineItemRow = { id: string; trade_category_id: number; description: string; quantity: number | null; unit: string | null; rate: number | null; total: number | null; is_assumption: boolean; assumption_status: string | null; margin_pct: number | null }
     type JobRow = { address: string; client_id: string | null }
     type ClientRow = { name: string; email: string | null }
-    type BuilderRow = { business_name: string | null; contact_name: string | null }
+    type BuilderRow = { business_name: string | null; name: string | null }
 
     const tq = quoteRow as QuoteRow
     const { data: jobRow } = await sb.from('jobs').select('address, client_id').eq('id', tq.job_id).single()
@@ -225,10 +226,10 @@ export async function POST(
       }
     }
 
-    const { data: builderRow } = await sb.from('builders').select('business_name, contact_name').eq('id', sessionBuilderId).single()
+    const { data: builderRow } = await sb.from('builders').select('business_name, name').eq('id', sessionBuilderId).single()
     const tb = builderRow as BuilderRow | null
-    const resolvedBuilderName = tb?.contact_name ?? 'Dave Nguyen'
-    const resolvedBusinessName = tb?.business_name ?? 'Nguyen Building Co.'
+    const resolvedBuilderName = tb?.name ?? 'Your builder'
+    const resolvedBusinessName = tb?.business_name ?? 'Your building team'
 
     quote = {
       id: tq.id, job_id: tq.job_id, job_address: tj?.address ?? 'the project',
@@ -270,12 +271,17 @@ export async function POST(
       customMessage: body.message,
     })
     const draftDb: EmailDraft = {
-      to: resolvedClientEmail || 'client@example.com',
+      to: resolvedClientEmail || '',
       subject: `Quote for ${quote.job_address} — ${resolvedBusinessName}`,
       body: emailBodyDb,
       quote_summary: { total_cost: quote.total_cost, margin_pct: quote.margin_pct, client_price: clientPriceDb, price_basis: PRICE_BASIS_LABEL, line_count: activeItemsDb.length, address: quote.job_address },
     }
-    return NextResponse.json({ draft: draftDb, requires_confirmation: true } as SendResponse)
+    try {
+      const pricing_review = await quoteSendReview(sb, sessionBuilderId, quoteId)
+      return NextResponse.json({ draft: draftDb, requires_confirmation: true, pricing_review })
+    } catch {
+      return NextResponse.json({error:'Could not verify the quote margin. Refresh and try again.'},{status:503})
+    }
   }
 
   // ── Verify quote is in pending_review state (demo-mode path only — the

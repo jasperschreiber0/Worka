@@ -372,8 +372,7 @@ async function loadRateContext(
   const stateFilter = builderState ? `state.is.null,state.eq.${builderState}` : 'state.is.null'
   const regionFilter = builderState ? `region.is.null,region.eq.${builderState}` : 'region.is.null'
 
-  const [learnedRes, prefRes, supplierRes, platformRes, networkRes, retailRes, labourRes, catalogue] = await Promise.all([
-    supabase.from('builder_learned_rates').select('line_item_key, rate, unit, sample_count, updated_at').eq('builder_id', builderId),
+  const [prefRes, supplierRes, platformRes, networkRes, retailRes, labourRes, catalogue] = await Promise.all([
     supabase.from('builder_rate_preferences').select('line_item_key, rate, unit, set_at').eq('builder_id', builderId),
     supabase.from('builder_supplier_rates').select('line_item_key, rate, unit, imported_at').eq('builder_id', builderId),
     supabase.from('cost_rates').select('line_item_key, trade_category_id, description, unit, rate, state, created_at').or(stateFilter),
@@ -387,8 +386,9 @@ async function loadRateContext(
   // updated_at/created_at) — normalized here, once, to the shared `rate_date`
   // field RateRow/StateRateRow/NetworkRateRow expose, so resolveRateForKey
   // doesn't need to know which column name belongs to which tier.
-  const learned = ((learnedRes.data ?? []) as Array<RateRow & { updated_at?: string | null }>)
-    .map((r) => ({ ...r, rate_date: r.updated_at ?? null }))
+  // Legacy trade-total reconciliation cannot justify changing a unit rate.
+  // Historical allowances now require an approved profitability learning decision.
+  const learned: RateRow[] = []
   const preferences = ((prefRes.data ?? []) as Array<RateRow & { set_at?: string | null }>)
     .map((r) => ({ ...r, rate_date: r.set_at ?? null }))
   const supplier = ((supplierRes.data ?? []) as Array<RateRow & { imported_at?: string | null }>)

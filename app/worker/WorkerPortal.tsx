@@ -1,6 +1,5 @@
 'use client'
 
-import { useState } from 'react'
 import type { DemoWorker, DemoWorkerJob } from '@/lib/worker-demo'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -84,12 +83,9 @@ function SiteCard({ job }: { job: DemoWorkerJob }) {
 // ─── Task list ────────────────────────────────────────────────────────────────
 
 function TaskList({ job }: { job: DemoWorkerJob }) {
-  const [tasks, setTasks] = useState(job.tasks)
+  const tasks = job.tasks
   const done = tasks.filter((t) => t.done).length
 
-  function toggle(i: number) {
-    setTasks((prev) => prev.map((t, idx) => idx === i ? { ...t, done: !t.done } : t))
-  }
 
   return (
     <div style={{ backgroundColor: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }} className="rounded-2xl shadow-sm px-4 py-4">
@@ -112,9 +108,9 @@ function TaskList({ job }: { job: DemoWorkerJob }) {
           <li key={i}>
             <button
               type="button"
-              onClick={() => toggle(i)}
+              disabled
               className="flex items-start gap-3 w-full text-left group"
-              aria-label={`${task.done ? 'Unmark' : 'Mark'} "${task.label}" as done`}
+              aria-label={`${task.label} — ${task.done ? 'completed' : 'pending'}; ask your builder to update`}
             >
               <div
                 className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-md border-2 flex items-center justify-center transition-colors ${
@@ -140,6 +136,7 @@ function TaskList({ job }: { job: DemoWorkerJob }) {
           </li>
         ))}
       </ul>
+      <p className="text-xs mt-3" style={{color:'var(--text-secondary)'}}>Task updates are recorded by your builder. Worker updates are not available here yet.</p>
     </div>
   )
 }
@@ -147,8 +144,8 @@ function TaskList({ job }: { job: DemoWorkerJob }) {
 // ─── Quick actions ────────────────────────────────────────────────────────────
 
 function QuickActions({ job }: { job: DemoWorkerJob }) {
-  const [photoUploaded, setPhotoUploaded] = useState(false)
-  const [issueReported, setIssueReported] = useState(false)
+  const photoUploaded = false
+  const issueReported = false
 
   return (
     <div style={{ backgroundColor: 'var(--bg-surface)', border: '1px solid var(--bg-border)' }} className="rounded-2xl shadow-sm px-4 py-4">
@@ -173,7 +170,8 @@ function QuickActions({ job }: { job: DemoWorkerJob }) {
         {/* Upload photo */}
         <button
           type="button"
-          onClick={() => setPhotoUploaded(true)}
+          disabled
+          aria-label="Photo upload not available"
           className="flex flex-col items-center gap-2 py-3 px-2 rounded-xl transition-colors"
           style={photoUploaded
             ? { backgroundColor: 'rgba(76,175,80,0.15)', border: '1px solid rgba(76,175,80,0.25)' }
@@ -194,14 +192,15 @@ function QuickActions({ job }: { job: DemoWorkerJob }) {
             className="text-xs font-semibold text-center leading-tight"
             style={{ color: photoUploaded ? 'var(--status-green)' : 'var(--text-secondary)' }}
           >
-            {photoUploaded ? 'Uploaded' : 'Site photo'}
+            Photo upload unavailable
           </span>
         </button>
 
         {/* Report issue */}
         <button
           type="button"
-          onClick={() => setIssueReported(true)}
+          disabled
+          aria-label="Issue reporting not available; contact your builder"
           className="flex flex-col items-center gap-2 py-3 px-2 rounded-xl transition-colors"
           style={issueReported
             ? { backgroundColor: 'rgba(76,175,80,0.15)', border: '1px solid rgba(76,175,80,0.25)' }
@@ -221,7 +220,7 @@ function QuickActions({ job }: { job: DemoWorkerJob }) {
             className="text-xs font-semibold text-center leading-tight"
             style={{ color: issueReported ? 'var(--status-green)' : 'var(--text-secondary)' }}
           >
-            {issueReported ? 'Reported' : 'Flag issue'}
+            Contact builder to report an issue
           </span>
         </button>
       </div>

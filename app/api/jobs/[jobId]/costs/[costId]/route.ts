@@ -29,7 +29,7 @@ export async function DELETE(
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     )
 
-    const { data: jobRow } = await supabase.from('jobs').select('id').eq('id', jobId).eq('builder_id', builderId).single()
+    const { data: jobRow } = await supabase.from('jobs').select('id,profitability_revision').eq('id', jobId).eq('builder_id', builderId).single()
     if (!jobRow) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
@@ -45,18 +45,15 @@ export async function DELETE(
       return NextResponse.json({ error: 'Cost entry not found on this job' }, { status: 404 })
     }
 
-    const { error } = await supabase
-      .from('job_cost_entries')
-      .delete()
-      .eq('id', costId)
-      .eq('job_id', jobId)
-      .eq('builder_id', builderId)
+    const { error } = await supabase.rpc('correct_job_financial_record', {
+      p_builder:builderId,p_job:jobId,p_revision:jobRow.profitability_revision,p_action:'void_cost',p_id:costId,p_values:{},p_reason:'Builder removed this cost from the job Money view',
+    })
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    return NextResponse.json({ deleted: true, cost_id: costId })
+    return NextResponse.json({ deleted: true, voided: true, cost_id: costId })
   } catch (err) {
     console.error('[jobs/costs:delete] error:', err)
     return NextResponse.json({ error: 'Failed to delete cost — please try again.' }, { status: 500 })

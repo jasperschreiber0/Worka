@@ -69,7 +69,7 @@ export async function POST(req: NextRequest, { params }: { params: { jobId: stri
       if (body.mappingsConfirmed !== true)
         throw new Error('Confirm the actual-cost trade mappings, including costs left Unclassified')
       if (data.uncostedHours > 0) throw new Error('Cost all labour hours first')
-      if (data.costs.some((c) => c.cost_kind === 'committed' || c.cost_kind === 'remaining'))
+      if (data.costs.some((c) => Number(c.amount)!==0 && (c.cost_kind === 'committed' || c.cost_kind === 'remaining')))
         throw new Error(
           'Reconcile outstanding commitments and remaining cost entries in Job Money first',
         )

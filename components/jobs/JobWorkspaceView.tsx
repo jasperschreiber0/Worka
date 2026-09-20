@@ -10,6 +10,7 @@ import CloseOutJobDrawer, { type CloseOutResult } from '@/components/jobs/CloseO
 import SitePanel from '@/components/jobs/SitePanel'
 import ProgrammePanel from '@/components/jobs/ProgrammePanel'
 import LabourMoneySummary from '@/components/jobs/LabourMoneySummary'
+import FinancialCorrections from '@/components/profitability/FinancialCorrections'
 import Link from 'next/link'
 
 function formatAud(amount: number): string {
@@ -189,7 +190,8 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
 
       {job && <nav aria-label="Job sections" className="grid grid-cols-4 gap-2 mb-4">{(['overview', 'money', 'site', 'files'] as const).map(item => <button key={item} type="button" aria-pressed={section === item} onClick={() => setSection(item)} className="px-2 sm:px-4 py-3 text-sm rounded-md" style={{ background: section === item ? 'var(--bg-elevated)' : 'transparent', color: section === item ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: section === item ? 600 : 400 }}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>}
       {job && <Link href={`/jobs/${jobId}/profitability`} className="block rounded-lg border p-4 mb-4 text-sm" style={{borderColor:'var(--bg-border)',color:'var(--orange-primary)'}}>Profitability intelligence · financial gate, actual costs and job review →</Link>}
-      {job && section === 'money' && <LabourMoneySummary jobId={jobId} />}
+      {job && section === 'money' && <LabourMoneySummary key={refreshKey} jobId={jobId} />}
+      {job && section === 'money' && <div className="pi"><FinancialCorrections jobId={jobId} onSaved={()=>{setRefreshKey(k=>k+1);refetchJob()}}/></div>}
       {job ? (
         section === 'site' ? <><ProgrammePanel jobId={jobId} /><SitePanel jobId={jobId} builderId={builderId} /></> : <JobSnapshotPanel
           workspaceSection={section}

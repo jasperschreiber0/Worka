@@ -1,0 +1,31 @@
+name: Core financial quality
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm test
+      - name: Install isolated database test runtime
+        run: npm install --prefix "$RUNNER_TEMP/worka-db" --no-save @electric-sql/pglite@0.3.14
+      - name: Verify migrations, tenant boundaries and financial lifecycle
+        env:
+          PGLITE_MODULE: ${{ runner.temp }}/worka-db/node_modules/@electric-sql/pglite
+        run: |
+          node scripts/test-profitability-db.cjs
+          node scripts/test-profit-control-db.cjs
+          node scripts/test-financial-corrections-db.cjs
+      - run: npm run build

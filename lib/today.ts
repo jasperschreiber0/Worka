@@ -1,4 +1,5 @@
 import { sumMoney } from './profitability.ts'
+import { isOpenJob } from './job-status.ts'
 import type { ControlException } from './profit-control.ts'
 
 export type TodayException = ControlException & { impact?: number; dueOn?: string }
@@ -30,7 +31,7 @@ export function todayOperations(jobs: Job[], invoices: Invoice[], variations: Va
     if (due.length) exceptions.push({id:`${job.id}:due-today`,priority:2,title:`${job.address}: invoices due today`,
       detail:`${due.length} issued invoice${due.length===1?'':'s'} due today. Check receipts before following up.`,dueOn:today,
       impact:sumMoney(due.map(i=>Number(i.amount))),href:`/jobs/${job.id}?section=money`,action:'Review job invoices'})
-    if (!['completed','archived','cancelled'].includes(job.status) && quote?.status==='sent' && quote.sent_at) exceptions.push({id:`${job.id}:quote`,priority:2,
+    if (isOpenJob(job.status) && quote?.status==='sent' && quote.sent_at) exceptions.push({id:`${job.id}:quote`,priority:2,
       title:`${job.address}: quote awaiting response`,detail:`Latest quote was sent ${new Date(quote.sent_at).toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'})}. Review its status before following up.`,
       href:`/jobs/${job.id}`,action:'Review quote'})
     if (job.status==='active' && unclaimed.length) exceptions.push({id:`${job.id}:claims`,priority:2,

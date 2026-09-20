@@ -1,3 +1,5 @@
+import {allRows} from '@/lib/profitability-data'
+import {jobActuals} from '@/lib/job-actuals'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDemoJobSnapshot } from '@/lib/job-snapshot-demo'
 import { createClient } from '@supabase/supabase-js'
@@ -98,15 +100,17 @@ export async function GET(
   // Actual cost: SUM of the costs the builder has actually logged — see
   // migration 097. 0 (never null) when nothing has been logged yet, since
   // that's a real, known state, not an unknown one.
-  const { data: costRows, error: costError } = await sb
-    .from('job_cost_entries')
-    .select('amount, cost_kind')
-    .eq('job_id', jobId)
-  if (costError) return NextResponse.json({ error: 'Could not load job costs. Please try again.' }, { status: 503 })
+  const [ledgerRows, hoursRows, settingsResult] = await Promise.all([
+    allRows(()=>sb.from('job_cost_entries').select('*').eq('job_id',jobId).eq('builder_id',builderId).order('id')),
+    allRows(()=>sb.from('job_labour_hours').select('*').eq('job_id',jobId).eq('builder_id',builderId).order('id')),
+    sb.from('job_profitability_settings').select('settings').eq('job_id',jobId).eq('builder_id',builderId).maybeSingle(),
+  ])
+  if(settingsResult.error) throw new Error('Could not load the agreed labour basis')
+  const costRows = jobActuals(ledgerRows,hoursRows,settingsResult.data?.settings?.labourIncluded===true)
   const actualCost = Math.round(
-    (costRows ?? []).filter((r: { cost_kind?: string }) => (r.cost_kind ?? 'incurred') === 'incurred').reduce((sum: number, r: { amount: number }) => sum + r.amount, 0) * 100
+    (costRows ?? []).filter((r: { cost_kind?: string }) => (r.cost_kind ?? 'incurred') === 'incurred').reduce((sum: number, r: { amount: number }) => sum + Number(r.amount), 0) * 100
   ) / 100
-  const committedCost = Math.round((costRows ?? []).filter((r: { cost_kind?: string }) => r.cost_kind === 'committed').reduce((sum: number, r: { amount: number }) => sum + r.amount, 0) * 100) / 100
+  const committedCost = Math.round((costRows ?? []).filter((r: { cost_kind?: string }) => r.cost_kind === 'committed').reduce((sum: number, r: { amount: number }) => sum + Number(r.amount), 0) * 100) / 100
   const remainingCost = (costRows ?? []).filter((r: { cost_kind?: string }) => r.cost_kind === 'remaining').reduce((sum: number, r: { amount: number }) => sum + Number(r.amount), 0)
   // This remains a known-cost subtotal until all costs have been reconciled.
   const profitCheck = calculateJobProfit({ contract: contractValue, approvedVariations: 0, actual: actualCost, outstandingCommitments: committedCost, remaining: remainingCost, uncostedHours: 0, reconciled: false })

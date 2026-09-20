@@ -1,8 +1,10 @@
+import {jobActuals} from './job-actuals'
 import { intelligenceDB, allRows } from './profitability-data'
 import { jobControl, jobExceptions, capacityConflicts, type ControlPlan, type ControlException } from './profit-control'
 import { financialProfile, EMPTY_PROFILE, cashForecast, sumMoney, type ActualRow } from './profitability'
 import { todayOperations, rankTodayExceptions } from './today'
 import { projectCash, validateCashPlan } from './cash-plan'
+import { isOpenJob } from './job-status'
 
 export async function loadProfitControl(builder: string) {
   const db = intelligenceDB()
@@ -25,15 +27,14 @@ export async function loadProfitControl(builder: string) {
   const rows = jobs.map(job => {
     const s = settings.find(s => s.job_id === job.id)
     const hours = labour.filter(l => l.job_id === job.id)
-    const actuals: ActualRow[] = [...costs.filter(c => c.job_id === job.id), ...(s?.settings?.labourIncluded === true ? [] : hours.filter(l=>l.hourly_rate !== null).map(l => ({
-      id:l.id, trade_category_id:l.trade_category_id, description:l.note || 'Site labour', amount:Number(l.hours)*Number(l.hourly_rate),
-    })))]
+    const actuals = jobActuals(costs.filter(c=>c.job_id===job.id), hours, s?.settings?.labourIncluded===true)
     const plan = plans.find(p => p.job_id === job.id) ?? null
     const control = jobControl({revision:job.profitability_revision, contract:s?.original_contract == null ? null : Number(s.original_contract),
       baseline:s?.baseline_items ?? [], actuals, approvedVariations:sumMoney(variations.filter(v=>v.job_id===job.id && v.status==='approved').map(v=>Number(v.amount))),
       uncostedHours:s?.settings?.labourIncluded === true ? 0 : sumMoney(hours.filter(l=>l.hourly_rate===null).map(l=>Number(l.hours))),
       taxReconciled:s?.settings?.taxReconciled===true,plan,candidates:candidates.filter(c=>c.job_id===job.id)})
-    const live = !['completed','archived','cancelled'].includes(job.status)
+    const live = isOpenJob(job.status)
+    if(job.status==='complete'&&!reviews.some(r=>r.job_id===job.id&&r.evidence?.taxReconciled===true&&r.evidence?.mappingsConfirmed===true)) exceptions.push({id:`${job.id}:review`,priority:1,title:'Completed job needs a financial review',detail:`${job.address}: confirm the current costs before using this outcome in future estimates.`,href:`/jobs/${job.id}/profitability#review`,action:'Review completed outcome'})
     if (live) exceptions.push(...jobExceptions(job,control,business?.targetMargin ?? null))
     return { id:job.id,address:job.address,status:job.status,revision:job.profitability_revision,control,plan,
       learned:reviews.some(r=>r.job_id===job.id && r.evidence?.taxReconciled===true && r.evidence?.mappingsConfirmed===true), live }

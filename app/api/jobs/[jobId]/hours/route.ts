@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { isValidTradeCategoryId } from '@/lib/trade-taxonomy'
+import { allRows } from '@/lib/profitability-data'
 
 export async function GET(_: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
   const builderId = await getAuthenticatedBuilderId(); if (!builderId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -9,8 +10,9 @@ export async function GET(_: NextRequest, { params }: { params: Promise<{ jobId:
   if (isDemoMode()) return NextResponse.json({ hours: [] })
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL; const key = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!url || !key) return NextResponse.json({ hours: [] })
-  const sb = createClient(url, key, { auth: { persistSession: false } }); const { data, error } = await sb.from('job_labour_hours').select('id,worker_id,work_date,hours,note,created_at,hourly_rate,trade_category_id').eq('builder_id', builderId).eq('job_id', jobId).order('work_date', { ascending: false }).limit(100)
-  if (error) return NextResponse.json({ error: 'Could not load hours.' }, { status: 500 }); return NextResponse.json({ hours: data ?? [] })
+  const sb = createClient(url, key, { auth: { persistSession: false } })
+  try {const data=await allRows(()=>sb.from('job_labour_hours').select('id,worker_id,work_date,hours,note,created_at,hourly_rate,trade_category_id').eq('builder_id', builderId).eq('job_id', jobId).order('work_date', { ascending: false }).order('id'));return NextResponse.json({hours:data})}
+  catch{return NextResponse.json({error:'Could not load all hours.'},{status:500})}
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {

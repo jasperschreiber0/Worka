@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { quoteSendReview } from '@/lib/quote-send-review'
 import { createClient } from '@supabase/supabase-js'
 import { addCommEntry } from '@/lib/comms-demo'
 import { requirePermission } from '@/lib/auth/role-guard'
@@ -27,6 +28,8 @@ const demoQuoteStatusMap: Map<string, { status: string; sent_at: string | null }
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ConfirmSendBody {
+  pricing_fingerprint?: string
+  margin_override_reason?: string
   builder_id: string
   to: string
   subject: string
@@ -189,6 +192,19 @@ export async function POST(
     }
   }
 
+  if (!resendApiKey) {
+    return NextResponse.json({ error: 'Quote email is not connected. Your quote remains ready for review.' }, { status: 503 })
+  }
+
+  let pricingReview
+  try { pricingReview = await quoteSendReview(supabase, sessionBuilderId, quoteId) }
+  catch { return NextResponse.json({error:'Could not verify the quote margin. Refresh and try again.'},{status:503}) }
+  if (body.pricing_fingerprint !== pricingReview.fingerprint) return NextResponse.json({error:'Quote pricing or overheads changed. Reopen the draft and review before sending.'},{status:409})
+  const overrideReason = typeof body.margin_override_reason === 'string' ? body.margin_override_reason.trim() : ''
+  if (pricingReview.required && (overrideReason.length < 10 || overrideReason.length > 1000)) return NextResponse.json({error:`${pricingReview.message} Record a reason of 10–1000 characters.`},{status:422})
+  const {error:decisionError} = await supabase.from('proof_events').insert({builder_id:sessionBuilderId,job_id:quoteRow.job_id,event_type:'approval',description:'Builder approved quote dispatch after margin review',metadata:{quote_id:quoteId,pricing_review:pricingReview,override_reason:pricingReview.required?overrideReason:null,delivery_state:'not_yet_sent',builder_confirmed:true}})
+  if (decisionError) return NextResponse.json({error:'Could not record your margin decision. Nothing has been sent.'},{status:503})
+
   // 4. Atomic claim FIRST, then email. Previously the Resend call ran before
   // the eq('status','pending_review') guard, so two near-simultaneous
   // requests (double-click, client retry) could both dispatch a real email
@@ -218,14 +234,14 @@ export async function POST(
   // with no email ever delivered.
   if (resendApiKey) {
     try {
-      const { Resend } = await import('resend')
-      const resend = new Resend(resendApiKey)
-      await resend.emails.send({
+      const delivery = await fetch('https://api.resend.com/emails', { method:'POST', headers:{Authorization:`Bearer ${resendApiKey}`,'Content-Type':'application/json','Idempotency-Key':`quote-${quoteId}`}, body:JSON.stringify({
         from: 'quotes@getworka.com',
         to: body.to,
         subject: body.subject,
         text: body.body,
-      })
+      }) })
+      const receipt = await delivery.json()
+      if (!delivery.ok || !receipt.id) throw new Error('Email provider did not accept the message')
     } catch (err) {
       console.error('[confirm-send] Resend error:', err)
       const { error: rollbackErr } = await supabase
@@ -237,7 +253,7 @@ export async function POST(
       if (rollbackErr) {
         console.error('[confirm-send] rollback after email failure ALSO failed — quote is marked sent without a delivered email:', rollbackErr.message, { quoteId })
       }
-      return NextResponse.json({ error: 'The email failed to send — nothing was delivered to the client. Please try again.' }, { status: 502 })
+      return NextResponse.json({ error: 'The email provider did not confirm acceptance. Refresh and try again; the same quote uses a duplicate-send guard.' }, { status: 502 })
     }
   }
 

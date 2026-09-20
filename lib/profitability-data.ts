@@ -1,3 +1,4 @@
+import {jobActuals} from './job-actuals'
 import { createClient } from '@supabase/supabase-js'
 import { createHash } from 'node:crypto'
 import { calculateClientPrice } from './pricing'
@@ -145,23 +146,7 @@ export async function loadIntelligence(builder: string, jobId: string, quoteId?:
     .filter((v) => v.status === 'approved')
     .reduce((s, v) => s + Number(v.amount ?? 0), 0)
   const labourIncluded = settings?.settings?.labourIncluded ?? false
-  const actuals: ActualRow[] = [
-    ...costs,
-    ...(labourIncluded
-      ? []
-      : labour
-          .filter((l) => l.hourly_rate !== null)
-          .map((l) => ({
-            id: l.id,
-            trade_category_id: l.trade_category_id,
-            description: l.note || 'Site labour',
-            amount: Number(l.hours) * Number(l.hourly_rate),
-            labour_hours: Number(l.hours),
-            labour_cost: Number(l.hours) * Number(l.hourly_rate),
-            incurred_on: l.work_date,
-            source_ref: 'Site hours',
-          }))),
-  ]
+  const actuals = jobActuals(costs, labour, labourIncluded)
   const evidenceKey = fingerprint({
     baseline,
     originalContract,

@@ -20,7 +20,7 @@ export default function JobControl({jobId}:{jobId:string}){
       ['Recorded job net cash',money(control.cash)],
     ]}/><p className="muted mt-4">Financials exclude GST. Job cash includes GST and uses your reconciled receipts and payments; it is not a connected bank balance. Unbilled change costs track potential recovery, not an extra cost to subtract.</p>
     {!control.complete&&<p className="pi-alert">Forecast incomplete: {control.reasons.join('. ')}. Capture the original estimate and confirm GST in Financial gate, then review Job Money.</p>}
-    <Link className="pi-button" href={`/jobs/${jobId}`}>Open Job Money to update costs →</Link>
+    <Link className="pi-button" href={`/jobs/${jobId}/profitability#corrections`}>Correct costs, settle commitments or repair labour →</Link>
     <label className="pi-check"><input type="checkbox" checked={confirm} onChange={e=>setConfirm(e.target.checked)}/>I have reviewed incurred costs, outstanding commitments and all other costs to finish. Each cost appears once; no remaining entries means no other work cost remains.</label>
     <p className="muted">Saving without this confirmation leaves the forecast unconfirmed. New costs, labour, scope changes or financial assumptions invalidate a previous confirmation.</p>
     <details className="mt-4"><summary>Record job cash and planned capacity</summary><div className="pi-grid">

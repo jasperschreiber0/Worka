@@ -7,6 +7,7 @@ import { TRADE_CATEGORIES, tradeCategoryName } from '@/lib/trade-taxonomy'
 import { Card, Field, TextField, Metrics, api, money, pct } from './ui'
 import CostImport from './CostImport'
 import JobControl from './JobControl'
+import FinancialCorrections from './FinancialCorrections'
 import './profitability.css'
 type Data = Awaited<ReturnType<typeof loadIntelligence>>
 const tradeName = (id: number | null) => (id === null ? 'Unclassified' : tradeCategoryName(id))
@@ -168,7 +169,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
     [adjustments, setAdjustments] = useState<Record<number, number>>({})
   const url = `/api/jobs/${jobId}/intelligence`
   useEffect(() => {
-    const select = () => { if (location.hash === '#review') setTab('Review'); else if (location.hash === '#scope') setTab('Correspondence & risks') }
+    const select = () => { if (location.hash === '#review') setTab('Review'); else if (location.hash === '#scope') setTab('Correspondence & risks'); else if(location.hash === '#corrections') setTab('Corrections') }
     select(); window.addEventListener('hashchange', select)
     return () => window.removeEventListener('hashchange', select)
   }, [])
@@ -331,6 +332,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
           <nav className="pi-tabs" aria-label="Profitability views">
             {[
               'Review',
+              'Corrections',
               'Forecast & cash',
               'Financial gate',
               'Correspondence & risks',
@@ -344,6 +346,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
             ))}
           </nav>
           {tab === 'Forecast & cash' && <JobControl jobId={jobId} />}
+          {tab === 'Corrections' && <FinancialCorrections jobId={jobId} onSaved={()=>void load()}/>}
           {tab === 'Review' && (
             <>
               <Card title="Job profitability review">
@@ -466,7 +469,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
               <Card title="Complete the job review">
                 <p className="muted">
                   Capture your original baseline in Financial gate first. A confirmed review
-                  supplies comparable-job learning. New costs or changed assumptions require
+                  closes this job and supplies comparable-job learning. New costs or changed assumptions require
                   confirmation again.
                 </p>
                 <label className="pi-check">
@@ -480,11 +483,11 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
                   costs. I have reviewed the trade mappings, including costs deliberately left Unclassified.
                 </label>
                 <button
-                  disabled={busy || !confirm || r.complete}
+                  disabled={busy || !confirm || (r.complete && d.job.status==='complete')}
                   className="primary"
                   onClick={() => action({ action: 'complete', confirmed: true, mappingsConfirmed: true })}
                 >
-                  {r.complete ? 'Review confirmed' : 'Confirm completed review'}
+                  {r.complete && d.job.status==='complete' ? 'Job completed · review confirmed' : 'Complete job and confirm review'}
                 </button>
               </Card>
               <Card title="Profitability analyst">

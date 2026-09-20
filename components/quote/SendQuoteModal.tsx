@@ -29,6 +29,7 @@ interface EmailDraft {
 }
 
 interface SendApiResponse {
+  pricing_review?: {required:boolean;message:string;fingerprint:string}
   draft: EmailDraft
   requires_confirmation: true
 }
@@ -83,6 +84,8 @@ export default function SendQuoteModal({
   const [draftTo, setDraftTo] = useState('')
   const [draftSubject, setDraftSubject] = useState('')
   const [draftBody, setDraftBody] = useState('')
+  const [pricingReview,setPricingReview] = useState<SendApiResponse['pricing_review']>()
+  const [marginReason,setMarginReason] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const panelRef = useRef<HTMLDivElement>(null)
@@ -98,6 +101,8 @@ export default function SendQuoteModal({
     setDraftTo('')
     setDraftSubject('')
     setDraftBody('')
+    setPricingReview(undefined)
+    setMarginReason('')
 
     async function fetchDraft() {
       try {
@@ -118,6 +123,7 @@ export default function SendQuoteModal({
         setDraftTo(data.draft.to)
         setDraftSubject(data.draft.subject)
         setDraftBody(data.draft.body)
+        setPricingReview(data.pricing_review)
         setStep('draft')
       } catch {
         setLoadError('Something went wrong loading the email draft.')
@@ -194,6 +200,8 @@ export default function SendQuoteModal({
           to: draftTo,
           subject: draftSubject,
           body: draftBody,
+          pricing_fingerprint: pricingReview?.fingerprint,
+          margin_override_reason: marginReason,
         }),
       })
 
@@ -211,7 +219,7 @@ export default function SendQuoteModal({
       setLoadError('Something went wrong sending the email.')
       setStep('error')
     }
-  }, [quoteId, builderId, draftTo, draftSubject, draftBody, onClose, onSent])
+  }, [quoteId, builderId, draftTo, draftSubject, draftBody, pricingReview, marginReason, onClose, onSent])
 
   if (!isOpen) return null
 
@@ -391,6 +399,7 @@ export default function SendQuoteModal({
           {/* Step 2 — Confirm */}
           {(step === 'confirm' || step === 'sending') && (
             <div className="px-5 py-6 space-y-5">
+              {pricingReview && <div role="note"><p>{pricingReview.message}</p>{pricingReview.required && <label className="block mt-3">Reason for sending at this margin<textarea className="block w-full border rounded p-2" value={marginReason} maxLength={1000} onChange={e=>setMarginReason(e.target.value)} placeholder="Record the commercial reason (at least 10 characters)" disabled={step==='sending'}/></label>}</div>}
               {/* Sending to */}
               <div
                 className="flex items-center gap-2.5 p-3 rounded-lg"
@@ -482,7 +491,7 @@ export default function SendQuoteModal({
             <button
               type="button"
               onClick={handleConfirmSend}
-              disabled={step === 'sending'}
+              disabled={step === 'sending' || Boolean(pricingReview?.required && marginReason.trim().length < 10)}
               className="flex items-center gap-2 px-5 py-2 text-[13px] font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ backgroundColor: 'var(--orange-primary)', color: '#fff' }}
               onMouseEnter={e => { if (step !== 'sending') e.currentTarget.style.opacity = '0.9' }}

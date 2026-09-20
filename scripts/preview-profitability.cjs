@@ -273,7 +273,29 @@ const server = http.createServer(async (req, res) => {
       return json(res,200,null)
     }
     if(rpc==='confirm_profitability_review'){
+      const owned=db.jobs.find(j=>j.id===body.p_job&&j.builder_id===body.p_builder)
+      if(!owned)return json(res,400,{message:'Job not found'})
+      if(body.p_revision!==owned.profitability_revision)return json(res,400,{message:'Financial records changed'})
+      owned.status='complete'
       db.profitability_reviews=[{job_id:body.p_job,builder_id:body.p_builder,context:body.p_context,review:body.p_review,evidence:body.p_evidence}]
+      return json(res,200,null)
+    }
+    if(rpc==='correct_job_financial_record'){
+      const owned=db.jobs.find(j=>j.id===body.p_job&&j.builder_id===body.p_builder)
+      if(!owned)return json(res,400,{message:'Job not found'})
+      if(body.p_revision!==owned.profitability_revision)return json(res,400,{message:'Financial records changed. Reload before correcting.'})
+      const table=body.p_action==='correct_hours'?'job_labour_hours':'job_cost_entries',row=db[table].find(r=>r.id===body.p_id&&r.job_id===body.p_job&&r.builder_id===body.p_builder)
+      if(!row)return json(res,400,{message:'Record not found'})
+      const before={...row},v=body.p_values
+      if(body.p_action==='correct_hours')Object.assign(row,{hours:v.hours,hourly_rate:v.hourly_rate})
+      else if(body.p_action==='void_cost')Object.assign(row,{amount:0,cost_kind:'incurred'})
+      else if(body.p_action==='settle_cost'){
+        if(!['committed','remaining'].includes(row.cost_kind)||v.amount<=0||v.amount>row.amount)return json(res,400,{message:'Invalid settlement'})
+        if(v.amount===row.amount)Object.assign(row,{cost_kind:'incurred',incurred_on:v.incurred_on})
+        else{row.amount-=v.amount;db.job_cost_entries.push({...row,id:crypto.randomUUID(),amount:v.amount,cost_kind:'incurred',incurred_on:v.incurred_on})}
+      }else Object.assign(row,{amount:v.amount,cost_kind:v.cost_kind})
+      owned.profitability_revision++;db.profitability_reviews=db.profitability_reviews.filter(r=>r.job_id!==body.p_job)
+      db.proof_events.push({id:crypto.randomUUID(),builder_id:body.p_builder,job_id:body.p_job,event_type:'cost_event',description:body.p_reason,metadata:{before,after:{...row}}})
       return json(res,200,null)
     }
     if (rpc === 'save_profitability_settings') {
@@ -417,6 +439,7 @@ server.listen(3222, '127.0.0.1', () => {
         SUPABASE_SERVICE_ROLE_KEY: 'local-fixture-service',
         ANTHROPIC_API_KEY: '',
         OPENAI_API_KEY: '',
+        RESEND_API_KEY: '',
         XERO_ENABLED: 'false',
         NEXT_PUBLIC_APP_URL: 'http://127.0.0.1:3221',
       },
