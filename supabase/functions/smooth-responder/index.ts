@@ -3,7 +3,7 @@ declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 import { approvedAttemptCeiling } from './approved-attempt-budget.ts'
 import { OpenAIEstimationClient, ESTIMATION_MODEL } from './openai-provider.ts'
 import { splitTextParts, combinePartResults } from './text-parts.ts'
-import { expandCompactFacts, hasDenseText } from './compact-facts.ts'
+import { separateEvidencedFacts, hasDenseText } from './compact-facts.ts'
 import { pendingDocumentIds, classificationBudgetRequired } from './document-checkpoint.ts'
 import { withExecutionLease } from './execution-lease.ts'
 /**
@@ -1774,7 +1774,17 @@ When a document is a structured, tabular selection/fixture/finishes schedule (an
           if(cachedPart) docResult=cachedPart.payload
           else {
           docResult = await callTool(anthropic, { supabase, builderId, jobId, stage: 'stage_document_intelligence', onProviderAttempt: () => { classificationCallThisRun = true }, parentJobId, invocationDeadlineAt: startedAt + WALL_CLOCK_SAFETY_MS }, docSystemPrompt, docUserContent, DOCUMENT_INTELLIGENCE_TOOL, maxTokens, batchTimeoutMs)
-          if (docResult) docResult.facts = expandCompactFacts(docResult.facts, batchFiles.length)
+          if (docResult) {
+            const validated = separateEvidencedFacts(docResult.facts, batchFiles.length)
+            docResult.facts = validated.facts
+            if (validated.excluded.length) {
+              console.log(JSON.stringify({ event: 'stage12_unevidenced_facts_excluded', job_id: jobId, batch_id: parentJobId, excluded: validated.excluded }))
+              for (const document of docResult.documents ?? []) {
+                const count = validated.excluded.filter(r => r.source_file_index === document.file_index).length
+                if (count) document.notes = `${document.notes ?? ''} ${count} AI inference(s) lacked source evidence and were excluded from project facts; review the original document if additional scope is needed.`.trim()
+              }
+            }
+          }
           }
           if(part && docResult) {
             if(!cachedPart) {

@@ -16,6 +16,25 @@ export function expandCompactFacts(rows: unknown, documentCount: number) {
   })
 }
 
+// An unsupported inference is not a project fact. Quarantine only missing
+// evidence; malformed attribution or other fields must still fail closed.
+export function separateEvidencedFacts(rows: unknown, documentCount: number) {
+  if (!Array.isArray(rows)) throw new Error('Missing compact facts')
+  const facts: ReturnType<typeof expandCompactFacts> = []
+  const excluded: Array<{ source_file_index: number; row: number; reason: string }> = []
+  rows.forEach((original, row) => {
+    const r = Array.isArray(original) && original.length === 6
+      ? [original[0], original[1], original[2], original[2], original[3], original[4], original[5]]
+      : original
+    if (Array.isArray(r) && r.length === 7 && (r[5] === null || (typeof r[5] === 'string' && !r[5].trim()))) {
+      const checked = expandCompactFacts([[...r.slice(0, 5), 'validation only', r[6]]], documentCount)[0]
+      excluded.push({ source_file_index: checked.source_file_index, row, reason: 'No source evidence; excluded from project facts' })
+    } else facts.push(...expandCompactFacts([r], documentCount))
+  })
+  if (excluded.length && !facts.length) throw new Error('No evidenced facts in document analysis')
+  return { facts, excluded }
+}
+
 // Dense text schedules can demand long row-by-row output despite tiny PDF bytes.
 export function hasDenseText(block: unknown): boolean {
   const blocks = Array.isArray(block) ? block : [block]

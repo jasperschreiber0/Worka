@@ -1,6 +1,17 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {expandCompactFacts, hasDenseText} from './compact-facts.ts'
+import {expandCompactFacts, hasDenseText, separateEvidencedFacts} from './compact-facts.ts'
+
+test('one unsupported inference does not discard evidenced plan facts',()=>{
+ const valid=[0,'fixtures','window','Window W01','p2','W01 fixed window','high']
+ const invalid=[0,'trades_involved','waterproofing','Implied but not stated',null,'','low']
+ const result=separateEvidencedFacts([valid,invalid],1)
+ assert.equal(result.facts.length,1)
+ assert.equal(result.facts[0].key,'window')
+ assert.deepEqual(result.excluded,[{source_file_index:0,row:1,reason:'No source evidence; excluded from project facts'}])
+ assert.throws(()=>separateEvidencedFacts([invalid],1),/No evidenced/)
+ for(const bad of [[2,...invalid.slice(1)],[0,'trade','x','x',{},'',20],[0,'trade','x','x',null,'',101]]) assert.throws(()=>separateEvidencedFacts([valid,bad],1))
+})
 test('compact schedule preserves products, unpriced selections and exact provenance',()=>{
  const rows=expandCompactFacts([[0,'fixtures','tap','Brand X tap; 2 units; price unknown','p2 row3','Tap row',90]],1)
  assert.equal(rows[0].value,'Brand X tap; 2 units; price unknown')

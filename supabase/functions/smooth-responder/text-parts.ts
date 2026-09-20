@@ -22,5 +22,6 @@ export function combinePartResults(rows: Array<{part_index:number; payload:any}>
     if (!Array.isArray(row.payload.facts) || !Array.isArray(row.payload.documents) || row.payload.documents.length!==1) throw new Error('Incomplete part result')
     for(const fact of row.payload.facts) facts.set(JSON.stringify([fact.category,fact.key,fact.value]),fact)
   }
-  return {documents:[{...ordered[0].payload.documents[0],page_count:null,notes:(ordered[0].payload.documents[0].notes??'')+' Analysed in '+total+' text parts; original PDF retained.'}],facts:[...facts.values()]}
+  const notes = [...new Set(ordered.map(r => r.payload.documents[0].notes).filter(Boolean))].join(' ')
+  return {documents:[{...ordered[0].payload.documents[0],page_count:null,notes:notes+' Analysed in '+total+' text parts; original PDF retained.'}],facts:[...facts.values()]}
 }

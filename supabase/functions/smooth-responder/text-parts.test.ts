@@ -17,3 +17,9 @@ test('one saved part never marks a three-part document complete',()=>{
  assert.equal(all.documents.length,1)
  assert.equal(all.facts.length,1)
 })
+test('later-part evidence exclusions remain visible after combining a document',()=>{
+ const payload={documents:[{file_index:0,notes:'First part'}],facts:[]}
+ const combined=combinePartResults([{part_index:0,payload},{part_index:1,payload:{documents:[{file_index:0,notes:'One unsupported inference excluded'}],facts:[]}}],2)
+ assert.match(combined.documents[0].notes,/First part/)
+ assert.match(combined.documents[0].notes,/unsupported inference excluded/)
+})
