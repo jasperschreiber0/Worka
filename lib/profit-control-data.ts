@@ -2,6 +2,7 @@ import { intelligenceDB, allRows } from './profitability-data'
 import { jobControl, jobExceptions, capacityConflicts, type ControlPlan, type ControlException } from './profit-control'
 import { financialProfile, EMPTY_PROFILE, cashForecast, sumMoney, type ActualRow } from './profitability'
 import { todayOperations, rankTodayExceptions } from './today'
+import { projectCash, validateCashPlan } from './cash-plan'
 
 export async function loadProfitControl(builder: string) {
   const db = intelligenceDB()
@@ -51,6 +52,10 @@ export async function loadProfitControl(builder: string) {
       startOn:profile.cash_flow.startOn ?? null, updatedAt:profile.updated_at}
     if (cash.deficitWeeks) exceptions.push({id:'cash:deficit',priority:1,title:'Cash forecast has a shortfall',detail:`Lowest projected closing cash is $${cash.lowest.toLocaleString('en-AU')} in week ${cash.lowestWeek}.`,href:'/business',action:'Review receipts, payments and timing'})
     if (!cash.complete || !cash.startOn || cash.startOn < today) exceptions.push({id:'cash:review',priority:2,title:'Refresh the 13-week cash forecast',detail:'Confirm dated receipts, wages, overhead and supplier payments. The forecast is a manual plan, not a bank balance.',href:'/business',action:'Update the cash plan'})
+    if(profile.cash_flow.plan){
+      const plan=validateCashPlan(profile.cash_flow.plan), projection=projectCash(plan)
+      if(projection.headroom<0) exceptions.push({id:'cash:buffer',priority:1,title:'Cash falls below your chosen buffer',detail:`Projected low $${projection.lowest.toLocaleString('en-AU')} on ${projection.lowestOn}, $${Math.abs(projection.headroom).toLocaleString('en-AU')} below your buffer.${projection.weeklyTiming?' Weekly allowances leave daily timing uncertain.':''}`,href:'/business#cash-flow',action:'Review payment timing'})
+    }
   }
   const active=rows.filter(j=>j.live), covered=active.filter(j=>j.control.complete)
   const learnedReviews=reviews.filter(r=>r.evidence?.taxReconciled===true && r.evidence?.mappingsConfirmed===true)

@@ -11,15 +11,10 @@ import {
 import { Card, Field, Metrics, money, pct, api } from './ui'
 import './profitability.css'
 import ProfitControl from './ProfitControl'
+import CashFlowPlanner from './CashFlowPlanner'
 export default function BusinessControl() {
   const [profile, setProfile] = useState<FinancialProfile>(EMPTY_PROFILE),
     [jobs, setJobs] = useState<{ id: string; address: string; status: string }[]>([]),
-    [cash, setCash] = useState({
-      opening: 0,
-      weeks: Array.from({ length: 13 }, () => ({ inflow: 0, outflow: 0 })),
-      complete: false,
-      startOn: new Date().toISOString().slice(0, 10),
-    }),
     [demo, setDemo] = useState(false),
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
@@ -37,7 +32,6 @@ export default function BusinessControl() {
       .then((d) => {
         setProfile({ ...EMPTY_PROFILE, ...d.profile })
         setJobs(d.jobs)
-        if (d.cash_flow?.weeks?.length === 13) setCash({ startOn: '', ...d.cash_flow })
         setDemo(d.demo)
         setRisk(
           (d.risks ?? [])
@@ -63,18 +57,14 @@ export default function BusinessControl() {
   } catch (e) {
     validation = (e as Error).message
   }
-  let forecast: ReturnType<typeof cashForecast> | null = null
-  try {
-    forecast = cashForecast(cash.opening, cash.weeks)
-  } catch {}
-  async function save(kind: 'profile' | 'cash_flow') {
+  async function save() {
     setBusy(true)
     setError('')
     setNotice('')
     try {
       await api(
         '/api/business/financial-profile',
-        kind === 'profile' ? { profile } : { cash_flow: cash },
+        { profile },
         'PUT',
       )
       setNotice('Saved to your business')
@@ -257,7 +247,7 @@ export default function BusinessControl() {
             <button
               className="primary"
               disabled={busy || !!validation || !loaded}
-              onClick={() => save('profile')}
+              onClick={save}
             >
               Save financial profile
             </button>
@@ -290,97 +280,7 @@ export default function BusinessControl() {
           )}
         </>
       )}
-      {tab === '13-week cash flow' && (
-        <Card title="13-week cash-flow forecast">
-          <label className="pi-field"><span>Forecast starts on</span><input type="date" value={cash.startOn} onChange={e => setCash({ ...cash, startOn: e.target.value })} /></label>
-          <p className="muted">
-            Enter expected bank movements, including GST where applicable. Inflows can include
-            claims, receivables and approved changes. Outflows should include suppliers,
-            subcontractors, wages, overhead and major purchases. Add each amount once.
-          </p>
-          <Field
-            label="Current cash"
-            value={cash.opening}
-            min={-999999999}
-            onChange={(n) => setCash({ ...cash, opening: n ?? 0 })}
-          />
-          <div className="pi-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Week</th>
-                  <th>Inflows</th>
-                  <th>Outflows</th>
-                  <th>Closing cash</th>
-                </tr>
-              </thead>
-              <tbody>
-                {cash.weeks.map((w, i) => (
-                  <tr key={i}>
-                    <td>Week {i + 1}{cash.startOn && <p className="muted">{new Date(Date.parse(cash.startOn) + i * 7 * 86400000).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' })}</p>}</td>
-                    <td>
-                      <input
-                        aria-label={`Week ${i + 1} inflows`}
-                        type="number"
-                        value={w.inflow}
-                        onChange={(e) =>
-                          setCash({
-                            ...cash,
-                            weeks: cash.weeks.map((r, j) =>
-                              j === i ? { ...r, inflow: Number(e.target.value) } : r,
-                            ),
-                          })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <input
-                        aria-label={`Week ${i + 1} outflows`}
-                        type="number"
-                        value={w.outflow}
-                        onChange={(e) =>
-                          setCash({
-                            ...cash,
-                            weeks: cash.weeks.map((r, j) =>
-                              j === i ? { ...r, outflow: Number(e.target.value) } : r,
-                            ),
-                          })
-                        }
-                      />
-                    </td>
-                    <td className={(forecast?.rows[i].closing ?? 0) < 0 ? 'pi-bad' : ''}>
-                      {money(forecast?.rows[i].closing)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <label className="pi-check">
-            <input
-              type="checkbox"
-              checked={cash.complete}
-              onChange={(e) => setCash({ ...cash, complete: e.target.checked })}
-            />
-            I have included all known payments and receipts for these 13 weeks.
-          </label>
-          <p className="pi-alert">
-            {cash.complete
-              ? 'Based on your confirmed inputs; payment timing remains uncertain.'
-              : 'Low confidence — inputs have not been confirmed complete.'}{' '}
-            Lowest projected cash: {money(forecast?.lowest)} in Week {forecast?.lowestWeek}.{' '}
-            {forecast?.deficitWeeks} deficit weeks. A profitable job can still create a cash
-            shortfall.
-          </p>
-          <button
-            className="primary"
-            disabled={busy || !forecast || !cash.startOn}
-            onClick={() => save('cash_flow')}
-          >
-            Save cash forecast
-          </button>
-        </Card>
-      )}
+      <div hidden={tab !== '13-week cash flow'}><CashFlowPlanner /></div>
     </main>
   )
 }

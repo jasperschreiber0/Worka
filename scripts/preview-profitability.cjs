@@ -125,6 +125,7 @@ const db = {
   business_financial_profiles: [
     {
       builder_id: builder,
+      updated_at: now,
       profile: {
         annualRevenue: 2000000,
         targetRevenue: 2500000,
@@ -375,6 +376,7 @@ const server = http.createServer(async (req, res) => {
       const old = req.headers.prefer?.includes('resolution=merge')
         ? db[name].find((r) => r[key] === input[key])
         : null
+      if(name==='business_financial_profiles'&&!old&&db[name].some(r=>r.builder_id===input.builder_id)) return json(res,409,{code:'23505',message:'Duplicate builder profile'})
       if (old) {
         Object.assign(old, input)
         output.push(old)

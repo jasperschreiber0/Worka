@@ -1,0 +1,10 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import ExcelJS from 'exceljs'
+import {previewCashWorkbook} from './cash-import.ts'
+import {addDays,projectCash} from './cash-plan.ts'
+async function fixture(broken=false){const wb=new ExcelJS.Workbook(),s=wb.addWorksheet('Cashflow Summary');s.getCell('A4').value='Cash In';s.getCell('A5').value='Cash Out';for(let i=0;i<13;i++){s.getCell(2,i+2).value=new Date(addDays('2026-09-27',i*7));s.getCell(3,i+2).value=100+i*7;s.getCell(4,i+2).value={formula:'10',result:10};s.getCell(5,i+2).value=3;s.getCell(6,i+2).value=107+i*7;}if(broken)s.getCell('D6').value=999;return Buffer.from(await wb.xlsx.writeBuffer())}
+test('import preserves 13 totals, starts Monday for Sunday-ending source, excludes credit/account totals',async()=>{const r=await previewCashWorkbook(await fixture(),'2026-09-27');assert.equal(r.plan.startOn,'2026-09-21');assert.equal(r.plan.opening,100);assert.equal(projectCash(r.plan).weeks[12].closing,191);assert.equal(r.plan.complete,false);assert.equal(r.plan.entries.length,26);assert.ok(r.warnings.length>=4)})
+test('import fails on inconsistent closing balance and unavailable 13-week window',async()=>{await assert.rejects(()=>previewCashWorkbook(awaitable as never,'2026-09-27'));const b=await fixture(true);await assert.rejects(()=>previewCashWorkbook(b,'2026-09-27'),/reconcile/);await assert.rejects(()=>previewCashWorkbook(b,'2026-09-28'),/week-ending/)})
+test('cached zero is valid but formulas without cached results are rejected',async()=>{const wb=new ExcelJS.Workbook();await wb.xlsx.load(await fixture() as never);const s=wb.getWorksheet('Cashflow Summary')!;s.getCell('B4').value={formula:'0',result:0};s.getCell('B3').value=110;const r=await previewCashWorkbook(Buffer.from(await wb.xlsx.writeBuffer()),'2026-09-27');assert.equal(projectCash(r.plan).weeks[0].inflow,0);s.getCell('B4').value={formula:'0'};await assert.rejects(()=>previewCashWorkbook(Buffer.from([]),'2026-09-27'));const b=Buffer.from(await wb.xlsx.writeBuffer());await assert.rejects(()=>previewCashWorkbook(b,'2026-09-27'),/Missing numeric/)})
+const awaitable=Buffer.from('invalid')
