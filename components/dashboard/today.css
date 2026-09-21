@@ -11,7 +11,7 @@
 .today-hero,.today-setup{border:1px solid var(--bg-border);background:var(--bg-surface);border-radius:14px;padding:24px;margin-bottom:16px}
 .today-hero h2{font-size:15px;color:var(--text-secondary);font-weight:500}.today-tag{border:1px solid var(--bg-border);border-radius:7px;padding:4px 9px}
 .today-figure{font-size:44px;font-weight:650;letter-spacing:-.035em;line-height:1.2;color:var(--status-green);display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
-.today-figure.negative{color:var(--status-red)}.today-figure span{font-size:14px;font-weight:400;letter-spacing:normal;color:var(--text-secondary)}
+.today-figure.negative{color:var(--status-red)}.today-figure.unconfirmed{color:var(--text-secondary)}.today-figure span{font-size:14px;font-weight:400;letter-spacing:normal;color:var(--text-secondary)}
 .today-hero>p{max-width:78ch;font-size:14px;margin:16px 0}.today-coverage{height:5px;background:var(--bg-border);border-radius:4px;overflow:hidden;margin:22px 0}.today-coverage span{height:100%;display:block;background:var(--orange-primary)}
 .today-hero-foot{border-top:1px solid var(--bg-border);padding-top:12px;font-size:13px;color:var(--text-secondary)}.today-hero-foot a,.today-setup a{color:var(--orange-primary)}
 .today-pricing{display:flex;align-items:center;justify-content:space-between;gap:22px;border:1px solid var(--bg-border);border-left:3px solid var(--orange-primary);border-radius:12px;padding:18px 20px;margin-bottom:22px;background:var(--bg-surface)}

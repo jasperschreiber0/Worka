@@ -12,6 +12,7 @@ import { Card, Field, Metrics, money, pct, api } from './ui'
 import './profitability.css'
 import ProfitControl from './ProfitControl'
 import CashFlowPlanner from './CashFlowPlanner'
+const BUSINESS_VIEWS: Record<string, string> = { Overview: '#overview', 'Financial profile': '#financial-profile', '13-week cash flow': '#cash-flow' }
 export default function BusinessControl() {
   const [profile, setProfile] = useState<FinancialProfile>(EMPTY_PROFILE),
     [jobs, setJobs] = useState<{ id: string; address: string; status: string }[]>([]),
@@ -23,7 +24,7 @@ export default function BusinessControl() {
     [tab, setTab] = useState('Overview'),
     [risk, setRisk] = useState<number | null>(null)
   useEffect(() => {
-    const select = () => { if (location.hash === '#financial-profile') setTab('Financial profile'); else if (location.hash === '#cash-flow') setTab('13-week cash flow') }
+    const select = () => { setTab(Object.keys(BUSINESS_VIEWS).find(view => BUSINESS_VIEWS[view] === location.hash) ?? 'Overview') }
     select(); window.addEventListener('hashchange', select)
     return () => window.removeEventListener('hashchange', select)
   }, [])
@@ -97,7 +98,7 @@ export default function BusinessControl() {
       {!loaded && !error && <p>Loading your business…</p>}
       <nav className="pi-tabs" aria-label="Business views">
         {['Overview', 'Financial profile', '13-week cash flow'].map((t) => (
-          <button key={t} aria-selected={tab === t} onClick={() => setTab(t)}>
+          <button key={t} aria-pressed={tab === t} onClick={() => { setTab(t); window.history.replaceState(null, '', BUSINESS_VIEWS[t]) }}>
             {t}
           </button>
         ))}

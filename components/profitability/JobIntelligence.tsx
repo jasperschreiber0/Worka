@@ -11,6 +11,11 @@ import FinancialCorrections from './FinancialCorrections'
 import './profitability.css'
 type Data = Awaited<ReturnType<typeof loadIntelligence>>
 const tradeName = (id: number | null) => (id === null ? 'Unclassified' : tradeCategoryName(id))
+const JOB_VIEWS: Record<string, string> = {
+  Review: '#review', Corrections: '#corrections', 'Forecast & cash': '#forecast',
+  'Financial gate': '#financial-gate', 'Correspondence & risks': '#scope',
+  'Actual costs': '#actual-costs', Ledger: '#ledger', Learning: '#learning',
+}
 function CandidateEditor({
   candidate,
   onSave,
@@ -169,7 +174,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
     [adjustments, setAdjustments] = useState<Record<number, number>>({})
   const url = `/api/jobs/${jobId}/intelligence`
   useEffect(() => {
-    const select = () => { if (location.hash === '#review') setTab('Review'); else if (location.hash === '#scope') setTab('Correspondence & risks'); else if(location.hash === '#corrections') setTab('Corrections') }
+    const select = () => { setTab(Object.keys(JOB_VIEWS).find(view => JOB_VIEWS[view] === location.hash) ?? (location.hash.startsWith('#trade-') ? 'Review' : 'Forecast & cash')) }
     select(); window.addEventListener('hashchange', select)
     return () => window.removeEventListener('hashchange', select)
   }, [])
@@ -340,7 +345,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
               'Ledger',
               'Learning',
             ].map((t) => (
-              <button key={t} aria-selected={tab === t} onClick={() => setTab(t)}>
+              <button key={t} aria-pressed={tab === t} onClick={() => { setTab(t); window.history.replaceState(null, '', JOB_VIEWS[t]) }}>
                 {t}
               </button>
             ))}
@@ -468,10 +473,11 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
               </Card>
               <Card title="Complete the job review">
                 <p className="muted">
-                  Capture your original baseline in Financial gate first. A confirmed review
+                  A confirmed review
                   closes this job and supplies comparable-job learning. New costs or changed assumptions require
                   confirmation again.
                 </p>
+                {!d.settings?.baseline_items?.length && <p className="pi-alert">First, capture the original estimate and confirm GST. <a href="#financial-gate">Open Financial gate →</a></p>}
                 <label className="pi-check">
                   <input
                     type="checkbox"

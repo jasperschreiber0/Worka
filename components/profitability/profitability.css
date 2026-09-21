@@ -120,7 +120,7 @@
 .pi-tabs button {
   white-space: nowrap;
 }
-.pi-tabs button[aria-selected='true'] {
+.pi-tabs button[aria-selected='true'], .pi-tabs button[aria-pressed='true'] {
   border-color: var(--orange-primary);
   color: var(--orange-primary);
 }
@@ -216,6 +216,8 @@
   color: var(--text-secondary);
 }
 @media (max-width: 600px) {
+  .pi-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; overflow: visible; }
+  .pi-tabs button { white-space: normal; min-height: 44px; }
   .pi {
     padding: 22px 14px 90px;
   }

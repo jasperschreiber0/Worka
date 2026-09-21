@@ -61,7 +61,7 @@ export default function TodayControl() {
 
       <section className="today-hero" aria-labelledby="forecast-title">
         <div className="today-section-heading"><h2 id="forecast-title">Forecast gross profit</h2><span className="today-tag">Confirmed open-job forecasts</span></div>
-        <div className={`today-figure ${data.totals.forecastProfit!==null && data.totals.forecastProfit<0?'negative':''}`}>{money(data.totals.forecastProfit)}<span>before business overhead and tax</span></div>
+        <div className={`today-figure ${data.totals.forecastProfit===null?'unconfirmed':data.totals.forecastProfit<0?'negative':''}`}>{money(data.totals.forecastProfit)}<span>before business overhead and tax</span></div>
         <p>{data.totals.confirmed} of {data.totals.active} open jobs have confirmed forecasts. These figures cover each job’s full duration, including quoting jobs, and are not profit earned this financial year.</p>
         <div className="today-coverage" role="progressbar" aria-label="Open jobs with confirmed forecasts" aria-valuemin={0} aria-valuemax={Math.max(1,data.totals.active)} aria-valuenow={data.totals.confirmed}><span style={{width:`${data.totals.active?data.totals.confirmed/data.totals.active*100:0}%`}}/></div>
         <div className="today-hero-foot"><span>{money(data.totals.leakage)} forecast profit reduction against original estimates</span><Link href="/business">Review job forecasts →</Link></div>
