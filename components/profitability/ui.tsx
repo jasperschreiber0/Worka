@@ -1,5 +1,5 @@
 'use client'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 export const money = (n: number | null | undefined) =>
   n == null
     ? 'Not available'
@@ -23,6 +23,8 @@ export function Field({
   nullable?: boolean
   min?: number
 }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
   return (
     <label className="pi-field">
       <span>{label}</span>
@@ -30,10 +32,20 @@ export function Field({
         type="number"
         step="any"
         min={min}
-        value={value ?? ''}
-        onChange={(e) =>
+        inputMode="decimal"
+        placeholder={nullable ? undefined : '0'}
+        value={editing ? draft : value ?? ''}
+        onFocus={() => {
+          setDraft(value === 0 || value === null ? '' : String(value))
+          setEditing(true)
+        }}
+        onChange={(e) => {
+          // Keep empty and partially typed decimals intact while editing.
+          // The parent retains the existing zero/null persistence semantics.
+          setDraft(e.target.value)
           onChange(e.target.value === '' && nullable ? null : Number(e.target.value))
-        }
+        }}
+        onBlur={() => setEditing(false)}
       />
     </label>
   )
