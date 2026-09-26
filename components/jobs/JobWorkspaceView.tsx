@@ -189,9 +189,20 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
       )}
 
       {job && <nav aria-label="Job sections" className="grid grid-cols-4 gap-2 mb-4">{(['overview', 'money', 'site', 'files'] as const).map(item => <button key={item} type="button" aria-pressed={section === item} onClick={() => setSection(item)} className="px-2 sm:px-4 py-3 text-sm rounded-md" style={{ background: section === item ? 'var(--bg-elevated)' : 'transparent', color: section === item ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: section === item ? 600 : 400 }}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>}
-      {job && <Link href={`/jobs/${jobId}/profitability`} className="block rounded-lg border p-4 mb-4 text-sm" style={{borderColor:'var(--bg-border)',color:'var(--orange-primary)'}}>Profitability intelligence · financial gate, actual costs and job review →</Link>}
-      {job && section === 'money' && <LabourMoneySummary key={refreshKey} jobId={jobId} />}
-      {job && section === 'money' && <div className="pi"><FinancialCorrections jobId={jobId} onSaved={()=>{setRefreshKey(k=>k+1);refetchJob()}}/></div>}
+      {job && section === 'overview' && <section className="card p-5 mb-4">
+        <h2 className="font-semibold text-lg">{job.status==='active'?'What needs doing on this job?':'Start with the plans'}</h2>
+        <p className="text-sm mt-2 mb-4" style={{color:'var(--text-secondary)'}}>{job.status==='active'?'Record a bill, a client change or a site update in one place.':'Upload the drawings, answer what is missing, then review your estimate.'}</p>
+        <div className="flex flex-wrap gap-3">
+          {job.status==='active'?<Link className="btn-primary px-4 py-3 text-sm" href={`/jobs/${jobId}/workflow`}>Run this job</Link>:<button className="btn-primary px-4 py-3 text-sm" onClick={handleUploadPlans}>Upload plans</button>}
+          <Link className="btn-secondary px-4 py-3 text-sm" href={`/jobs/${jobId}/drawings`}>Review plans and estimate</Link>
+        </div>
+        {job.status!=='active'&&<Link className="inline-block text-sm mt-4" href={`/jobs/${jobId}/workflow`}>Orders, programme and site updates →</Link>}
+      </section>}
+      {job && section === 'money' && <Link href={`/jobs/${jobId}/profitability`} className="block rounded-lg border p-4 mb-4 text-sm" style={{borderColor:'var(--bg-border)',color:'var(--orange-primary)'}}>Review job profit and actual costs →</Link>}
+      {job && section === 'files' && <Link className="btn-primary inline-block px-4 py-3 mb-4" href={`/jobs/${jobId}/drawings`}>Manage plans and estimate versions →</Link>}
+      {job && section === 'site' && <Link className="btn-primary inline-block px-4 py-3 mb-4" href={`/jobs/${jobId}/workflow`}>Site updates and upcoming work →</Link>}
+      {job && section === 'money' && <details className="mb-4"><summary className="p-3 cursor-pointer">Recorded labour</summary><LabourMoneySummary key={refreshKey} jobId={jobId} /></details>}
+      {job && section === 'money' && <details className="mb-4"><summary className="p-3 cursor-pointer">Correct a cost or settle a commitment</summary><div className="pi"><FinancialCorrections jobId={jobId} onSaved={()=>{setRefreshKey(k=>k+1);refetchJob()}}/></div></details>}
       {job ? (
         section === 'site' ? <><ProgrammePanel jobId={jobId} /><SitePanel jobId={jobId} builderId={builderId} /></> : <JobSnapshotPanel
           workspaceSection={section}

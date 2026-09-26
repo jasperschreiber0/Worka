@@ -358,6 +358,7 @@ function PricingTypeTag({ type }: { type: DemoQuoteLineItem['pricing_type'] }) {
 
 interface LineItemRowProps {
   key?: string | number
+  initiallyEditing?: boolean
   item: DemoQuoteLineItem
   /** True when the quote is still editable (draft / pending_review). */
   canEdit?: boolean
@@ -380,9 +381,12 @@ function NeedsInputList({ groups, onUpdated, canEdit, onSetRate, onExclude, onEd
   async function review(item:DemoQuoteLineItem,action:string){setReviewBusy(true);setReviewError('');try{const res=await fetch('/api/quotes/'+item.quote_id+'/line-items/'+item.id+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});const result=await res.json();if(!res.ok)throw Error(result.error);await onUpdated()}catch(e){setReviewError(e instanceof Error?e.message:'Review could not be saved')}finally{setReviewBusy(false)}}
   const [open, setOpen] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [tradeFilter, setTradeFilter] = useState('')
+  const [visibleCount, setVisibleCount] = useState(5)
   const entries = groups.flatMap(group => group.items.map(item => ({ item, trade: group.category_name, reason: estimateInputReason(item) })))
     .filter(entry => entry.reason !== null)
     .sort((a, b) => Number(b.reason === 'Price needed') - Number(a.reason === 'Price needed'))
+  const filtered = entries.filter(entry => !tradeFilter || entry.trade === tradeFilter)
   return (
     <section className="mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--bg-border)' }} aria-label="Needs input">
       <button type="button" className="w-full px-4 py-3 flex justify-between text-left font-semibold" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="estimate-needs-input-list">
@@ -393,23 +397,26 @@ function NeedsInputList({ groups, onUpdated, canEdit, onSetRate, onExclude, onEd
           {entries.length ? 'Start with missing prices, then check assumptions and allowances. Open an item to edit it. Other scope and quality checks still apply below.' : 'No line-item input outstanding. Check the scope and quality findings below before sending.'}
         </p>
         {reviewError && <p role="alert" className="px-4 pb-2 text-sm">{reviewError}</p>}
-        <div className="max-h-96 overflow-y-auto">
-          {entries.map(({ item, trade, reason }) => <div key={item.id} style={{ borderTop: '1px solid var(--bg-border)' }}>
+        <label className="block px-4 pb-3 text-sm">Review one trade at a time<select className="block w-full mt-2 p-3 rounded-md" style={{background:"var(--bg-elevated)",color:"var(--text-primary)"}} value={tradeFilter} onChange={e=>{setTradeFilter(e.target.value);setVisibleCount(5);setSelectedId(null)}}><option value="">All trades ({entries.length})</option>{Array.from(new Set(entries.map(e=>e.trade))).map(trade=><option key={trade} value={trade}>{trade} ({entries.filter(e=>e.trade===trade).length})</option>)}</select></label>
+        <p className="px-4 pb-3 text-sm">Showing {Math.min(visibleCount,filtered.length)} of {filtered.length}. Saved changes are kept as you work.</p>
+        <div>
+          {filtered.slice(0,visibleCount).map(({ item, trade, reason }) => <div key={item.id} style={{ borderTop: '1px solid var(--bg-border)' }}>
             <button type="button" className="w-full px-4 py-3 text-left" aria-expanded={selectedId === item.id} onClick={() => setSelectedId(selectedId === item.id ? null : item.id)}>
               <span className="block text-xs font-semibold" style={{ color: 'var(--status-amber)' }}>{reason} · {trade}</span>
               <span className="block text-sm mt-1">{item.description}</span>
               <span className="block text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>{selectedId === item.id ? 'Close item' : canEdit ? 'Review / edit' : 'View item'}</span>
             </button>
             {selectedId === item.id && canEdit && <div className="px-4 pb-2 flex gap-2"><button type="button" className="btn-secondary px-3 py-2 text-xs" disabled={reviewBusy} onClick={()=>review(item,'awaiting_quote')}>Awaiting supplier quote</button><button type="button" className="btn-secondary px-3 py-2 text-xs" disabled={reviewBusy || item.total===null || item.total<=0} onClick={()=>review(item,'reviewed')}>Confirm reviewed</button></div>}
-            {selectedId === item.id && <LineItemRow item={item} canEdit={canEdit} onSetRate={onSetRate} onExclude={onExclude} onEditItem={onEditItem} onDeleteItem={onDeleteItem} />}
+            {selectedId === item.id && <LineItemRow key={item.id} initiallyEditing item={item} canEdit={canEdit} onSetRate={onSetRate} onExclude={onExclude} onEditItem={onEditItem} onDeleteItem={onDeleteItem} />}
           </div>)}
         </div>
+        {filtered.length > visibleCount && <button type="button" className="btn-secondary m-4 px-4 py-3" onClick={()=>setVisibleCount(n=>n+5)}>Show next 5 items</button>}
       </div>}
     </section>
   )
 }
 
-function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDeleteItem }: LineItemRowProps) {
+function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDeleteItem, initiallyEditing = false }: LineItemRowProps) {
   const [rateSaveMessage,setRateSaveMessage] = useState('')
   const [savingRateMemory,setSavingRateMemory] = useState(false)
   async function saveMyRate(){setSavingRateMemory(true);try{const res=await fetch('/api/quotes/'+item.quote_id+'/line-items/'+item.id+'/save-rate',{method:'POST'});const result=await res.json();setRateSaveMessage(res.ok?'Saved to your rates for matching future work.':result.error)}catch{setRateSaveMessage('Could not save your rate. Please retry.')}finally{setSavingRateMemory(false)}}
@@ -441,7 +448,7 @@ function LineItemRow({ item, canEdit, onSetRate, onExclude, onEditItem, onDelete
   }
 
   // ── Full edit / delete — every field, any line item ────────────────────
-  const [editingItem, setEditingItem] = useState(false)
+  const [editingItem, setEditingItem] = useState(initiallyEditing && Boolean(canEdit && onEditItem))
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
   const [editFields, setEditFields] = useState<EditItemFields>({
@@ -1161,21 +1168,7 @@ function SummaryCard({ summary }: SummaryCardProps) {
           <div className="flex justify-between font-semibold"><span>Including GST - priced portion</span><span>{formatCurrency(summary.grand_total ?? 0)}</span></div>
           {summary.readiness !== 'ready' && <p>Unresolved prices are excluded from these figures. This is not a final contract price.</p>}
         </div>}
-        <div
-          className="flex items-center justify-between px-4 py-2.5"
-          style={{ borderBottom: summary.unresolved_count > 0 || summary.assumption_count > 0 ? '1px solid var(--bg-border)' : undefined }}
-        >
-          <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>Confidence</span>
-          <div className="flex items-center gap-2">
-            <OverallConfidenceBadge score={summary.confidence_score} />
-            <span className="text-[11px] hidden sm:inline" style={{ color: 'var(--text-tertiary)' }}>{confidenceLabel}</span>
-          </div>
-        </div>
-        <ConfidenceSplit
-          pricingConfidence={summary.confidence_score}
-          scopeConfidence={summary.scope_confidence}
-          overallConfidence={summary.overall_estimate_confidence}
-        />
+        <details className="px-4 py-3 text-sm"><summary className="cursor-pointer">How WorkA assessed this estimate</summary><p className="mt-2" style={{color:'var(--text-secondary)'}}>These scores describe the available evidence, not a guarantee of price accuracy. Review missing prices, quantities and assumptions before sending.</p><ConfidenceSplit pricingConfidence={summary.confidence_score} scopeConfidence={summary.scope_confidence} overallConfidence={summary.overall_estimate_confidence} /></details>
         {/* Readiness banner — the one answer to "can I send this?" */}
         {summary.readiness === 'blocked' && (
           <div className="px-4 py-2.5" style={{ backgroundColor: 'rgba(244,67,54,0.08)' }}>
@@ -1415,7 +1408,7 @@ const COVERAGE_BANNER_STYLE: Record<'ready' | 'warning' | 'review', { border: st
     border: '1px solid rgba(76,175,80,0.3)',
     bg: 'rgba(76,175,80,0.08)',
     text: 'var(--status-green)',
-    headline: 'Estimate generated from complete project documentation.',
+    headline: 'All uploaded files processed. Review scope and prices before sending.',
   },
   warning: {
     border: '1px solid rgba(255,152,0,0.3)',
@@ -1792,7 +1785,7 @@ function QuoteViewInner({
   const [sentAt, setSentAt] = useState<string | null>(null)
   const [estimateStatus, setEstimateStatus] = useState<EstimateStatusPayload | null>(null)
 
-  // Set of expanded category IDs — all start expanded
+  // Keep the full trade breakdown collapsed; the review queue leads the work.
   const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
 
   const overlayRef = useRef<HTMLDivElement>(null)
@@ -1889,11 +1882,11 @@ function QuoteViewInner({
           )
         }
       }
-      // Expand all categories by default — but only on first load, so a
+      // Initialise the collapsed breakdown only on first load, so a
       // refetch after a fix doesn't blow away the builder's collapse state.
       if (firstLoadRef.current) {
         firstLoadRef.current = false
-        const allIds = new Set(json.line_items_by_category.map((g) => g.category_id))
+        const allIds = new Set<number>()
         setExpandedCategories(allIds)
       }
     } catch {
@@ -2114,7 +2107,7 @@ function QuoteViewInner({
                     Draft
                   </span>
                 )}
-                {data && !sentAt && <OverallConfidenceBadge score={data.quote.confidence_score} />}
+
                 {sentAt && (
                   <span
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold"

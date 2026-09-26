@@ -4,6 +4,7 @@ const http = require('node:http'),
   crypto = require('node:crypto'),
   { spawn } = require('node:child_process'),
   path = require('node:path')
+const PREVIEW_PORT=Number(process.env.PREVIEW_PORT||3221),FIXTURE_PORT=Number(process.env.FIXTURE_PORT||3222)
 const builder = '10000000-0000-4000-8000-000000000001',
   job = '20000000-0000-4000-8000-000000000001',
   quote = '30000000-0000-4000-8000-000000000001',
@@ -86,6 +87,9 @@ const items = [
   },
 ]
 const db = {
+  job_workflow_records: [], job_workflow_events: [], estimate_source_sets: [],
+  files:[{id:'60000000-0000-4000-8000-000000000001',job_id:job,builder_id:builder,filename:'DEMONSTRATION issued alterations plans.pdf',drawing_state:'current',intake_status:'extracted',created_at:now}],
+  project_facts:[{id:'61000000-0000-4000-8000-000000000001',job_id:job,category:'builder_answer',key:'Tile allowance installation',value:'Supply only; installation priced separately.',evidence:'DEMONSTRATION builder confirmation',review_required:false,superseded:false,created_at:now}],
   job_control_plans: [],
   worker_compliance_records: [],
   workers: [{id:'70000000-0000-4000-8000-000000000001',builder_id:builder,name:'Sample supervisor',status:'active'}],
@@ -226,6 +230,8 @@ function matches(row, params) {
   for (const [k, v] of params) {
     if (['select', 'order', 'offset', 'limit', 'on_conflict'].includes(k)) continue
     if (v.startsWith('eq.') && String(row[k]) !== v.slice(3)) return false
+    if (v.startsWith('neq.') && String(row[k]) === v.slice(4)) return false
+    if (v.startsWith('ilike.') && !String(row[k] ?? '').toLowerCase().includes(v.slice(6).replace(/^%|%$/g, '').toLowerCase())) return false
     if (v === 'is.null' && row[k] != null) return false
   }
   return true
@@ -261,6 +267,18 @@ const server = http.createServer(async (req, res) => {
   const name = url.pathname.slice('/rest/v1/'.length)
   if (name.startsWith('rpc/')) {
     const rpc = name.slice(4)
+    // UI-only fixture. Real transition/permission behaviour is exercised in test-connected-job-db.cjs.
+    if(rpc==='save_job_workflow'){
+      if(body.p_builder!==builder||!db.jobs.some(j=>j.id===body.p_job&&j.builder_id===builder))return json(res,403,{message:'Job not found'})
+      let r=db.job_workflow_records.find(r=>r.id===body.p_id&&r.job_id===body.p_job&&r.builder_id===builder)
+      if(body.p_action==='save'){
+        if(r&&r.version!==body.p_version)return json(res,409,{message:'This record changed. Reload and review.'})
+        if(!r){r={id:body.p_id,job_id:body.p_job,builder_id:builder,status:'draft',version:0,created_at:now};db.job_workflow_records.push(r)}
+        Object.assign(r,{kind:body.p_kind,title:body.p_title,payload:body.p_payload,result:body.p_result,basis_revision:body.p_basis,version:r.version+1,updated_at:now})
+      }else{return json(res,409,{message:'UI fixture: financial approval is intentionally disabled. SQL approvals are tested separately.'})}
+      return json(res,200,r)
+    }
+
     if(rpc==='save_job_control_plan'){
       if(body.p_builder!==builder||body.p_job!==job)return json(res,400,{message:'Job not found'})
       if(body.p_revision!==0)return json(res,400,{message:'Financial records changed. Refresh and review again'})
@@ -417,7 +435,7 @@ const server = http.createServer(async (req, res) => {
   if (req.headers.accept?.includes('vnd.pgrst.object')) return json(res, 200, output[0])
   json(res, 200, output)
 })
-server.listen(3222, '127.0.0.1', () => {
+server.listen(FIXTURE_PORT, '127.0.0.1', () => {
   const child = spawn(
     process.execPath,
     [
@@ -426,7 +444,7 @@ server.listen(3222, '127.0.0.1', () => {
       '--hostname',
       '127.0.0.1',
       '--port',
-      '3221',
+      String(PREVIEW_PORT),
     ],
     {
       cwd: path.join(__dirname, '..'),
@@ -434,14 +452,14 @@ server.listen(3222, '127.0.0.1', () => {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        NEXT_PUBLIC_SUPABASE_URL: 'http://127.0.0.1:3222',
+        NEXT_PUBLIC_SUPABASE_URL: `http://127.0.0.1:${FIXTURE_PORT}`,
         NEXT_PUBLIC_SUPABASE_ANON_KEY: 'local-fixture-anon',
         SUPABASE_SERVICE_ROLE_KEY: 'local-fixture-service',
         ANTHROPIC_API_KEY: '',
         OPENAI_API_KEY: '',
         RESEND_API_KEY: '',
         XERO_ENABLED: 'false',
-        NEXT_PUBLIC_APP_URL: 'http://127.0.0.1:3221',
+        NEXT_PUBLIC_APP_URL: `http://127.0.0.1:${PREVIEW_PORT}`,
       },
     },
   )

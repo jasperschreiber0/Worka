@@ -6,6 +6,8 @@ import { useRouter } from 'next/navigation'
 import type { loadProfitControl } from '@/lib/profit-control-data'
 import { targetMarkup } from '@/lib/today'
 import './today.css'
+import '@/components/profitability/profitability.css'
+import TodayActions from '@/components/jobs/TodayActions'
 
 type Data = Awaited<ReturnType<typeof loadProfitControl>>
 const money = (n: number | null) => n === null ? 'Not confirmed' : new Intl.NumberFormat('en-AU', {style:'currency',currency:'AUD',maximumFractionDigits:0}).format(n)
@@ -47,31 +49,15 @@ export default function TodayControl() {
     {done:Boolean(data.cash?.complete && data.cash.startOn && !data.exceptions.some(e=>e.id==='cash:review')),title:'Plan the next 13 weeks of cash',detail:'Enter opening cash, expected receipts and payments. An accounting connection is optional; these figures are a manual plan.',href:'/business#cash-flow',action:'Enter cash plan'},
   ] : []
   const incomplete = setup.filter(s=>!s.done)
-  const entries = data?.exceptions ?? []
+  const quotingJobs = data?.jobs.filter(j => j.status === 'quoting' || j.status === 'quoted') ?? []
+  const entries = (data?.exceptions ?? []).filter(e => e.id !== 'business:profile' && e.id !== 'cash:missing' && !quotingJobs.some(j => e.id === `${j.id}:incomplete`))
   return <main className="worka-today">
     <header className="today-heading"><div><h1>Today</h1><p>{data ? new Date(data.generatedAt).toLocaleDateString('en-AU',{timeZone:'Australia/Sydney',weekday:'long',day:'numeric',month:'long'}) : 'Your business, jobs and next actions'}</p></div><Link className="today-primary" href="/jobs?new=1">New job</Link></header>
+    <section className="today-setup" aria-labelledby="start-title"><h2 id="start-title">What are you working on?</h2><p>Start a job with its address and plans, or pick up where you left off.</p><div className="flex flex-wrap gap-3 mt-4"><Link className="today-primary" href="/jobs?new=1">Upload plans for a new job</Link><Link className="today-secondary" href="/jobs">Open my jobs →</Link></div>{quotingJobs.length>0&&<div className="mt-5"><h3>Continue an estimate</h3>{quotingJobs.slice(0,3).map(j=><Link className="block py-3" key={j.id} href={`/jobs/${j.id}`}>{j.address} →</Link>)}</div>}</section>
+    <div className="pi !p-0"><TodayActions /></div>
     {error && <div role="alert" className="today-error"><p>{error} {data && 'Previously loaded figures may be out of date.'}</p><button disabled={loading} onClick={load}>Try again</button></div>}
     {!data && loading && <p role="status">Loading your profit picture…</p>}
     {data && <>
-      {incomplete.length>0 && <section className="today-setup" aria-labelledby="setup-title">
-        <div className="today-section-heading"><div><span className="today-eyebrow">YOUR PROFIT PICTURE</span><h2 id="setup-title">{setup.every(s=>!s.done)?'Get the numbers working for you':'Complete your profit picture'}</h2></div><span>{setup.length-incomplete.length} of {setup.length} ready</span></div>
-        <p>Keep estimating and managing jobs while you complete these steps. WorkA shows what is known and what still needs your review.</p>
-        <ol>{setup.map((s,i)=><li key={s.title}><span className={s.done?'today-step done':'today-step'} aria-label={s.done?'Complete':`Step ${i+1}`}>{s.done?'✓':i+1}</span><div><h3>{s.title}</h3><p>{s.detail}</p>{!s.done && <Link href={s.href}>{s.action} →</Link>}</div></li>)}</ol>
-      </section>}
-
-      <section className="today-hero" aria-labelledby="forecast-title">
-        <div className="today-section-heading"><h2 id="forecast-title">Forecast gross profit</h2><span className="today-tag">Confirmed open-job forecasts</span></div>
-        <div className={`today-figure ${data.totals.forecastProfit===null?'unconfirmed':data.totals.forecastProfit<0?'negative':''}`}>{money(data.totals.forecastProfit)}<span>before business overhead and tax</span></div>
-        <p>{data.totals.confirmed} of {data.totals.active} open jobs have confirmed forecasts. These figures cover each job’s full duration, including quoting jobs, and are not profit earned this financial year.</p>
-        <div className="today-coverage" role="progressbar" aria-label="Open jobs with confirmed forecasts" aria-valuemin={0} aria-valuemax={Math.max(1,data.totals.active)} aria-valuenow={data.totals.confirmed}><span style={{width:`${data.totals.active?data.totals.confirmed/data.totals.active*100:0}%`}}/></div>
-        <div className="today-hero-foot"><span>{money(data.totals.leakage)} forecast profit reduction against original estimates</span><Link href="/business">Review job forecasts →</Link></div>
-      </section>
-
-      <section className="today-pricing" aria-label="Your pricing target"><div>
-        {markup!==null && business ? <><p>At your planning revenue of <strong>{money(business.revenue)}</strong>, overheads need <strong>{pct(business.minimumMargin)}</strong> of sales. Your profit target requires <strong>{pct(business.targetMargin)} gross margin</strong> — equivalent to <strong>{pct(markup)} markup on cost</strong>.</p>
-          <details><summary>How this is calculated</summary><p>Required margin = (annual overheads + target profit) ÷ planning revenue. Markup = margin ÷ (100 − margin) × 100. These are business planning targets, not your measured average quote pricing.</p><p>Annual overheads: {money(business.overhead)} · Target profit: {money(business.targetProfit)}. Quote figures exclude GST.</p></details></> : <p>What should you charge? Set your overheads, planning revenue and profit target to calculate the margin your prices need to cover.</p>}
-      </div><Link className="today-secondary" href="/business#financial-profile">Review pricing</Link></section>
-
       <section className="today-metrics" aria-label="Business indicators">
         {[
           {label:'Active jobs',value:String(data.operations.activeJobs),detail:'Jobs currently marked active',href:'/jobs'},
@@ -96,6 +82,27 @@ export default function TodayControl() {
           </details>
         })}
       </section>
+      <details className="today-setup"><summary className="cursor-pointer font-semibold">Business planning and profit forecasts</summary><p className="mt-3">Complete these when you are ready to plan business profit and cash.</p>
+      {incomplete.length>0 && <section className="today-setup" aria-labelledby="setup-title">
+        <div className="today-section-heading"><div><span className="today-eyebrow">YOUR PROFIT PICTURE</span><h2 id="setup-title">{setup.every(s=>!s.done)?'Get the numbers working for you':'Complete your profit picture'}</h2></div><span>{setup.length-incomplete.length} of {setup.length} ready</span></div>
+        <p>Keep estimating and managing jobs while you complete these steps. WorkA shows what is known and what still needs your review.</p>
+        <ol>{setup.map((s,i)=><li key={s.title}><span className={s.done?'today-step done':'today-step'} aria-label={s.done?'Complete':`Step ${i+1}`}>{s.done?'✓':i+1}</span><div><h3>{s.title}</h3><p>{s.detail}</p>{!s.done && <Link href={s.href}>{s.action} →</Link>}</div></li>)}</ol>
+      </section>}
+
+      <section className="today-hero" aria-labelledby="forecast-title">
+        <div className="today-section-heading"><h2 id="forecast-title">Forecast gross profit</h2><span className="today-tag">Confirmed open-job forecasts</span></div>
+        <div className={`today-figure ${data.totals.forecastProfit===null?'unconfirmed':data.totals.forecastProfit<0?'negative':''}`}>{money(data.totals.forecastProfit)}<span>before business overhead and tax</span></div>
+        <p>{data.totals.confirmed} of {data.totals.active} open jobs have confirmed forecasts. These figures cover each job’s full duration, including quoting jobs, and are not profit earned this financial year.</p>
+        <div className="today-coverage" role="progressbar" aria-label="Open jobs with confirmed forecasts" aria-valuemin={0} aria-valuemax={Math.max(1,data.totals.active)} aria-valuenow={data.totals.confirmed}><span style={{width:`${data.totals.active?data.totals.confirmed/data.totals.active*100:0}%`}}/></div>
+        <div className="today-hero-foot"><span>{money(data.totals.leakage)} forecast profit reduction against original estimates</span><Link href="/business">Review job forecasts →</Link></div>
+      </section>
+
+      <section className="today-pricing" aria-label="Your pricing target"><div>
+        {markup!==null && business ? <><p>At your planning revenue of <strong>{money(business.revenue)}</strong>, overheads need <strong>{pct(business.minimumMargin)}</strong> of sales. Your profit target requires <strong>{pct(business.targetMargin)} gross margin</strong> — equivalent to <strong>{pct(markup)} markup on cost</strong>.</p>
+          <details><summary>How this is calculated</summary><p>Required margin = (annual overheads + target profit) ÷ planning revenue. Markup = margin ÷ (100 − margin) × 100. These are business planning targets, not your measured average quote pricing.</p><p>Annual overheads: {money(business.overhead)} · Target profit: {money(business.targetProfit)}. Quote figures exclude GST.</p></details></> : <p>What should you charge? Set your overheads, planning revenue and profit target to calculate the margin your prices need to cover.</p>}
+      </div><Link className="today-secondary" href="/business#financial-profile">Review pricing</Link></section>
+
+      </details>
       <footer className="today-freshness"><span>Refreshed {new Date(data.generatedAt).toLocaleTimeString('en-AU',{hour:'numeric',minute:'2-digit'})} · Manual records and confirmed forecasts</span><button disabled={loading} onClick={load}>{loading?'Refreshing…':'Refresh'}</button></footer>
     </>}
     <div className="today-ask"><form onSubmit={ask}><span className="today-mark" aria-hidden="true">W</span><label className="sr-only" htmlFor="today-question">Draft a question for WorkA</label><input id="today-question" maxLength={2000} value={question} onChange={e=>setQuestion(e.target.value)} placeholder="Ask WorkA about your jobs…"/><button disabled={!question.trim()} type="submit">Open draft →</button></form><small>Review and send your question in <Link href="/chat">Ask WorkA</Link>.</small>{askError && <p role="alert">{askError}</p>}</div>

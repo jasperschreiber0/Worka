@@ -47,7 +47,7 @@ export default function VariationsListView() {
   useEffect(() => { load() }, [load])
 
   function openVariation(v: VariationItem) {
-    router.push(`/jobs/${v.job_id}`)
+    router.push(`/variations/${v.id}/review`)
   }
 
   return (

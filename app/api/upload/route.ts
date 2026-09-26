@@ -48,7 +48,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  let body: { job_id?: string; filename?: string; content_type?: string; size?: number; upload_batch_id?: string }
+  let body: { job_id?: string; filename?: string; content_type?: string; size?: number; upload_batch_id?: string; upload_client_key?: string }
   try {
     body = await req.json()
   } catch {
@@ -92,8 +92,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ error: 'Job not found' }, { status: 404 })
       }
 
-      const storagePath = uniqueStoragePath(builder_id, job_id, filename)
+      const clientKey = body.upload_client_key
+      if(clientKey && (typeof clientKey!=='string'||clientKey.length>160))return NextResponse.json({error:'Invalid upload request'},{status:400})
+      const {data:reserved}=clientKey?await supabase.from('files').select('*').eq('job_id',job_id).eq('builder_id',builder_id).eq('upload_client_key',clientKey).maybeSingle():{data:null}
+      if(reserved && reserved.filename!==filename)return NextResponse.json({error:'Upload request changed. Select this file again.'},{status:409})
+      if(reserved?.content_hash)return NextResponse.json({file:reserved,upload_url:null,content_type:mimeType})
+      const storagePath = reserved?.storage_path ?? uniqueStoragePath(builder_id, job_id, filename)
 
+      if(reserved){
+        const {data:uploaded}=await supabase.storage.from('plans').download(storagePath)
+        if(uploaded)return NextResponse.json({file:reserved,upload_url:null,content_type:mimeType})
+      }
       // Create signed upload URL first — if storage isn't set up this will error
       const { data: signData, error: signError } = await supabase.storage
         .from('plans')
@@ -103,11 +112,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const msg = signError?.message ?? 'Could not create upload URL'
         console.error('Signed URL error:', msg)
         return NextResponse.json(
-          { error: `Storage error: ${msg}. Ensure the "plans" bucket exists in Supabase Storage.` },
+          { error: 'Could not prepare the upload. Your selected files are retained; please retry.' },
           { status: 500 }
         )
       }
 
+      if(reserved)return NextResponse.json({file:reserved,upload_url:signData.signedUrl,content_type:mimeType})
       // Insert DB record
       const { data: fileRow, error: dbError } = await supabase
         .from('files')
@@ -120,6 +130,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           file_type: detectFileType(filename),
           intake_status: 'uploaded' as FileIntakeStatus,
           upload_batch_id: upload_batch_id ?? null,
+          drawing_state: 'unresolved',
+          upload_client_key: clientKey ?? null,
         })
         .select()
         .single()
@@ -127,7 +139,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (dbError || !fileRow) {
         const msg = (dbError as { message?: string } | null)?.message ?? 'unknown'
         console.error('DB insert error:', msg)
-        return NextResponse.json({ error: `Database error: ${msg}` }, { status: 500 })
+        return NextResponse.json({ error: 'Could not save the upload request. Please retry.' }, { status: 500 })
       }
 
       return NextResponse.json(
@@ -137,7 +149,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error('Upload error:', msg)
-      return NextResponse.json({ error: `Upload failed: ${msg}` }, { status: 500 })
+      return NextResponse.json({ error: 'Upload failed. Your selected files are retained; please retry.' }, { status: 500 })
     }
   }
 

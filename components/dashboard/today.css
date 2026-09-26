@@ -26,3 +26,6 @@
 .today-error{padding:16px;border:1px solid var(--status-red);border-radius:10px;margin-bottom:20px}.worka-today button:disabled{opacity:.5;cursor:wait}.worka-today a:focus-visible,.worka-today button:focus-visible,.worka-today summary:focus-visible{outline:2px solid var(--orange-primary);outline-offset:3px}
 @media(max-width:1050px){.today-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.today-setup ol{grid-template-columns:1fr;gap:16px}}
 @media(max-width:600px){.worka-today{padding:20px 16px}.today-figure{font-size:34px}.today-hero,.today-setup{padding:18px}.today-pricing{align-items:flex-start;flex-direction:column;gap:12px}.today-attention article{flex-wrap:wrap;padding:14px}.today-attention .today-secondary{margin-left:21px;max-width:100%}.today-section-heading{align-items:flex-start}.today-metric{padding:12px}.today-ask form{gap:8px}.today-ask input{font-size:14px}}
+
+.today-setup a.today-primary{color:#180800;min-height:44px}
+.today-setup h2{font-size:20px;font-weight:600}

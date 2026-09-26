@@ -11,6 +11,7 @@ import {
 import { Card, Field, Metrics, money, pct, api } from './ui'
 import './profitability.css'
 import ProfitControl from './ProfitControl'
+import TodayActions from '@/components/jobs/TodayActions'
 import CashFlowPlanner from './CashFlowPlanner'
 const BUSINESS_VIEWS: Record<string, string> = { Overview: '#overview', 'Financial profile': '#financial-profile', '13-week cash flow': '#cash-flow' }
 export default function BusinessControl() {
@@ -105,12 +106,13 @@ export default function BusinessControl() {
       </nav>
       {tab === 'Overview' && (
         <>
+          <TodayActions />
           <ProfitControl />
           <div className="pi-hero">
             <Metrics
               values={[
-                ['Revenue target', money(calc?.revenue)],
-                ['Monthly overhead', money(calc?.monthlyOverhead)],
+                ['Revenue target', money(loaded?calc?.revenue:null)],
+                ['Monthly overhead', money(loaded?calc?.monthlyOverhead:null)],
                 ['Required gross margin', pct(calc?.targetMargin)],
                 ['Known margin at risk', money(risk)],
               ]}
@@ -124,7 +126,7 @@ export default function BusinessControl() {
             <p className="muted mb-3">
               Your estimate said one thing. Your actuals said another. WorkA shows you why.
             </p>
-            {jobs.length === 0 ? (
+            {!loaded ? <p>Job records have not finished loading.</p> : jobs.length === 0 ? (
               <p>
                 No saved jobs yet. <Link href="/jobs?new=1">Create a job and upload plans →</Link>
               </p>

@@ -129,12 +129,12 @@ const CARD_STYLE: React.CSSProperties = {
 }
 
 const WorkspaceSection = React.createContext<'overview' | 'money' | 'files' | undefined>(undefined)
-const MONEY_SECTIONS = ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Needs your input', 'Worth knowing', 'Questions & answers', 'Pending']
+const MONEY_SECTIONS = ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Pending']
 
 function SectionGroup({ label, children }: { label: string; children?: React.ReactNode }) {
   const section = React.useContext(WorkspaceSection)
   if (section === 'files' || (section === 'money' && !MONEY_SECTIONS.includes(label)) || (section === 'overview' && ['Money', 'Money detail', 'Invoicing', 'Actual costs', 'Worth knowing'].includes(label))) return null
-  if (section === 'overview' && ['Client', 'Timeline', 'Crew on site', 'Comms', 'Proof trail'].includes(label)) {
+  if (section === 'overview' && ['Client', 'Timeline', 'Crew on site', 'Comms', 'Proof trail', 'Questions & answers'].includes(label)) {
     return <details className="mb-4 rounded-md" style={{ background: 'var(--bg-elevated)' }}>
       <summary className="p-4 cursor-pointer text-sm font-medium">{label === 'Comms' ? 'Messages' : label === 'Proof trail' ? 'Activity record' : label}</summary>
       <div className="px-4 pb-4">{children}</div>
@@ -545,23 +545,10 @@ export default function JobSnapshotPanel({
   }, [job, onClose])
 
   const handleVariationResolve = useCallback(
-    async (variationId: string, action: 'approved' | 'rejected') => {
-      setVariationActionError(null)
-      try {
-        const res = await fetch(`/api/variations/${variationId}/resolve`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action }),
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error ?? `Couldn't ${action === 'approved' ? 'approve' : 'reject'} variation`)
-        setOpenVariationId(null)
-        if (job) await fetchSnapshot(job.id)
-      } catch (err) {
-        setVariationActionError(err instanceof Error ? err.message : 'Something went wrong — try again.')
-      }
+    async (variationId: string, _action: 'approved' | 'rejected') => {
+      window.location.assign(`/variations/${variationId}/review`)
     },
-    [job, fetchSnapshot]
+    []
   )
 
   const handleActivated = useCallback(
@@ -659,7 +646,9 @@ export default function JobSnapshotPanel({
   // this component does not recompute or cache a second copy of any of them.
   const budgetEstimate = snapshot?.job.budget_estimate ?? null
   const estimatedCost = snapshot?.quote?.total_cost ?? null // internal cost basis — distinct from contract value
-  const contractValue = snapshot?.overview.contract_value ?? null // canonical client-facing price
+  const hasAgreedQuote = snapshot?.quote?.status === 'approved'
+  const contractValue = hasAgreedQuote ? snapshot?.overview.contract_value ?? null : null
+  const draftPrice = !hasAgreedQuote ? snapshot?.overview.contract_value ?? null : null
   const invoicedPct =
     contractValue && contractValue > 0 ? Math.min(100, Math.round((invoicedTotal / contractValue) * 100)) : null
   const actualCostLogged = snapshot?.overview.actual_cost ?? 0
@@ -690,7 +679,7 @@ export default function JobSnapshotPanel({
             if (!snapshot?.quote) {
               return snapshot?.files.length ? { label: 'Plans saved — estimate not yet ready', timing: null, isUploadCta: false } : { label: 'Upload plans to start', timing: null, isUploadCta: true }
             }
-            return { label: 'Send quote', timing: snapshot?.job.quote_deadline ?? null, isUploadCta: false }
+            return { label: 'Review estimate and missing inputs', timing: snapshot?.job.quote_deadline ?? null, isUploadCta: false }
           }
           if (displayStatus === 'quoted') {
             return {
@@ -1018,7 +1007,7 @@ export default function JobSnapshotPanel({
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Missing information</span>
                   <span style={{ fontSize: 12, fontWeight: 500, color: unresolvedCount > 0 ? 'var(--status-amber)' : 'var(--text-primary)' }}>
-                    {unresolvedCount > 0 ? `${unresolvedCount} item${unresolvedCount === 1 ? '' : 's'}` : 'Nothing missing'}
+                    {!snapshot?.quote?.id ? 'Upload plans to identify what is needed' : unresolvedCount > 0 ? `${unresolvedCount} item${unresolvedCount === 1 ? '' : 's'}` : 'No open estimate questions'}
                   </span>
                 </div>
                 {/* Next AI action — either the big upload CTA, or a compact accented row */}
@@ -1052,7 +1041,7 @@ export default function JobSnapshotPanel({
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Next</span>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--orange-primary)' }}>{nextAction.label}</span>
+                      {displayStatus === 'quoting' && snapshot?.quote?.id && onViewQuote ? <button type="button" className="py-3 text-sm font-semibold" style={{color:'var(--orange-primary)'}} onClick={()=>onViewQuote(snapshot.quote!.id!)}>{nextAction.label} →</button> : <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--orange-primary)' }}>{nextAction.label}</span>}
                       {nextAction.timing && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{nextAction.timing}</span>}
                     </span>
                   </div>
@@ -1085,6 +1074,7 @@ export default function JobSnapshotPanel({
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Committed costs</span>
                   <span className="animate-number-in" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{formatAUD(committedCost)}</span>
                 </div>
+                {draftPrice != null && <p className="text-sm mb-3">Draft priced portion: {formatAUD(draftPrice)} ex GST. Subject to scope and price review; not an agreed contract.</p>}
                 {contractValue != null && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                     <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Contract value</span>
@@ -1102,29 +1092,7 @@ export default function JobSnapshotPanel({
                   </div>
                 )}
                 <p className="text-xs mb-3" style={{ color: 'var(--text-secondary)' }}>Forecast incomplete until remaining work, labour and outstanding commitments are reconciled. Only enter remaining allowances for work not already included in actual or committed costs.</p>
-                {/* Current margin — the headline figure of this whole section */}
-                {currentMargin != null && (
-                  <div
-                    style={{
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      padding: '10px 12px', borderRadius: 8,
-                      backgroundColor: 'var(--bg-elevated)',
-                    }}
-                  >
-                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Contract less logged costs</span>
-                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-                      <span className="animate-number-in" style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
-                        {formatAUD(animatedCurrentMargin)}
-                      </span>
-                      {currentMarginPct != null && (
-                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentMarginPct}%</span>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {currentMargin == null && (
-                  <p style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: 0 }}>Create an estimate to see the job’s starting figures.</p>
-                )}
+                <p className="text-sm" style={{color:"var(--text-secondary)"}}>Profit is not confirmed here. Review the costs to finish in Job profit and actual costs.</p>
                 {/* Job Closeout v1 — only while the job is active (forward-only:
                     hidden for quoting/quoted/complete/archived, and doubles as
                     the UI-level guard against a duplicate close attempt once

@@ -1085,43 +1085,12 @@ export default function ChatInterface({
 
   // Handler: approve variation from chat card — POST resolve then open notification modal
   const handleVariationApprove = useCallback(async (variationId: string) => {
-    // POST to resolve endpoint
-    try {
-      await fetch(`/api/variations/${variationId}/resolve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          builder_id: builderId,
-          action: 'approved',
-        }),
-      })
-    } catch {
-      // Proceed to modal even if resolve call fails (card already updated optimistically)
-    }
-    setActiveVariationModal({ variationId })
+    window.location.assign(`/variations/${variationId}/review`)
   }, [])
 
-  // Handler: reject variation from chat card — POST resolve, append confirmation
+  // Decisions require a dated evidence record in the review screen.
   const handleVariationReject = useCallback(async (variationId: string) => {
-    try {
-      await fetch(`/api/variations/${variationId}/resolve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          builder_id: builderId,
-          action: 'rejected',
-        }),
-      })
-    } catch {
-      // Optimistic UI — card already updated
-    }
-    const confirmMessage: Message = {
-      id: generateId(),
-      role: 'assistant',
-      content: 'Variation rejected. No notification has been sent to the client.',
-      timestamp: new Date(),
-    }
-    setMessages((prev) => [...prev, confirmMessage])
+    window.location.assign(`/variations/${variationId}/review`)
   }, [])
 
   // Handler: email draft sent — append confirmation message

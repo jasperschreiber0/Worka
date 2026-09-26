@@ -197,6 +197,7 @@ async function executeFactQuery(sb: SupabaseClient, jobId: string, spec: FactQue
     .eq('job_id', jobId)
     .eq('superseded', spec.superseded)
 
+  if (!spec.superseded) query=query.eq('review_required',false)
   if (spec.categoryIn) query = query.in('category', spec.categoryIn)
   if (spec.categoryNotIn) query = query.not('category', 'in', `(${spec.categoryNotIn.map((c) => `"${c}"`).join(',')})`)
 

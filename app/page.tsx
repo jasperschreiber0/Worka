@@ -98,9 +98,9 @@ export default function HomePage() {
                   />
                 </svg>
               </div>
-              <h2 className="text-lg font-bold text-slate-900 mb-2">Quote in minutes</h2>
+              <h2 className="text-lg font-bold text-slate-900 mb-2">Start with an estimate draft</h2>
               <p className="text-sm text-slate-500 leading-relaxed">
-                Upload plans. AI extracts quantities across 13 trade categories. Your rates applied automatically.
+                Upload plans. AI extracts quantities across 13 trade categories. Review quantities, assumptions and suggested rates before quoting.
               </p>
             </div>
 
@@ -146,7 +146,7 @@ export default function HomePage() {
                   />
                 </svg>
               </div>
-              <h2 className="text-lg font-bold text-slate-900 mb-2">Full job in one click</h2>
+              <h2 className="text-lg font-bold text-slate-900 mb-2">Keep the job together</h2>
               <p className="text-sm text-slate-500 leading-relaxed">
                 Quote → variations → invoices → audit trail. All in one place. Activate a job the moment your client says yes.
               </p>
@@ -303,7 +303,7 @@ export default function HomePage() {
       {/* ── Footer ───────────────────────────────────────────────────────────── */}
       <footer className="border-t border-slate-100 py-8">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-slate-400">
-          <span>&copy; 2025 WorkA — Built for Australian residential builders</span>
+          <span>&copy; 2026 WorkA — Built for Australian residential builders</span>
           <div className="flex items-center gap-4">
             <a href="/privacy" className="hover:text-slate-600 transition-colors">
               Privacy

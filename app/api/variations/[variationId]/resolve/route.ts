@@ -11,6 +11,8 @@ import { shouldLogContractApplicationFailure } from '@/lib/variation-approval'
 
 interface ResolveRequestBody {
   action: 'approved' | 'rejected'
+  approval_date?: string
+  evidence?: string
 }
 
 interface NotificationDraft {
@@ -82,6 +84,8 @@ export async function POST(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  if (!body.approval_date || !/^\d{4}-\d{2}-\d{2}$/.test(body.approval_date) || !body.evidence || body.evidence.trim().length < 10) return NextResponse.json({error:'Record the client decision date and supporting evidence first.'},{status:400})
+
   const { variationId } = await params
   const now = new Date().toISOString()
 
@@ -117,7 +121,7 @@ export async function POST(
     })
 
     const notificationDraft =
-      action === 'approved' ? buildNotificationDraft(updated, 'Dave Nguyen', 'Dave Nguyen Building') : null
+      action === 'approved' ? buildNotificationDraft(updated, '', '') : null
 
     return NextResponse.json({
       variation: updated,
@@ -135,17 +139,12 @@ export async function POST(
   }
   const sb = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
 
-  // Atomic, forward-only update — only succeeds while still draft/pending.
-  const { data: updatedRows, error } = await sb
-    .from('variations')
-    .update({ status: action, approved_at: action === 'approved' ? now : null, approved_by: action === 'approved' ? builderId : null })
-    .eq('id', variationId)
-    .eq('builder_id', builderId)
-    .in('status', ['draft', 'pending'])
-    .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by, trade_category_id')
+  const {data:decided,error}=await sb.rpc('record_variation_decision',{p_builder:builderId,p_id:variationId,p_action:action,p_date:body.approval_date,p_evidence:body.evidence})
+  if(error)return NextResponse.json({error:error.message},{status:409})
+  const updatedRows=decided?[decided]:[]
 
   const updatedRow = (updatedRows as (DemoVariation & { variation_ref: string | null; trade_category_id: number | null })[] | null)?.[0]
-  if (error || !updatedRow) {
+  if (!updatedRow) {
     const { data: existing } = await sb
       .from('variations')
       .select('status')
@@ -168,11 +167,11 @@ export async function POST(
     builderId,
     eventType: action === 'approved' ? 'variation_approved' : 'variation_rejected',
     description: `Variation ${updatedRow.variation_ref ?? updatedRow.id} ${action}: ${updatedRow.title} ($${updatedRow.amount.toLocaleString('en-AU')})`,
-    metadata: { variation_id: updatedRow.id, amount: updatedRow.amount, decided_at: now },
+    metadata: { variation_id: updatedRow.id, amount: updatedRow.amount, decided_at: now, approval_date:body.approval_date, evidence:body.evidence },
   })
 
   const notificationDraft =
-    action === 'approved' ? buildNotificationDraft(updated, 'Dave Nguyen', 'Dave Nguyen Building') : null
+    action === 'approved' ? buildNotificationDraft(updated, '', '') : null
 
   // The financial connection this milestone exists for — only ever attempted
   // when this exact request performed the draft/pending -> approved

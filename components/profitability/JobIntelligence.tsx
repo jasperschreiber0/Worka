@@ -318,10 +318,10 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
             <Metrics
               values={[
                 [
-                  r.complete ? 'Actual gross profit' : 'Gross profit to date',
-                  money(r.actualProfit),
+                  r.complete ? 'Actual gross profit' : 'Profit awaiting review',
+                  r.complete ? money(r.actualProfit) : 'Not confirmed',
                 ],
-                [r.complete ? 'Actual margin' : 'Margin to date', pct(r.actualMargin)],
+                [r.complete ? 'Actual margin' : 'Margin awaiting review', r.complete ? pct(r.actualMargin) : 'Not confirmed'],
                 ['Known margin at risk', money(d.risk.atRisk)],
                 ['Unbilled change costs', money(d.risk.unbilled)],
               ]}
@@ -359,7 +359,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
                   values={[
                     ['Original contract', money(r.originalContract)],
                     ['Approved variations', money(r.approvedVariations)],
-                    ['Final / current revenue', money(r.revenue)],
+                    [r.complete ? 'Confirmed revenue' : 'Revenue basis for review (unconfirmed)', money(r.revenue)],
                     ['Estimated cost', money(r.estimatedCost)],
                     ['Actual cost recorded', money(r.actualCost)],
                     ['Cost variance', `${money(r.variance)} · ${pct(r.variancePct)}`],
@@ -367,7 +367,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
                     ['Expected margin', pct(r.expectedMargin)],
                     [
                       'Margin movement',
-                      r.marginMovement === null
+                      !r.complete || r.marginMovement === null
                         ? 'Not available'
                         : `${r.marginMovement.toFixed(1)} points`,
                     ],
@@ -383,7 +383,7 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
                   <p className="pi-alert">{d.uncostedHours} site hours still need a cost rate.</p>
                 )}
               </Card>
-              <Card title="Where profit moved">
+              {r.complete && <Card title="Where profit moved">
                 <p className="muted">
                   Expected profit + approved variation revenue − trade overruns + trade savings =
                   actual profit. Change costs already in invoices are included once.
@@ -414,8 +414,8 @@ export default function JobIntelligence({ jobId }: { jobId: string }) {
                     </div>
                   ))}
                 </div>
-              </Card>
-              <Card title="Trade variance · largest overruns first">
+              </Card>}
+              <Card title="Estimate versus recorded costs"><p className="muted">{r.complete ? "Completed costs confirmed by builder." : "Partial records only. Differences are not savings or overruns until all work and costs are accounted for."}</p>
                 <div className="pi-scroll">
                   <table>
                     <thead>

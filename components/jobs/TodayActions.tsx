@@ -1,0 +1,12 @@
+'use client'
+import {useEffect,useState} from 'react'
+import Link from 'next/link'
+export default function TodayActions(){
+ const [showAll,setShowAll]=useState(false)
+ const [report,setReport]=useState('')
+ const [data,setData]=useState<any>(null),[error,setError]=useState('')
+ async function load(){setError('');try{const r=await fetch('/api/business/today'),d=await r.json();if(!r.ok)throw Error(d.error);setData(d)}catch(e){setError((e as Error).message)}}
+ useEffect(()=>{void load()},[])
+ const labels:Record<string,string>={client_invoice:'Client invoice due — recorded status',programme:'Planned work',selection:'Client decision',question:'Waiting on an answer',deadline:'Deadline / inspection',site_update:'Site issue',bill:'Recorded bill / credit',purchase_order:'Delivery expected',unsigned_variation:'Unsigned variation',quote:'Quote follow-up',scope_pack:'Trade briefing',trade_quote:'Trade quote'}
+ return <section className="pi-card"><h2>Today and next actions</h2>{error&&<p role="alert">{error} <button onClick={load}>Retry</button></p>}{!data&&!error&&<p>Loading recorded work…</p>}{data&&<><details className="mb-3"><summary>What these actions include</summary><p className="muted">{data.coverage}</p></details>{!data.items.length&&<p>No daily actions recorded yet. Open a job and add its programme, decisions and bills.</p>}<ul>{(showAll?data.items:data.items.slice(0,8)).map((r:any)=><li className="py-3 border-b" key={r.id}><Link href={r.href}><strong>{r.title}</strong> · {r.job} →</Link><p>{labels[r.kind]??r.kind} · {r.status}{r.owner?` · ${r.owner}`:''}{r.due?` · ${new Date(r.due+'T12:00:00').toLocaleDateString('en-AU')}${r.due<data.today?' — overdue':''}`:''}{r.amount!=null?` · ${Number(r.amount).toLocaleString('en-AU',{style:'currency',currency:'AUD'})} ex GST`:''}</p>{r.blockers?.length>0&&<p>Waiting on: {r.blockers.join(', ')}</p>}</li>)}</ul>{data.items.length>8&&<button onClick={()=>setShowAll(!showAll)}>{showAll?'Show fewer':`Show all ${data.items.length} recorded actions`}</button>}</>}<details><summary>Weekly sales activity draft</summary><button onClick={async()=>{try{const r=await fetch('/api/business/weekly-summary'),d=await r.json();if(!r.ok)throw Error(d.error);setReport(d.report)}catch(e){setError((e as Error).message)}}}>Generate from recorded activity</button>{report&&<textarea aria-label="Weekly activity report" rows={12} value={report} readOnly/>}</details></section>
+}

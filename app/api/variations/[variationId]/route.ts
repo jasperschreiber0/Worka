@@ -228,7 +228,7 @@ export async function PATCH(
   // so two concurrent submissions of the same link can't both "win".
   const { data: updatedRows, error } = await sb
     .from('variations')
-    .update({ status, approved_at: now, approved_by: approvedBy })
+    .update({ status, approved_at: now, approved_by: approvedBy, approval_evidence:{date:now.slice(0,10),recorded_at:now,source:'verified_client_link',client_name:approvedBy,evidence:'Decision submitted using the valid client approval link'} })
     .eq('id', variationId)
     .in('status', ['draft', 'pending'])
     .select('id, job_id, builder_id, title, description, amount, status, created_at, approved_at, approved_by, variation_ref, labour_cost, materials_cost, submitted_by, trade_category_id')

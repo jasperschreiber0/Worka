@@ -46,6 +46,9 @@ export async function POST(
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
 
+    const {data:commercial}=await supabase.from('quotes').select('id,status').eq('job_id',jobId).eq('is_current',true).maybeSingle()
+    if(commercial && ['sent','approved'].includes(commercial.status))return NextResponse.json({quote_id:commercial.id})
+
     // Reuse an existing draft/pending_review quote instead of creating a
     // second one — same rule smooth-responder applies (index.ts, Stage 6
     // "Incremental upload" comment). Makes this endpoint safe to call twice

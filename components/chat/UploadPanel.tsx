@@ -235,6 +235,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         content_type: sf.file.type || 'application/octet-stream',
         size: sf.file.size,
         upload_batch_id: uploadBatchId,
+        upload_client_key: `${uploadBatchId}:${sf.id}`,
       }),
     })
 
@@ -253,8 +254,7 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         headers: { 'Content-Type': content_type ?? sf.file.type ?? 'application/octet-stream' },
       })
       if (!putRes.ok) {
-        const errText = await putRes.text().catch(() => putRes.statusText)
-        throw new Error(`Storage upload failed: ${errText}`)
+        throw new Error('This file did not finish uploading. Retry; completed files will be kept.')
       }
     }
 
@@ -277,19 +277,18 @@ function UploadPanelInner({ isOpen, onClose, job, builderId, onIntakeComplete, p
         if (uploadedById[sf.id]) continue
         const dbFile = await uploadSingleFile(sf, batchId)
         newlyUploaded[sf.id] = dbFile
+        setUploadedById(current => ({...current,[sf.id]:dbFile}))
       }
       const merged = { ...uploadedById, ...newlyUploaded }
       setUploadedById(merged)
 
       const uploaded = files.map((sf) => merged[sf.id]).filter((f): f is DBFile => Boolean(f))
 
-      const start = await fetch('/api/jobs/'+job.id+'/start-estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_batch_id:batchId,file_ids:uploaded.map(f=>f.id)})})
-      if(!start.ok) {const result=await start.json();throw new Error(result.error??'Your documents are saved, but processing could not start. Please retry.')}
-      // Primary file drives the intake pipeline; the rest are siblings
-      const [primary, ...siblings] = uploaded
-      setSiblingFileIds(siblings.map(f => f.id))
-      setUploadedFile(primary)
-      setIntakeStarted(true)
+      for (const file of uploaded) {
+        const check=await fetch(`/api/jobs/${job.id}/drawings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'finalise',file_id:file.id})})
+        if(!check.ok){const result=await check.json();throw new Error(result.error??'Your upload is saved. Retry to finish checking it.')}
+      }
+      window.location.assign(`/jobs/${job.id}/drawings`)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed — please try again.'
       setUploadError(message)

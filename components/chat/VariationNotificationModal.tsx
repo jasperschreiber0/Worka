@@ -95,55 +95,8 @@ export default function VariationNotificationModal({
     setDraftBody('')
 
     async function fetchDraft() {
-      try {
-        const res = await fetch(`/api/variations/${variationId}/resolve`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ builder_id: builderId, action: 'approved' }),
-        })
-
-        // If already approved (422), that's fine — fetch the existing draft from GET
-        if (res.status === 422) {
-          // Already approved — just fetch variation to get notification draft context
-          const getRes = await fetch(`/api/variations/${variationId}`)
-          if (!getRes.ok) {
-            setLoadError('Failed to load variation details.')
-            setStep('error')
-            return
-          }
-          const getData = await getRes.json() as { variation: { job_address: string; title: string; amount: number } }
-          const v = getData.variation
-          setDraftTo('henderson@example.com')
-          setDraftSubject(`Variation approved — ${v.job_address}`)
-          setDraftBody(`Hi there,\n\nYour variation request has been approved.\n\n${v.title}\nAmount: $${v.amount.toLocaleString('en-AU')}\n\nThis amount will be added to your final invoice.\n\nDave Nguyen\nDave Nguyen Building`)
-          setStep('draft')
-          return
-        }
-
-        if (!res.ok) {
-          const err = await res.json() as { error?: string }
-          setLoadError(err.error ?? 'Failed to prepare notification draft.')
-          setStep('error')
-          return
-        }
-
-        const data = await res.json() as ResolveResponse
-
-        if (!data.notification_draft) {
-          // No draft (e.g. rejected) — just close
-          onSent()
-          return
-        }
-
-        // Use client email from demo data
-        setDraftTo('henderson@example.com')
-        setDraftSubject(data.notification_draft.subject)
-        setDraftBody(data.notification_draft.body)
-        setStep('draft')
-      } catch {
-        setLoadError('Something went wrong loading the notification draft.')
-        setStep('error')
-      }
+      // Opening an email draft must never approve a financial change.
+      window.location.assign(`/variations/${variationId}/review`)
     }
 
     fetchDraft()

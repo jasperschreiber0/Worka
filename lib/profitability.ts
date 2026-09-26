@@ -1,5 +1,9 @@
 // Pure deterministic arithmetic. Percentages are percentage points, money is ex GST.
-export const roundMoney = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100
+// Match PostgreSQL numeric rounding, including half-cent credits (away from zero).
+export const roundMoney = (n: number) => {
+  const scaled=Math.abs(n)*100, cents=Math.round(scaled+Number.EPSILON*scaled)
+  return cents===0?0:Math.sign(n)*cents/100
+}
 export const sumMoney = (values: number[]) => roundMoney(values.reduce((a, b) => a + b, 0))
 export function amount(n: unknown, label = 'Amount', min = 0): number {
   if (typeof n !== 'number' || !Number.isFinite(n) || n < min || Math.abs(n) > 999999999)

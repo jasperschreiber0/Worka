@@ -20,7 +20,7 @@ test('CSV preserves commas, escaped quotes, embedded newlines and BOM', () => {
 })
 test('invalid finance is rejected rather than coerced; dates follow Australian order', () => {
   assert.equal(parseAmount('$1,234.50'), 1234.5)
-  assert.throws(() => parseAmount('(100.00)'))
+  assert.equal(parseAmount('(100.00)'), -100)
   assert.throws(() => parseAmount('abc'))
   assert.throws(() => parseAmount('1,2,3'))
   assert.throws(() => parseAmount('10,50'))
@@ -48,11 +48,10 @@ test('explicit GST conversion and labour addition are deterministic and retain s
     1000,
   )
 })
-test('mixed project, negative credits, missing amounts and unpriced formulas block import', () => {
+test('mixed project, missing amounts and unpriced formulas block import', () => {
   const mapping = suggestMapping(['Description', 'Amount', 'Project'])
   for (const row of [
     ['Invoice', '200', 'Other job'],
-    ['Credit', '-200', 'Test job'],
     ['Frame', '', ''],
     ['Frame', '[FORMULA]', ''],
   ])

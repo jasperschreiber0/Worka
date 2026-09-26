@@ -1303,11 +1303,20 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
     // 0, resume_kind always fresh_or_unstarted), traced live 2026-07-19/20.
     // Deterministic order makes an unchanged fact base hash identically on
     // every retry, so the breaker actually engages.
+    const sourceRunResult = parentJobId ? await supabase.from('estimate_source_sets').select('*').eq('batch_id',parentJobId).maybeSingle() : {data:null,error:null}
+    if (sourceRunResult.error) throw new Error('Unable to verify estimate source set')
+    const sourceRun = sourceRunResult.data
+    if(sourceRun?.cleared_at)throw new Error('This draft was cleared. Start a new estimate refresh from the current plans.')
+    if(sourceRun){
+      const {data:latestRun,error:latestError}=await supabase.from('estimate_source_sets').select('id').eq('job_id',jobId).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      if(latestError||latestRun?.id!==sourceRun.id)throw new Error('A newer estimate refresh exists. Open its saved progress to continue.')
+    }
     const { data: existingFacts } = await supabase
       .from('project_facts')
       .select('id, category, key, value, evidence, confidence, embedding, source_document_id')
       .eq('job_id', jobId)
       .eq('superseded', false)
+      .eq('review_required', false)
       .order('id', { ascending: true })
 
     // .order('id') for the same reason as existingFacts above: this feeds
@@ -1329,6 +1338,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
     // value/confidence) so batched Stage 1/2 calls below can supersede
     // against facts from earlier batches in this same run, not only
     // against what was already in the database before this run started.
+    const sourceDocumentIds = sourceRun ? new Set((existingDocs ?? []).filter((d: {file_id:string}) => sourceRun.file_ids.includes(d.file_id)).map((d:{id:string})=>d.id)) : null
     let facts: FactRow[] =
       (existingFacts ?? []).map((f: Record<string, unknown>) => ({
         id: f.id as string,
@@ -1340,7 +1350,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
         // per-document representation exactly on the incremental uploads
         // where the fact base is biggest and balance matters most.
         source_document_id: (f.source_document_id as string | null) ?? null,
-      }))
+      })).filter((f:FactRow)=>!sourceDocumentIds || !f.source_document_id || sourceDocumentIds.has(f.source_document_id))
 
     // ── Stage 1 + 2: Document Intelligence + Project Understanding ────────
     // Skipped entirely on an answers-only resume — the documents were already
@@ -1369,7 +1379,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
             duplicate_count: skippedDuplicates.length, duplicate_document_ids: skippedDuplicates,
           }))
         }
-        if (allLoaded.length === 0 && skippedDuplicates.length > 0) {
+        if (!sourceRun && allLoaded.length === 0 && skippedDuplicates.length > 0) {
           // Every file in this upload was a byte-identical re-upload of
           // content already classified for this job — not a failure, and
           // nothing about the estimate needs to change: the job's existing
@@ -1419,7 +1429,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
           await fail('Every document in this batch was already processed, and no existing quote was found to reuse for this job')
           return
         }
-        if (allLoaded.length === 0) {
+        if (allLoaded.length === 0 && !(sourceRun && skippedDuplicates.length > 0 && facts.length > 0)) {
           await fail('No documents were successfully extracted for this batch')
           return
         }
@@ -1681,7 +1691,7 @@ async function runPipeline(args: RunArgs, supabase: SupabaseClient, anthropic: O
       // earlier uploads to this job, grows with each batch in this run, so
       // batch 2+ knows what batch 1 already established, not just what the
       // database had before this run started.
-      const processedDocTitles: string[] = ((existingDocs ?? []) as Array<Record<string, unknown>>)
+      const processedDocTitles: string[] = ((existingDocs ?? []) as Array<Record<string, unknown>>).filter(d => !sourceDocumentIds || sourceDocumentIds.has(d.id as string))
         .map((d) => (d.drawing_title as string) ?? (d.document_type as string))
         .filter((t): t is string => Boolean(t))
 
@@ -2607,6 +2617,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
                 .filter((s): s is Record<string, unknown> & { trade_category_id: number } => typeof s.trade_category_id === 'number')
                 .map((s) => ({
                   job_id: jobId,
+                  source_batch_id: parentJobId ?? null,
                   trade_category_id: s.trade_category_id,
                   included_scope: s.included_scope ?? [],
                   excluded_scope: s.excluded_scope ?? [],
@@ -2901,11 +2912,14 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     // Found during the R-03 follow-up review (production validation pass
     // after Phase 1) — the earlier pass covered Stage 1/2 and Stage 3's
     // direct inputs but had not checked Stage 6's.
-    const { data: scopeForEstimate } = await supabase
+    let scopeQuery = supabase
       .from('scope_items')
       .select('trade_category_id, included_scope, excluded_scope, assumptions, uncertainty_notes')
       .eq('job_id', jobId)
       .order('trade_category_id', { ascending: true })
+    if (sourceRun) scopeQuery=scopeQuery.eq('source_batch_id',parentJobId)
+    const {data:scopeForEstimate,error:scopeError}=await scopeQuery
+    if(scopeError)throw new Error('Could not load the scope for this estimate version')
 
     console.log(JSON.stringify({
       event: 'stage_checkpoint', job_id: jobId, batch_id: parentJobId ?? null,
@@ -3059,7 +3073,11 @@ For each relevant trade, state what is included, what is excluded, dependencies,
       .maybeSingle()
 
     let quoteId: string
-    if (existingQuote) {
+    if (sourceRun?.draft_quote_id) {
+      const {data:ownedDraft,error:draftError}=await supabase.from('quotes').select('id,status').eq('id',sourceRun.draft_quote_id).eq('job_id',jobId).eq('builder_id',builderId).maybeSingle()
+      if(draftError||!ownedDraft||!['draft','pending_review'].includes(ownedDraft.status))throw new Error('This estimate is no longer a draft. Start a new refresh after reviewing the job.')
+      quoteId = sourceRun.draft_quote_id
+    } else if (existingQuote) {
       quoteId = existingQuote.id
     } else {
       const { data: quoteRow, error: quoteErr } = await supabase
@@ -3082,7 +3100,7 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     // Best-effort by design: never lets quote creation itself fail because
     // this bookkeeping call did.
     {
-      const { error: currentErr } = await supabase.rpc('set_current_quote', { p_job_id: jobId, p_quote_id: quoteId })
+      const { error: currentErr } = sourceRun ? {error:null} : await supabase.rpc('set_current_quote', { p_job_id: jobId, p_quote_id: quoteId })
       if (currentErr) console.error('set_current_quote failed:', currentErr.message)
     }
 
@@ -3762,6 +3780,11 @@ For each relevant trade, state what is included, what is excluded, dependencies,
     )
 
     if (completionPersisted) {
+      if (sourceRun) {
+        // A refreshed draft never replaces a sent/approved commercial baseline.
+        const {error: publishError} = await supabase.rpc('publish_estimate_draft',{p_builder:builderId,p_job:jobId,p_quote:quoteId})
+        if(publishError) throw new Error('Draft is saved but could not become the current estimate. Please retry.')
+      }
       if (parentJobId) {
         await supabase.from('document_processing_batches').update({ quote_id: quoteId, updated_at: new Date().toISOString() }).eq('id', parentJobId)
         // Every file in the batch, not just fileId (the primary/anchor) —

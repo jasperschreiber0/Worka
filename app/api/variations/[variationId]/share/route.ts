@@ -39,7 +39,7 @@ export async function POST(
 
   const { data: variation } = await supabase
     .from('variations')
-    .select('id')
+    .select('id,issue_stage,status')
     .eq('id', variationId)
     .eq('builder_id', builderId)
     .single()
@@ -47,6 +47,8 @@ export async function POST(
   if (!variation) {
     return NextResponse.json({ error: 'Variation not found' }, { status: 404 })
   }
+
+  if(variation.issue_stage==='draft')return NextResponse.json({error:'Review and approve this variation for issue first.'},{status:409})
 
   const rawToken = randomBytes(24).toString('base64url')
   const tokenHash = createHash('sha256').update(rawToken).digest('hex')

@@ -113,8 +113,8 @@ export async function POST(
   if (!description) {
     return NextResponse.json({ error: 'Description is required' }, { status: 400 })
   }
-  if (typeof body.amount !== 'number' || !Number.isFinite(body.amount) || body.amount < 0) {
-    return NextResponse.json({ error: 'Amount must be a number greater than or equal to 0' }, { status: 400 })
+  if (typeof body.amount !== 'number' || !Number.isFinite(body.amount) || Math.abs(body.amount) > 999999999 || (body.amount < 0 && body.cost_kind && body.cost_kind !== 'incurred')) {
+    return NextResponse.json({ error: 'Enter a valid signed actual cost; commitments and remaining costs cannot be negative' }, { status: 400 })
   }
   const amount = round2(body.amount)
   const costKind = body.cost_kind ?? 'incurred'

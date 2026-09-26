@@ -149,7 +149,7 @@ export function parseAmount(text: string, required = true): number | null {
   s = s.replace(/^(AUD\s*|\$)/i, '').trim()
   if (!/^-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,4})?$/.test(s)) throw new Error(`Invalid numeric value: ${text}`)
   s=s.replace(/,/g,'')
-  return amount(Number(s), 'Cost') // Existing ledger cannot represent credits: reject visibly, never abs().
+  return amount(Number(s), 'Cost', -999999999)
 }
 export function parseDate(text: string): string {
   let s = text.trim()
@@ -192,10 +192,11 @@ export function mapCostRows(rows: string[][], mapping: ColumnMapping, options: I
         labour = parseAmount(read('labourCost'), false),
         hours = parseAmount(read('hours'), false)
       const factor = options.taxBasis === 'inclusive' ? 1 / 1.1 : 1
+      if (hours !== null && hours < 0) throw new Error('Labour hours cannot be negative; correct the source hours separately')
       const total = roundMoney(
         (base + (options.labourBasis === 'additional' ? (labour ?? 0) : 0)) * factor,
       )
-      if (options.labourBasis === 'included' && labour !== null && labour > base)
+      if (options.labourBasis === 'included' && labour !== null && (Math.abs(labour) > Math.abs(base) || (labour !== 0 && Math.sign(labour) !== Math.sign(base))))
         throw new Error('Labour exceeds the total amount')
       const category = read('category').toLowerCase()
       const known =

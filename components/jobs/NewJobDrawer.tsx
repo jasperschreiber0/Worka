@@ -15,16 +15,11 @@ interface CreateJobResponse {
   error?: string
 }
 
-// The reference workflow from the interaction spec — five structured fields,
-// no round-trip through chat's intent classifier. Client + Address are the
-// only two required to enable Continue; project name/builder/start date are
-// optional (the AI can infer a project name from the drawings' title block
-// once uploaded, so there's nothing lost by leaving it blank here).
+// Start with the site address. Client and project details can be supplied later.
 export default function NewJobDrawer({ open, onClose, onCreated }: NewJobDrawerProps) {
   const [clientName, setClientName] = useState('')
   const [address, setAddress] = useState('')
   const [projectName, setProjectName] = useState('')
-  const [startDate, setStartDate] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null)
@@ -33,14 +28,13 @@ export default function NewJobDrawer({ open, onClose, onCreated }: NewJobDrawerP
 
   useEffect(() => {
     if (open) {
-      // Cursor auto-focuses Client Name on open.
+      // Cursor auto-focuses the site address on open.
       const t = setTimeout(() => firstFieldRef.current?.focus(), 420)
       return () => clearTimeout(t)
     } else {
       setClientName('')
       setAddress('')
       setProjectName('')
-      setStartDate('')
       setError(null)
       setDuplicateWarning(null)
       setExistingJob(null)
@@ -48,7 +42,7 @@ export default function NewJobDrawer({ open, onClose, onCreated }: NewJobDrawerP
   }, [open])
 
   async function handleSubmit(forceCreate = false) {
-    if (!clientName.trim() || !address.trim()) return
+    if (!address.trim()) return
     setSubmitting(true)
     setError(null)
     setDuplicateWarning(null)
@@ -58,7 +52,7 @@ export default function NewJobDrawer({ open, onClose, onCreated }: NewJobDrawerP
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           address: address.trim(),
-          client_name: clientName.trim(),
+          client_name: clientName.trim() || undefined,
           scope_notes: projectName.trim() ? `Project: ${projectName.trim()}` : undefined,
           force_create: forceCreate,
         }),
@@ -118,22 +112,18 @@ export default function NewJobDrawer({ open, onClose, onCreated }: NewJobDrawerP
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-5 flex flex-col gap-4">
+          <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Start with the site address, then upload the plans. Client details are optional for estimating.</p>
           <div>
-            <label className="label">Client name</label>
-            <input ref={firstFieldRef} className="input w-full px-3 py-2" value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="e.g. The Hendersons" />
+            <label className="label" htmlFor="new-job-address">Job address</label>
+            <input id="new-job-address" ref={firstFieldRef} className="input w-full px-3 py-2" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="e.g. 15 McCann Crescent" autoComplete="street-address" onKeyDown={e=>{if(e.key==='Enter'&&!submitting)void handleSubmit(false)}} />
           </div>
-          <div>
-            <label className="label">Address</label>
-            <input className="input w-full px-3 py-2" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="14 Merri St, Fitzroy VIC 3065" />
-          </div>
-          <div>
-            <label className="label">Project name <span style={{ color: 'var(--text-tertiary)' }}>(optional)</span></label>
-            <input className="input w-full px-3 py-2" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Kitchen &amp; bathroom renovation" />
-          </div>
-          <div>
-            <label className="label">Start date <span style={{ color: 'var(--text-tertiary)' }}>(optional)</span></label>
-            <input type="date" className="input w-full px-3 py-2" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-          </div>
+          <details>
+            <summary className="text-sm cursor-pointer">Add client or project details (optional)</summary>
+            <div className="mt-4 flex flex-col gap-4">
+              <div><label className="label" htmlFor="new-job-client">Client name</label><input id="new-job-client" className="input w-full px-3 py-2" value={clientName} onChange={e=>setClientName(e.target.value)} placeholder="e.g. The Hendersons" /></div>
+              <div><label className="label" htmlFor="new-job-project">Project description</label><input id="new-job-project" className="input w-full px-3 py-2" value={projectName} onChange={e=>setProjectName(e.target.value)} placeholder="Kitchen and bathroom renovation" /></div>
+            </div>
+          </details>
 
           {duplicateWarning && (
             <div className="text-sm px-3 py-2.5 rounded-[6px]" style={{ background: 'var(--pill-awaiting-bg)', color: 'var(--pill-awaiting-text)', border: '1px solid var(--pill-awaiting-border)' }}>
@@ -160,11 +150,11 @@ export default function NewJobDrawer({ open, onClose, onCreated }: NewJobDrawerP
           <button className="btn-secondary flex-1 py-2" onClick={onClose}>Cancel</button>
           <button
             className="btn-primary flex-1 py-2"
-            disabled={!clientName.trim() || !address.trim() || submitting}
-            style={{ opacity: !clientName.trim() || !address.trim() ? 0.5 : 1 }}
+            disabled={!address.trim() || submitting}
+            style={{ opacity: !address.trim() ? 0.5 : 1 }}
             onClick={() => handleSubmit(false)}
           >
-            {submitting ? 'Creating…' : 'Continue'}
+            {submitting ? 'Creating…' : 'Continue to plans'}
           </button>
         </div>
       </div>
