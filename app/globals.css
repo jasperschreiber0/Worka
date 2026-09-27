@@ -194,7 +194,8 @@
   }
 
   .input::placeholder {
-    color: var(--text-ghost);
+    color: var(--text-secondary);
+    opacity: 1;
   }
 
   .label {
