@@ -1,14 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { buildBriefEmail, getDemoBrief, type BriefAlert } from '@/lib/morning-brief'
+import { buildBriefEmail, shouldSendBrief, getDemoBrief, type BriefAlert } from '@/lib/morning-brief'
 
 // ─── GET /api/cron/morning-brief ─────────────────────────────────────────────
-// Scheduled daily by Vercel Cron (see vercel.json) — delivers the morning
-// brief to every builder by email at 6:45am AEST. This is the daily habit:
-// the builder opens their phone and WorkA has already done the thinking.
-//
-// Auth: Vercel sends `Authorization: Bearer ${CRON_SECRET}` automatically
-// when the CRON_SECRET env var is set on the project.
+// Scheduled by GitHub Actions; delivers actionable recorded job items by email.
+// Auth: scheduler supplies Authorization: Bearer ${CRON_SECRET}.
 //
 // Demo mode (no Supabase): sends the demo brief to MORNING_BRIEF_TEST_EMAIL
 // if set, so the loop can be tested end-to-end without production data.
@@ -26,18 +22,20 @@ interface EdgeBriefResponse {
   alerts: BriefAlert[]
 }
 
-async function sendBriefEmail(resendApiKey: string, to: string, subject: string, text: string): Promise<boolean> {
+async function sendBriefEmail(resendApiKey: string, to: string, subject: string, text: string, html: string, idempotencyKey?: string): Promise<boolean> {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${resendApiKey}`,
       'Content-Type': 'application/json',
+      ...(idempotencyKey ? {'Idempotency-Key': idempotencyKey} : {}),
     },
     body: JSON.stringify({
       from: `WorkA <${process.env.EMAIL_FROM_ADDRESS ?? 'hello@getworka.com'}>`,
       to: [to],
       subject,
       text,
+      html,
     }),
   })
   if (!res.ok) {
@@ -81,7 +79,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
     const demo = getDemoBrief()
     const email = buildBriefEmail(demo.builderName, demo.brief, demo.alerts)
-    const ok = await sendBriefEmail(resendApiKey, testEmail, email.subject, email.text)
+    const ok = await sendBriefEmail(resendApiKey, testEmail, email.subject, email.text, email.html)
     return NextResponse.json({ sent: ok ? 1 : 0, failed: ok ? 0 : 1, demo: true })
   }
 
@@ -98,6 +96,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   let sent = 0
   let failed = 0
+  let skipped = 0
 
   for (const builder of (builders ?? []) as BuilderRow[]) {
     if (!builder.email) continue
@@ -118,8 +117,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
 
       const { brief, alerts } = (await briefRes.json()) as EdgeBriefResponse
+      if (!shouldSendBrief(alerts ?? [])) { skipped += 1; continue }
       const email = buildBriefEmail(builder.name, brief, alerts ?? [])
-      const ok = await sendBriefEmail(resendApiKey, builder.email, email.subject, email.text)
+      const ok = await sendBriefEmail(resendApiKey, builder.email, email.subject, email.text, email.html, `morning-brief/${builder.id}/${new Date().toLocaleDateString('en-CA', {timeZone:'Australia/Sydney'})}`)
       if (ok) sent += 1
       else failed += 1
     } catch (err) {
@@ -128,5 +128,5 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return NextResponse.json({ sent, failed, builders: (builders ?? []).length })
+  return NextResponse.json({ sent, failed, skipped, builders: (builders ?? []).length })
 }

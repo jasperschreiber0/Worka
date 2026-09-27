@@ -28,6 +28,7 @@ interface MorningBriefRequest {
 interface Alert {
   priority: 'high' | 'medium' | 'low'
   message: string
+  href?: string
   action?: string
   entity_id?: string
   entity_type?: string
@@ -57,6 +58,7 @@ interface VariationRow {
 }
 
 interface InvoiceRow {
+  job_id: string
   id: string
   amount: number
   status: string
@@ -66,6 +68,7 @@ interface InvoiceRow {
 }
 
 interface QuoteRow {
+  job_id: string
   id: string
   status: string
   sent_at: string | null
@@ -156,11 +159,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // ── 1. Overdue invoices (highest priority) ────────────────
     const { data: overdueInvoices } = await supabase
       .from('invoices')
-      .select('id, amount, status, due_date, sent_at, job:jobs(address, client:clients(name))')
+      .select('id, job_id, amount, status, due_date, sent_at, job:jobs(address, client:clients(name))')
       .eq('builder_id', builder_id)
       .in('status', ['sent', 'overdue'])
       .not('due_date', 'is', null)
-      .lt('due_date', now.toISOString().split('T')[0]) // past due date
+      .lt('due_date', new Intl.DateTimeFormat('en-CA',{timeZone:'Australia/Sydney',year:'numeric',month:'2-digit',day:'2-digit'}).format(now)).throwOnError() // past due date
 
     for (const inv of (overdueInvoices ?? []) as unknown as InvoiceRow[]) {
       const daysOver = daysBetween(inv.due_date, now)
@@ -169,8 +172,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const dayWord = daysOver === 1 ? 'day' : 'days'
       alerts.push({
         priority: 'high',
-        message: `${label} has an invoice for ${amount} that is ${daysOver} ${dayWord} overdue.`,
-        action: 'Send payment reminder',
+        message: `${label} has an invoice for ${amount} recorded as ${daysOver} ${dayWord} overdue.`,
+        action: 'Review recorded invoice and payment status',
+        href: `/jobs/${inv.job_id}?section=money`,
         entity_id: inv.id,
         entity_type: 'invoice',
       })
@@ -181,7 +185,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .from('variations')
       .select('id, title, amount, status, created_at, job:jobs(address)')
       .eq('builder_id', builder_id)
-      .eq('status', 'pending')
+      .eq('status', 'pending').throwOnError()
 
     for (const v of (pendingVariations ?? []) as unknown as VariationRow[]) {
       const daysWaiting = daysBetween(v.created_at, now)
@@ -192,8 +196,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const dayWord = daysWaiting === 1 ? 'day' : 'days'
       alerts.push({
         priority: 'high',
-        message: `Variation "${v.title}"${amountStr} on ${jobAddr} has been awaiting client approval for ${daysWaiting} ${dayWord}.`,
-        action: 'Chase client approval',
+        message: `Variation "${v.title}"${amountStr} on ${jobAddr} has a pending approval record for ${daysWaiting} ${dayWord}.`,
+        action: 'Review approval evidence',
+        href: `/variations/${v.id}/review`,
         entity_id: v.id,
         entity_type: 'variation',
       })
@@ -203,10 +208,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
     const { data: staleSentQuotes } = await supabase
       .from('quotes')
-      .select('id, status, sent_at, job:jobs(address, client:clients(name))')
+      .select('id, job_id, status, sent_at, job:jobs(address, client:clients(name))')
       .eq('builder_id', builder_id)
       .eq('status', 'sent')
-      .lt('sent_at', sevenDaysAgo)
+      .lt('sent_at', sevenDaysAgo).throwOnError()
 
     for (const q of (staleSentQuotes ?? []) as unknown as QuoteRow[]) {
       const daysSent = daysBetween(q.sent_at, now)
@@ -219,7 +224,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       alerts.push({
         priority: 'medium',
         message: `A quote sent ${label} ${daysSent} ${dayWord} ago has had no response yet.`,
-        action: 'Follow up with client',
+        action: 'Review quote and follow-up',
+        href: `/jobs/${q.job_id}`,
         entity_id: q.id,
         entity_type: 'quote',
       })
@@ -232,7 +238,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('id, address, status, updated_at, client:clients(name)')
       .eq('builder_id', builder_id)
       .eq('status', 'active')
-      .lt('updated_at', fiveDaysAgo)
+      .lt('updated_at', fiveDaysAgo).throwOnError()
 
     for (const j of (staleJobs ?? []) as unknown as JobRow[]) {
       const daysStale = daysBetween(j.updated_at, now)
@@ -241,7 +247,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       alerts.push({
         priority: 'medium',
         message: `${label.charAt(0).toUpperCase() + label.slice(1)} has had no updates for ${daysStale} ${dayWord}.`,
-        action: 'Log progress update',
+        action: 'Review job progress',
+        href: `/jobs/${j.id}`,
         entity_id: j.id,
         entity_type: 'job',
       })
@@ -252,7 +259,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .from('jobs')
       .select('id', { count: 'exact', head: true })
       .eq('builder_id', builder_id)
-      .eq('status', 'active')
+      .eq('status', 'active').throwOnError()
 
     if ((activeJobCount ?? 0) > 0) {
       const jobWord = activeJobCount === 1 ? 'job' : 'jobs'
@@ -268,7 +275,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .from('jobs')
       .select('id', { count: 'exact', head: true })
       .eq('builder_id', builder_id)
-      .eq('status', 'quoting')
+      .eq('status', 'quoting').throwOnError()
 
     if ((quotingCount ?? 0) > 0) {
       const jobWord = quotingCount === 1 ? 'job' : 'jobs'
@@ -279,15 +286,28 @@ Deno.serve(async (req: Request): Promise<Response> => {
       })
     }
 
+    // Give draft estimates a named, directly linked next step.
+    const {data: drafts} = await supabase.from('quotes')
+      .select('id,job_id,status,job:jobs(address,status),quote_line_items(total,is_assumption,assumption_status)')
+      .eq('builder_id',builder_id).eq('is_current',true).in('status',['draft','pending_review']).throwOnError()
+    for (const draft of (drafts ?? []) as unknown as Array<{id:string;job_id:string;job:{address:string;status:string}|null;quote_line_items:Array<{total:number|null;is_assumption:boolean;assumption_status:string|null}>}>) {
+      if (!draft.job || ['archived','complete'].includes(draft.job.status)) continue
+      const included=draft.quote_line_items.filter(i=>i.assumption_status!=='excluded')
+      const prices=included.filter(i=>i.total===null).length
+      const assumptions=included.filter(i=>i.is_assumption&&i.assumption_status==='unresolved').length
+      const detail=[prices?`${prices} missing price${prices===1?'':'s'}`:'',assumptions?`${assumptions} assumption${assumptions===1?'':'s'} to review`:''].filter(Boolean).join(' and ')
+      alerts.push({priority:'medium',message:`${draft.job.address}: ${detail || 'draft estimate needs your review before issue'}.`,action:'Continue estimate review',href:`/jobs/${draft.job_id}`,entity_id:draft.id,entity_type:'quote'})
+    }
+
     // ── Build brief summary string ────────────────────────────
     const highCount = alerts.filter((a) => a.priority === 'high').length
     const mediumCount = alerts.filter((a) => a.priority === 'medium').length
 
     let brief: string
     if (alerts.length === 0) {
-      brief = 'All clear — no urgent items today. Have a great day on site.'
+      brief = 'No urgent items found in the records checked. Missing or outdated records may hide work that needs attention.'
     } else if (highCount === 0 && mediumCount === 0) {
-      brief = `No urgent items today. ${alerts.length} low-priority update${alerts.length > 1 ? 's' : ''} for your attention.`
+      brief = `No urgent items found in the records checked. ${alerts.length} low-priority update${alerts.length > 1 ? 's' : ''} for your attention.`
     } else {
       const parts: string[] = []
       if (highCount > 0) parts.push(`${highCount} urgent item${highCount > 1 ? 's' : ''}`)
