@@ -12,3 +12,11 @@ test('cent arithmetic remains exact',()=>{const p=projectCash(plan([entry({amoun
 test('legacy totals retain all weeks without claiming precise daily timing',()=>{const weeks=Array.from({length:13},(_,i)=>({inflow:i*10,outflow:i*3}));const p=projectCash(legacyCashPlan({opening:3,startOn:'2026-09-21',weeks}));assert.deepEqual(p.weeks.map(({inflow,outflow})=>({inflow,outflow})),weeks);assert.equal(p.weeklyTiming,true)})
 test('invalid dates, directions, duplicate IDs, negative amounts and unbounded recurrence rejected',()=>{for(const entries of [[entry({expectedOn:'2026-02-30'})],[entry({amount:-1})],[entry(),entry()],[entry({frequency:'weekly',endOn:''})],[entry({direction:'wrong' as 'in'})]])assert.throws(()=>validateCashPlan(plan(entries)));assert.throws(()=>validateCashPlan(plan([],{opening:NaN})));assert.throws(()=>validateCashPlan(plan([],{accounts:''})))})
 test('lowest includes opening cash even if every subsequent balance rises',()=>{assert.equal(projectCash(plan([entry()])).lowest,100)})
+
+import {addMonths} from './cash-plan.ts'
+test('annual periods cover a leap year once and keep first 13 weeks identical',()=>{
+ const p=plan([entry({expectedOn:'2024-01-31',frequency:'monthly',endOn:'2025-01-30'}),entry({id:'last',expectedOn:'2025-01-30',amount:.25}),entry({id:'outside',expectedOn:'2025-01-31',amount:999})],{startOn:'2024-01-31',opening:0})
+ const a=projectCash(p,undefined,'12-months');assert.equal(a.daily.length,366);assert.equal(a.months.length,12);assert.equal(a.months.at(-1)!.closing,1200.25);assert.equal(a.months[0].endOn,'2024-02-28');assert.equal(a.months[1].startOn,'2024-02-29');assert.equal(addMonths('2024-01-31',2),'2024-03-31');assert.deepEqual(a.weeks,projectCash(p).weeks)
+ assert.equal(a.months.reduce((s,m)=>s+m.inflow,0),1200.25)
+})
+test('annual late-payment scenario crosses the boundary without changing saved entries',()=>{const p=plan([entry({expectedOn:'2027-09-20'})]);assert.equal(projectCash(p,undefined,'12-months').months[11].closing,200);assert.equal(projectCash(p,{id:'one',days:14},'12-months').months[11].closing,100);assert.equal(p.entries[0].expectedOn,'2027-09-20')})

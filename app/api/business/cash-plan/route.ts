@@ -1,9 +1,14 @@
+import {localBusinessStore,BusinessStoreError} from '@/lib/local-business-store'
+import {localMode,identity,sameOrigin,StoreError} from '@/lib/studio-store'
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { intelligenceDB } from '@/lib/profitability-data'
 import { EMPTY_PROFILE } from '@/lib/profitability'
 import { projectCash, validateCashPlan } from '@/lib/cash-plan'
-export async function GET() {
+export const dynamic = 'force-dynamic'
+export async function GET(req:NextRequest) {
+  if(localMode())try{await identity(req);const data=await localBusinessStore().read();return NextResponse.json({plan:data.plan,legacy:null,revision:data.cashRevision,local:true},{headers:{'Cache-Control':'no-store'}})}catch(e){return NextResponse.json({error:(e as Error).message},{status:e instanceof StoreError||e instanceof BusinessStoreError?e.status:500})}
+
   const builder=await getAuthenticatedBuilderId()
   if(!builder) return NextResponse.json({error:'Unauthorized'},{status:401})
   if(isDemoMode()) return NextResponse.json({plan:null,legacy:null,revision:null,demo:true})
@@ -12,6 +17,8 @@ export async function GET() {
   return NextResponse.json({plan:data?.cash_flow?.plan??null,legacy:data?.cash_flow??null,revision:data?.updated_at??null})
 }
 export async function PUT(req: NextRequest) {
+  if(localMode())try{await identity(req);sameOrigin(req);const text=await req.text();if(text.length>2000000)throw new BusinessStoreError('Cash plan is too large');const body=JSON.parse(text);const data=await localBusinessStore().write('cash',body.plan,body.revision);return NextResponse.json({ok:true,plan:data.plan,revision:data.cashRevision,local:true})}catch(e){return NextResponse.json({error:(e as Error).message},{status:e instanceof StoreError||e instanceof BusinessStoreError?e.status:400})}
+
   const builder=await getAuthenticatedBuilderId()
   if(!builder) return NextResponse.json({error:'Unauthorized'},{status:401})
   if(isDemoMode()) return NextResponse.json({error:'Connect your business account to save'},{status:400})

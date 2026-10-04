@@ -36,12 +36,13 @@ export default function SignupPage() {
 
     try {
       if (!supabaseUrl) {
-        router.push('/today')
+        if(!['localhost','127.0.0.1','[::1]'].includes(window.location.hostname))throw new Error('Account registration is temporarily unavailable.')
+        router.push('/studio')
         return
       }
 
       const supabase = createClientComponentClient<Database>()
-      const { error: authError } = await supabase.auth.signUp({
+      const { data, error: authError } = await supabase.auth.signUp({
         email,
         password,
         options: {
@@ -57,7 +58,10 @@ export default function SignupPage() {
         return
       }
 
+      if(data.session){router.push('/studio');router.refresh();return}
       setDone(true)
+    } catch(e) {
+      setError(e instanceof Error?e.message:'Could not create your account. Please try again.')
     } finally {
       setLoading(false)
     }

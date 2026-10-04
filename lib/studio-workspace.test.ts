@@ -1,0 +1,30 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { length,polygonArea,rectangleGeometry,simplePolygon,validOpening,wallArea } from './studio-geometry.ts'
+import { newWorkspace,parseWorkspace,clientProjection,recordApproval,restoreOption } from './studio-workspace.ts'
+import { lineCost,quantity,totals,revise,draftVariation,financials } from './project-studio.ts'
+import type { Line } from './project-studio.ts'
+
+const item:Line={id:'test-wall',name:'Wall lining',trade:'Interiors',quantity:0,unit:'m²',rate:20,labour:10,waste:10,source:'wall-area',wallId:'wall-0',included:true,allowance:false,note:'Internal assumption',supplier:'PRIVATE supplier reference',rateVerified:true}
+function project(){const w=newWorkspace();w.name='Test project';w.project.working.design={width:8,depth:6,height:2.7,geometry:rectangleGeometry(8,6,2.7)};w.project.working.lines=[{...item}];return w}
+test('wall quantities deduct actual openings; waste applies only to materials',()=>{
+  const w=project(),g=w.project.working.design.geometry!;g.walls[0].openings=[{id:'d',kind:'door',offset:1,width:.9,height:2.1,sill:0},{id:'w',kind:'window',offset:3,width:1.2,height:1.2,sill:.9}]
+  assert.equal(quantity(item,w.project.working.design),18.27)
+  assert.equal(lineCost(item,w.project.working.design),584.64)
+  assert.ok(Math.abs(wallArea(g.walls[0])-18.27)<1e-8)
+})
+test('non-rectangular footprints use polygon area, not bounding box',()=>{const g=rectangleGeometry(8,6,2.7);g.footprint=[{x:0,y:0},{x:8,y:0},{x:8,y:3},{x:4,y:3},{x:4,y:6},{x:0,y:6}];assert.equal(polygonArea(g.footprint),36);assert.equal(quantity({...item,source:'area'},{width:8,depth:6,height:2.7,geometry:g}),36);assert.ok(simplePolygon(g.footprint));assert.equal(simplePolygon([{x:0,y:0},{x:8,y:6},{x:0,y:6},{x:8,y:0}]),false)})
+test('overlapping and out-of-bounds openings rejected',()=>{const wall=rectangleGeometry(8,6,2.7).walls[0];wall.openings=[{id:'a',kind:'door',offset:1,width:1,height:2.1,sill:0}];assert.equal(validOpening(wall,{id:'b',kind:'window',offset:1.5,width:1,height:1,sill:1}),false);assert.equal(validOpening(wall,{id:'b',kind:'window',offset:7.5,width:1,height:1,sill:1}),false);assert.equal(validOpening(wall,{id:'b',kind:'window',offset:3,width:1,height:1,sill:1}),true)})
+test('workspace validation rejects malformed geometry and rates but accepts empty real project',()=>{assert.ok(parseWorkspace(newWorkspace()));const w=project();assert.ok(parseWorkspace(w));w.project.working.lines[0].labour=-1;assert.equal(parseWorkspace(w),null);w.project.working.lines[0].labour=1;w.project.working.design.geometry!.walls[0].a.x=Infinity;assert.equal(parseWorkspace(w),null)})
+test('acceptance requires reviewed geometry, rates and evidence',()=>{let w=project();assert.throws(()=>recordApproval(w,'Client','email'),/Verify/);w.project.working.design.geometry!.verified=true;assert.throws(()=>recordApproval(w,'','email'),/name/);w=recordApproval(w,'Test Client','Written acceptance ref 123');assert.equal(w.approvals.length,1);assert.equal(w.project.baseline?.id,1)})
+test('option restore and draft variation preserve accepted finances until approval',()=>{let w=project();w.project.working.design.geometry!.verified=true;w=recordApproval(w,'Client','email');const original=financials(w.project);const option={id:'o',name:'Upgrade',savedAt:new Date().toISOString(),revision:{...structuredClone(w.project.working),markup:50}};w=restoreOption(w,option);assert.equal(w.project.working.id,2);assert.equal(w.project.baseline?.markup,25);w.project=draftVariation(w.project);assert.deepEqual(financials(w.project),original);w=recordApproval(w,'Client','Variation email','VAR-001');assert.equal(financials(w.project).revenue,totals(option.revision).price);assert.ok(parseWorkspace(w))})
+test('client projection never contains internal rates, supplier references, comments or approvals',()=>{const w=project();w.project.working.design.geometry!.walls[0].note='PRIVATE architectural note';w.options=[{id:'option',name:'Alternative',revision:structuredClone(w.project.working),savedAt:new Date().toISOString()}];const text=JSON.stringify(clientProjection(w));for(const secret of ['PRIVATE','Internal assumption','"labour"','"waste"','"rate"','"markup"','"profit"','"approvals"'])assert.equal(text.includes(secret),false,secret);assert.equal(clientProjection(w).current.total,totals(w.project.working).total)})
+test('adding and removing lines remains valid after acceptance',()=>{let w=project();w.project.working.design.geometry!.verified=true;w=recordApproval(w,'Client','email');w.project=revise(w.project,{lines:[{...item,id:'new',name:'Replacement'}]});assert.ok(parseWorkspace(w))})
+test('linked missing wall blocks approval rather than silently accepting a zero quantity',()=>{const w=project();w.project.working.design.geometry!.verified=true;w.project.working.lines[0].wallId='missing';assert.equal(quantity(w.project.working.lines[0],w.project.working.design),0);assert.throws(()=>recordApproval(w,'Client','email'),/Reconnect/)})
+
+import {newPlanProject} from './studio-workspace.ts'
+test('repeat plan projects isolate geometry scope approvals and unreviewed rates',()=>{
+ const old=project();old.rates=[{...item,rateVerified:true},{...item,id:'unreviewed',rateVerified:false}];old.options=[{id:'old',name:'Old choice',revision:structuredClone(old.project.working),savedAt:'2026-10-03'}]
+ const snapshot=JSON.stringify(old),a=newPlanProject(old,'Another house','New address'),b=newPlanProject(old,'Second house','')
+ assert.notEqual(a.project.id,b.project.id);assert.notEqual(a.project.id,old.project.id);assert.equal(a.project.working.lines.length,0);assert.equal(a.project.working.design.geometry,undefined);assert.equal(a.plan,null);assert.equal(a.options.length,0);assert.equal(a.approvals.length,0);assert.equal(a.project.baseline,null);assert.equal(a.rates.length,1);assert.equal(a.rates[0].wallId,undefined);assert.equal(a.rates[0].source,'entered');assert.ok(parseWorkspace(a));assert.equal(JSON.stringify(old),snapshot);a.rates[0].rate=99;assert.equal(old.rates[0].rate,20)
+})
