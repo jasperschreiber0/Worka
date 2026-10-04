@@ -1,9 +1,14 @@
+import {localBusinessStore, BusinessStoreError} from '@/lib/local-business-store'
+import {localMode,identity,sameOrigin,listProjects,StoreError} from '@/lib/studio-store'
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedBuilderId, isDemoMode } from '@/lib/auth/api-auth'
 import { intelligenceDB, allRows } from '@/lib/profitability-data'
 import { EMPTY_PROFILE, financialProfile, cashForecast } from '@/lib/profitability'
 import { dateOnly } from '@/lib/profit-control'
-export async function GET() {
+export const dynamic = 'force-dynamic'
+export async function GET(req:NextRequest) {
+  if(localMode())try{const owner=await identity(req),data=await localBusinessStore().read(),projects=await listProjects(owner);return NextResponse.json({profile:data.profile,revision:data.profileRevision,jobs:projects.map(p=>({id:p.id,address:p.name,status:'Studio project'})),risks:[],demo:false,local:true},{headers:{'Cache-Control':'no-store'}})}catch(e){return NextResponse.json({error:(e as Error).message},{status:e instanceof StoreError||e instanceof BusinessStoreError?e.status:500})}
+
   const builder = await getAuthenticatedBuilderId()
   if (!builder) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   if (isDemoMode())
@@ -43,6 +48,8 @@ export async function GET() {
   }
 }
 export async function PUT(req: NextRequest) {
+  if(localMode())try{await identity(req);sameOrigin(req);const text=await req.text();if(text.length>64000)throw new BusinessStoreError('Financial profile is too large');const body=JSON.parse(text);const data=await localBusinessStore().write('profile',body.profile,body.revision);return NextResponse.json({ok:true,revision:data.profileRevision,local:true})}catch(e){return NextResponse.json({error:(e as Error).message},{status:e instanceof StoreError||e instanceof BusinessStoreError?e.status:400})}
+
   const builder = await getAuthenticatedBuilderId()
   if (!builder) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   if (isDemoMode())

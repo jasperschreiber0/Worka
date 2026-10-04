@@ -20,6 +20,7 @@ const ICON_PROPS = {
 }
 
 const NAV_ITEMS: NavItemDef[] = [
+  { href: '/studio', label: 'Project Studio', icon: <svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M12 3l9 5v8l-9 5-9-5V8l9-5zm0 9l9-4m-9 4L3 8m9 4v9" /></svg> },
   { href: '/today', label: 'Today', icon: <svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M8 3v4m8-4v4M4 10h16M5 5h14a1 1 0 011 1v14H4V6a1 1 0 011-1z" /></svg> },
   { href: '/jobs', label: 'Jobs', icon: <svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M3 10l9-7 9 7M5 9v12h14V9M9 21v-7h6v7" /></svg> },
   { href: '/business', label: 'Business', icon: <svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M4 20V10h4v10m4 0V4h4v16m4 0H2" /></svg> },
@@ -111,7 +112,7 @@ export default function NavRail() {
 }
 
 // ─── Mobile bottom tab bar ──────────────────────────────────────────────────
-// Keep the same three destinations on mobile. Settings is available in Business.
+// Keep the same destinations on mobile. Settings is available in Business.
 const MOBILE_ITEMS = NAV_ITEMS
 
 export function MobileTabBar() {

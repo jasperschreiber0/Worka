@@ -29,8 +29,14 @@ function occurrence(e: CashEntry, n: number) {
   const last = new Date(Date.UTC(target.getUTCFullYear(),target.getUTCMonth()+1,0)).getUTCDate()
   target.setUTCDate(Math.min(day,last)); return target.toISOString().slice(0,10)
 }
-export function projectCash(p: CashPlan, scenario?: {id: string; days: number}) {
-  const end = addDays(p.startOn,90)
+export function addMonths(value:string,n:number){
+ const d=new Date(value),target=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+n,1))
+ target.setUTCDate(Math.min(d.getUTCDate(),new Date(Date.UTC(target.getUTCFullYear(),target.getUTCMonth()+1,0)).getUTCDate()))
+ return target.toISOString().slice(0,10)
+}
+export function projectCash(p: CashPlan, scenario?: {id: string; days: number}, horizon:'13-weeks'|'12-months'='13-weeks') {
+  const end = horizon==='12-months'?addDays(addMonths(p.startOn,12),-1):addDays(p.startOn,90)
+  const dayCount=Math.round((Date.parse(end)-Date.parse(p.startOn))/86400000)+1
   const movements: (CashEntry & { on: string })[] = []
   for (const e of p.entries) {
     for (let n=0;n<525;n++) {
@@ -42,7 +48,7 @@ export function projectCash(p: CashPlan, scenario?: {id: string; days: number}) 
     }
   }
   let balance=cents(p.opening), lowest=balance, lowestOn=p.startOn
-  const daily=Array.from({length:91},(_,i)=>{
+  const daily=Array.from({length:dayCount},(_,i)=>{
     const on=addDays(p.startOn,i), entries=movements.filter(e=>e.on===on)
     const inflow=entries.filter(e=>e.direction==='in').reduce((s,e)=>s+cents(e.amount),0)
     const outflow=entries.filter(e=>e.direction==='out').reduce((s,e)=>s+cents(e.amount),0)
@@ -54,7 +60,11 @@ export function projectCash(p: CashPlan, scenario?: {id: string; days: number}) 
     const days=daily.slice(i*7,i*7+7)
     return {startOn:days[0].on,inflow:days.reduce((s,d)=>s+cents(d.inflow),0)/100,outflow:days.reduce((s,d)=>s+cents(d.outflow),0)/100,closing:days[6].closing}
   })
-  return {daily,weeks,lowest:lowest/100,lowestOn,headroom:(lowest-cents(p.buffer))/100,weeklyTiming:movements.some(e=>e.timing==='week'),overdue:p.entries.filter(e=>e.frequency==='once' && e.expectedOn<p.startOn)}
+  const months=horizon==='12-months'?Array.from({length:12},(_,i)=>{
+    const startOn=addMonths(p.startOn,i),endOn=addDays(addMonths(p.startOn,i+1),-1),days=daily.filter(d=>d.on>=startOn&&d.on<=endOn)
+    return {startOn,endOn,inflow:days.reduce((s,d)=>s+cents(d.inflow),0)/100,outflow:days.reduce((s,d)=>s+cents(d.outflow),0)/100,closing:days.at(-1)!.closing}
+  }):[]
+  return {daily,weeks,months,lowest:lowest/100,lowestOn,headroom:(lowest-cents(p.buffer))/100,weeklyTiming:movements.some(e=>e.timing==='week'),overdue:p.entries.filter(e=>e.frequency==='once' && e.expectedOn<p.startOn)}
 }
 export function legacyCashPlan(cash: {opening:number;startOn:string;weeks:{inflow:number;outflow:number}[]}): CashPlan {
   return {version:1,startOn:cash.startOn,opening:cash.opening,buffer:0,accounts:'Business accounts — confirm which accounts are included',complete:false,

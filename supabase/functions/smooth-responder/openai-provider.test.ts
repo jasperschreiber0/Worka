@@ -3,6 +3,11 @@ import assert from 'node:assert/strict'
 import {openAIRequest, normalizeOpenAIResponse, OpenAIEstimationClient} from './openai-provider.ts'
 import {classifyAnthropicError} from './pipeline-logic.ts'
 const request = {system:'Synthetic test',max_tokens:500,tools:[{name:'estimate',input_schema:{type:'object'}}],messages:[{content:[{type:'text',text:'Synthetic facts'}]}]}
+
+test('spatial reconstruction uses reasoning while ordinary extraction keeps its existing mode',()=>{
+ for(const name of ['submit_plan','submit_building'])assert.equal(openAIRequest({...request,tools:[{name,input_schema:{type:'object'}}]}).reasoning.effort,'medium')
+ assert.equal(openAIRequest({...request,tools:[{name:'submit_document_reading',input_schema:{type:'object'}}]}).reasoning.effort,'none')
+})
 test('OpenAI uses bounded single-tool requests without persistence',()=>{
  const body=openAIRequest(request)
  assert.equal(body.store,false); assert.equal(body.max_output_tokens,500); assert.equal(body.parallel_tool_calls,false)

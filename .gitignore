@@ -1,8 +1,10 @@
 # Dependencies
 node_modules/
+.worka-studio/
 
 # Next.js build output
 .next/
+.next-studio-dev/
 out/
 
 # Build artifacts
@@ -33,3 +35,7 @@ Thumbs.db
 *.swp
 *.swo
 .claude/
+
+# Local plan evidence, generated images and test logs
+output/
+*.log

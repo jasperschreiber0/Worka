@@ -13,11 +13,12 @@ import './profitability.css'
 import ProfitControl from './ProfitControl'
 import TodayActions from '@/components/jobs/TodayActions'
 import CashFlowPlanner from './CashFlowPlanner'
-const BUSINESS_VIEWS: Record<string, string> = { Overview: '#overview', 'Financial profile': '#financial-profile', '13-week cash flow': '#cash-flow' }
+const BUSINESS_VIEWS: Record<string, string> = { Overview: '#overview', 'Financial profile': '#financial-profile', '13-week cash flow': '#cash-flow', '12-month cash flow': '#annual-cash-flow' }
 export default function BusinessControl() {
   const [profile, setProfile] = useState<FinancialProfile>(EMPTY_PROFILE),
     [jobs, setJobs] = useState<{ id: string; address: string; status: string }[]>([]),
     [demo, setDemo] = useState(false),
+    [local,setLocal]=useState(false),[profileRevision,setProfileRevision]=useState<string|null>(null),
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
     [busy, setBusy] = useState(false),
@@ -34,7 +35,7 @@ export default function BusinessControl() {
       .then((d) => {
         setProfile({ ...EMPTY_PROFILE, ...d.profile })
         setJobs(d.jobs)
-        setDemo(d.demo)
+        setDemo(d.demo);setLocal(!!d.local);setProfileRevision(d.revision??null)
         setRisk(
           (d.risks ?? [])
             .filter((r: { status: string }) => !['recovered', 'not_a_change'].includes(r.status))
@@ -64,12 +65,12 @@ export default function BusinessControl() {
     setError('')
     setNotice('')
     try {
-      await api(
+      const saved=await api(
         '/api/business/financial-profile',
-        { profile },
+        { profile,revision:profileRevision },
         'PUT',
       )
-      setNotice('Saved to your business')
+      setProfileRevision(saved.revision??profileRevision);setNotice(local?'Financial profile saved on this computer':'Saved to your business')
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -80,7 +81,7 @@ export default function BusinessControl() {
     <main className="pi">
       <p className="muted">WORKA / BUSINESS</p>
       <h1>Builder control centre</h1>
-      <p className="muted">Know whether the job will make money before you win it.</p>
+      <p className="muted">Know whether the job will make money before you win it.</p><p><Link href="/studio">Open estimate & 3D workspace →</Link></p>{local&&<p className="pi-alert">Local business workspace · figures save on this computer. Studio proposals are not booked revenue or bank movements; enter cash timing explicitly.</p>}
       {error && (
         <div role="alert" className="pi-alert pi-error">
           {error}
@@ -98,7 +99,7 @@ export default function BusinessControl() {
       )}
       {!loaded && !error && <p>Loading your business…</p>}
       <nav className="pi-tabs" aria-label="Business views">
-        {['Overview', 'Financial profile', '13-week cash flow'].map((t) => (
+        {Object.keys(BUSINESS_VIEWS).map((t) => (
           <button key={t} aria-pressed={tab === t} onClick={() => { setTab(t); window.history.replaceState(null, '', BUSINESS_VIEWS[t]) }}>
             {t}
           </button>
@@ -106,15 +107,14 @@ export default function BusinessControl() {
       </nav>
       {tab === 'Overview' && (
         <>
-          <TodayActions />
-          <ProfitControl />
+          {!local&&<><TodayActions /><ProfitControl /></>}
           <div className="pi-hero">
             <Metrics
               values={[
                 ['Revenue target', money(loaded?calc?.revenue:null)],
                 ['Monthly overhead', money(loaded?calc?.monthlyOverhead:null)],
                 ['Required gross margin', pct(calc?.targetMargin)],
-                ['Known margin at risk', money(risk)],
+                ['Known margin at risk', local?'Not assessed':money(risk)],
               ]}
             />
             <p className="muted mt-4">
@@ -128,15 +128,15 @@ export default function BusinessControl() {
             </p>
             {!loaded ? <p>Job records have not finished loading.</p> : jobs.length === 0 ? (
               <p>
-                No saved jobs yet. <Link href="/jobs?new=1">Create a job and upload plans →</Link>
+                No saved jobs yet. <Link href={local?"/studio":"/jobs?new=1"}>Create a job and upload plans →</Link>
               </p>
             ) : (
               <div className="pi-grid">
                 {jobs.map((j) => (
-                  <Link className="pi-card !mt-0" key={j.id} href={`/jobs/${j.id}/profitability`}>
+                  <Link className="pi-card !mt-0" key={j.id} href={local?'/studio':`/jobs/${j.id}/profitability`}>
                     <span className="pi-badge">{j.status}</span>
                     <h3 className="mt-3">{j.address}</h3>
-                    <p>Review profitability →</p>
+                    <p>{local?'Open Studio project picker →':'Review profitability →'}</p>
                   </Link>
                 ))}
               </div>
@@ -283,7 +283,7 @@ export default function BusinessControl() {
           )}
         </>
       )}
-      <div hidden={tab !== '13-week cash flow'}><CashFlowPlanner /></div>
+      <div hidden={!['13-week cash flow','12-month cash flow'].includes(tab)}><CashFlowPlanner annual={tab==='12-month cash flow'} /></div>
     </main>
   )
 }

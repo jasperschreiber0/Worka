@@ -1,5 +1,6 @@
 'use client'
 import React from 'react'
+import {loginDestination} from '@/lib/studio-access'
 import { useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
@@ -23,7 +24,7 @@ const INPUT_STYLE: React.CSSProperties = {
 export default function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const next = searchParams.get('next') ?? '/today'
+  const next = loginDestination(searchParams.get('next'))
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -38,11 +39,12 @@ export default function LoginForm() {
     setLoading(true)
 
     try {
-      if (!supabaseUrl || (email === DEMO_EMAIL && password === DEMO_PASSWORD)) {
+      if (!supabaseUrl && ['localhost','127.0.0.1','[::1]'].includes(window.location.hostname)) {
         router.push(next as never)
         return
       }
 
+      if(!supabaseUrl){setError('Account access is not configured on this website.');return}
       const supabase = createClientComponentClient<Database>()
       const { error: authError } = await supabase.auth.signInWithPassword({ email, password })
 
@@ -53,6 +55,8 @@ export default function LoginForm() {
 
       router.push(next as never)
       router.refresh()
+    } catch {
+      setError('Unable to sign in. Check your connection and try again.')
     } finally {
       setLoading(false)
     }

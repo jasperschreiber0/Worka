@@ -20,6 +20,8 @@ if (commitSha === 'dev') {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Allow local preview checks without replacing the presentation build.
+  distDir: process.env.WORKA_BUILD_DIR || '.next',
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
     NEXT_PUBLIC_COMMIT_SHA: commitSha,
