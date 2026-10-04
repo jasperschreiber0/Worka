@@ -1,3 +1,4 @@
+import {matchesJson} from '@/lib/studio-json'
 import {renderRepository} from '@/lib/studio-render-store'
 import {NextRequest,NextResponse} from 'next/server'
 import {identity,sameOrigin,StoreError,getProject} from '@/lib/studio-store'
@@ -18,7 +19,7 @@ export async function POST(req:NextRequest){let owner='',locked=false;try{
  active.add(owner);locked=true
  const project=await getProject(owner,body.projectId)
  if(!project)throw new StoreError('Project not found.',404)
- if(JSON.stringify(project.workspace.project.working.design)!==body.revision)throw new StoreError('The model has changed. Save your current project before generating.',409)
+ if(!matchesJson(project.workspace.project.working.design,body.revision))throw new StoreError('The model has changed. Save your current project before generating.',409)
  const store=await renderRepository()
  if((await store.list(owner,body.projectId)).length>=20)throw new StoreError('This project already has 20 saved images.',409)
  const {response}=await guardedClaudeCall({supabase:gatewaySupabase(),attribution:{kind:'builder',builderId:owner},callSite:'studio_photorealistic_image',model:'gpt-image-2.5-sunburst'},signal=>renderImage(process.env.OPENAI_API_KEY!,input,signal),{timeoutMs:210000,maxRetries:0,label:'studio_render'})
