@@ -28,7 +28,9 @@ export default function LoginForm() {
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(searchParams.get('confirmation') === 'failed'
+    ? 'We could not finish that confirmation link. Try signing in below. If your email still needs confirmation, open the latest email in the same browser where you signed up.'
+    : null)
   const [loading, setLoading] = useState(false)
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL

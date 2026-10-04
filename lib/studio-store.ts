@@ -7,11 +7,12 @@ import { randomUUID,createHash } from 'node:crypto'
 import type { NextRequest } from 'next/server'
 import { parseWorkspace } from './studio-workspace'
 import type { StoredWorkspace,Workspace,ClientProjection } from './studio-workspace'
+import {isStudioOrigin} from './studio-origin'
 
 const directory=path.join(process.cwd(),'.worka-studio')
 export const localMode=()=>process.env.WORKA_LOCAL_STUDIO==='1'&&!process.env.NEXT_PUBLIC_SUPABASE_URL
 export class StoreError extends Error {constructor(message:string,public status=400){super(message)}}
-export function sameOrigin(req:NextRequest){const origin=req.headers.get('origin');if((origin&&origin!==req.nextUrl.origin)||req.headers.get('sec-fetch-site')==='cross-site')throw new StoreError('This request must come from Worka.',403)}
+export function sameOrigin(req:NextRequest){if(!isStudioOrigin(req.headers.get('origin'),req.nextUrl.origin,req.headers.get('sec-fetch-site')))throw new StoreError('This request must come from Worka.',403)}
 export async function identity(req:NextRequest){
   if(localMode()){
     if(!['localhost','127.0.0.1','[::1]'].includes(req.nextUrl.hostname))throw new StoreError('Local storage is available on this computer only.',403)
