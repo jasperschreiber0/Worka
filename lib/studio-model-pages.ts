@@ -8,7 +8,8 @@ export function modelPageSelection(reading:DocumentReading){
  if(!floors.length)return {pages:[],omitted:[]}
  const support=sheets.filter(s=>/section/i.test(s.role+' '+s.title)&&!floors.some(f=>f.page===s.page))
  const openings=sheets.filter(s=>/window|door/i.test(s.title)&&/schedule/i.test(s.role+' '+s.title))
- const pages=[...floors.slice(0,5).map(s=>({...s,role:'floor-plan' as const})),...support.slice(0,1).map(s=>({...s,role:'section' as const})),...openings.slice(0,2).map(s=>({...s,role:'other' as const}))].slice(0,8)
+ const dimensions=sheets.filter(s=>/wall.*(?:location|layout).*plan|set[ -]?out.*plan/i.test(s.title)&&!floors.some(f=>f.page===s.page))
+ const pages=[...floors.slice(0,5).map(s=>({...s,role:'floor-plan' as const})),...dimensions.slice(0,2).map(s=>({...s,role:'other' as const})),...support.slice(0,1).map(s=>({...s,role:'section' as const})),...openings.slice(0,2).map(s=>({...s,role:'other' as const}))].slice(0,8)
  const omitted=sheets.filter(s=>!pages.some(p=>p.page===s.page)).map(s=>`Page ${s.page}: ${s.title}`)
  return {pages,omitted}
 }

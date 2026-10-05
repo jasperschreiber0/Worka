@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {addFloorDetails,floorEnvelope,generateFloorStages,validFloorCheckpoint,repairFloor,drawingAreaWarning,drawingOpeningWarning} from './studio-floor-stages.ts'
+import {addFloorRooms,addFloorDetails,floorEnvelope,generateFloorStages,validFloorCheckpoint,repairFloor,drawingAreaWarning,drawingOpeningWarning} from './studio-floor-stages.ts'
 import {newWorkspace,parseWorkspace} from './studio-workspace.ts'
 const source='a'.repeat(64),plan={walls:[{name:'Wall',openings:[]}],rooms:[],warnings:[]}
 const draft=()=>floorEnvelope(plan,source,'structure')
@@ -8,10 +8,11 @@ test('completed walls survive workspace save/reopen and remain tied to the sourc
  const w=newWorkspace();w.modelProgress={source,at:new Date().toISOString(),error:'Next step',draft:draft()}
  const restored=parseWorkspace(w)!
  assert.ok(restored);assert.ok(validFloorCheckpoint(restored.modelProgress?.draft,source));assert.equal(validFloorCheckpoint(restored.modelProgress?.draft,'b'.repeat(64)),false)
+ assert.equal(validFloorCheckpoint({...draft(),version:undefined},source),false,'Old checkpoints must not bypass the revised evidence reader')
 })
 test('details cannot silently omit a wall or change its geometry',()=>{
  const next=addFloorDetails(draft(),{walls:[{wallIndex:0,openings:[{kind:'door',width:.9,height:2.1}]}],rooms:[],warnings:[]})
- assert.equal(next.stage,'details');assert.equal(next.floors[0].plan.walls[0].name,'Wall');assert.equal(plan.walls[0].openings.length,0)
+ assert.equal(next.stage,'rooms');assert.equal(next.floors[0].plan.walls[0].name,'Wall');assert.equal(plan.walls[0].openings.length,0)
  assert.throws(()=>addFloorDetails(draft(),{walls:[],rooms:[],warnings:[]}))
  assert.throws(()=>addFloorDetails(draft(),{walls:[{wallIndex:1,openings:[]}],rooms:[],warnings:[]}))
  assert.throws(()=>repairFloor(next,{walls:[{floorIndex:0,wallIndex:0,wall:{name:'Wall',openings:[]}}],rooms:[],footprints:[],warnings:[]}))
@@ -33,7 +34,7 @@ test('save failure, cancellation, and provider failure stop further paid work',a
 })
 test('large plans read bounded wall groups and keep earlier openings and rooms',()=>{
  let d=floorEnvelope({...plan,walls:Array.from({length:25},(_,i)=>({name:'Wall '+i,openings:[]}))},source,'structure') as any
- for(let start=0;start<25;start+=12){d=addFloorDetails(d,{walls:Array.from({length:Math.min(12,25-start)},(_,i)=>({wallIndex:start+i,openings:start+i===0?[{kind:'door',width:.9,height:2.1}]:[]})),rooms:start===0?[{name:'Kitchen',polygon:[]}]:[],warnings:[]});assert.equal(d.stage,start===24?'details':'structure')}
+ for(let start=0;start<25;start+=12){d=addFloorDetails(d,{walls:Array.from({length:Math.min(12,25-start)},(_,i)=>({wallIndex:start+i,openings:start+i===0?[{kind:'door',width:.9,height:2.1}]:[]})),rooms:start===0?[{name:'Kitchen',polygon:[]}]:[],warnings:[]});assert.equal(d.stage,start===24?'rooms':'structure')}
  assert.equal(d.checkedWalls.length,25);assert.equal(d.floors[0].plan.walls[0].openings.length,1);assert.equal(d.floors[0].plan.rooms[0].name,'Kitchen')
 })
 test('a repair that only changes warnings is saved but is not repeatedly submitted',async()=>{
@@ -50,3 +51,5 @@ test('opening coverage counts unique tags and does not claim tags prove geometry
  const p={text:[{text:'D01 D01 W 02 W02'}]} as any
  assert.match(drawingOpeningWarning(p,1)!,/2 distinct/);assert.match(drawingOpeningWarning(p,1)!,/Tags can refer to schedules or assemblies/);assert.equal(drawingOpeningWarning(p,2),null)
 })
+
+test('rooms are read separately without discarding completed wall openings',()=>{const previous=addFloorDetails(draft(),{walls:[{wallIndex:0,openings:[{kind:'door',width:.9,height:2.1}]}],rooms:[],warnings:[]});const completed=addFloorRooms(previous,{rooms:[{name:'Kitchen',polygon:[]}],warnings:[]});assert.equal(completed.stage,'details');assert.equal(completed.floors[0].plan.rooms[0].name,'Kitchen');assert.equal(completed.floors[0].plan.walls[0].openings.length,1)})

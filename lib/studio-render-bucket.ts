@@ -12,12 +12,12 @@ function missingBucket(error: unknown) {
   return e.status === 404 || ['404', 'NoSuchBucket', 'not_found'].includes(String(e.statusCode)) || e.code === 'NoSuchBucket'
 }
 
-export async function ensurePrivateRenderBucket(storage: BucketService) {
-  let result = await storage.getBucket(renderBucket)
+export async function ensurePrivateRenderBucket(storage: BucketService,bucket=renderBucket,mimeTypes=['application/json'],size=32000000) {
+  let result = await storage.getBucket(bucket)
   if (missingBucket(result.error)) {
-    await storage.createBucket(renderBucket, {public:false, fileSizeLimit:32000000, allowedMimeTypes:['application/json']})
+    await storage.createBucket(bucket, {public:false, fileSizeLimit:size, allowedMimeTypes:mimeTypes})
     // Also covers another request creating it concurrently. Always verify privacy.
-    result = await storage.getBucket(renderBucket)
+    result = await storage.getBucket(bucket)
   }
   if (result.error || !result.data || result.data.public !== false) throw new Error('Private image storage is unavailable.')
 }

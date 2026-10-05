@@ -4,8 +4,8 @@ import {drawingText} from '@/lib/studio-drawing-text'
 import type {DocumentReading} from '@/lib/studio-document-reading'
 import type {PlanSource} from '@/lib/studio-workspace'
 
-export async function prepareDocumentPages(file:File,reading:DocumentReading,signal:AbortSignal){
- const selection=modelPageSelection(reading),pages:PlanSource[]=[]
+export async function prepareDocumentPages(file:File,reading:DocumentReading,signal:AbortSignal,explicitSelection=false){
+ const selection=explicitSelection?{pages:reading.sheets.map(s=>({...s,role:s.role as PlanSource["role"]})),omitted:[]}:modelPageSelection(reading),pages:PlanSource[]=[]
  if(!selection.pages.length)return {pages,omitted:selection.omitted}
  const {resolvePDFJS}=await import('unpdf/pdfjs'),engine=await resolvePDFJS()
  const pdf=await engine.getDocument({data:new Uint8Array(await file.arrayBuffer()),isEvalSupported:false,useSystemFonts:true}).promise
