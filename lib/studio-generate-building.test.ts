@@ -8,16 +8,16 @@ test('corrects a rejected model in a fresh request carrying the rejected draft',
  const result=await generateBuildingDraft([],new AbortController().signal,m=>messages.push(m),request)
  assert.equal(bodies.length,2);assert.equal(bodies[0].previousDraft,undefined);assert.deepEqual(bodies[1].previousDraft,draft);assert.equal(result.geometry.verified,false);assert.equal(messages.length,1)
 })
-test('does not retry authentication, server failure or two rejected corrections',async()=>{
+test('does not retry authentication, server failures or an empty building response',async()=>{
  for(const status of [401,403,502,422]){
   let calls=0
   await assert.rejects(generateBuildingDraft([],new AbortController().signal,()=>{},(async()=>{calls++;return Response.json({error:'Needs review',rejectedDraft:{floors:[]}},{status})}) as typeof fetch),/Needs review/)
-  assert.equal(calls,status===422?3:1)
+  assert.equal(calls,1)
  }
 })
 test('stopping after the first response prevents another paid request',async()=>{
  let calls=0;const c=new AbortController()
- await assert.rejects(generateBuildingDraft([],c.signal,()=>c.abort(),(async()=>{calls++;return Response.json({error:'Needs review',rejectedDraft:{floors:[]}},{status:422})}) as typeof fetch),{name:'AbortError'})
+ await assert.rejects(generateBuildingDraft([],c.signal,()=>c.abort(),(async()=>{calls++;return Response.json({error:'Needs review',rejectedDraft:{floors:[{}]}},{status:422})}) as typeof fetch),{name:'AbortError'})
  assert.equal(calls,1)
 })
 test('persists the final rejected response and resumes the saved draft in a later run',async()=>{
@@ -29,4 +29,14 @@ test('failed checkpoint stops further paid correction attempts',async()=>{
  let calls=0
  await assert.rejects(generateBuildingDraft([],new AbortController().signal,()=>{},(async()=>{calls++;return Response.json({error:'Needs correction',rejectedDraft:{floors:[{}]}},{status:422})}) as typeof fetch,{save:async()=>{throw new Error('Storage unavailable')}}),/Storage unavailable/)
  assert.equal(calls,1)
+})
+
+test('empty drafts never reach workspace saving and preserve the missing-sheet explanation',async()=>{
+ let calls=0,saves=0
+ await assert.rejects(generateBuildingDraft([],new AbortController().signal,()=>{},(async()=>{calls++;return Response.json({error:'No floor plan could be reconstructed. Add CD-500 and CD-600.',rejectedDraft:{floors:[],warnings:['Add CD-500 and CD-600.']}},{status:422})}) as typeof fetch,{save:async()=>{saves++;throw new Error('Invalid workspace')}}),/Add CD-500 and CD-600/)
+ assert.equal(calls,1);assert.equal(saves,0)
+})
+
+test('checkpoint errors retain the geometry failure that triggered recovery',async()=>{
+ await assert.rejects(generateBuildingDraft([],new AbortController().signal,()=>{},(async()=>Response.json({error:'Kitchen door overlaps its wall.',rejectedDraft:{floors:[{}]}},{status:422})) as typeof fetch,{save:async()=>{throw new Error('Storage unavailable')}}),/Kitchen door overlaps its wall.*Storage unavailable/)
 })

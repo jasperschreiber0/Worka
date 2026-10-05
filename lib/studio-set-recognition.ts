@@ -5,6 +5,10 @@ import {validBuilding} from './studio-building.ts'
 import type {drawingSetInput} from './studio-api-input.ts'
 export const setSchema={type:'object',required:['floors','warnings'],properties:{warnings:{type:'array',items:{type:'string'}},floors:{type:'array',maxItems:5,items:{type:'object',required:['name','pageIndex','elevation','offsetX','offsetY','alignmentEvidence','plan'],properties:{name:{type:'string'},pageIndex:{type:'integer'},elevation:{type:'number'},offsetX:{type:'number'},offsetY:{type:'number'},alignmentEvidence:{type:'string'},plan:recognitionSchema}}}}}
 export function recognisedSet(v:any,pages:ReturnType<typeof drawingSetInput>){
+ if(v&&Array.isArray(v.floors)&&v.floors.length===0){
+  const reasons=Array.isArray(v.warnings)?v.warnings.filter((s:unknown)=>typeof s==='string'&&s.length<=1000).slice(0,3).join(' '):''
+  throw new Error('No floor plan could be reconstructed. '+(reasons||'Choose the floor-plan page showing the walls and a readable dimension, then try again.'))
+ }
  if(!v||!Array.isArray(v.floors)||!v.floors.length||v.floors.length>5||!Array.isArray(v.warnings)||v.warnings.length>40||v.warnings.some((s:any)=>typeof s!=='string'||s.length>1000))throw new Error('The drawing set did not produce a usable building draft.')
  const warnings:string[]=[...v.warnings],used=new Set<number>()
  const failures:string[]=[]
