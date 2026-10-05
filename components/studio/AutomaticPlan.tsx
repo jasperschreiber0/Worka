@@ -4,6 +4,7 @@ import type { Workspace } from '@/lib/studio-workspace'
 import type { recognisedPlan } from '@/lib/studio-recognition'
 import { revise } from '@/lib/project-studio'
 import PlanModel from './PlanModel'
+import {floorDiagnostic} from './floor-diagnostic'
 import {generateFloorStages,validFloorCheckpoint} from '@/lib/studio-floor-stages'
 import {floorSupportingPages} from '@/lib/studio-page-index'
 import {drawingFingerprint} from '@/lib/studio-model-progress'
@@ -33,7 +34,7 @@ export default function AutomaticPlan({ workspace: w, onChange, onCheckpoint }: 
         const updated={...current.current,modelProgress:{source,draft,error,at:new Date().toISOString()}}
         if(onCheckpoint)await onCheckpoint(updated)
         else onChange(updated)
-      },previous,fetch,supports)
+      },previous,fetch,supports,floorDiagnostic)
       if (id !== generation.current) return
       draftStamp.current = started; setDraft(result); setMessage(result.warnings.some(s=>/^(Incomplete model:|(?:Area|Coverage) check required:)/.test(s))?'A partial draft is ready. Resolve the highlighted measurement and coverage checks before using quantities.':'Your draft model is ready. Compare it with the drawing, then use it in your project.')
     } catch (e) { if (id === generation.current) setMessage(c.signal.aborted ? 'Reading stopped. You can retry; your model is unchanged.' : e instanceof Error ? e.message : 'Unable to read this plan.') }

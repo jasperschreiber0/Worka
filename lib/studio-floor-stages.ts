@@ -47,12 +47,12 @@ export function drawingOpeningWarning(p:PlanSource,count:number):string|null{
 export function validateFloor(d:any,p:PlanSource){const result=recognisedPlan(d.floors[0].plan,p.aspect,p.metresPerUnit,p.name+' · page '+p.page);const warnings=[drawingAreaWarning(p,polygonArea(result.geometry.footprint)),drawingOpeningWarning(p,result.geometry.walls.reduce((n,w)=>n+w.openings.length,0))].filter((w):w is string=>!!w);const printed=drawingAreaTotal(p);const incomplete=printed&&Math.abs(polygonArea(result.geometry.footprint)/printed-1)>.25?'Incomplete model: footprint differs from the printed area by more than 25%. Correct the boundary and area basis before applying this draft.':(!result.geometry.rooms?.length&&(p.text||[]).some(t=>/\b(?:KITCHEN|LIVING|BED\s*\d)\b/i.test(t.text))?'Incomplete model: labelled rooms were not reconstructed. This draft cannot be applied; the room-reading step needs another pass.':null);return {...result,warnings:[...(incomplete?[incomplete]:[]),...warnings,...result.warnings]}}
 
 /** Checkpoint each completed step before paying for the next. A later run resumes it. */
-export async function generateFloorStages(page:PlanSource,signal:AbortSignal,onProgress:(s:string)=>void,save:(draft:any,error:string)=>Promise<void>,previousDraft?:unknown,request:typeof fetch=fetch,supportingPages:PlanSource[]=[]){
+export async function generateFloorStages(page:PlanSource,signal:AbortSignal,onProgress:(s:string)=>void,save:(draft:any,error:string)=>Promise<void>,previousDraft?:unknown,request:typeof fetch=fetch,supportingPages:PlanSource[]=[],diagnose?:(page:PlanSource,draft:any)=>Promise<string|undefined>){
  let draft=previousDraft
  for(let i=0;i<8;i++){
   signal.throwIfAborted()
   onProgress(!draft?'Reading scale, outline and walls…':(draft as any).stage==='rooms'?'Reading labelled rooms inside the saved walls…':(draft as any).stage==='structure'?`Reading doors, windows and rooms. ${(draft as any).checkedWalls?.length||0} of ${(draft as any).floors[0].plan.walls.length} walls checked; completed steps are saved.`:'Checking the draft and repairing affected parts. Completed steps are saved…')
-  const r=await request('/api/studio/recognise-floor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page,supportingPages,previousDraft:draft}),signal})
+  const r=await request('/api/studio/recognise-floor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page,supportingPages,previousDraft:draft,diagnostic:diagnose&&draft?await diagnose(page,draft):undefined}),signal})
   const data=await r.json();signal.throwIfAborted()
   const unchanged=r.status===422&&draft&&(draft as any).stage===data.checkpoint?.stage&&JSON.stringify((draft as any).floors)===JSON.stringify(data.checkpoint?.floors)
   if(data.checkpoint){await save(data.checkpoint,String(data.error||data.message||'Model in progress').slice(0,5000));draft=data.checkpoint}

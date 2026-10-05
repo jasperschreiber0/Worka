@@ -17,7 +17,7 @@ export function openAIRequest(request: Request) {
   }))
   return { model: ESTIMATION_MODEL, store: false, instructions: request.system,
     input: [{role: 'user', content}], max_output_tokens: request.max_tokens,
-    reasoning: {effort: tool.name==='submit_building_corrections'?'low':['submit_plan','submit_building'].includes(tool.name)?'medium':'none'}, parallel_tool_calls: false,
+    reasoning: {effort: ['submit_building_corrections','submit_floor_positions'].includes(tool.name)?'low':['submit_plan','submit_building'].includes(tool.name)?'medium':'none'}, parallel_tool_calls: false,
     tools: [{type: 'function', name: tool.name, description: tool.description, parameters: tool.input_schema, strict: false}],
     tool_choice: {type: 'function', name: tool.name} }
 }
