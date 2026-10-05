@@ -18,8 +18,8 @@ export default function AutomaticPlan({ workspace: w, onChange }: { workspace: W
     if (!w.plan) return
     const id = ++generation.current, started = stamp
     const c = new AbortController(); controller.current = c
-    setBusy(true); setDraft(null); setMessage('Reading walls, dimensions and openings. This can take about a minute…')
-    const timer = window.setTimeout(() => c.abort(), 205000)
+    setBusy(true); setDraft(null); setMessage('Reading walls, dimensions and openings. Detailed plans can take up to four minutes. Keep this page open…')
+    const timer = window.setTimeout(() => c.abort(), 230000)
     try {
       const response = await fetch('/api/studio/recognise', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(w.plan), signal: c.signal })
       const result = await response.json()
