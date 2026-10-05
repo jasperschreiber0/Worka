@@ -51,7 +51,7 @@ export default function DocumentReader({workspace:w,onChange,onCheckpoint}:{work
   const timer=setTimeout(()=>controller.abort(),660000)
   try{
    const source=await drawingFingerprint(pages)
-   const data=await generateBuildingDraft(pages,controller.signal,setMessage,fetch,{previousDraft:latest.modelProgress?.source===source?latest.modelProgress.draft:undefined,save:async(draft,error)=>{if(current.current.project.id!==project)throw new Error('Project changed.');const progress={...current.current,modelProgress:{source,draft,error,at:new Date().toISOString()}};current.current=progress;onChange(progress);if(onCheckpoint)await onCheckpoint(progress)}})
+   const data=await generateBuildingDraft(pages,controller.signal,setMessage,fetch,{previousDraft:latest.modelProgress?.source===source&&(latest.modelProgress.draft as any)?.kind!=='staged-floor-v1'?latest.modelProgress.draft:undefined,save:async(draft,error)=>{if(current.current.project.id!==project)throw new Error('Project changed.');const progress={...current.current,modelProgress:{source,draft,error,at:new Date().toISOString()}};current.current=progress;onChange(progress);if(onCheckpoint)await onCheckpoint(progress)}})
    if(current.current.project.id!==project)return
    if(!validBuilding(data.geometry)||!data.design||JSON.stringify(data.design.geometry)!==JSON.stringify(data.geometry)||!Array.isArray(data.warnings)||data.warnings.length>250||!data.warnings.every((s:unknown)=>typeof s==='string'&&s.length<=1200))throw new Error('The model did not pass validation.')
    if(JSON.stringify(current.current.project.working)!==stamp)throw new Error('Your estimate changed during generation. Use the saved pages to generate again against the current version.')
