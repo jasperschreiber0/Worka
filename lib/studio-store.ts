@@ -1,3 +1,4 @@
+import {encodeStoredRecord,decodeStoredRecord} from './studio-record-codec'
 import {stableJson} from './studio-json'
 import { cookies } from 'next/headers'
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
@@ -36,16 +37,17 @@ export async function listProjects(owner:string){
   if(localMode())return Object.values((await readLocal()).projects).map(p=>({id:p.workspace.project.id,name:p.workspace.name,version:p.version}))
   const {data,error}=await admin().from('studio_workspaces').select('id,name,version').eq('owner_id',owner).order('updated_at',{ascending:false});if(error)throw new StoreError('Project storage is unavailable.',503);return data
 }
-export async function getProject(owner:string,id:string):Promise<StoredWorkspace|null>{safe(id);if(localMode())return (await readLocal()).projects[id]||null;const {data,error}=await admin().from('studio_workspaces').select('document').eq('owner_id',owner).eq('id',id).maybeSingle();if(error)throw new StoreError('Project storage is unavailable.',503);return data?.document||null}
+export async function getProject(owner:string,id:string):Promise<StoredWorkspace|null>{safe(id);if(localMode())return (await readLocal()).projects[id]||null;const {data,error}=await admin().from('studio_workspaces').select('document').eq('owner_id',owner).eq('id',id).maybeSingle();if(error)throw new StoreError('Project storage is unavailable.',503);return data?.document?decodeStoredRecord(data.document):null}
 export async function saveProject(owner:string,input:unknown,version:number,label:string){
   const w=parseWorkspace(input);if(!w)throw new StoreError('The project contains invalid measurements or data. Nothing was saved.')
   const id=safe(w.project.id)
   const build=(old:StoredWorkspace|null):StoredWorkspace=>{if((old?.version||0)!==version)throw new StoreError('This project changed in another window. Reload the saved version or download your edits before continuing.',409);if(old?.workspace.project.baseline){if(stableJson(old.workspace.project.baseline)!==stableJson(w.project.baseline))throw new StoreError('The accepted baseline cannot be overwritten.',409);if(old.workspace.approvals.some((a,i)=>stableJson(a)!==stableJson(w.approvals[i])))throw new StoreError('Recorded approval evidence cannot be overwritten.',409);const approved=old.workspace.project.variations.filter(v=>v.status==='approved');if(approved.some((v,i)=>stableJson(v)!==stableJson(w.project.variations[i])))throw new StoreError('Approved variation history cannot be overwritten.',409)}return {version:version+1,workspace:w,history:old?[...old.history.slice(-9),{at:new Date().toISOString(),label,workspace:old.workspace}]:[]}}
   if(localMode())return localWrite(db=>{const record=build(db.projects[id]||null);db.projects[id]=record;return record})
   const old=await getProject(owner,id),record=build(old),client=admin()
-  const row={id,owner_id:owner,name:w.name,version:record.version,document:record,updated_at:new Date().toISOString()}
+  const row={id,owner_id:owner,name:w.name,version:record.version,document:encodeStoredRecord(record),updated_at:new Date().toISOString()}
   const response=old?await client.from('studio_workspaces').update(row).eq('id',id).eq('owner_id',owner).eq('version',version).select('id'):await client.from('studio_workspaces').insert(row).select('id')
-  if(response.error||!response.data?.length)throw new StoreError('The save conflicted or storage is unavailable. Your edits are still on screen.',409)
+  if(response.error){console.error('studio_save_failed',{code:response.error.code});throw new StoreError(response.error.code==='57014'?'Saving took too long. Your edits are still on screen; retry Save.':'Project storage is unavailable. Your edits are still on screen; retry Save.',503)}
+  if(!response.data?.length)throw new StoreError('This project changed in another window. Reload the saved version or download your edits before continuing.',409)
   return record
 }
 const digest=(token:string)=>createHash('sha256').update(token).digest('hex')
