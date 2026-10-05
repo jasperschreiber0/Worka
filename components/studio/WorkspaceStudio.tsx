@@ -43,7 +43,9 @@ export default function WorkspaceStudio(){
   function line(id:string,patch:Partial<Line>){update({lines:w.project.working.lines.map(l=>l.id===id?{...l,...patch}:l)})}
   useEffect(()=>{
     let active=true
-    const view=new URLSearchParams(window.location.search).get('view');if(view==='plan'||view==='financials')setTab(view)
+    const params=new URLSearchParams(window.location.search),requested=params.get('project'),focus=params.get('focus')
+    const view=params.get('view');if(view==='plan'||view==='financials')setTab(view)
+    if(focus==='setup')setPlanSetup(true)
     void (async()=>{try{
       const d=await api();if(!active)return
       if(typeof d.owner!=='string')throw new Error('Sign in again to open your workspace.')
@@ -60,10 +62,33 @@ export default function WorkspaceStudio(){
         if(parsed&&recoveryConflicts(recovery||{workspace:parsed,baseVersion:null},saved.record)){setRecoveryConflict(true);setNotice('This browser has edits from an older saved version. Download a backup, then reload the saved project from Saved versions. Your edits cannot overwrite newer work.')}
         if(!parsed){setW(saved.record.workspace);current.current=saved.record.workspace}
         setDirty(stableJson(current.current)!==lastSaved.current)
-      }else if(!parsed)setPanel('new-project')
+      }else if(!parsed&&!requested)setPanel('new-project')
+      if(requested&&requested!==current.current.project.id){
+        if(!d.projects.some((p:any)=>p.id===requested)){setNotice('The linked project is unavailable for this account. Choose one of your saved projects.');setPanel('projects')}
+        else if(parsed&&stableJson(parsed)!==lastSaved.current){setNotice('You have unsaved edits in another project. Save or download them first, then reopen the email link.');return}
+        else{
+          const linked=await api(undefined,'?id='+encodeURIComponent(requested));if(!active)return
+          setRecord(linked.record);lastSaved.current=stableJson(linked.record.workspace)
+          setW(linked.record.workspace);current.current=linked.record.workspace;setDirty(false);setPanel('none')
+        }
+      }
+      if(requested===current.current.project.id){
+        if(focus==='share')setPanel('sharing')
+        if(focus==='scope'||focus==='costs')setNotice(focus==='scope'?'Next step: confirm what is included below.':'Next step: review the included quantities and prices below.')
+      }
     }catch(e){if(active)setNotice((e as Error).message)}finally{if(active)setLoaded(true)}})()
     return()=>{active=false}
   },[])
+  useEffect(()=>{
+    if(!loaded)return
+    const params=new URLSearchParams(window.location.search)
+    if(params.get('project')!==w.project.id)return
+    const focus=params.get('focus'),id=focus==='scope'?'job-scope':focus==='costs'?'estimate-items':null
+    if(!id)return
+    const el=document.getElementById(id),details=el instanceof HTMLDetailsElement?el:el?.querySelector('details')
+    if(details)details.open=true
+    el?.scrollIntoView({block:'start'})
+  },[loaded,w.project.id])
   useEffect(()=>{if(!loaded||!owner)return;let active=true;void writeBrowserRecovery(encodeRecovery(w,recoveryConflict?null:record?.version||0),owner).catch(()=>{if(active)setNotice('Browser recovery is unavailable. Save your project or download a backup.')});return()=>{active=false}},[w,loaded,owner,record?.version,recoveryConflict])
   useEffect(()=>{const fn=(e:BeforeUnloadEvent)=>{if(dirty){e.preventDefault();e.returnValue=''}};window.addEventListener('beforeunload',fn);return()=>window.removeEventListener('beforeunload',fn)},[dirty])
   const recordRef=useRef(record),saveFlight=useRef<Promise<void>|null>(null);recordRef.current=record
@@ -88,7 +113,7 @@ export default function WorkspaceStudio(){
     setBusy(true)
     try{const next=newPlanProject(w,newName,newAddress),d=await api({workspace:next,version:0,label:'New plan project'});setW(next);setRecord(d.record);lastSaved.current=stableJson(next);setDirty(false);setProjects((await api()).projects);setPanel('none');setPlanSetup(true);navigate('plan');setSelected('');setCompare('');setNewName('');setNewAddress('');setNotice('New project saved. Upload its plans, review the model, then build its own estimate. Only reviewed library rates were copied.')}catch(e){setNotice((e as Error).message)}finally{setBusy(false)}
   }
-  function navigate(next:Tab){setTab(next);window.history.replaceState(null,'','/studio?view='+next);window.scrollTo({top:0,behavior:'instant'})}
+  function navigate(next:Tab){setTab(next);window.history.replaceState(null,'','/studio?project='+w.project.id+'&view='+next);window.scrollTo({top:0,behavior:'instant'})}
   async function open(id:string,discard=false){if(dirty&&!discard){setNotice('Save or download your current edits before opening another project.');return}setBusy(true);try{const d=await api(undefined,'?id='+id);if(!d.record)throw new Error('Project not found.');setW(d.record.workspace);setRecord(d.record);setRecoveryConflict(false);lastSaved.current=stableJson(d.record.workspace);setDirty(false);setPanel('none');setSelected('');setCompare('');setShareUrl('')}catch(e){setNotice((e as Error).message)}finally{setBusy(false)}}
   async function restore(file?:File){if(!file)return;try{if(file.size>12000000)throw new Error('Backup exceeds 12 MB.');const raw=await file.text(),next=parseWorkspace(raw)||migrateDemo(raw);if(!next)throw new Error('This backup is invalid. Existing work has been kept.');if(dirty)throw new Error('Save your current edits before importing a backup.');next.project.id=uid();next.name+=' (restored copy)';setRecord(null);setRecoveryConflict(false);lastSaved.current='';change(next);setNotice('Backup restored as a separate project. Save it to keep the recovered copy.')}catch(e){setNotice((e as Error).message)}finally{if(importRef.current)importRef.current.value=''}}
   async function share(){if(dirty||!record){setNotice('Save the current project before creating its client review.');return}setBusy(true);try{const d=await api({action:'share',id:w.project.id});setShareUrl(window.location.origin+'/studio/review/'+d.token);setNotice(d.local?'Review link created for this computer only. Public sharing requires the hosted app.':'Private review link created. Anyone with it can review this snapshot for seven days.');await refreshReviews()}catch(e){setNotice((e as Error).message)}finally{setBusy(false)}}

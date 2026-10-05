@@ -5,6 +5,7 @@ export interface BriefAlert {
   action?: string
   href?: string
   entity_type?: string
+  jobName?: string
 }
 export interface BriefEmail { subject: string; text: string; html: string }
 export function shouldSendBrief(alerts: BriefAlert[]): boolean {
@@ -12,17 +13,16 @@ export function shouldSendBrief(alerts: BriefAlert[]): boolean {
 }
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!))
 export function buildBriefEmail(builderName: string, _brief: string, alerts: BriefAlert[]): BriefEmail {
-  const origin = (process.env.NEXT_PUBLIC_APP_URL || 'https://worka-production.up.railway.app').replace(/\/$/, '')
-  const link = (path?: string) => origin + (path && /^\/(jobs\/[a-zA-Z0-9-]+(?:\?section=money)?|variations\/[a-zA-Z0-9-]+\/review)$/.test(path) ? path : '/today')
+  const origin = (process.env.NEXT_PUBLIC_APP_URL || 'https://getworka.com').replace(/\/$/, '')
+  const link = (path?: string) => origin + (path && /^\/(jobs\/[a-zA-Z0-9-]+(?:\?(?:section=money|estimate=1))?|variations\/[a-zA-Z0-9-]+\/review|studio\?project=[a-zA-Z0-9-]+&view=(?:plan|estimate|financials)(?:&focus=(?:setup|scope|costs|share))?)$/.test(path) ? path : '/today')
   const actions = alerts.filter(a => a.entity_type !== 'summary' && a.action).sort((a,b)=>['high','medium','low'].indexOf(a.priority)-['high','medium','low'].indexOf(b.priority))
-  const urgent = actions.filter(a=>a.priority==='high').length
-  const subject = urgent ? `Morning brief — ${urgent} recorded item${urgent===1?' needs':'s need'} attention` : actions.length ? `Morning brief — ${actions.length} job action${actions.length===1?'':'s'} to review` : 'Morning brief — no recorded actions to review'
-  const intro = actions.length ? `${actions.length} recorded job action${actions.length===1?'':'s'} to review.${urgent?'':' No urgent items found in the records checked.'}` : 'No urgent items found in the records checked.'
-  const shown = actions.slice(0,8)
+  const subject = actions.length ? `Worka — ${actions.length} next step${actions.length===1?'':'s'} for your jobs` : 'Worka — no new job actions'
+  const intro = actions.length ? 'Here’s what needs your next decision.' : 'No new job actions in your saved records.'
+  const shown = actions.slice(0,5)
   const greeting = `G'day ${builderName.trim().split(/\s+/)[0] || 'there'},`
-  const coverage = 'Based on recorded jobs, estimates, invoices and variations. Missing or outdated records can hide work that needs attention. Check Today for site actions and the full job picture.'
-  const lines=[greeting,'',intro,'',...shown.flatMap(a=>[a.message,`${a.action}: ${link(a.href)}`,'']),...(actions.length>8?[`${actions.length-8} more actions in WorkA.`,'']:[]),`Review today's jobs: ${link()}`,'',coverage,'','— WorkA']
-  const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#f5f5f5;font-family:Arial,sans-serif;color:#202020"><main style="max-width:560px;margin:24px auto;padding:24px;background:white;border-radius:12px"><p style="font-weight:bold;color:#a63b00">WorkA</p><h1 style="font-size:24px">Your morning brief</h1><p>${escapeHtml(greeting)}</p><p>${escapeHtml(intro)}</p>${shown.map(a=>`<section style="border-top:1px solid #ddd;padding:16px 0"><p>${escapeHtml(a.message)}</p><a style="color:#a63b00" href="${escapeHtml(link(a.href))}">${escapeHtml(a.action!)} →</a></section>`).join('')}${actions.length>8?`<p>${actions.length-8} more actions in WorkA.</p>`:''}<p><a href="${escapeHtml(link())}" style="display:inline-block;background:#ff6b1a;color:#181818;text-decoration:none;padding:14px 18px;border-radius:8px;font-weight:bold">Review today’s jobs</a></p><p style="font-size:13px;line-height:1.5;color:#555">${escapeHtml(coverage)}</p></main></body></html>`
+  const coverage = 'Based on your saved records. Unchanged items are reminded weekly; the full checks stay in Worka.'
+  const lines=[greeting,'',intro,'',...shown.flatMap(a=>[...(a.jobName?[a.jobName]:[]),a.message,`${a.action}: ${link(a.href)}`,'']),...(actions.length>5?[`${actions.length-5} more actions in Worka.`,'']:[]),`Open Worka: ${link()}`,'',coverage,'','— Worka']
+  const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#f5f5f5;font-family:Arial,sans-serif;color:#202020"><main style="max-width:560px;margin:24px auto;padding:24px;background:white;border-radius:12px"><p style="font-weight:bold;color:#a63b00">Worka</p><h1 style="font-size:24px">Your next steps</h1><p>${escapeHtml(greeting)}</p><p>${escapeHtml(intro)}</p>${shown.map(a=>`<section style="border-top:1px solid #ddd;padding:16px 0">${a.jobName?`<h2 style="font-size:18px;margin:0 0 8px">${escapeHtml(a.jobName)}</h2>`:''}<p style="line-height:1.5">${escapeHtml(a.message)}</p><a style="color:#a63b00" href="${escapeHtml(link(a.href))}">${escapeHtml(a.action!)} →</a></section>`).join('')}${actions.length>5?`<p>${actions.length-5} more actions in Worka.</p>`:''}<p><a href="${escapeHtml(link())}" style="display:inline-block;background:#ff6b1a;color:#181818;text-decoration:none;padding:14px 18px;border-radius:8px;font-weight:bold">Open Worka</a></p><p style="font-size:13px;line-height:1.5;color:#555">${escapeHtml(coverage)}</p></main></body></html>`
   return {subject,text:lines.join('\n'),html}
 }
 
