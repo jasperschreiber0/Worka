@@ -38,7 +38,9 @@ export function recognisedPlan(input: unknown, aspect: number, suppliedScale = 0
       if(o.center!==undefined){
         if(!point(o.center))throw new Error('An opening centre is outside the drawing.')
         const a=convert(w.a),b=convert(w.b),c=convert(o.center),span=length(a,b),dx=(b.x-a.x)/span,dy=(b.y-a.y)/span
-        if(!Number.isFinite(span)||span<.1||Math.abs((c.x-a.x)*dy-(c.y-a.y)*dx)>Math.max(.3,w.thickness))throw new Error('An opening centre does not lie on its assigned wall.')
+        if(!Number.isFinite(span)||span<.1)throw new Error('An opening is assigned to a wall with no usable length.')
+        const separation=Math.abs((c.x-a.x)*dy-(c.y-a.y)*dx)
+        if(separation>Math.max(.3,w.thickness))openingIssues.push(`An opening centre does not lie on its assigned wall: wall ${i} (${w.name}), opening ${j}, center ${JSON.stringify(o.center)}, wall endpoints ${JSON.stringify(w.a)} to ${JSON.stringify(w.b)}, perpendicular separation ${separation.toFixed(3)} m. Re-read the assigned wall and gap in the drawing; preserve printed opening size.`)
         offset=(c.x-a.x)*dx+(c.y-a.y)*dy-o.width/2
       }
       return { id: `${prefix}-${i}-${j}`, kind: o.kind, offset, width: o.width, height: o.height, sill: o.sill }

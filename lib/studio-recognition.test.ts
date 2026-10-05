@@ -17,6 +17,11 @@ test('correction feedback reports every invalid wall opening without accepting a
  data.walls[1].openings=[{kind:'window',offset:0,width:10,height:1,sill:1}]
  assert.throws(()=>recognisedPlan(data,1.25),(e:Error)=>e.message.includes('Wall 1')&&e.message.includes('Wall 2'))
 })
+test('misassigned opening centres report all wall and opening indices for focused repair',()=>{
+ const data=input();data.walls[0].openings=[{kind:'door',offset:0,width:.9,height:2.1,sill:0,center:{x:400,y:300}} as any]
+ data.walls[1].openings=[{kind:'door',offset:0,width:.9,height:2.1,sill:0,center:{x:600,y:400}} as any]
+ assert.throws(()=>recognisedPlan(data,1.25),(e:Error)=>e.message.includes('wall 0 (Wall 1), opening 0')&&e.message.includes('wall 1 (Wall 2), opening 0')&&e.message.includes('perpendicular separation'))
+})
 
 test('room and opening failures are returned together for one coherent correction',()=>{
  const data={...input(),rooms:[{name:'Bedroom',polygon:[{x:50,y:100},{x:200,y:100},{x:200,y:300},{x:50,y:300}]}]}
