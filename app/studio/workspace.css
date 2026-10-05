@@ -21,3 +21,18 @@
 @media(max-width:900px){.wb-job-overview{grid-template-columns:1fr}.wb-empty-house{min-height:160px}.wb-price-overview h2{font-size:25px}}
 
 .wb-budget input[type=range]{width:100%;accent-color:#376d58;margin:18px 0}.wb-budget-choice{padding:16px 0;border-bottom:1px solid #dfe6df}.wb-budget-choice summary{cursor:pointer;font-weight:600}.wb-budget fieldset label{display:block;margin:8px 0}.wb-budget-packages{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:16px 0}.wb-budget-packages button{display:flex;flex-direction:column;gap:10px;text-align:left;padding:18px;white-space:normal}.wb-budget-packages button[aria-pressed=true]{border:2px solid #376d58;background:#eef5ef}.wb-budget-packages small{line-height:1.5}
+
+/* Clear action hierarchy and readable states for the builder workflow. */
+.wb-app{font-size:16px;line-height:1.6;--muted:#465b50}
+.wb-app p{color:#465b50}.wb-app label{font-size:15px}.wb-app table{font-size:15px}.wb-app th{font-size:12px}.wb-app td small{font-size:13px;color:#465b50}
+.wb-app button{font-size:15px;min-height:44px;border-color:#82988b;color:#214b3c;background:#fff;padding:10px 16px}
+.wb-app button:hover{background:#edf3ef;border-color:#285747;opacity:1}
+.wb-app button.wb-primary,.wb-app .wb-journey-intro>button,.wb-app .wb-next>button{background:#214f3e;color:#fff;border:2px solid #214f3e;min-height:48px;padding:12px 22px;font-weight:700;box-shadow:0 3px 6px #173c2426}
+.wb-app button.wb-primary:hover,.wb-app .wb-journey-intro>button:hover,.wb-app .wb-next>button:hover{background:#173c2e;border-color:#173c2e;color:#fff}
+.wb-app button:disabled,.wb-app button.wb-primary:disabled{opacity:1;background:#e6eae7;color:#526159;border:1px solid #b9c3bc;box-shadow:none;cursor:not-allowed}
+.wb-app button:focus-visible,.wb-app summary:focus-visible{outline:3px solid #285747;outline-offset:3px}
+.wb-app input,.wb-app select,.wb-app textarea{border-color:#82988b;font-size:16px}.wb-app input::placeholder,.wb-app textarea::placeholder{color:#59675f;opacity:1}
+.wb-app .wb-excluded{opacity:1;background:#edf0ed}.wb-app .wb-excluded td,.wb-app .wb-excluded td small{color:#46534b}.wb-app .wb-excluded .wb-link{color:#46534b}
+.wb-app .wb-hint{font-size:14px}.wb-app summary{font-size:16px}.wb-app details.wb-card>summary{padding:10px 0}.wb-app .wb-journey{border:2px solid #9aafa1;background:#f2f7f3}.wb-app .wb-journey nav button[aria-current=step]{background:#e0ece4;color:#214b3c;border:2px solid #285747}.wb-app .wb-readiness{font-size:14px;margin-top:12px}.wb-app .wb-readiness button{font-size:14px;min-height:40px}
+.wb-app #estimate-items{scroll-margin-top:20px}.wb-app .wb-table-scroll{margin-top:16px}.wb-app .wb-metrics span,.wb-app .wb-metrics small{font-size:14px}
+@media(max-width:760px){.wb-app .wb-journey-intro{align-items:stretch;flex-direction:column}.wb-app .wb-journey-intro>button{width:100%}.wb-app .wb-fields{grid-template-columns:1fr}.wb-app .wb-journey nav button{font-size:14px;padding:10px}}
