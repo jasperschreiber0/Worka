@@ -11,8 +11,8 @@ test('brief replaces stale all-clear prose with recorded evidence and direct lin
   const email=buildBriefEmail('Chris Builder','All clear today',[{priority:'medium',message:'Alfred Street: 2 missing prices.',action:'Continue estimate review',href:'/jobs/abc-123',entity_type:'quote'}])
   assert.match(email.text,/Alfred Street: 2 missing prices/)
   assert.match(email.text,/\/jobs\/abc-123/)
-  assert.match(email.html,/Review today’s jobs/)
-  assert.match(email.text,/Missing or outdated records/)
+  assert.match(email.html,/Open Worka/)
+  assert.match(email.text,/Based on your saved records/)
   assert.doesNotMatch(email.text+email.subject,/all clear|\/chat/i)
 })
 test('untrusted job names are escaped and external links cannot enter the email',()=>{
@@ -24,6 +24,14 @@ test('untrusted job names are escaped and external links cannot enter the email'
 test('urgent actions lead, with bounded detail and remaining count',()=>{
   const email=buildBriefEmail('Chris','',Array.from({length:10},(_,i)=>({priority:i===9?'high' as const:'medium' as const,message:`Action ${i}`,action:'Review',href:'/jobs/abc'})))
   assert.ok(email.text.indexOf('Action 9')<email.text.indexOf('Action 0'))
-  assert.match(email.text,/2 more actions/)
-  assert.equal((email.html.match(/<section /g)||[]).length,8)
+  assert.match(email.text,/5 more actions/)
+  assert.equal((email.html.match(/<section /g)||[]).length,5)
+})
+test('Studio links keep the project and next-step focus without allowing extra URL parameters',()=>{
+  const make=(href:string)=>buildBriefEmail('Chris','',[{priority:'medium',jobName:'Alfred & Street',message:'Confirm excavation.',action:'Confirm scope',href}])
+  const valid=make('/studio?project=abc-123&view=estimate&focus=scope')
+  assert.match(valid.html,/Alfred &amp; Street/)
+  assert.match(valid.html,/project=abc-123&amp;view=estimate&amp;focus=scope/)
+  assert.doesNotMatch(valid.text,/No urgent|assumptions/)
+  assert.doesNotMatch(make('/studio?project=abc&view=estimate&redirect=evil').html,/redirect=evil/)
 })

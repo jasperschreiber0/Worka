@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { buildBriefEmail, shouldSendBrief, getDemoBrief, type BriefAlert } from '@/lib/morning-brief'
+import { buildBriefEmail, getDemoBrief } from '@/lib/morning-brief'
+import {loadBriefActions} from '@/lib/brief-source'
+import {dueActions} from '@/lib/brief-actions'
+import {deliverBrief} from '@/lib/brief-delivery'
+import {briefDeliveryStore} from '@/lib/brief-delivery-store'
 
 // ─── GET /api/cron/morning-brief ─────────────────────────────────────────────
 // Scheduled by GitHub Actions; delivers actionable recorded job items by email.
@@ -15,11 +19,6 @@ interface BuilderRow {
   id: string
   name: string
   email: string
-}
-
-interface EdgeBriefResponse {
-  brief: string
-  alerts: BriefAlert[]
 }
 
 async function sendBriefEmail(resendApiKey: string, to: string, subject: string, text: string, html: string, idempotencyKey?: string): Promise<boolean> {
@@ -37,6 +36,7 @@ async function sendBriefEmail(resendApiKey: string, to: string, subject: string,
       text,
       html,
     }),
+    signal: AbortSignal.timeout(30000),
   })
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { message?: string }
@@ -60,7 +60,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const resendApiKey = process.env.RESEND_API_KEY
-  if (!resendApiKey) {
+  const dryRun = request.nextUrl.searchParams.get('dryRun') === '1'
+  if (!resendApiKey && !dryRun) {
     return NextResponse.json({ sent: 0, skipped: 'RESEND_API_KEY not configured — brief not delivered' })
   }
 
@@ -70,6 +71,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   // ── Demo mode: single test delivery ────────────────────────────────────────
   if (isDemoMode) {
+    if(dryRun)return NextResponse.json({sent:0,dryRun:true,demo:true})
     const testEmail = process.env.MORNING_BRIEF_TEST_EMAIL
     if (!testEmail) {
       return NextResponse.json({
@@ -79,7 +81,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
     const demo = getDemoBrief()
     const email = buildBriefEmail(demo.builderName, demo.brief, demo.alerts)
-    const ok = await sendBriefEmail(resendApiKey, testEmail, email.subject, email.text, email.html)
+    const ok = await sendBriefEmail(resendApiKey!, testEmail, email.subject, email.text, email.html)
     return NextResponse.json({ sent: ok ? 1 : 0, failed: ok ? 0 : 1, demo: true })
   }
 
@@ -97,36 +99,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   let sent = 0
   let failed = 0
   let skipped = 0
+  let previewActions = 0
 
   for (const builder of (builders ?? []) as BuilderRow[]) {
-    if (!builder.email) continue
+    if (!builder.email || builder.id.startsWith('00000000-0000-0000-0000-') || /^synthetic\b/i.test(builder.name)) continue
     try {
-      // Layer 2 Decision: the morning-brief edge function builds the ranked brief
-      const briefRes = await fetch(`${supabaseUrl}/functions/v1/morning-brief`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ builder_id: builder.id }),
-      })
-      if (!briefRes.ok) {
-        console.error(`[cron/morning-brief] morning-brief function failed for ${builder.id}: ${briefRes.status}`)
-        failed += 1
+      const now=new Date(),actions=await loadBriefActions(supabase,builder.id,now)
+      if(dryRun){
+        const {data,error}=await supabase.from('morning_brief_delivery').select('state').eq('builder_id',builder.id).maybeSingle()
+        if(error)throw error
+        previewActions+=dueActions(actions,data?.state?.sent||{},now).length
         continue
       }
-
-      const { brief, alerts } = (await briefRes.json()) as EdgeBriefResponse
-      if (!shouldSendBrief(alerts ?? [])) { skipped += 1; continue }
-      const email = buildBriefEmail(builder.name, brief, alerts ?? [])
-      const ok = await sendBriefEmail(resendApiKey, builder.email, email.subject, email.text, email.html, `morning-brief/${builder.id}/${new Date().toLocaleDateString('en-CA', {timeZone:'Australia/Sydney'})}`)
-      if (ok) sent += 1
-      else failed += 1
+      const io=briefDeliveryStore(supabase,builder.id,p=>sendBriefEmail(resendApiKey!,p.to,p.email.subject,p.email.text,p.email.html,`morning-brief/${builder.id}/${p.id}`))
+      const result=await deliverBrief(io,builder,actions,now)
+      if(result==='sent')sent++
+      else if(result==='failed')failed++
+      else skipped++
     } catch (err) {
       console.error(`[cron/morning-brief] Error for builder ${builder.id}:`, err)
       failed += 1
     }
   }
 
-  return NextResponse.json({ sent, failed, skipped, builders: (builders ?? []).length })
+  return NextResponse.json({ sent, failed, skipped, builders: (builders ?? []).length,...(dryRun?{dryRun:true,previewActions}:{}) },{status:failed?503:200})
 }

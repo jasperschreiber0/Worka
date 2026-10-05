@@ -64,6 +64,18 @@ export default function JobWorkspaceView({ jobId, builderId }: JobWorkspaceViewP
   const [closeOutOpen, setCloseOutOpen] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
 
+  useEffect(()=>{
+    if(!job||searchParams.get('estimate')!=='1')return
+    let active=true
+    void fetch(`/api/jobs/${jobId}/snapshot`).then(async response=>{
+      if(!response.ok)throw new Error('Estimate unavailable')
+      const data=await response.json();if(!active)return
+      if(data.snapshot?.quote?.id)setViewingQuoteId(data.snapshot.quote.id)
+      else setToast({tone:'info',message:'There is no current estimate for this job. Review the job below.'})
+    }).catch(()=>{if(active)setToast({tone:'error',message:'Could not open the estimate. Use View estimate below to retry.'})})
+    return()=>{active=false}
+  },[job?.id,jobId,searchParams])
+
   useEffect(() => {
     let cancelled = false
     fetch(`/api/jobs/${jobId}`)
