@@ -1,5 +1,6 @@
 import type {PlanSource} from './studio-workspace.ts'
 import type {recognisedSet} from './studio-set-recognition.ts'
+import {resumableModelDraft} from './studio-model-progress.ts'
 
 /** Each correction receives its own server budget. Never retry a transport or authentication failure. */
 export async function generateBuildingDraft(pages:PlanSource[],signal:AbortSignal,onProgress:(message:string)=>void,request:typeof fetch=fetch,progress?:{previousDraft?:unknown;save:(draft:unknown,error:string)=>Promise<void>}):Promise<ReturnType<typeof recognisedSet>> {
@@ -10,8 +11,8 @@ export async function generateBuildingDraft(pages:PlanSource[],signal:AbortSigna
   const data=await response.json()
   signal.throwIfAborted()
   if(response.ok)return data
-  const repairable=response.status===422&&data.rejectedDraft&&JSON.stringify(data.rejectedDraft).length<=200000
-  if(repairable&&progress)await progress.save(data.rejectedDraft,String(data.error||'Review needed').slice(0,5000))
+  const repairable=response.status===422&&resumableModelDraft(data.rejectedDraft)
+  if(repairable&&progress){try{await progress.save(data.rejectedDraft,String(data.error||'Review needed').slice(0,5000))}catch(e){throw new Error(`${data.error||'The building draft needs correction.'} Progress could not be saved: ${e instanceof Error?e.message:'storage unavailable'}. Your saved plans are unchanged.`)}}
   signal.throwIfAborted()
   if(attempt<2&&repairable){
    previousDraft=data.rejectedDraft
