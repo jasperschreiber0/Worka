@@ -36,3 +36,5 @@
 .wb-app .wb-hint{font-size:14px}.wb-app summary{font-size:16px}.wb-app details.wb-card>summary{padding:10px 0}.wb-app .wb-journey{border:2px solid #9aafa1;background:#f2f7f3}.wb-app .wb-journey nav button[aria-current=step]{background:#e0ece4;color:#214b3c;border:2px solid #285747}.wb-app .wb-readiness{font-size:14px;margin-top:12px}.wb-app .wb-readiness button{font-size:14px;min-height:40px}
 .wb-app #estimate-items{scroll-margin-top:20px}.wb-app .wb-table-scroll{margin-top:16px}.wb-app .wb-metrics span,.wb-app .wb-metrics small{font-size:14px}
 @media(max-width:760px){.wb-app .wb-journey-intro{align-items:stretch;flex-direction:column}.wb-app .wb-journey-intro>button{width:100%}.wb-app .wb-fields{grid-template-columns:1fr}.wb-app .wb-journey nav button{font-size:14px;padding:10px}}
+
+.wb-simple-estimate h2{font-size:32px}.wb-app .wb-simple-estimate input[type=range]{width:100%;padding:0;accent-color:#214f3e;cursor:pointer;min-height:44px}.wb-slider-labels{display:flex;justify-content:space-between;font-size:14px}.wb-simple-estimate>button{margin:8px 8px 8px 0}.wb-simple-estimate input[type=number]{width:100%;max-width:320px}
