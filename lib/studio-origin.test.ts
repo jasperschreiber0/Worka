@@ -16,3 +16,10 @@ test('foreign, lookalike, insecure and cross-site origins remain blocked', () =>
   assert.equal(isStudioOrigin('https://getworka.com','https://getworka.com','cross-site'),false)
   assert.equal(isStudioOrigin(null,'https://getworka.com','cross-site'),false)
 })
+test('local aliases match only the same port and protocol and never a cross-site request',()=>{
+ assert.equal(isStudioOrigin('http://127.0.0.1:3100','http://localhost:3100','same-origin'),true)
+ assert.equal(isStudioOrigin('http://127.0.0.1:3101','http://localhost:3100','same-origin'),false)
+ assert.equal(isStudioOrigin('https://127.0.0.1:3100','http://localhost:3100','same-origin'),false)
+ assert.equal(isStudioOrigin('http://127.0.0.1:3100','http://localhost:3100','cross-site'),false)
+ assert.equal(isStudioOrigin('http://127.0.0.1:3100','https://getworka.com','same-origin'),false)
+})

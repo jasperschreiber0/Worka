@@ -1,8 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {modelPageSelection,appendModelPages} from './studio-model-pages.ts'
+import {modelPageSelection,appendModelPages,estimatingPageSelection} from './studio-model-pages.ts'
 import type {DocumentReading} from './studio-document-reading.ts'
 import type {PlanSource} from './studio-workspace.ts'
+test('builder estimating preserves existing plans, roofs, renders and elevations alongside proposed scope',()=>{
+ const d={name:'Concept design.pdf',sheets:[{page:1,role:'other',title:'Cover'},{page:2,role:'plan',title:'Existing floor plan'},{page:3,role:'plan',title:'Existing roof plan'},{page:4,role:'other',title:'Concept design reference images'},{page:5,role:'other',title:'Concept design 2 render existing roof height'},{page:6,role:'other',title:'Concept design 2 render interior'},{page:7,role:'other',title:'Concept design 2 render rear'},{page:8,role:'floor-plan',title:'Concept design 2 floor plan'},{page:9,role:'other',title:'Concept design 2 roof plan'},{page:10,role:'elevation',title:'Northern and southern elevations'}]} as DocumentReading
+ const selected=estimatingPageSelection(d);assert.deepEqual(selected.pages.map(p=>p.page),[8,2,3,5,6,7,9,10]);assert.equal(selected.pages.find(p=>p.page===2)?.role,'other');assert.ok(selected.omitted.some(p=>p.includes('reference images')))
+})
 test('drawing selection distinguishes proposed floors from existing, roof and detached scope',()=>{
  const d={name:'Architecture.pdf',sheets:[{page:1,role:'plan',title:'Existing floor plan'},{page:2,role:'plan',title:'Ground floor plan'},{page:3,role:'plan',title:'First floor plan'},{page:4,role:'plan',title:'Roof plan'},{page:5,role:'section',title:'Section A'},{page:6,role:'plan',title:'Secondary dwelling'}]} as DocumentReading
  const r=modelPageSelection(d);assert.deepEqual(r.pages.map(p=>p.page),[2,3,5]);assert.ok(r.omitted.some(s=>s.includes('Secondary dwelling')))

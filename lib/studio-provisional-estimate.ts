@@ -8,7 +8,9 @@ export function pricingGroups(w:Workspace):PricingGroup[]{
  const groups:PricingGroup[]=[],byKey=new Map<string,PricingGroup>()
  for(const l of w.project.working.lines){
   if(!l.included||l.rate+(l.labour||0)>0)continue
-  const name=l.name.split(' · ').at(-1)!.trim(),key=JSON.stringify([name.toLowerCase(),l.trade,l.unit,l.source,l.packageId||'',l.note])
+  // Measured wall packages have unique IDs, but identical work and specifications
+  // can share a unit rate. Entered packages retain their separate identities.
+  const name=l.name.split(' · ').at(-1)!.trim(),key=JSON.stringify([name.toLowerCase(),l.trade,l.unit,l.source,l.source==='entered'?l.packageId||'':'',l.note])
   let group=byKey.get(key)
   if(!group){group={id:'group-'+groups.length,name,trade:l.trade,unit:l.unit,source:l.source,quantity:0,lineIds:[],notes:[l.note]};groups.push(group);byKey.set(key,group)}
   group.quantity=round(group.quantity+quantity(l,w.project.working.design));group.lineIds.push(l.id)

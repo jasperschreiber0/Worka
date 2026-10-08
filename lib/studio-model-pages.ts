@@ -1,6 +1,14 @@
 import type {DocumentReading} from './studio-document-reading.ts'
 import type {PlanSource} from './studio-workspace.ts'
 
+/** Estimating needs existing work, roofs and visual specifications as well as floors. */
+export function estimatingPageSelection(reading:DocumentReading){
+ const model=modelPageSelection(reading)
+ const candidates=reading.sheets.filter(s=>/floor|roof|elevation|section|render|concept design|schedule|existing/i.test(s.role+' '+s.title)&&!/reference images|cover|title page/i.test(s.title))
+ const pages=[...model.pages,...candidates.filter(s=>!model.pages.some(p=>p.page===s.page)).map(s=>({...s,role:(/existing|roof|render/i.test(s.title)?'other':/elevation/i.test(s.role+' '+s.title)?'elevation':'other') as PlanSource['role']}))].slice(0,8)
+ return {pages,omitted:reading.sheets.filter(s=>!pages.some(p=>p.page===s.page)).map(s=>`Page ${s.page}: ${s.title}`)}
+}
+
 export function modelPageSelection(reading:DocumentReading){
  const sheets=reading.sheets.filter((s,i,a)=>a.findIndex(p=>p.page===s.page)===i)
  if(/electrical|structural|pantry|kitchen elevation|fittings|finishes/i.test(reading.name))return {pages:[],omitted:[]}

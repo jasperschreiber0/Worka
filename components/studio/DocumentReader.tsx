@@ -2,7 +2,7 @@
 import {useEffect,useRef,useState} from 'react'
 import {drawingFingerprint} from '@/lib/studio-model-progress'
 import {generateBuildingDraft} from '@/lib/studio-generate-building'
-import type {Workspace} from '@/lib/studio-workspace'
+import {parseWorkspace,type Workspace} from '@/lib/studio-workspace'
 import {newScopeReview} from '@/lib/studio-scope'
 import {applyDocumentItems,validDocumentReadings} from '@/lib/studio-document-reading'
 import {appendModelPages} from '@/lib/studio-model-pages'
@@ -11,8 +11,9 @@ import {validBuilding} from '@/lib/studio-building'
 import {revise} from '@/lib/project-studio'
 import {prepareLinkedTakeoff} from '@/lib/studio-draft-takeoff'
 export default function DocumentReader({workspace:w,onChange,onCheckpoint}:{workspace:Workspace;onChange:(w:Workspace)=>void;onCheckpoint?:(w:Workspace)=>Promise<void>}){
- const [mode,setMode]=useState<'local'|'ai'>('local'),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[selected,setSelected]=useState<string[]>([])
- const [autoModel,setAutoModel]=useState(true)
+ const [mode,setMode]=useState<'local'|'ai'>('ai'),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[selected,setSelected]=useState<string[]>([])
+ const [autoModel,setAutoModel]=useState(false)
+ const [autoEstimate,setAutoEstimate]=useState(true)
  const current=useRef(w),abort=useRef<AbortController|null>(null);current.current=w
  useEffect(()=>()=>abort.current?.abort(),[])
  async function read(files:File[]){if(busy||!files.length)return;setBusy(true);const project=w.project.id;let preparedPlans=false
@@ -45,6 +46,13 @@ export default function DocumentReader({workspace:w,onChange,onCheckpoint}:{work
    preparedPlans=true
   }
  }
+ if(mode==='ai'&&autoEstimate){
+  setMessage('Preparing your builder review estimate: scope, quantities, average allowances and options…')
+  const source=current.current,stamp=JSON.stringify(source),controller=new AbortController();abort.current=controller
+  const timer=setTimeout(()=>controller.abort(),235000)
+  try{const response=await fetch('/api/studio/price-draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:source}),signal:controller.signal}),data=await response.json();if(!response.ok)throw new Error(data.error||'Estimate preparation failed.');const next=parseWorkspace(data.workspace);if(!next||next.project.id!==project)throw new Error('The estimate was invalid.');if(JSON.stringify(current.current)!==stamp)throw new Error('Your project changed. Prepare the estimate again to preserve your edits.');current.current=next;onChange(next);if(onCheckpoint)await onCheckpoint(next);setMessage('Your builder estimate is ready. Review the trade breakdown, assumed quantities and allowances. The 3D model is optional.')}
+  catch(e){setMessage('Your plans are saved. Estimate preparation needs another try: '+(e as Error).message);return}finally{clearTimeout(timer)}
+ }
  if(mode==='ai'&&autoModel&&preparedPlans&&!current.current.project.working.design.geometry){
   const latest=current.current,pages=latest.drawings||[],stamp=JSON.stringify(latest.project.working),controller=new AbortController();abort.current=controller
   setMessage('Documents read. Generating your 3D draft from the saved floor plans…')
@@ -64,9 +72,9 @@ export default function DocumentReader({workspace:w,onChange,onCheckpoint}:{work
    setMessage('Your document readings and plan pages have been kept. The 3D model still needs attention: '+reason)
    if(onCheckpoint)await onCheckpoint(current.current)
   }finally{clearTimeout(timer)}
- }else setMessage('Document review complete. Identified floor-plan pages are saved in Plan setup for 3D generation. Review omitted pages and save your project.')
+ }else if(!autoEstimate||mode!=='ai')setMessage('Document review complete. Identified floor-plan pages are saved in Plan setup for 3D generation. Review omitted pages and save your project.')
  }catch(e){setMessage((e as Error).name==='AbortError'?'Reading stopped or timed out. Previously completed readings have been kept.':(e as Error).message)}finally{setBusy(false);abort.current=null}}
- return <details className="wb-card"><summary><strong>Plans & selections</strong> · {w.documentReadings?.length||0} documents read</summary><p>Add your PDFs, then review the items Worka finds. Missing quantities and prices stay flagged.</p><label>Reading method <select disabled={busy} value={mode} onChange={e=>setMode(e.target.value as typeof mode)}><option value="local">Local schedule extraction — stays on this computer in local mode</option><option value="ai">AI plan interpretation — sends PDFs to the configured AI provider</option></select></label>{mode==='ai'&&<label><input type="checkbox" checked={autoModel} disabled={busy} onChange={e=>setAutoModel(e.target.checked)}/>Generate a 3D draft after reading the plans. Selected drawing pages are sent to the same AI provider.</label>}<label>PDF plans and schedules <input type="file" accept="application/pdf,.pdf" multiple disabled={busy} onChange={e=>{void read(Array.from(e.target.files||[]));e.target.value=''}}/></label>{busy&&<button onClick={()=>abort.current?.abort()}>Stop reading</button>}{message&&<p role="status">{message}</p>}
+ return <details className="wb-card"><summary><strong>Plans & selections</strong> · {w.documentReadings?.length||0} documents read</summary><p>Add your PDFs, then review the items Worka finds. Missing quantities and prices stay flagged.</p><label>Reading method <select disabled={busy} value={mode} onChange={e=>setMode(e.target.value as typeof mode)}><option value="local">Local schedule extraction — stays on this computer in local mode</option><option value="ai">AI plan interpretation — sends PDFs to the configured AI provider</option></select></label>{mode==='ai'&&<label><input type="checkbox" checked={autoEstimate} disabled={busy} onChange={e=>setAutoEstimate(e.target.checked)}/>Prepare an internal builder estimate automatically, using provisional quantities and average allowances.</label>}{mode==='ai'&&<label><input type="checkbox" checked={autoModel} disabled={busy} onChange={e=>setAutoModel(e.target.checked)}/>Also generate a 3D draft (optional). Selected drawing pages are sent to the same AI provider.</label>}<label>PDF plans and schedules <input type="file" accept="application/pdf,.pdf" multiple disabled={busy} onChange={e=>{void read(Array.from(e.target.files||[]));e.target.value=''}}/></label>{busy&&<button onClick={()=>abort.current?.abort()}>Stop reading</button>}{message&&<p role="status">{message}</p>}
  {(w.documentReadings||[]).map(d=><details className="wb-card" key={d.id}><summary>{d.name} · {d.pages} pages · {d.items.length} extracted items · {d.applied.length} added</summary><p>{d.summary}</p><p>Revision: {d.revision||'Not identified'} · Quantity and pricing checks still required.</p><details><summary>Drawing index</summary><ul>{d.sheets.map((s,i)=><li key={i}>Page {s.page}: {s.title} ({s.role})</li>)}</ul></details>{d.questions.length>0&&<details open><summary>Questions raised by this document</summary><ul>{d.questions.map((q,i)=><li key={i}>{q}</li>)}</ul></details>}{d.warnings.length>0&&<details><summary>Limitations and omitted items ({d.warnings.length})</summary><ul>{d.warnings.map((q,i)=><li key={i}>{q}</li>)}</ul></details>}
  <p>Unknown quantities become unmeasured items. Prices with unknown GST treatment remain unpriced. Imported supply prices are provisional and exclude installation unless explicitly stated.</p><button onClick={()=>setSelected(Array.from(new Set([...selected,...d.items.filter(i=>!d.applied.includes(i.id)).map(i=>i.id)])))}>Select remaining draft items</button> <button disabled={busy||!d.items.some(i=>selected.includes(i.id)&&!d.applied.includes(i.id))} onClick={()=>{try{const ids=d.items.filter(i=>selected.includes(i.id)&&!d.applied.includes(i.id)).map(i=>i.id);onChange(applyDocumentItems(current.current,d.id,ids));setSelected(selected.filter(id=>!ids.includes(id)));setMessage('Draft items added. Review quantities, scope overlaps, tax treatment and rates before approval.')}catch(e){setMessage((e as Error).message)}}}>Add selected to draft estimate</button>
  {d.items.map(i=><details className="wb-card" key={i.id}><summary>{i.name} · {i.quantity===null?'Quantity needed':`${i.quantity} ${i.unit}`}{d.applied.includes(i.id)?' · Added':''}</summary><label><input type="checkbox" checked={selected.includes(i.id)} disabled={d.applied.includes(i.id)} onChange={e=>setSelected(e.target.checked?[...selected,i.id]:selected.filter(id=>id!==i.id))}/> Include this draft item</label><p>{i.basis}</p><p>Printed unit supply price: {i.price===null?'Not supplied':`$${i.price}`} · GST {i.tax}. {i.priceBasis}</p>{i.evidence.map((e,j)=><blockquote key={j}>Page {e.page}: {e.quote}</blockquote>)}</details>)}
